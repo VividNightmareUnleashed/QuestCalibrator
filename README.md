@@ -1,52 +1,125 @@
-# OpenVR Space Calibrator
+# QuestCalibrator
 
-This helps you use tracked VR devices from one company with any other. It aligns multiple tracking systems with a quick calibration step. It may not work for your setup, but there are many cases that work to a degree, and some work very well.
+A personal fork of [OpenVR-SpaceCalibrator](https://github.com/pushrax/OpenVR-SpaceCalibrator)
+that fuses two VR tracking systems (e.g. a Quest headset plus lighthouse trackers) into a
+single SteamVR playspace, rebuilt around a hardened driver and a new calibration solver.
 
-- Rift CV1 x Vive devices: works very well with the v2 (blue logo) trackers, v1 trackers (grey logo, not in production) have major interference issues in the IR spectrum, controller wands (both gen) and Index controllers work very well.
-- Rift S, Quest, Windows MR, other SLAM inside-out tracked HMDs x Vive devices: works very well when you aren't moving around the room far (e.g. Beat Saber) but a lot of walking around causes a nontrivial amount of drift between systems. Your results may vary depending on your space. It's possible some of this can be fixed in software with a better calibration algorithm.
-- Quest wireless streaming is particularly bad right now and requires frequent recalibration, but it does work for a short time until one of many factors causes it to drift. With wireless devices, moving slowly when calibrating and using the Slow or Very Slow calibration modes is effective at reducing the initial error.
-- Any non-Rift HMD x Touch controllers: does not work, the Oculus driver requires the HMD is a Rift. It's theoretically possible to work around this in software but as far as I know it hasn't been done as it would require a fair amount of reverse engineering effort.
+> **Important:** uninstall or disable the original OpenVR-SpaceCalibrator (and any fork of
+> it) before installing this. Both register a SteamVR driver that rewrites device poses;
+> two of them active at once will apply two transforms and mangle tracking.
 
-There is a community of a few thousand on [**Discord**](https://discord.gg/m7g2Wyj) and a newer community on [**Reddit**](https://www.reddit.com/r/MixedVR/). You may find the answer to your question in [the **wiki**](https://github.com/pushrax/OpenVR-SpaceCalibrator/wiki).
+## What changed vs. upstream
 
-A quick video of how this works using an old version (~v0.3) is available at https://www.youtube.com/watch?v=W3TnQd9JMl4. The user interface has been upgraded since then; the calibration is now done via a SteamVR dashboard menu, and there's much more configurability.
+Solver (new `CalibrationEngine`, covered by synthetic tests in `Tests/`):
 
-### Install
+- **Inter-system time alignment.** The driver timestamps every raw pose at capture
+  (QueryPerformanceCounter) and publishes it over shared memory; the solver estimates the
+  constant latency between the two systems by cross-correlating angular-speed profiles and
+  interpolates the reference stream accordingly. Latency between tracking systems converts
+  hand speed directly into calibration error and was previously unmodeled.
+- **Velocity gating.** Samples taken during fast motion are dropped using driver-reported
+  velocities.
+- **Gravity prior, not constraint.** The rotation solve is full 3-DOF Kabsch with a
+  weighted virtual up-axis pair whose weight fades as real two-axis motion accumulates:
+  single-axis (ill-conditioned) sessions stay gravity-aligned, genuinely tilted universes
+  are still recovered.
+- **Robust numerics.** Reflection-checked Kabsch, quaternion-based axis extraction (stable
+  near 180 degrees), IRLS/Huber reweighting against jitter and glitches, sign-invariant
+  axis conditioning check, and per-pair rigid-angle consistency rejection.
+- **Honest validation.** Rotation RMS, translation RMS, and axis-diversity gates; the
+  solver refuses (with a plain-language reason) rather than save a bad calibration.
+- **Playspace scale** solved by residual minimization (on by default), since the two
+  systems can disagree slightly on metric scale and the error grows with distance
+  from the calibration spot.
+- Calibration collects both streams for a fixed duration and solves once — the two-stage
+  rotation-then-translation dance (and its partial-transform IPC updates) is gone.
 
-Before following the directions below, download and run the installer for the [latest release](https://github.com/pushrax/OpenVR-SpaceCalibrator/releases). This will automatically set up SteamVR for use with multiple tracking systems (`activateMultipleDrivers: true`). There are many guides that say you need to edit the SteamVR config manually. You do not.
+Driver and IPC:
 
-### Usage
+- Transform slots are seqlock-protected against the IPC-thread/pose-thread race, with
+  identity-quaternion / scale = 1 defaults instead of a zeroing `memset`.
+- Device ids arriving over the pipe are bounds-checked; short pipe messages are rejected;
+  the wire protocol (v5) only ever carries complete transforms.
+- Lock-free multi-producer pose ring in shared memory (vrserver invokes pose updates from
+  each device driver's own thread).
+- The driver log lands next to the driver DLL instead of vrserver's working directory.
 
-Once Space Calibrator has a calibration, it works in the background to keep your devices configured correctly. Since v0.8, everything aside from creating the calibration is automated.
+Profiles:
 
-### Calibration
+- The calibrated rotation is stored as a **quaternion** (plus translation in meters);
+  Euler angles exist only in the profile editor UI. Stored under
+  `HKCU\Software\QuestCalibrator` — profiles from upstream are not migrated.
 
-As part of first time setup, or when you make a change to your space (e.g. move a sensor), and occasionally as the calibration drifts over time (consumer VR tracking isn't perfectly stable), you'll need to run a calibration:
+## Runtime alignment maintenance
 
-1. Copy the chaperone/guardian bounds from your HMD's play space. This doesn't need to be run if your HMD's play space hasn't changed since last time you copied it. __Example:__ if you're using the Rift with Vive trackers and you bump a Vive lighthouse, or if the calibration has just drifted a little, you likely don't need to run this step, but if you bump an Oculus sensor you will (after running Oculus guardian setup again).
-    1. Run SteamVR, with only devices from your HMD's tracking system powered on. __Example:__ for Rift with Vive trackers, don't turn on the trackers yet.
-    2. Confirm your chaperone/guardian is set up with the walls in the right place. If you change it later, you need to run step again.
-    3. Open SPACE CAL in the SteamVR dashboard overlay.
-    4. Click `Copy Chaperone Bounds to profile`
+Calibrating once is the easy part; these keep the alignment true during play. All of
+them build on the timestamped pose ring and the solver above:
 
-2. Calibrate devices.
-    1. Open SteamVR if you haven't already. Turn on some or all your devices.
-    2. Open SPACE CAL in the SteamVR dashboard overlay.
-    3. Select one device from the reference space on the left and one device from the target space on the right. If you turned on multiple devices from one space and can't tell which one is selected, click "Identify selected devices" to blink an LED or vibrate it. __Example:__ for Rift with Vive trackers, you'll see the Touch controllers on the left, and Vive trackers on the right. __Pro tip:__ if you turn on just one Vive tracker, you don't have to figure out which one is selected.
-    4. Hold these two devices in one hand, like they're glued together. If they slip, calibration won't work as well.
-    5. Click `Start Calibration`
-    6. Move and rotate your hand around slowly a few times, like you're calibrating the compass on your phone. You want to sample as many orientations as possible.
-    7. Done! A profile will be saved automatically. If you haven't already, turn on all your devices. Space Calibrator will automatically apply the calibration to devices as they turn on.
+- **Runtime latency re-prediction** — the driver shifts the lighthouse devices'
+  prediction time by the solved inter-system offset, so vrserver's own predictor
+  aligns the two timelines during live motion, not just at calibration time.
+- **Universe-jump compensation** — pose discontinuities inconsistent with the
+  device's reported velocity (headset recenter / SLAM re-localization) are detected
+  and the inverse delta is folded into the calibration instantly, so a recenter no
+  longer breaks the alignment.
+- **Drift detection** — alignment staleness is scored from calibration age plus
+  stationary-slide and tracking-loss evidence, shown in the overlay, and raised as
+  a one-shot notification instead of letting the alignment degrade silently.
+- **Spatial correction field** — multi-point calibration interpolated by each
+  device's own position (Gaussian RBF blending in the driver), correcting SLAM map
+  deformation across the room instead of pretending one rigid transform fits
+  everywhere.
+- **Continuous calibration** — with a spare lighthouse tracker mounted firmly on the
+  headset, a background loop keeps the alignment maintained during play. A
+  head-referenced calibration learns the mount offset (with a rigidity gate), after
+  which every time-aligned HMD+tracker pose pair directly measures the universe
+  transform with no motion required. Small yaw+translation corrections are
+  auto-applied and slewed sub-perceptually by the driver; large or tilted deviations
+  (a bumped mount, a tracking fault) freeze auto-apply and notify instead. The
+  mounted tracker can be hidden from games so full-body setups never mistake it for
+  a body tracker. Optional (off by default): online re-estimation of the
+  inter-system time offset from the same rigid pair.
 
-### Calibration outside VR
+Not planned: trackerless continuous alignment (without a rigid cross-universe pair
+there is nothing sound to measure during play).
 
-You can calibrate without using the dashboard overlay by unminimizing Space Calibrator after opening SteamVR (it starts minimized). This is required if you're calibrating for a lone HMD without any devices in its tracking system.
+## Building
 
-### Compiling your own build
+Visual Studio 2022 build tools (v143, Windows 10 SDK). No external dependencies.
 
-Open `OpenVR-SpaceCalibrator.sln` in Visual Studio 2017 and build. There are no external dependencies.
+```
+MSBuild QuestCalibrator.sln /p:Configuration=Release /p:Platform=x64
+```
 
-### The math
+Solver tests (build and run; exit code = failed scenarios):
 
-See [math.pdf](https://github.com/pushrax/OpenVR-SpaceCalibrator/blob/master/math.pdf) for details.
-If you have some ideas for how to improve the calibration process, let me know!
+```
+MSBuild Tests\SolverTests.vcxproj /p:Configuration=Release /p:Platform=x64
+Tests\x64\Release\SolverTests.exe
+```
+
+A from-source setup is manual — copy `Driver\01questcalibrator` into SteamVR's `drivers`
+folder, put the built `driver_01questcalibrator.dll` in its `bin\win64`, and run the
+overlay exe (with `openvr_api.dll`, `manifest.vrmanifest`, and `icon.png` beside it)
+from a folder of your choice.
+
+## How the math works
+
+The two-stage hand-eye solve is inherited from upstream — see
+[math.pdf](https://github.com/pushrax/OpenVR-SpaceCalibrator/blob/master/math.pdf) for the
+derivation. Rotation comes from paired delta-rotation axes (the rigid mount offset cancels
+under conjugation) via Kabsch; translation is a linear least-squares over sample pairs.
+This fork keeps that core and wraps it in the time alignment, weighting, and validation
+described above.
+
+## License
+
+Source-available: build and modify it for your own use; redistribution needs
+permission first, and selling it isn't allowed — see `LICENSE` for the exact terms. Portions inherited from OpenVR-SpaceCalibrator,
+Copyright (c) 2020 Justin Li (pushrax), remain under their original MIT License
+(included in `LICENSE`).
+Several solver-quality ideas (outlier rejection, axis-variance conditioning,
+raw-driver-pose sampling) were inspired by the
+[hyblocker fork](https://github.com/hyblocker/OpenVR-SpaceCalibrator) and
+reimplemented from scratch; no code from that fork is included.
+MinHook is vendored under its BSD-2-Clause license (`lib/MinHook/LICENSE`).

@@ -1,10 +1,7 @@
-ipch
-.vs
-*.db
-*.opendb
-*.aps
+.vs/
+x64/
+QuestCal.A61324AD/
 *.user
-/OpenVR-SpaceCalibrator/x64/
-/OpenVR-SpaceCalibratorDriver/x64/
-/x64/
-/lib/boost*
+# Local-only packaging: official installers ship exclusively via the store
+# listing, so the NSIS script and its output stay out of the repo.
+install/

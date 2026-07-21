@@ -1,3 +1,36 @@
+# License
+
+QuestCalibrator is source-available, not open source.
+Copyright (c) 2026 VividNightmare. All rights reserved except as granted below.
+
+You may:
+
+- Read the source and build QuestCalibrator from it for your own use.
+- Modify your own build for your own use.
+
+You may not:
+
+- Redistribute QuestCalibrator in any form -- source, binaries, or
+  installers -- modified or unmodified -- without prior permission from the
+  copyright holder.
+- Sell QuestCalibrator or include it (or any part of its code) in other
+  products, packages, or bundles.
+
+No warranty: the software is provided as is, and no liability is accepted for
+any damages arising from its use.
+
+## Upstream and vendored code
+
+QuestCalibrator is based on OpenVR-SpaceCalibrator by Justin Li (pushrax).
+Those portions were received under the MIT License below, which continues to
+apply to them and must be retained; the original, unrestricted project remains
+available at https://github.com/pushrax/OpenVR-SpaceCalibrator. No code from
+other forks of OpenVR-SpaceCalibrator is included; ideas credited to other
+forks in the README were reimplemented independently. MinHook is vendored
+under its own BSD-2-Clause license (lib/MinHook/LICENSE).
+
+---
+
 MIT License
 
 Copyright (c) 2020 Justin Li
