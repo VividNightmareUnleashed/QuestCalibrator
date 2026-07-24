@@ -90,6 +90,7 @@
   <ItemGroup>
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\Protocol.h" />
+    <ClInclude Include="..\common\Version.h" />
     <ClInclude Include="AlignmentField.h" />
     <ClInclude Include="Hooking.h" />
     <ClInclude Include="InterfaceHookInjector.h" />
@@ -122,6 +123,9 @@
     <ClCompile Include="..\lib\MinHook\src\trampoline.c" />
     <ClCompile Include="..\lib\MinHook\src\hde\hde32.c" />
     <ClCompile Include="..\lib\MinHook\src\hde\hde64.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="QuestCalibratorDriver.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

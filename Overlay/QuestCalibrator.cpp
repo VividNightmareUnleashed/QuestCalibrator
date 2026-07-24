@@ -70,7 +70,45 @@ vr::VROverlayHandle_t GetMainOverlayHandle()
 static GLuint fboHandle = 0, fboTextureHandle = 0;
 static int fboTextureWidth = 0, fboTextureHeight = 0;
 
-static char cwd[MAX_PATH];
+// Directory containing QuestCalibrator.exe. Everything we load or register by
+// path (manifest.vrmanifest, icon.png) sits next to the executable, so this must
+// NOT come from the process working directory - installers, Start Menu shortcuts
+// and SteamVR auto-launch all start us from somewhere else, and registering a
+// manifest path relative to the wrong directory fails silently.
+static char appDir[MAX_PATH];
+
+static void ResolveAppDir()
+{
+	DWORD len = GetModuleFileNameA(nullptr, appDir, MAX_PATH);
+	if (len == 0 || len >= MAX_PATH)
+	{
+		_getcwd(appDir, MAX_PATH);
+		return;
+	}
+	char *lastSlash = strrchr(appDir, '\\');
+	if (lastSlash)
+		*lastSlash = '\0';
+}
+
+// Release builds are a GUI binary with no console, so printf/cerr from the
+// -installmanifest style commands go nowhere. Report through a message box
+// instead, unless the caller passed -noui (the installer does, so a scripted
+// install never blocks on a modal window and reads the exit code instead).
+static bool g_cliNoUi = false;
+
+static void CliReport(const char *message, bool isError)
+{
+	if (isError)
+		fprintf(stderr, "%s\n", message);
+	else
+		printf("%s\n", message);
+
+	if (g_cliNoUi)
+		return;
+
+	MessageBoxA(nullptr, message, "QuestCalibrator",
+		MB_OK | (isError ? MB_ICONERROR : MB_ICONINFORMATION));
+}
 
 void CreateGLFWWindow()
 {
@@ -152,7 +190,7 @@ void TryCreateVROverlay()
 
 	if (error == vr::VROverlayError_KeyInUse)
 	{
-		throw std::runtime_error("Another instance of OpenVR Space Calibrator is already running");
+		throw std::runtime_error("Another instance of QuestCalibrator is already running");
 	}
 	else if (error != vr::VROverlayError_None)
 	{
@@ -163,7 +201,7 @@ void TryCreateVROverlay()
 	vr::VROverlay()->SetOverlayInputMethod(overlayMainHandle, vr::VROverlayInputMethod_Mouse);
 	vr::VROverlay()->SetOverlayFlag(overlayMainHandle, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
 
-	std::string iconPath = cwd;
+	std::string iconPath = appDir;
 	iconPath += "\\icon.png";
 	vr::VROverlay()->SetOverlayFromFile(overlayThumbnailHandle, iconPath.c_str());
 }
@@ -272,7 +310,7 @@ void RunLoop()
 
 				vr::VROverlay()->ShowKeyboardForOverlay(
 					overlayMainHandle, vr::k_EGamepadTextInputModeNormal, vr::k_EGamepadTextInputLineModeSingleLine,
-					unFlags, "Space Calibrator Overlay", sizeof buf, buf, 0
+					unFlags, "QuestCalibrator Overlay", sizeof buf, buf, 0
 				);
 				keyboardOpen = true;
 			}
@@ -365,7 +403,7 @@ void RunLoop()
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
-	_getcwd(cwd, MAX_PATH);
+	ResolveAppDir();
 	HandleCommandLine(lpCmdLine);
 
 #ifdef DEBUG_LOGS
@@ -487,118 +525,137 @@ static void SetupPreviewState()
 	CalCtx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr)) - 42.0;
 }
 
+// Shared exit path for the CLI commands: report, shut OpenVR down, and exit with
+// a code the installer can act on.
+static void CliExit(const std::string &message, bool isError)
+{
+	CliReport(message.c_str(), isError);
+	vr::VR_Shutdown();
+	exit(isError ? -2 : 0);
+}
+
+static std::string InitErrorMessage(vr::EVRInitError vrErr)
+{
+	return std::string("Failed to initialize OpenVR: ")
+		+ vr::VR_GetVRInitErrorAsEnglishDescription(vrErr)
+		+ "\n\nSteamVR must be installed. If it has never been run on this PC,"
+		" start SteamVR once and try again.";
+}
+
 static void HandleCommandLine(LPWSTR lpCmdLine)
 {
-	if (lstrcmp(lpCmdLine, L"-uipreview") == 0)
+	std::wstring cmd = lpCmdLine ? lpCmdLine : L"";
+
+	// -noui may accompany any command below. The installer passes it so a
+	// scripted install never blocks on a modal dialog and reads the exit code
+	// instead; without it (manual install) results are shown in a message box.
+	const std::wstring nouiFlag = L"-noui";
+	auto nouiAt = cmd.find(nouiFlag);
+	if (nouiAt != std::wstring::npos)
+	{
+		g_cliNoUi = true;
+		cmd.erase(nouiAt, nouiFlag.size());
+	}
+	auto firstCh = cmd.find_first_not_of(L" \t");
+	cmd = (firstCh == std::wstring::npos)
+		? std::wstring()
+		: cmd.substr(firstCh, cmd.find_last_not_of(L" \t") - firstCh + 1);
+
+	if (cmd == L"-uipreview")
 	{
 		g_uiPreviewMode = true;
 	}
-	else if (lstrcmp(lpCmdLine, L"-uipreview-many") == 0)
+	else if (cmd == L"-uipreview-many")
 	{
 		g_uiPreviewMode = true;
 		g_uiPreviewMany = true;
 	}
-	else if (lstrcmp(lpCmdLine, L"-openvrpath") == 0)
+	else if (cmd == L"-openvrpath")
 	{
 		auto vrErr = vr::VRInitError_None;
 		vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-		if (vrErr == vr::VRInitError_None)
-		{
-			char cruntimePath[MAX_PATH] = { 0 };
-			unsigned int pathLen;
-			vr::VR_GetRuntimePath(cruntimePath, MAX_PATH, &pathLen);
+		if (vrErr != vr::VRInitError_None)
+			CliExit(InitErrorMessage(vrErr), true);
 
-			printf("%s", cruntimePath);
-			vr::VR_Shutdown();
-			exit(0);
-		}
-		fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
+		char cruntimePath[MAX_PATH] = { 0 };
+		unsigned int pathLen;
+		vr::VR_GetRuntimePath(cruntimePath, MAX_PATH, &pathLen);
+
+		// Machine-readable, so no trailing newline: callers capture this on
+		// stdout and use it directly as a path.
+		printf("%s", cruntimePath);
+		if (!g_cliNoUi)
+			MessageBoxA(nullptr, cruntimePath, "QuestCalibrator", MB_OK | MB_ICONINFORMATION);
 		vr::VR_Shutdown();
-		exit(-2);
+		exit(0);
 	}
-	else if (lstrcmp(lpCmdLine, L"-installmanifest") == 0)
+	else if (cmd == L"-installmanifest")
 	{
 		auto vrErr = vr::VRInitError_None;
 		vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-		if (vrErr == vr::VRInitError_None)
+		if (vrErr != vr::VRInitError_None)
+			CliExit(InitErrorMessage(vrErr), true);
+
+		if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
 		{
-			if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
-			{
-				char oldWd[MAX_PATH] = { 0 };
-				auto vrAppErr = vr::VRApplicationError_None;
-				vr::VRApplications()->GetApplicationPropertyString(OPENVR_APPLICATION_KEY, vr::VRApplicationProperty_WorkingDirectory_String, oldWd, MAX_PATH, &vrAppErr);
-				if (vrAppErr != vr::VRApplicationError_None)
-				{
-					fprintf(stderr, "Failed to get old working dir, skipping removal: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
-				}
-				else
-				{
-					std::string manifestPath = oldWd;
-					manifestPath += "\\manifest.vrmanifest";
-					std::cout << "Removing old manifest path: " << manifestPath << std::endl;
-					vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-				}
-			}
-			std::string manifestPath = cwd;
-			manifestPath += "\\manifest.vrmanifest";
-			std::cout << "Adding manifest path: " << manifestPath << std::endl;
-			auto vrAppErr = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
+			char oldWd[MAX_PATH] = { 0 };
+			auto vrAppErr = vr::VRApplicationError_None;
+			vr::VRApplications()->GetApplicationPropertyString(OPENVR_APPLICATION_KEY, vr::VRApplicationProperty_WorkingDirectory_String, oldWd, MAX_PATH, &vrAppErr);
 			if (vrAppErr != vr::VRApplicationError_None)
 			{
-				fprintf(stderr, "Failed to add manifest: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
-				vr::VR_Shutdown();
-				exit(-2);
+				fprintf(stderr, "Failed to get old working dir, skipping removal: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
 			}
-			vr::VRApplications()->SetApplicationAutoLaunch(OPENVR_APPLICATION_KEY, true);
-			vr::VR_Shutdown();
-			exit(0);
+			else
+			{
+				std::string oldManifest = oldWd;
+				oldManifest += "\\manifest.vrmanifest";
+				std::cout << "Removing old manifest path: " << oldManifest << std::endl;
+				vr::VRApplications()->RemoveApplicationManifest(oldManifest.c_str());
+			}
 		}
-		fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
-		vr::VR_Shutdown();
-		exit(-2);
+
+		std::string manifestPath = appDir;
+		manifestPath += "\\manifest.vrmanifest";
+
+		auto vrAppErr = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
+		if (vrAppErr != vr::VRApplicationError_None)
+		{
+			CliExit("Failed to register the application manifest with SteamVR.\n\n"
+				+ manifestPath + "\n\n"
+				+ vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
+		}
+		vr::VRApplications()->SetApplicationAutoLaunch(OPENVR_APPLICATION_KEY, true);
+		CliExit("QuestCalibrator registered with SteamVR.\n\n" + manifestPath, false);
 	}
-	else if (lstrcmp(lpCmdLine, L"-removemanifest") == 0)
+	else if (cmd == L"-removemanifest")
 	{
 		auto vrErr = vr::VRInitError_None;
 		vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-		if (vrErr == vr::VRInitError_None)
-		{
-			if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
-			{
-				std::string manifestPath = cwd;
-				manifestPath += "\\manifest.vrmanifest";
-				std::cout << "Removing manifest path: " << manifestPath << std::endl;
-				vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-			}
-			vr::VR_Shutdown();
-			exit(0);
-		}
-		fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
-		vr::VR_Shutdown();
-		exit(-2);
+		if (vrErr != vr::VRInitError_None)
+			CliExit(InitErrorMessage(vrErr), true);
+
+		std::string manifestPath = appDir;
+		manifestPath += "\\manifest.vrmanifest";
+		if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
+			vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
+
+		CliExit("QuestCalibrator deregistered from SteamVR.", false);
 	}
-	else if (lstrcmp(lpCmdLine, L"-activatemultipledrivers") == 0)
+	else if (cmd == L"-activatemultipledrivers")
 	{
-		int ret = -2;
 		auto vrErr = vr::VRInitError_None;
 		vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-		if (vrErr == vr::VRInitError_None)
+		if (vrErr != vr::VRInitError_None)
+			CliExit(InitErrorMessage(vrErr), true);
+
+		try
 		{
-			try
-			{
-				ActivateMultipleDrivers();
-				ret = 0;
-			}
-			catch (std::runtime_error &e)
-			{
-				std::cerr << e.what() << std::endl;
-			}
+			ActivateMultipleDrivers();
 		}
-		else
+		catch (std::runtime_error &e)
 		{
-			fprintf(stderr, "Failed to initialize OpenVR: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(vrErr));
+			CliExit(std::string("Failed to enable SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
 		}
-		vr::VR_Shutdown();
-		exit(ret);
+		CliExit("SteamVR multiple-driver support enabled.", false);
 	}
 }
