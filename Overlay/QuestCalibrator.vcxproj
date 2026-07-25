@@ -96,6 +96,7 @@
     <ClInclude Include="ContinuousAlignment.h" />
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="EmbeddedFiles.h" />
+    <ClInclude Include="FieldMath.h" />
     <ClInclude Include="IPCClient.h" />
     <ClInclude Include="JumpDetector.h" />
     <ClInclude Include="PoseStreamHub.h" />

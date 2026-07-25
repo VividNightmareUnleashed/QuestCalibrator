@@ -4,6 +4,7 @@
 #include "ChaperoneMath.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
+#include "FieldMath.h"
 #include "IPCClient.h"
 #include "JumpDetector.h"
 #include "PoseStreamHub.h"
@@ -453,6 +454,11 @@ static bool StaleNotified = false;
 // One notification per freeze episode: re-armed by resume or a new solve.
 static bool FreezeNotified = false;
 
+// One "observations unstable" notification per calibration: the condition is
+// benign and self-healing (bad lighthouse geometry while lying down), so the
+// log records every episode but the toast never repeats.
+static bool UnstableNotified = false;
+
 static void NotifyStaleAlignment(CalibrationContext &ctx)
 {
 	NotifyOnce(ctx, StaleNotified,
@@ -475,11 +481,21 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 		ageScore = std::min(std::max(ageHours, 0.0) / 24.0, 1.0) * 0.5;
 	}
 
-	// One large slide is conclusive on its own; repeated small events
-	// accumulate. Loss glitches are weaker evidence than observed slides.
+	// A large slide dominates; repeated small events accumulate. Loss glitches
+	// are weaker evidence than observed slides.
 	double slideScore = std::min(ctx.driftMaxSlideM / 0.04, 1.0);
 	double repeatScore = std::min((ctx.driftSlideEvents + 0.5 * ctx.discontinuousLossEvents) / 8.0, 1.0);
 	double evidence = std::max(slideScore, repeatScore);
+
+	// Corroboration gate: one slide window on one device is a measurement,
+	// not a verdict — a resting body's posture creep passes the rest gates and
+	// produces exactly one such window, and used to flip the rating straight
+	// to Stale/Very Poor while the alignment looked visibly fine. Genuine
+	// detector-band drift persists, so the monitor re-fires within ~one window
+	// (its window clears per event) and the cap lifts almost immediately;
+	// until then a lone event can only ever say "aging".
+	if (ctx.driftSlideEvents + ctx.discontinuousLossEvents <= 1)
+		evidence = std::min(evidence, 0.5);
 
 	// Soft-OR: independent evidence compounds without exceeding 1.
 	ctx.driftScore = 1.0 - (1.0 - ageScore) * (1.0 - evidence);
@@ -489,7 +505,13 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 		ctx.driftScore >= 0.30 ? CalibrationContext::AlignmentHealth::Aging :
 		CalibrationContext::AlignmentHealth::Fresh;
 
-	if (ctx.alignment == CalibrationContext::AlignmentHealth::Stale)
+	// A healthy continuous loop re-measures the alignment constantly; the
+	// rating already skips staleness for it, and toasting "quality looks poor"
+	// while it is visibly being maintained is pure noise.
+	bool maintained = ctx.continuousEnabled && ctx.mountExtrinsic.valid &&
+		ctx.continuousState ==
+			static_cast<int>(questcal::ContinuousAlignment::State::Tracking);
+	if (ctx.alignment == CalibrationContext::AlignmentHealth::Stale && !maintained)
 		NotifyStaleAlignment(ctx);
 }
 
@@ -532,6 +554,11 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		Drift->Reset();
 	}
 
+	// The HMD's latest raw position, for the worn-device heuristic below.
+	// Persisted across ticks; only rough currency is needed.
+	static Eigen::Vector3d lastHmdRawPos;
+	static double lastHmdRawTime = -1e9;
+
 	for (const auto &s : MonitorScratch)
 	{
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
@@ -539,16 +566,42 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		if (ctx.referenceDeviceMask[s.deviceId])
 			Jumps->Push(s);
 
+		bool sampleValid = s.poseIsValid &&
+			s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK);
+		if (sampleValid && s.deviceId == vr::k_unTrackedDeviceIndex_Hmd &&
+			ctx.referenceDeviceMask[s.deviceId])
+		{
+			RingSampleParts p = UnpackRingSample(s);
+			lastHmdRawPos = p.wfdRot * p.drvPos + p.wfdTrans;
+			lastHmdRawTime = static_cast<double>(s.sampleTimeQpc) * QpcToSeconds;
+		}
+
 		// Drift evidence must come from devices that anchor a universe. On the
 		// reference side that is the HMD alone: its SLAM map IS the reference
 		// universe, while reference-side peripherals (e.g. set-down Touch
 		// controllers) IMU-coast with slowly sliding poses that still report
 		// Running_OK -- centimeters of "slide" that say nothing about
 		// alignment. Every lighthouse device is rigid to the target universe,
-		// so all target-system devices stay eligible.
+		// so target-system devices stay eligible -- except the HMD-mounted
+		// tracker (rides a human head), and any lighthouse device within
+		// arm's reach of the headset: that is a worn tracker (hips, feet) or a
+		// device the user is right next to, and a supported resting body
+		// passes the stationarity gates then "slides" with slow posture creep.
 		bool anchorsUniverse =
 			(s.deviceId == vr::k_unTrackedDeviceIndex_Hmd && ctx.referenceDeviceMask[s.deviceId]) ||
-			ctx.targetDeviceMask[s.deviceId];
+			(ctx.targetDeviceMask[s.deviceId] && s.deviceId != ctx.continuousTrackerId);
+
+		if (anchorsUniverse && sampleValid && s.deviceId != vr::k_unTrackedDeviceIndex_Hmd &&
+			static_cast<double>(s.sampleTimeQpc) * QpcToSeconds - lastHmdRawTime < 3.0)
+		{
+			RingSampleParts p = UnpackRingSample(s);
+			Eigen::Vector3d rawPos = p.wfdRot * p.drvPos + p.wfdTrans;
+			Eigen::Vector3d refPos = ctx.calibratedRotationQ
+				* (ctx.calibratedScale * rawPos) + ctx.TranslationMeters();
+			if ((refPos - lastHmdRawPos).norm() < 1.2)
+				anchorsUniverse = false;
+		}
+
 		if (anchorsUniverse)
 			Drift->Push(s);
 	}
@@ -660,6 +713,11 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		Continuous->Reset();
 	}
 
+	// The mounted tracker's latest raw position anchors the field lookup
+	// below; it only has to be roughly current (the field varies over meters).
+	static Eigen::Vector3d lastTrackerRawPos;
+	static bool hasTrackerRawPos = false;
+
 	for (const auto &s : ContinuousScratch)
 	{
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
@@ -670,14 +728,38 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
 			Continuous->PushReference(EngineSampleFromRing(s));
 		else if (s.deviceId == ctx.continuousTrackerId)
-			Continuous->PushTarget(EngineSampleFromRing(s));
+		{
+			questcal::PoseSample sample = EngineSampleFromRing(s);
+			Continuous->PushTarget(sample);
+			lastTrackerRawPos = sample.pos;
+			hasTrackerRawPos = true;
+		}
+	}
+
+	// The deviation baseline is the transform expected AT THE TRACKER'S SPOT:
+	// with field anchors active the true local alignment differs from base by
+	// each anchor's own delta BY DESIGN, so comparing against raw base would
+	// freeze on healthy anchors ("check the mount" while lying at an anchored
+	// spot) and, below the freeze threshold, emit corrections that drag the
+	// base -- and every anchor with it -- toward one spot's local deformation.
+	// Corrections stay exact under this baseline: ApplyAlignmentDelta shifts
+	// base and anchors together, so the blended expectation moves by exactly
+	// the applied delta.
+	Eigen::Quaterniond expectedRot = ctx.calibratedRotationQ;
+	Eigen::Vector3d expectedTrans = ctx.TranslationMeters();
+	if (ctx.fieldEnabled && !ctx.fieldAnchors.empty() && hasTrackerRawPos)
+	{
+		Eigen::Vector3d basePos = ctx.calibratedRotationQ
+			* (ctx.calibratedScale * lastTrackerRawPos) + ctx.TranslationMeters();
+		questcal::BlendedFieldCalibration(ctx.fieldAnchors, ctx.calibratedRotationQ,
+			ctx.TranslationMeters(), basePos, expectedRot, expectedTrans);
 	}
 
 	// The engine's clock is the ring's (QPC seconds), not the UI clock.
 	LARGE_INTEGER qnow;
 	QueryPerformanceCounter(&qnow);
 	double ringNow = static_cast<double>(qnow.QuadPart) * QpcToSeconds;
-	Continuous->Update(ringNow, ctx.calibratedRotationQ, ctx.TranslationMeters(),
+	Continuous->Update(ringNow, expectedRot, expectedTrans,
 		ctx.calibratedScale, ctx.calibratedTimeOffset);
 
 	questcal::ContinuousAlignment::Correction corr;
@@ -702,13 +784,27 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		switch (ev.type)
 		{
 		case questcal::ContinuousAlignment::Event::FrozenLargeDeviation:
-			snprintf(buf, sizeof buf,
-				"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm\n",
-				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
+			if (ev.deviation.valid)
+				snprintf(buf, sizeof buf,
+					"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm\n",
+					ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
+			else
+				snprintf(buf, sizeof buf,
+					"Continuous calibration frozen: observation scatter %.2f deg / %.1f cm stays far above the tracking noise -- mount fault signature\n",
+					Continuous->ScatterRotRmsDeg(), Continuous->ScatterPosRmsM() * 100.0);
 			ctx.Log(buf);
 			NotifyOnce(ctx, FreezeNotified,
 				"The headset-mounted tracker moved or lost tracking -- alignment updates are on hold",
 				"QuestCalibrator: the headset-mounted tracker moved or lost tracking. Alignment updates are on hold -- recalibrate to re-learn the mount.");
+			break;
+		case questcal::ContinuousAlignment::Event::ObservationsUnstable:
+			snprintf(buf, sizeof buf,
+				"Mounted tracker observations unstable (scatter %.2f deg / %.1f cm) -- alignment updates paused until tracking settles\n",
+				Continuous->ScatterRotRmsDeg(), Continuous->ScatterPosRmsM() * 100.0);
+			ctx.Log(buf);
+			NotifyOnce(ctx, UnstableNotified,
+				"Mounted tracker tracking is unstable -- alignment updates paused until it settles",
+				"QuestCalibrator: the headset-mounted tracker's tracking looks unstable here. Alignment updates are paused and will resume on their own.");
 			break;
 		case questcal::ContinuousAlignment::Event::Resumed:
 			ctx.Log("Continuous calibration resumed\n");
@@ -939,6 +1035,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 	ctx.alignment = CalibrationContext::AlignmentHealth::Fresh;
 	StaleNotified = false;
 	FreezeNotified = false;
+	UnstableNotified = false;
 	ctx.lastAutoCorrectionUnixTime = 0.0;
 	ctx.autoCorrectionsApplied = 0;
 	Drift->Reset();

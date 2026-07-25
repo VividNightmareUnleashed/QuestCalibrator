@@ -9,6 +9,7 @@
 #include "../Overlay/CalibrationEngine.h"
 #include "../Overlay/ChaperoneMath.h"
 #include "../Overlay/ContinuousAlignment.h"
+#include "../Overlay/FieldMath.h"
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/JumpDetector.h"
 
@@ -1087,6 +1088,7 @@ struct ContinuousSim
 
 	int corrections = 0;
 	int freezes = 0, resumes = 0, losses = 0, recoveries = 0;
+	int unstables = 0;
 	double maxCorrRotDeg = 0.0;   // largest single emitted correction
 	double maxCorrPosM = 0.0;     // measured as displacement at the head
 	double afterMark = 1e18;
@@ -1187,6 +1189,7 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 				case ContinuousAlignment::Event::Resumed: sim.resumes++; break;
 				case ContinuousAlignment::Event::TrackerLost: sim.losses++; break;
 				case ContinuousAlignment::Event::TrackerRecovered: sim.recoveries++; break;
+				case ContinuousAlignment::Event::ObservationsUnstable: sim.unstables++; break;
 				}
 			}
 
@@ -1575,6 +1578,173 @@ void RunContinuousScenarios()
 		Check("continuous: latency re-estimation",
 			offsetUpdates >= 5 && trackErr < 0.003 && maxStep <= 0.002 + 1e-12 &&
 			offUpdates == 0 && simOff.solvedOffset == 0.008 && !stillEstimated, detail);
+	}
+
+	// The overlay-side anchor shape ContinuousTick blends over.
+	struct OverlayAnchor
+	{
+		Eigen::Vector3d position;
+		Eigen::Quaterniond rotation;
+		Eigen::Vector3d translationMeters;
+	};
+
+	// 9. Overlay field expectation: BlendedFieldCalibration must reproduce the
+	// driver's blend (BlendAt composed with base) exactly — the continuous
+	// loop measures deviation against it, so any divergence between the two
+	// implementations becomes a phantom deviation.
+	{
+		std::mt19937 rng(808);
+		std::uniform_real_distribution<double> u(-1.0, 1.0);
+
+		const FieldTransform base{
+			Eigen::Quaterniond(Eigen::AngleAxisd(1.1, Eigen::Vector3d::UnitY())),
+			Eigen::Vector3d(0.4, 0.02, -1.1) };
+
+		double worstRot = 0.0, worstPos = 0.0;
+		for (int trial = 0; trial < 24; ++trial)
+		{
+			size_t n = 1 + trial % 5;
+			std::vector<FieldTransform> anchors;
+			std::vector<Eigen::Vector3d> positions;
+			std::vector<OverlayAnchor> overlay;
+			for (size_t i = 0; i < n; ++i)
+			{
+				FieldTransform a = Compose(SmallDelta(2.5 * u(rng),
+					0.06 * Eigen::Vector3d(u(rng), u(rng), u(rng))), base);
+				Eigen::Vector3d pos(2.5 * u(rng), 1.2 + 0.3 * u(rng), 2.5 * u(rng));
+				anchors.push_back(a);
+				positions.push_back(pos);
+				overlay.push_back({ pos, a.R, a.T });
+			}
+			protocol::SetAlignmentField f = BuildField(base, anchors, positions, 1);
+
+			for (int k = 0; k < 8; ++k)
+			{
+				Eigen::Vector3d q(3.0 * u(rng), 1.2 + 0.3 * u(rng), 3.0 * u(rng));
+				FieldTransform drv = DriverEffective(f, base, q);
+				Eigen::Quaterniond eR;
+				Eigen::Vector3d eT;
+				BlendedFieldCalibration(overlay, base.R, base.T, q, eR, eT);
+				worstRot = std::max(worstRot, eR.angularDistance(drv.R));
+				worstPos = std::max(worstPos, (eT - drv.T).norm());
+			}
+		}
+
+		bool constantsMatch =
+			FieldBlendIdentityFloor == alignfield::IdentityFloorWeight &&
+			FieldBlendSigmaMeters == protocol::SetAlignmentField().sigmaMeters;
+		snprintf(detail, sizeof detail, "worst rot %.2e rad  pos %.2e m  constants %d",
+			worstRot, worstPos, constantsMatch);
+		Check("continuous: field expectation matches driver blend",
+			worstRot < 1e-9 && worstPos < 1e-9 && constantsMatch, detail);
+	}
+
+	// 10. Anchor coexistence: an anchor capturing a genuine 6 cm local
+	// deformation. Measured against raw base (the wiring that shipped in
+	// v1.0.0) the anchor's own delta reads as a fault and freezes with the
+	// mount warning; measured against the blended expectation the loop stays
+	// quiet — the residual is only the identity-floor undershoot (~3 mm).
+	{
+		std::mt19937 rng(909);
+
+		GroundTruth localTruth = baseTruth;
+		localTruth.translation = baseTruth.translation + Eigen::Vector3d(0.06, 0.0, 0.0);
+		auto localTruthAt = [&](double) { return localTruth; };
+
+		// The anchor as StoreFieldAnchor keeps it: absolute local solve,
+		// positioned at the target trajectory's centroid in reference space.
+		Eigen::Vector3d anchorPos = Eigen::Vector3d::Zero();
+		{
+			int n = 0;
+			for (double t = 0.0; t < 15.0; t += 0.1, ++n)
+				anchorPos += PositionAt(t) + RotationAt(t, false) * kMountPos;
+			anchorPos /= static_cast<double>(n);
+		}
+		std::vector<OverlayAnchor> anchors{
+			{ anchorPos, localTruth.rotation, localTruth.translation } };
+
+		ContinuousSim simBase;
+		simBase.ca.SetExtrinsic(trueExtrinsic);
+		simBase.solvedOffset = baseTruth.latency;
+		simBase.calRot = baseTruth.rotation;
+		simBase.calTrans = baseTruth.translation;
+		RunContinuousSegment(simBase, scene, 0.0, 20.0, rng, localTruthAt, constMount, alwaysVisible);
+
+		Eigen::Quaterniond expRot;
+		Eigen::Vector3d expTrans;
+		BlendedFieldCalibration(anchors, baseTruth.rotation, baseTruth.translation,
+			anchorPos, expRot, expTrans);
+
+		std::mt19937 rng2(910);
+		ContinuousSim simField;
+		simField.ca.SetExtrinsic(trueExtrinsic);
+		simField.solvedOffset = baseTruth.latency;
+		simField.calRot = expRot;
+		simField.calTrans = expTrans;
+		RunContinuousSegment(simField, scene, 0.0, 20.0, rng2, localTruthAt, constMount, alwaysVisible);
+
+		bool baseFroze = simBase.freezes >= 1 && simBase.corrections == 0 &&
+			simBase.ca.GetState() == ContinuousAlignment::State::Frozen;
+		bool fieldQuiet = simField.freezes == 0 &&
+			simField.ca.GetState() != ContinuousAlignment::State::Frozen &&
+			simField.maxCorrPosM <= 0.011;
+		snprintf(detail, sizeof detail,
+			"vs base: freezes %d corr %d  vs blend: freezes %d corr %d maxCorr %.1f mm",
+			simBase.freezes, simBase.corrections, simField.freezes, simField.corrections,
+			simField.maxCorrPosM * 1000.0);
+		Check("continuous: anchors do not read as faults", baseFroze && fieldQuiet, detail);
+	}
+
+	// 11. Degraded tracking: mid-frequency warble (grazing lighthouse geometry
+	// while lying down) inflates window scatter past the gates but decorrelates
+	// between consecutive observations, so the classifier calls it noise — the
+	// loop must hold quietly with one informational event, never freeze with
+	// the mount warning, and resume by itself once tracking settles.
+	{
+		std::mt19937 rng(1010);
+		auto warble = [&](double t, PoseSample &s)
+		{
+			if (t < 20.0 || t >= 50.0)
+				return;
+			double a = (1.6 * EIGEN_PI / 180.0) * std::sin(2.0 * EIGEN_PI * t / 0.8);
+			s.rot = (Eigen::Quaterniond(Eigen::AngleAxisd(a, Eigen::Vector3d::UnitX()))
+				* s.rot).normalized();
+			s.pos += Eigen::Vector3d(
+				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.7),
+				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.5 + 0.8),
+				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.9 + 2.0));
+		};
+
+		ContinuousSim sim;
+		sim.ca.SetExtrinsic(trueExtrinsic);
+		sim.solvedOffset = baseTruth.latency;
+		sim.calRot = baseTruth.rotation;
+		sim.calTrans = baseTruth.translation;
+
+		bool holdingSeen = false;
+		RunContinuousSegment(sim, scene, 0.0, 50.0, rng, constTruth, constMount, alwaysVisible,
+			warble, false,
+			[&](double t)
+			{
+				if (t >= 40.0 && sim.ca.GetState() == ContinuousAlignment::State::Holding)
+					holdingSeen = true;
+			});
+		bool heldDuring = holdingSeen && sim.freezes == 0 && sim.unstables >= 1;
+
+		// Recovery: perturb the calibration, let the warbled window age out —
+		// corrections must resume with no Resumed hysteresis (that event is
+		// for freezes).
+		sim.calRot = (Eigen::Quaterniond(Eigen::AngleAxisd(
+			0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())) * sim.calRot).normalized();
+		int before = sim.corrections;
+		RunContinuousSegment(sim, scene, 50.0, 70.0, rng, constTruth, constMount, alwaysVisible, warble);
+		bool recovered = sim.corrections > before && sim.freezes == 0 && sim.resumes == 0 &&
+			sim.ca.GetState() == ContinuousAlignment::State::Tracking;
+
+		snprintf(detail, sizeof detail,
+			"holding %d  freezes %d  unstable events %d  post-settle corr %d",
+			holdingSeen, sim.freezes, sim.unstables, sim.corrections - before);
+		Check("continuous: unstable tracking holds, not freezes", heldDuring && recovered, detail);
 	}
 }
 

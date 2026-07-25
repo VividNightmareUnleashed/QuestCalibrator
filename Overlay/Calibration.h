@@ -46,7 +46,11 @@ struct CalibrationContext
 	// The shift (seconds) most recently sent to the driver for target devices.
 	double appliedTimeOffset = 0.0;
 
-	bool solveScale = true;
+	// Playspace scale solving is opt-in: streamed reference poses are motion-
+	// smoothed, which under-reports calibration motion and biases the solved
+	// scale low by several percent (varying with motion speed) — far larger
+	// than the sub-percent genuine metric difference it could correct.
+	bool solveScale = false;
 
 	// UI preference (persisted): show raw solver/drift stats instead of the
 	// plain-language calibration rating.

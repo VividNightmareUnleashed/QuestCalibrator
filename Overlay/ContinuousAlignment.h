@@ -13,11 +13,17 @@
 //
 // A rolling window of observations is robust-averaged (hemisphere-safe
 // eigenvector quaternion mean + trimmed translation mean) and compared to the
-// current calibration. Small deviations are emitted as yaw+translation
-// corrections for the caller to auto-apply (the driver slews them); large or
-// tilted deviations mean a bumped mount or a tracking fault and freeze
-// auto-apply instead. Tilt is never applied: both runtimes are gravity-aligned,
-// so a growing tilt deviation is mount creep or noise, not universe drift.
+// current calibration — which the caller passes in as the transform expected
+// AT THE TRACKER'S SPOT (the field-blended local calibration when anchors
+// exist), so anchor deltas never read as deviations. Small deviations are
+// emitted as yaw+translation corrections for the caller to auto-apply (the
+// driver slews them); large or tilted sustained deviations mean a bumped
+// mount or a tracking fault and freeze auto-apply instead. Noisy windows only
+// hold corrections until tracking settles — unless the scatter is structured
+// (constant between neighboring observations yet large across the window),
+// which is the slipped-mount signature and freezes. Tilt is never applied:
+// both runtimes are gravity-aligned, so a growing tilt deviation is mount
+// creep or noise, not universe drift.
 //
 // Pure Eigen + CalibrationEngine reuse; no OpenVR or UI dependencies, so the
 // synthetic test harness compiles exactly the code the overlay ships. All side
@@ -70,13 +76,22 @@ public:
 		double jumpConfirmSpacing = 0.1;   // s
 
 		// --- estimate sanity: window scatter (after trimming) above these
-		// means the pair itself is untrustworthy — hold, don't correct. A
-		// slipped mount often lands here rather than in a stable deviation
-		// (its error rotates with the head), so sustained scatter freezes too,
-		// on a longer confirm than a stable deviation ---
+		// means the pair itself is untrustworthy — hold, don't correct. What
+		// happens next depends on the scatter's structure. A slipped mount's
+		// error rotates with the head: large across the window, but nearly
+		// constant between consecutive observations — so window scatter far
+		// above the short-term (consecutive-obs) noise estimate is a mount
+		// fault and freezes, on a longer confirm than a stable deviation.
+		// Unstructured scatter — window RMS explained by per-sample noise —
+		// is degraded tracking (grazing lighthouse geometry while lying down,
+		// partial occlusion) and only holds corrections until it settles;
+		// freezing on it spammed "check the mount" at users whose mount was
+		// fine every time they lay down ---
 		double maxScatterRotDeg = 0.8;
 		double maxScatterPosM = 0.02;
-		double scatterFreezeConfirmSeconds = 8.0;
+		double scatterFreezeConfirmSeconds = 8.0;   // structured scatter -> freeze
+		double scatterNotifySeconds = 10.0;         // unstructured -> one info event
+		double structuredScatterFactor = 1.6;       // window RMS vs noise estimate
 
 		// --- apply policy ---
 		double evaluateInterval = 2.0;     // s between decisions
@@ -87,7 +102,7 @@ public:
 		double freezeYawDeg = 2.0;         // at/above (sustained): freeze + event
 		double freezeTiltDeg = 1.5;        // tilt alone also freezes (mount slip)
 		double freezePosM = 0.05;
-		double freezeConfirmSeconds = 2.0;
+		double freezeConfirmSeconds = 6.0;
 		double resumeFactor = 0.5;         // unfreeze below freeze*factor ...
 		double resumeConfirmSeconds = 5.0; // ... sustained this long
 		double coastGapSeconds = 2.0;      // no fresh obs -> coasting
@@ -112,6 +127,7 @@ public:
 		Tracking,   // fresh estimate available, corrections flowing
 		Coasting,   // tracker occluded/off; calibration holds, resumes cleanly
 		Frozen,     // sustained large deviation; nothing applied until resolved
+		Holding,    // observations too noisy to act on; resumes when they settle
 	};
 
 	// Left delta over the current calibration: newCal = D o oldCal. Rotation is
@@ -141,8 +157,9 @@ public:
 			Resumed,
 			TrackerLost,
 			TrackerRecovered,
+			ObservationsUnstable,   // sustained unstructured scatter; informational
 		} type = FrozenLargeDeviation;
-		Deviation deviation;   // populated for FrozenLargeDeviation
+		Deviation deviation;   // populated for a deviation-path FrozenLargeDeviation
 	};
 
 	void SetConfig(const Config &c) { config = c; }
@@ -226,9 +243,20 @@ private:
 	Deviation deviation;
 	double scatterRotRmsDeg = 0.0;
 	double scatterPosRmsM = 0.0;
+	// Short-term noise estimate (robust sigma from consecutive-obs deltas):
+	// the unstructured part of the window scatter.
+	double noiseRotDeg = 0.0;
+	double noisePosM = 0.0;
 
 	double freezeExceededSince = -1.0;
 	double resumeBelowSince = -1.0;
+
+	// Scatter episode bookkeeping: one timer, with a running structured/noise
+	// classification vote so a flickering classification still converges.
+	double scatterSince = -1.0;
+	int scatterVotes = 0;
+	int structuredVotes = 0;
+	bool unstableNotified = false;
 
 	// Jump-guard candidate: a discontinuous observation awaiting confirmation
 	// by a second one before the window is dropped (vs a one-off glitch).

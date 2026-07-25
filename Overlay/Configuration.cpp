@@ -83,7 +83,16 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (obj["apply_time_offset"].is<bool>())
 		ctx.applyTimeOffset = obj["apply_time_offset"].get<bool>();
 
-	if (obj["solve_scale"].is<bool>())
+	// One-time migration (settings_version < 2): scale solving used to default
+	// on, but streamed reference poses are motion-smoothed and the solved
+	// scale absorbs the attenuation (several percent, varying with motion
+	// speed) — so it is opt-in now, including for profiles saved before the
+	// change. The already-applied scale is deliberately kept: it was solved
+	// jointly with the translation, and clearing it without re-solving would
+	// visibly misalign the space. The next recalibration replaces it.
+	int settingsVersion = obj["settings_version"].is<double>()
+		? static_cast<int>(obj["settings_version"].get<double>()) : 1;
+	if (settingsVersion >= 2 && obj["solve_scale"].is<bool>())
 		ctx.solveScale = obj["solve_scale"].get<bool>();
 
 	if (obj["ui_advanced"].is<bool>())
@@ -205,6 +214,15 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		ctx.chaperone.valid = true;
 	}
 
+	if (settingsVersion < 2)
+	{
+		ctx.Log("Playspace scale solving is now opt-in and has been turned off for this profile (re-enable it in settings if you need it)\n");
+		if (ctx.calibratedScale < 0.98 || ctx.calibratedScale > 1.02)
+			ctx.Log("The stored playspace scale (" +
+				std::to_string(ctx.calibratedScale).substr(0, 5) +
+				"x) likely came from streamed-pose smoothing -- recalibrate to clear it\n");
+	}
+
 	ctx.validProfile = true;
 }
 
@@ -236,6 +254,9 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["calibration_time"].set<double>(ctx.calibrationUnixTime);
 	profile["apply_time_offset"].set<bool>(ctx.applyTimeOffset);
 	profile["solve_scale"].set<bool>(ctx.solveScale);
+	// Bumped when a load-time migration must not re-run (see ParseProfile).
+	double settingsVersion = 2.0;
+	profile["settings_version"].set<double>(settingsVersion);
 	profile["ui_advanced"].set<bool>(ctx.uiAdvanced);
 	profile["chaperone_warning_ack"].set<bool>(ctx.chaperoneWarningAck);
 

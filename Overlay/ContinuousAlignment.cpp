@@ -270,6 +270,27 @@ bool ContinuousAlignment::EstimateWindow(Eigen::Quaterniond &rotOut, Eigen::Vect
 	scatterPosRmsM = stats.posRmsM;
 	rotOut = stats.rot;
 	transOut = stats.trans;
+
+	// Short-term noise: robust sigma from consecutive-obs deltas. Neighboring
+	// observations are ~0.1 s apart, so a slipped mount's head-orientation-
+	// locked error barely moves between them while per-sample tracking noise
+	// decorrelates fully — the ratio of window scatter to this estimate is
+	// what separates the two. Median-based so glitch pairs don't inflate it
+	// (they would push a real slip toward the harmless "noise" verdict).
+	// sigma = 1.4826 * median|delta| / sqrt(2): Gaussian consistency for a
+	// difference of two iid samples.
+	if (quats.size() >= 2)
+	{
+		std::vector<double> dRot(quats.size() - 1), dPos(quats.size() - 1);
+		for (size_t i = 1; i < quats.size(); ++i)
+		{
+			dRot[i - 1] = quats[i].angularDistance(quats[i - 1]) * RadToDeg;
+			dPos[i - 1] = (vecs[i] - vecs[i - 1]).norm();
+		}
+		constexpr double k = 1.4826 / 1.4142135623730951;
+		noiseRotDeg = k * Median(dRot);
+		noisePosM = k * Median(dPos);
+	}
 	return true;
 }
 
@@ -284,24 +305,42 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		return;
 	}
 
-	// Scatter sanity: a noisy window means the pair itself is untrustworthy.
-	// Hold rather than correct — but a rigid pair never scatters for long, so
-	// a sustained exceed is itself a fault (a slipped mount's error rotates
-	// with the head and lands here, not in a stable deviation) and freezes on
-	// a longer confirm than a stable deviation would.
-	if (scatterRotRmsDeg > config.maxScatterRotDeg || scatterPosRmsM > config.maxScatterPosM)
+	// Scatter sanity: a noisy window means the pair itself is untrustworthy —
+	// never correct from it. Whether it is also a FAULT depends on structure:
+	// window scatter far above the short-term noise estimate means the error
+	// is locked to head orientation (slipped mount) and freezes after a
+	// confirm; scatter explained by per-sample noise is degraded tracking
+	// (grazing lighthouse angles while lying down) and only holds until it
+	// settles. The vote counters make a flickering classification converge to
+	// its majority instead of resetting the episode.
+	bool rotExceed = scatterRotRmsDeg > config.maxScatterRotDeg;
+	bool posExceed = scatterPosRmsM > config.maxScatterPosM;
+	if (rotExceed || posExceed)
 	{
 		deviation.valid = false;
+		freezeExceededSince = -1.0;   // no deviation can confirm through noise
 		if (state == State::Frozen)
 		{
 			resumeBelowSince = -1.0;
 			return;
 		}
-		if (freezeExceededSince < 0.0)
+
+		bool structured =
+			(rotExceed && scatterRotRmsDeg > config.structuredScatterFactor * noiseRotDeg) ||
+			(posExceed && scatterPosRmsM > config.structuredScatterFactor * noisePosM);
+
+		if (scatterSince < 0.0)
 		{
-			freezeExceededSince = now;
+			scatterSince = now;
+			scatterVotes = 0;
+			structuredVotes = 0;
 		}
-		else if (now - freezeExceededSince >= config.scatterFreezeConfirmSeconds)
+		scatterVotes++;
+		if (structured)
+			structuredVotes++;
+
+		bool structuredMajority = 2 * structuredVotes > scatterVotes;
+		if (now - scatterSince >= config.scatterFreezeConfirmSeconds && structuredMajority)
 		{
 			state = State::Frozen;
 			resumeBelowSince = -1.0;
@@ -309,9 +348,24 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 			e.type = Event::FrozenLargeDeviation;
 			e.deviation = deviation;
 			events.push_back(e);
+			return;
+		}
+
+		state = State::Holding;
+		if (!unstableNotified && !structuredMajority &&
+			now - scatterSince >= config.scatterNotifySeconds)
+		{
+			unstableNotified = true;
+			Event e;
+			e.type = Event::ObservationsUnstable;
+			events.push_back(e);
 		}
 		return;
 	}
+	scatterSince = -1.0;
+	unstableNotified = false;   // next sustained episode logs again
+	if (state == State::Holding)
+		state = State::Tracking;   // settled; resumes silently below
 
 	// Deviation of the windowed estimate from the current calibration, as a
 	// left delta D: newCal = D o oldCal.
@@ -426,7 +480,7 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 	{
 		// Occluded / powered off / face away from the base stations: hold the
 		// calibration, resume cleanly. Frozen stays frozen through occlusion.
-		if (state == State::Tracking)
+		if (state == State::Tracking || state == State::Holding)
 		{
 			state = State::Coasting;
 			Event e;
@@ -513,8 +567,14 @@ void ContinuousAlignment::Reset()
 	deviation = Deviation();
 	scatterRotRmsDeg = 0.0;
 	scatterPosRmsM = 0.0;
+	noiseRotDeg = 0.0;
+	noisePosM = 0.0;
 	freezeExceededSince = -1.0;
 	resumeBelowSince = -1.0;
+	scatterSince = -1.0;
+	scatterVotes = 0;
+	structuredVotes = 0;
+	unstableNotified = false;
 	pendingDiscontinuity = false;
 	hasPendingCorrection = false;
 	hasPendingTimeOffset = false;

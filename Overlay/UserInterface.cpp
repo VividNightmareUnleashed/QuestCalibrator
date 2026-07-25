@@ -745,6 +745,7 @@ static const char *ContinuousStatusText()
 	case CA::State::Tracking: return "maintaining";
 	case CA::State::Coasting: return "paused -- tracker not tracking";
 	case CA::State::Frozen:   return "on hold -- check the mount";
+	case CA::State::Holding:  return "paused -- tracker tracking unstable";
 	default:                  return "gathering";
 	}
 }
