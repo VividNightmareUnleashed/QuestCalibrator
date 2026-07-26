@@ -28,9 +28,11 @@ Solver (new `CalibrationEngine`, covered by synthetic tests in `Tests/`):
   axis conditioning check, and per-pair rigid-angle consistency rejection.
 - **Honest validation.** Rotation RMS, translation RMS, and axis-diversity gates; the
   solver refuses (with a plain-language reason) rather than save a bad calibration.
-- **Playspace scale** solved by residual minimization (on by default), since the two
-  systems can disagree slightly on metric scale and the error grows with distance
-  from the calibration spot.
+- **Playspace scale** is an experimental, opt-in solve. A gross/fine motion-gain
+  diagnostic distinguishes a frequency-flat metric difference from streamed-pose
+  smoothing. When smoothing is detected, scale is fixed from a clean gross band or
+  held at neutral 1.0 if gross motion is attenuated too; a contaminated free-scale
+  fit is never applied.
 - Calibration collects both streams for a fixed duration and solves once — the two-stage
   rotation-then-translation dance (and its partial-transform IPC updates) is gone.
 
@@ -83,6 +85,14 @@ them build on the timestamped pose ring and the solver above:
 Not planned: trackerless continuous alignment (without a rigid cross-universe pair
 there is nothing sound to measure during play).
 
+## Reporting problems
+
+Every calibration, correction, freeze, and jump compensation is logged to
+`%LOCALAPPDATA%\QuestCalibrator\QuestCalibrator.log` (the previous session is kept
+as `QuestCalibrator.prev.log`; nothing older accumulates). Attach both files to a
+bug report — they carry the timeline and the numbers behind whatever the overlay
+decided to do.
+
 ## Building
 
 Visual Studio 2022 build tools (v143, Windows 10 SDK). No external dependencies.
@@ -98,6 +108,25 @@ MSBuild Tests\SolverTests.vcxproj /p:Configuration=Release /p:Platform=x64
 Tests\x64\Release\SolverTests.exe
 ```
 
+Repository-aware validation is configured through `cpp-validation.json`:
+
+```powershell
+# Fast: build and scan for substantial copied C/C++ blocks
+tools\validate-cpp.ps1 -Mode Build
+tools\validate-cpp.ps1 -Mode Duplicates
+
+# Deep: rebuild every translation unit under Clang-Tidy
+tools\validate-cpp.ps1 -Mode Analyze -All
+```
+
+Fast mode runs the evaluated MSVC solution build plus conservative C++ clone
+detection. Deep mode additionally uses Visual Studio's integrated Clang-Tidy,
+so every translation unit is analyzed with its real MSVC defines, include
+paths, PCH, SDK, and per-file options. Build failures block changed files;
+Clang-Tidy and clone findings are advisory pending human review. Thresholds and
+the solution/configuration live in `cpp-validation.json`; the implementation is
+`tools/validate-cpp.ps1`.
+
 A from-source setup is manual — copy `Driver\01questcalibrator` into SteamVR's `drivers`
 folder, put the built `driver_01questcalibrator.dll` in its `bin\win64`, and run the
 overlay exe (with `openvr_api.dll`, `manifest.vrmanifest`, and `icon.png` beside it)
@@ -107,10 +136,13 @@ from a folder of your choice.
 
 The two-stage hand-eye solve is inherited from upstream — see
 [math.pdf](https://github.com/pushrax/OpenVR-SpaceCalibrator/blob/master/math.pdf) for the
-derivation. Rotation comes from paired delta-rotation axes (the rigid mount offset cancels
-under conjugation) via Kabsch; translation is a linear least-squares over sample pairs.
-This fork keeps that core and wraps it in the time alignment, weighting, and validation
-described above.
+derivation, **together with [math errata](docs/math-errata.md)**: two steps of the pdf's
+algebra are wrong as written (the mount offset composes on the wrong side, and eq. 6 is
+really a conjugation), and the errata also states the observability, latency, and scale
+properties the implementation depends on. Rotation comes from paired delta-rotation axes
+(the rigid mount offset cancels under conjugation) via Kabsch; translation is a linear
+least-squares over sample pairs. This fork keeps that core and wraps it in the time
+alignment, weighting, and validation described above.
 
 ## License
 

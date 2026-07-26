@@ -2,9 +2,9 @@
 
 #include "../common/Protocol.h"
 
+#include <atomic>
 #include <thread>
 #include <set>
-#include <mutex>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -35,19 +35,22 @@ private:
 
 	PipeInstance *CreatePipeInstance(HANDLE pipe);
 	void ClosePipeInstance(PipeInstance *pipeInst);
+	static PipeInstance *ActivePipeInstance(LPOVERLAPPED overlap);
 
 	static void RunThread(IPCServer *_this);
-	static BOOL CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe);
+	static bool CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending);
 	static void WINAPI CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED overlap);
 	static void WINAPI CompletedWriteCallback(DWORD err, DWORD bytesWritten, LPOVERLAPPED overlap);
 
 	std::thread mainThread;
 
-	bool running = false;
-	bool stop = false;
+	// Crossed between the caller and RunThread; the event is created by Run()
+	// (not RunThread) so Stop() can never signal an indeterminate handle.
+	std::atomic<bool> stop{ false };
 
 	std::set<PipeInstance *> pipes;
-	HANDLE connectEvent;
+	HANDLE connectEvent = nullptr;
+	HANDLE stopEvent = nullptr;
 
 	ServerTrackedDeviceProvider *driver;
 };

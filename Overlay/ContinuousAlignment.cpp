@@ -271,23 +271,32 @@ bool ContinuousAlignment::EstimateWindow(Eigen::Quaterniond &rotOut, Eigen::Vect
 	rotOut = stats.rot;
 	transOut = stats.trans;
 
-	// Short-term noise: robust sigma from consecutive-obs deltas. Neighboring
-	// observations are ~0.1 s apart, so a slipped mount's head-orientation-
-	// locked error barely moves between them while per-sample tracking noise
-	// decorrelates fully — the ratio of window scatter to this estimate is
-	// what separates the two. Median-based so glitch pairs don't inflate it
-	// (they would push a real slip toward the harmless "noise" verdict).
-	// sigma = 1.4826 * median|delta| / sqrt(2): Gaussian consistency for a
-	// difference of two iid samples.
-	if (quats.size() >= 2)
+	// Short-term noise: robust scatter-equivalent from lag-2 obs deltas
+	// (~0.2 s apart). A slipped mount's head-orientation-locked error barely
+	// moves over that span while tracking noise — white, or the mid-frequency
+	// warble of grazing lighthouse geometry — decorrelates, so the ratio of
+	// window scatter to this estimate is what separates the two. Lag 2 rather
+	// than 1 because warble is still partially correlated between direct
+	// neighbors and would read as structure. Median-based so glitch pairs
+	// don't inflate it (they would push a real slip toward the harmless
+	// "noise" verdict).
+	// The deltas are norms of 3D differences — Maxwell-distributed for
+	// Gaussian noise, median 1.5382 * (sigma * sqrt(2)) per axis — while the
+	// window scatter under pure noise is sigma * sqrt(3), so the median is
+	// scaled by sqrt(3) / (1.5382 * sqrt(2)) to make noiseX directly
+	// comparable to scatterX: unstructured windows sit at a ratio of ~1 and
+	// structuredScatterFactor compares like with like. (The scalar-Gaussian
+	// MAD constant used before overstated the estimate by ~32%, silently
+	// raising the effective structured threshold to ~2.1x the designed 1.6x.)
+	if (quats.size() >= 3)
 	{
-		std::vector<double> dRot(quats.size() - 1), dPos(quats.size() - 1);
-		for (size_t i = 1; i < quats.size(); ++i)
+		std::vector<double> dRot(quats.size() - 2), dPos(quats.size() - 2);
+		for (size_t i = 2; i < quats.size(); ++i)
 		{
-			dRot[i - 1] = quats[i].angularDistance(quats[i - 1]) * RadToDeg;
-			dPos[i - 1] = (vecs[i] - vecs[i - 1]).norm();
+			dRot[i - 2] = quats[i].angularDistance(quats[i - 2]) * RadToDeg;
+			dPos[i - 2] = (vecs[i] - vecs[i - 2]).norm();
 		}
-		constexpr double k = 1.4826 / 1.4142135623730951;
+		constexpr double k = 1.7320508075688772 / (1.5382 * 1.4142135623730951);
 		noiseRotDeg = k * Median(dRot);
 		noisePosM = k * Median(dPos);
 	}
@@ -332,14 +341,21 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		if (scatterSince < 0.0)
 		{
 			scatterSince = now;
-			scatterVotes = 0;
-			structuredVotes = 0;
+			scatterStructuredVotes.clear();
 		}
-		scatterVotes++;
-		if (structured)
-			structuredVotes++;
+		// Sliding vote window: a mount slip that starts deep into a long
+		// degraded-tracking episode must only outvote the window, not the
+		// episode's whole history, so the freeze delay stays bounded by
+		// ~scatterVoteWindow evaluations.
+		scatterStructuredVotes.push_back(structured ? 1 : 0);
+		if (scatterStructuredVotes.size() > static_cast<size_t>(config.scatterVoteWindow))
+			scatterStructuredVotes.pop_front();
 
-		bool structuredMajority = 2 * structuredVotes > scatterVotes;
+		int structuredVotes = 0;
+		for (char v : scatterStructuredVotes)
+			structuredVotes += v;
+		bool structuredMajority =
+			2 * structuredVotes > static_cast<int>(scatterStructuredVotes.size());
 		if (now - scatterSince >= config.scatterFreezeConfirmSeconds && structuredMajority)
 		{
 			state = State::Frozen;
@@ -572,8 +588,7 @@ void ContinuousAlignment::Reset()
 	freezeExceededSince = -1.0;
 	resumeBelowSince = -1.0;
 	scatterSince = -1.0;
-	scatterVotes = 0;
-	structuredVotes = 0;
+	scatterStructuredVotes.clear();
 	unstableNotified = false;
 	pendingDiscontinuity = false;
 	hasPendingCorrection = false;

@@ -96,6 +96,7 @@
     <ClInclude Include="InterfaceHookInjector.h" />
     <ClInclude Include="IPCServer.h" />
     <ClInclude Include="Logging.h" />
+    <ClInclude Include="PoseScale.h" />
     <ClInclude Include="QuestCalibratorDriver.h" />
     <ClInclude Include="ServerTrackedDeviceProvider.h" />
     <ClInclude Include="VRWatchdogProvider.h" />

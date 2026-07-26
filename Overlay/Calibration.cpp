@@ -9,10 +9,12 @@
 #include "JumpDetector.h"
 #include "PoseStreamHub.h"
 #include "../common/PoseChannel.h"
+#include "../common/Version.h"
 
 #include <Eigen/Dense>
 
 #include <ctime>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -36,6 +38,67 @@ static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
 
 CalibrationContext CalCtx;
+
+// ---------------------------------------------------------------------------
+// Session log (see Calibration.h)
+
+static std::ofstream SessionLog;
+static size_t SessionLogBytes = 0;
+// Hard cap so a pathological log loop can never eat a user's disk.
+static constexpr size_t SessionLogMaxBytes = 4 * 1024 * 1024;
+
+void InitSessionLog()
+{
+	wchar_t base[MAX_PATH];
+	DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+	if (len == 0 || len >= MAX_PATH)
+		return;
+
+	std::wstring dir = std::wstring(base) + L"\\QuestCalibrator";
+	CreateDirectoryW(dir.c_str(), nullptr);
+
+	std::wstring current = dir + L"\\QuestCalibrator.log";
+	std::wstring previous = dir + L"\\QuestCalibrator.prev.log";
+	// One-generation rotation: bounded disk use, but the session that ended in
+	// a problem survives the restart that usually precedes the bug report.
+	MoveFileExW(current.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
+
+	SessionLog.open(current.c_str(), std::ios::out | std::ios::trunc);
+	if (!SessionLog.is_open())
+		return;
+
+	char date[32] = { 0 };
+	std::time_t now = std::time(nullptr);
+	std::tm tm;
+	if (localtime_s(&tm, &now) == 0)
+		std::strftime(date, sizeof date, "%Y-%m-%d %H:%M:%S", &tm);
+	SessionLog << "QuestCalibrator " << QUESTCAL_VERSION_STRING
+		<< " session started " << date << "\n";
+	SessionLog.flush();
+}
+
+void AppendSessionLog(const std::string &msg)
+{
+	if (!SessionLog.is_open() || msg.empty() || SessionLogBytes >= SessionLogMaxBytes)
+		return;
+
+	char stamp[16] = { 0 };
+	std::time_t now = std::time(nullptr);
+	std::tm tm;
+	if (localtime_s(&tm, &now) == 0)
+		std::strftime(stamp, sizeof stamp, "[%H:%M:%S] ", &tm);
+
+	SessionLog << stamp << msg;
+	if (msg.back() != '\n')
+		SessionLog << '\n';
+
+	SessionLogBytes += msg.size() + 12;
+	if (SessionLogBytes >= SessionLogMaxBytes)
+		SessionLog << stamp << "session log size cap reached -- further messages dropped\n";
+
+	// Flushed per line so a crashed or killed session keeps everything.
+	SessionLog.flush();
+}
 
 void InitCalibrator()
 {
@@ -69,6 +132,7 @@ void ShutdownCalibrator()
 		CalCtx.profileSaveDirty = false;
 	}
 	PoseHub.Stop();
+	AppendSessionLog("session ended cleanly");
 }
 
 PoseStreamHub &GetPoseHub()
@@ -128,8 +192,9 @@ static void SendAlignmentField(CalibrationContext &ctx)
 	for (uint32_t i = 0; i < f.anchorCount; ++i)
 	{
 		const auto &a = ctx.fieldAnchors[i];
-		Eigen::Quaterniond dR = (a.rotation * baseInv).normalized();
-		Eigen::Vector3d dT = a.translationMeters - dR * baseT;
+		Eigen::Quaterniond dR;
+		Eigen::Vector3d dT;
+		questcal::AnchorDelta(a.rotation, a.translationMeters, baseInv, baseT, dR, dT);
 
 		for (int k = 0; k < 3; ++k)
 		{
@@ -999,6 +1064,24 @@ static void FinishCalibration(CalibrationContext &ctx)
 		result.timeOffset * 1000.0, result.axisSpread,
 		result.pairsUsed, result.pairsRejected, result.samplesGated);
 	ctx.Log(buf);
+
+	// Scale-artifact diagnostic: flat gains = genuine metric difference; fine
+	// below gross = the reference stream smooths motion and the solved scale
+	// is contaminated (the guard then takes scale from the gross band).
+	if (result.motionGainValid)
+	{
+		snprintf(buf, sizeof buf,
+			"Motion gain (reference vs target): %.3f gross / %.3f fine%s\n",
+			result.motionGainLow, result.motionGainHigh,
+			result.scaleFromGrossMotion
+				? " -- fine motion attenuated; scale taken from clean gross motion"
+				: (result.scaleNeutralizedForSmoothing
+					? " -- gross and fine motion attenuated; scale held at neutral 1.0"
+					: (result.motionSmoothingDetected
+						? " -- streamed-pose smoothing detected"
+						: "")));
+		ctx.Log(buf);
+	}
 
 	if (!result.valid)
 	{

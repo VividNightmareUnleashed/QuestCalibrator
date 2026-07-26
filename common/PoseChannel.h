@@ -76,7 +76,11 @@ namespace protocol
 			uint64_t idx = ring->claimCount.fetch_add(1, std::memory_order_relaxed);
 			auto &slot = ring->slots[idx % PoseRing::Capacity];
 
-			slot.seq.store(0, std::memory_order_release);   // invalidate old content for readers
+			// The invalidation must be an acquire operation: a plain release
+			// store would let the compiler hoist the payload copy above it, and
+			// a lapped reader could then pass both seq checks around a torn
+			// sample. The acquire half of the RMW pins the copy below it.
+			slot.seq.exchange(0, std::memory_order_acq_rel);   // invalidate old content for readers
 			slot.sample = sample;
 			slot.seq.store(idx + 1, std::memory_order_release);
 		}

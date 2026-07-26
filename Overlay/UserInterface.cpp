@@ -2213,7 +2213,18 @@ void BuildMainWindow(bool runningInOverlay)
 		return;
 	}
 
-	auto state = LoadVRState();
+	// The device list changes on the order of minutes, but this runs at the
+	// ~90 Hz dashboard frame rate — re-querying vrserver's properties (plus
+	// per-device icon disk stats) every frame is a cross-process call storm.
+	// A 1 Hz refresh keeps the panes current without it.
+	static VRState state;
+	static double lastStateRefresh = -1e9;
+	double now = ImGui::GetTime();
+	if (now - lastStateRefresh >= 1.0)
+	{
+		state = LoadVRState();
+		lastStateRefresh = now;
+	}
 
 	BuildHeader();
 	ImGui::Spacing();

@@ -1,5 +1,6 @@
 ﻿#include "stdafx.h"
 #include "Configuration.h"
+#include "ProfileValidation.h"
 #include "UserInterface.h"
 #include "../common/Protocol.h"
 
@@ -10,18 +11,43 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <cmath>
 
-static picojson::array FloatArray(const float *buf, int numFloats)
+static picojson::array FloatArray(const float *buf, size_t numFloats)
 {
 	picojson::array arr;
 
-	for (int i = 0; i < numFloats; i++)
+	for (size_t i = 0; i < numFloats; i++)
 		arr.push_back(picojson::value(double(buf[i])));
 
 	return arr;
 }
 
-static void LoadFloatArray(const picojson::value &obj, float *buf, int numFloats)
+// picojson's get<T>() is guarded only by assert() (compiled out in Release), so
+// every read of untrusted profile JSON must type-check first to reach the
+// intended runtime_error path instead of reading the wrong union member.
+static double GetDouble(const picojson::value &v)
+{
+	if (!v.is<double>())
+		throw std::runtime_error("expected number, got " + v.to_str());
+	double value = v.get<double>();
+	if (!std::isfinite(value))
+		throw std::runtime_error("expected finite number");
+	return value;
+}
+
+template<typename T>
+static bool HasTypedValue(const picojson::object &obj, const char *name)
+{
+	auto it = obj.find(name);
+	if (it == obj.end())
+		return false;
+	if (!it->second.is<T>())
+		throw std::runtime_error(std::string("invalid type for ") + name);
+	return true;
+}
+
+static void LoadFloatArray(const picojson::value &obj, float *buf, size_t numFloats)
 {
 	if (!obj.is<picojson::array>())
 		throw std::runtime_error("expected array, got " + obj.to_str());
@@ -30,8 +56,14 @@ static void LoadFloatArray(const picojson::value &obj, float *buf, int numFloats
 	if (arr.size() != numFloats)
 		throw std::runtime_error("wrong buffer size");
 
-	for (int i = 0; i < numFloats; i++)
-		buf[i] = (float) arr[i].get<double>();
+	for (size_t i = 0; i < numFloats; i++)
+	{
+		double value = GetDouble(arr[i]);
+		if (value < -std::numeric_limits<float>::max() ||
+			value > std::numeric_limits<float>::max())
+			throw std::runtime_error("number is outside float range");
+		buf[i] = static_cast<float>(value);
+	}
 }
 
 static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
@@ -41,14 +73,23 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	if (!err.empty())
 		throw std::runtime_error(err);
 
+	if (!v.is<picojson::array>())
+		throw std::runtime_error("profile file is not an array");
 	auto arr = v.get<picojson::array>();
 	if (arr.size() < 1)
 		throw std::runtime_error("no profiles in file");
 
+	if (!arr[0].is<picojson::object>())
+		throw std::runtime_error("profile entry is not an object");
 	auto obj = arr[0].get<picojson::object>();
 
+	if (!obj["reference_tracking_system"].is<std::string>() ||
+		!obj["target_tracking_system"].is<std::string>())
+		throw std::runtime_error("profile is missing the tracking system names");
 	ctx.referenceTrackingSystem = obj["reference_tracking_system"].get<std::string>();
 	ctx.targetTrackingSystem = obj["target_tracking_system"].get<std::string>();
+	if (ctx.referenceTrackingSystem.empty() || ctx.targetTrackingSystem.empty())
+		throw std::runtime_error("tracking system names cannot be empty");
 
 	// The quaternion is the stored truth; Euler display values are derived
 	// from it by SetCalibration below.
@@ -61,26 +102,32 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 		throw std::runtime_error("malformed rotation_quat/translation_meters");
 
 	Eigen::Quaterniond rotation(
-		quatArr[0].get<double>(),   // w
-		quatArr[1].get<double>(),   // x
-		quatArr[2].get<double>(),   // y
-		quatArr[3].get<double>());  // z
+		GetDouble(quatArr[0]),   // w
+		GetDouble(quatArr[1]),   // x
+		GetDouble(quatArr[2]),   // y
+		GetDouble(quatArr[3]));  // z
 	Eigen::Vector3d translationMeters(
-		transArr[0].get<double>(),
-		transArr[1].get<double>(),
-		transArr[2].get<double>());
+		GetDouble(transArr[0]),
+		GetDouble(transArr[1]),
+		GetDouble(transArr[2]));
 
-	double scale = obj["scale"].is<double>() ? obj["scale"].get<double>() : 1.0;
+	double scale = HasTypedValue<double>(obj, "scale") ? GetDouble(obj["scale"]) : 1.0;
+	if (!questcal::IsValidCalibrationTransform(rotation, translationMeters, scale))
+		throw std::runtime_error("invalid calibration transform");
 	ctx.SetCalibration(rotation, translationMeters, scale);
 
-	if (obj["time_offset"].is<double>())
-		ctx.calibratedTimeOffset = obj["time_offset"].get<double>();
+	if (HasTypedValue<double>(obj, "time_offset"))
+		ctx.calibratedTimeOffset = GetDouble(obj["time_offset"]);
 
 	// Unix seconds of the last successful solve; 0 = unknown (older profile).
-	if (obj["calibration_time"].is<double>())
-		ctx.calibrationUnixTime = obj["calibration_time"].get<double>();
+	if (HasTypedValue<double>(obj, "calibration_time"))
+	{
+		ctx.calibrationUnixTime = GetDouble(obj["calibration_time"]);
+		if (ctx.calibrationUnixTime < 0.0)
+			throw std::runtime_error("invalid calibration_time");
+	}
 
-	if (obj["apply_time_offset"].is<bool>())
+	if (HasTypedValue<bool>(obj, "apply_time_offset"))
 		ctx.applyTimeOffset = obj["apply_time_offset"].get<bool>();
 
 	// One-time migration (settings_version < 2): scale solving used to default
@@ -90,68 +137,90 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	// change. The already-applied scale is deliberately kept: it was solved
 	// jointly with the translation, and clearing it without re-solving would
 	// visibly misalign the space. The next recalibration replaces it.
-	int settingsVersion = obj["settings_version"].is<double>()
-		? static_cast<int>(obj["settings_version"].get<double>()) : 1;
-	if (settingsVersion >= 2 && obj["solve_scale"].is<bool>())
+	double settingsVersionValue = HasTypedValue<double>(obj, "settings_version")
+		? GetDouble(obj["settings_version"]) : 1.0;
+	if (settingsVersionValue < 1.0 || settingsVersionValue > 100.0 ||
+		std::floor(settingsVersionValue) != settingsVersionValue)
+		throw std::runtime_error("invalid settings_version");
+	int settingsVersion = static_cast<int>(settingsVersionValue);
+	bool hasSolveScale = HasTypedValue<bool>(obj, "solve_scale");
+	if (settingsVersion >= 2 && hasSolveScale)
 		ctx.solveScale = obj["solve_scale"].get<bool>();
 
-	if (obj["ui_advanced"].is<bool>())
+	if (HasTypedValue<bool>(obj, "ui_advanced"))
 		ctx.uiAdvanced = obj["ui_advanced"].get<bool>();
 
-	if (obj["chaperone_warning_ack"].is<bool>())
+	if (HasTypedValue<bool>(obj, "chaperone_warning_ack"))
 		ctx.chaperoneWarningAck = obj["chaperone_warning_ack"].get<bool>();
 
-	if (obj["calibration_speed"].is<double>())
-		ctx.calibrationSpeed = (CalibrationContext::Speed)(int) obj["calibration_speed"].get<double>();
+	if (HasTypedValue<double>(obj, "calibration_speed"))
+	{
+		double speed = GetDouble(obj["calibration_speed"]);
+		if (speed < CalibrationContext::FAST || speed > CalibrationContext::VERY_SLOW ||
+			std::floor(speed) != speed)
+			throw std::runtime_error("invalid calibration_speed");
+		ctx.calibrationSpeed = static_cast<CalibrationContext::Speed>(static_cast<int>(speed));
+	}
 
-	if (obj["field_enabled"].is<bool>())
+	if (HasTypedValue<bool>(obj, "field_enabled"))
 		ctx.fieldEnabled = obj["field_enabled"].get<bool>();
 
 	// Continuous calibration (all optional: older profiles load unchanged).
-	if (obj["continuous_enabled"].is<bool>())
+	if (HasTypedValue<bool>(obj, "continuous_enabled"))
 		ctx.continuousEnabled = obj["continuous_enabled"].get<bool>();
 
-	if (obj["continuous_tracker_serial"].is<std::string>())
+	if (HasTypedValue<std::string>(obj, "continuous_tracker_serial"))
 		ctx.continuousTrackerSerial = obj["continuous_tracker_serial"].get<std::string>();
 
-	if (obj["continuous_latency_reestimation"].is<bool>())
+	if (HasTypedValue<bool>(obj, "continuous_latency_reestimation"))
 		ctx.continuousLatencyReestimation = obj["continuous_latency_reestimation"].get<bool>();
 
-	if (obj["hide_mounted_tracker"].is<bool>())
+	if (HasTypedValue<bool>(obj, "hide_mounted_tracker"))
 		ctx.hideMountedTracker = obj["hide_mounted_tracker"].get<bool>();
 
-	// Presence of a well-formed mount_extrinsic implies validity; absent or
-	// malformed leaves it invalid (continuous mode stays disarmed).
+	// Presence makes the mount extrinsic part of the profile contract. Reject
+	// malformed data instead of normalizing a degenerate quaternion and
+	// silently arming continuous calibration with NaNs.
 	ctx.mountExtrinsic = questcal::MountExtrinsic();
-	if (obj["mount_extrinsic"].is<picojson::object>())
+	if (HasTypedValue<picojson::object>(obj, "mount_extrinsic"))
 	{
 		auto extrinsic = obj["mount_extrinsic"].get<picojson::object>();
-		if (extrinsic["rotation_quat"].is<picojson::array>() &&
-			extrinsic["translation_meters"].is<picojson::array>())
-		{
-			auto &rotArr = extrinsic["rotation_quat"].get<picojson::array>();
-			auto &traArr = extrinsic["translation_meters"].get<picojson::array>();
-			if (rotArr.size() == 4 && traArr.size() == 3)
-			{
-				ctx.mountExtrinsic.rot = Eigen::Quaterniond(
-					rotArr[0].get<double>(), rotArr[1].get<double>(),
-					rotArr[2].get<double>(), rotArr[3].get<double>()).normalized();
-				ctx.mountExtrinsic.pos = Eigen::Vector3d(
-					traArr[0].get<double>(), traArr[1].get<double>(), traArr[2].get<double>());
-				if (extrinsic["rot_rms_deg"].is<double>())
-					ctx.mountExtrinsic.rotRmsDeg = extrinsic["rot_rms_deg"].get<double>();
-				if (extrinsic["pos_rms_m"].is<double>())
-					ctx.mountExtrinsic.posRmsM = extrinsic["pos_rms_m"].get<double>();
-				ctx.mountExtrinsic.valid = true;
-			}
-		}
+		if (!extrinsic["rotation_quat"].is<picojson::array>() ||
+			!extrinsic["translation_meters"].is<picojson::array>())
+			throw std::runtime_error("malformed mount_extrinsic");
+		auto &rotArr = extrinsic["rotation_quat"].get<picojson::array>();
+		auto &traArr = extrinsic["translation_meters"].get<picojson::array>();
+		if (rotArr.size() != 4 || traArr.size() != 3)
+			throw std::runtime_error("malformed mount_extrinsic");
+
+		Eigen::Quaterniond mountRotation(
+			GetDouble(rotArr[0]), GetDouble(rotArr[1]),
+			GetDouble(rotArr[2]), GetDouble(rotArr[3]));
+		Eigen::Vector3d mountPosition(
+			GetDouble(traArr[0]), GetDouble(traArr[1]), GetDouble(traArr[2]));
+		if (!questcal::IsValidRotation(mountRotation) ||
+			!questcal::IsFinite(mountPosition))
+			throw std::runtime_error("invalid mount_extrinsic");
+
+		ctx.mountExtrinsic.rot = mountRotation.normalized();
+		ctx.mountExtrinsic.pos = mountPosition;
+		if (HasTypedValue<double>(extrinsic, "rot_rms_deg"))
+			ctx.mountExtrinsic.rotRmsDeg = GetDouble(extrinsic["rot_rms_deg"]);
+		if (HasTypedValue<double>(extrinsic, "pos_rms_m"))
+			ctx.mountExtrinsic.posRmsM = GetDouble(extrinsic["pos_rms_m"]);
+		if (!questcal::IsValidResidual(ctx.mountExtrinsic.rotRmsDeg) ||
+			!questcal::IsValidResidual(ctx.mountExtrinsic.posRmsM))
+			throw std::runtime_error("invalid mount_extrinsic residual");
+		ctx.mountExtrinsic.valid = true;
 	}
 
 	ctx.fieldAnchors.clear();
-	if (obj["field_anchors"].is<picojson::array>())
+	if (HasTypedValue<picojson::array>(obj, "field_anchors"))
 	{
 		for (auto &anchorV : obj["field_anchors"].get<picojson::array>())
 		{
+			if (!anchorV.is<picojson::object>())
+				throw std::runtime_error("malformed field anchor");
 			auto anchorObj = anchorV.get<picojson::object>();
 
 			if (!anchorObj["position"].is<picojson::array>() ||
@@ -166,20 +235,26 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 				throw std::runtime_error("malformed field anchor");
 
 			CalibrationContext::FieldAnchor anchor;
-			anchor.position = Eigen::Vector3d(posArr[0].get<double>(), posArr[1].get<double>(), posArr[2].get<double>());
-			anchor.rotation = Eigen::Quaterniond(rotArr[0].get<double>(), rotArr[1].get<double>(),
-				rotArr[2].get<double>(), rotArr[3].get<double>()).normalized();
-			anchor.translationMeters = Eigen::Vector3d(traArr[0].get<double>(), traArr[1].get<double>(), traArr[2].get<double>());
+			anchor.position = Eigen::Vector3d(GetDouble(posArr[0]), GetDouble(posArr[1]), GetDouble(posArr[2]));
+			Eigen::Quaterniond anchorRotation(GetDouble(rotArr[0]), GetDouble(rotArr[1]),
+				GetDouble(rotArr[2]), GetDouble(rotArr[3]));
+			anchor.translationMeters = Eigen::Vector3d(GetDouble(traArr[0]), GetDouble(traArr[1]), GetDouble(traArr[2]));
+			if (!questcal::IsFinite(anchor.position) ||
+				!questcal::IsValidRotation(anchorRotation) ||
+				!questcal::IsFinite(anchor.translationMeters))
+				throw std::runtime_error("invalid field anchor");
+			anchor.rotation = anchorRotation.normalized();
 
 			if (ctx.fieldAnchors.size() < protocol::SetAlignmentField::MaxAnchors)
 				ctx.fieldAnchors.push_back(anchor);
 		}
 	}
 
-	if (obj["chaperone"].is<picojson::object>())
+	if (HasTypedValue<picojson::object>(obj, "chaperone"))
 	{
 		auto chaperone = obj["chaperone"].get<picojson::object>();
-		ctx.chaperone.autoApply = chaperone["auto_apply"].get<bool>();
+		if (HasTypedValue<bool>(chaperone, "auto_apply"))
+			ctx.chaperone.autoApply = chaperone["auto_apply"].get<bool>();
 
 		LoadFloatArray(chaperone["play_space_size"], ctx.chaperone.playSpaceSize.v, 2);
 
@@ -204,10 +279,14 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 		ctx.chaperone.geometry.resize(geometry.size() / floatsPerQuad);
 		if (!geometry.empty())
-			LoadFloatArray(chaperone["geometry"], (float *) ctx.chaperone.geometry.data(), (int) geometry.size());
+			LoadFloatArray(chaperone["geometry"], (float *) ctx.chaperone.geometry.data(), geometry.size());
 
-		if (chaperone["copy_time"].is<double>())
-			ctx.chaperone.copyUnixTime = chaperone["copy_time"].get<double>();
+		if (HasTypedValue<double>(chaperone, "copy_time"))
+		{
+			ctx.chaperone.copyUnixTime = GetDouble(chaperone["copy_time"]);
+			if (ctx.chaperone.copyUnixTime < 0.0)
+				throw std::runtime_error("invalid chaperone copy_time");
+		}
 
 		// A snapshot with no walls is still a snapshot (standing center + play
 		// area size): it just never auto-restores.
@@ -394,6 +473,12 @@ static std::string ReadRegistryKey()
 
 static void WriteRegistryKey(std::string str)
 {
+	if (str.size() >= std::numeric_limits<DWORD>::max())
+	{
+		std::cerr << "Profile is too large to write to the registry" << std::endl;
+		return;
+	}
+
 	HKEY hkey;
 	auto result = RegCreateKeyExA(HKEY_CURRENT_USER_LOCAL_SETTINGS, RegistryKey, 0, REG_NONE, 0, KEY_ALL_ACCESS, 0, &hkey, 0);
 	if (result != ERROR_SUCCESS)
@@ -402,7 +487,7 @@ static void WriteRegistryKey(std::string str)
 		return;
 	}
 
-	DWORD size = str.size() + 1;
+	DWORD size = static_cast<DWORD>(str.size() + 1);
 
 	result = RegSetValueExA(hkey, "Config", 0, REG_SZ, reinterpret_cast<const BYTE*>(str.c_str()), size);
 	if (result != ERROR_SUCCESS)
@@ -426,10 +511,15 @@ void LoadProfile(CalibrationContext &ctx)
 	try
 	{
 		std::stringstream io(str);
-		ParseProfile(ctx, io);
+		// Parse transactionally. A malformed late field must not leave an
+		// earlier transform active after the overall profile load failed.
+		CalibrationContext parsed = ctx;
+		parsed.validProfile = false;
+		ParseProfile(parsed, io);
+		ctx = std::move(parsed);
 		std::cout << "Loaded profile" << std::endl;
 	}
-	catch (const std::runtime_error &e)
+	catch (const std::exception &e)
 	{
 		std::cerr << "Error loading profile: " << e.what() << std::endl;
 	}

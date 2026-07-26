@@ -1,6 +1,7 @@
 #include "ServerTrackedDeviceProvider.h"
 #include "Logging.h"
 #include "InterfaceHookInjector.h"
+#include "PoseScale.h"
 
 // Vertical displacement applied to a hidden device's forwarded pose.
 static constexpr double HiddenPoseOffsetY = 1000.0;   // meters
@@ -213,9 +214,9 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 				};
 				vr::HmdVector3d_t world = quaternionRotateVector(pose.qWorldFromDriverRotation, scaled);
 				double raw[3] = {
-					world.v[0] + pose.vecWorldFromDriverTranslation[0],
-					world.v[1] + pose.vecWorldFromDriverTranslation[1],
-					world.v[2] + pose.vecWorldFromDriverTranslation[2],
+					world.v[0] + pose.vecWorldFromDriverTranslation[0] * tf.scale,
+					world.v[1] + pose.vecWorldFromDriverTranslation[1] * tf.scale,
+					world.v[2] + pose.vecWorldFromDriverTranslation[2] * tf.scale,
 				};
 				vr::HmdVector3d_t based = quaternionRotateVector(baseRot, raw);
 				double basePos[3] = {
@@ -242,11 +243,24 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		pose.qWorldFromDriverRotation = calRot * pose.qWorldFromDriverRotation;
 
-		pose.vecPosition[0] *= tf.scale;
-		pose.vecPosition[1] *= tf.scale;
-		pose.vecPosition[2] *= tf.scale;
+		// Linear position and its time derivatives share the same length unit.
+		// Scaling position alone makes vrserver predict with incompatible
+		// velocity/acceleration, creating a motion-dependent offset.
+		questcal::ScaleLinearPose(tf.scale, pose.vecPosition,
+			pose.vecVelocity, pose.vecAcceleration);
 
-		vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(calRot, pose.vecWorldFromDriverTranslation);
+		// The solved scale applies to the COMPOSED raw-world position (the
+		// solver's model, mirrored by the drift monitor and continuous loop), so
+		// worldFromDriver's own translation must scale along with the
+		// driver-local position; scaling only vecPosition would leave the
+		// applied transform off from the solved one by R*(s-1)*wfdT whenever the
+		// target driver carries a nonzero worldFromDriver translation.
+		double scaledWfdTranslation[3] = {
+			pose.vecWorldFromDriverTranslation[0] * tf.scale,
+			pose.vecWorldFromDriverTranslation[1] * tf.scale,
+			pose.vecWorldFromDriverTranslation[2] * tf.scale,
+		};
+		vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(calRot, scaledWfdTranslation);
 		pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + calTrans.v[0];
 		pose.vecWorldFromDriverTranslation[1] = rotatedTranslation.v[1] + calTrans.v[1];
 		pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + calTrans.v[2];

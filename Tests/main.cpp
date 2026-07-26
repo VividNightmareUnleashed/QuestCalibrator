@@ -6,16 +6,19 @@
 // Exit code is the number of failed scenarios.
 
 #include "../Driver/AlignmentField.h"
+#include "../Driver/PoseScale.h"
 #include "../Overlay/CalibrationEngine.h"
 #include "../Overlay/ChaperoneMath.h"
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/FieldMath.h"
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/JumpDetector.h"
+#include "../Overlay/ProfileValidation.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -42,18 +45,42 @@ struct SceneConfig
 	double rotNoiseDeg = 0.0;       // degrees, 1 sigma
 	double outlierRate = 0.0;       // probability per sample of a 0.5 m glitch
 	bool   yawOnlyMotion = false;
+	double motionScale = 1.0;       // scales ALL rotation amplitudes (slow, cautious motion)
+	double offAxisScale = 1.0;      // scales the pitch/roll motion amplitudes
+	double offAxisRate = 1.0;       // scales the pitch/roll frequencies (small fast nods)
+	// When set, the pitch/roll motion only happens inside this window (smooth
+	// sin^2 envelope): "nodded briefly, then only turned" — the burst returns
+	// to neutral, so long-lag pairs spanning it carry no off-axis delta.
+	double offAxisBurstT0 = -1e9;
+	double offAxisBurstT1 = 1e9;
 };
 
 // Smooth, rich test motion: two-axis rotation plus a figure-eight translation,
 // the sort of wiggling a user actually does while calibrating.
+Eigen::Quaterniond RotationAt(double t, const SceneConfig &scene)
+{
+	Eigen::AngleAxisd yaw(scene.motionScale * (1.1 * std::sin(0.9 * t) + 0.25 * t),
+		Eigen::Vector3d::UnitY());
+	if (scene.yawOnlyMotion || scene.offAxisScale <= 0.0)
+		return Eigen::Quaterniond(yaw);
+	double envelope = 0.0;
+	if (t >= scene.offAxisBurstT0 && t <= scene.offAxisBurstT1)
+	{
+		double u = std::sin(EIGEN_PI * (t - scene.offAxisBurstT0)
+			/ (scene.offAxisBurstT1 - scene.offAxisBurstT0));
+		envelope = u * u;
+	}
+	double a = scene.motionScale * scene.offAxisScale * envelope;
+	Eigen::AngleAxisd pitch(a * 0.9 * std::sin(scene.offAxisRate * 1.35 * t + 0.7), Eigen::Vector3d::UnitX());
+	Eigen::AngleAxisd roll(a * 0.5 * std::sin(scene.offAxisRate * 1.7 * t + 2.1), Eigen::Vector3d::UnitZ());
+	return Eigen::Quaterniond(yaw) * pitch * roll;
+}
+
 Eigen::Quaterniond RotationAt(double t, bool yawOnly)
 {
-	Eigen::AngleAxisd yaw(1.1 * std::sin(0.9 * t) + 0.25 * t, Eigen::Vector3d::UnitY());
-	if (yawOnly)
-		return Eigen::Quaterniond(yaw);
-	Eigen::AngleAxisd pitch(0.9 * std::sin(1.35 * t + 0.7), Eigen::Vector3d::UnitX());
-	Eigen::AngleAxisd roll(0.5 * std::sin(1.7 * t + 2.1), Eigen::Vector3d::UnitZ());
-	return Eigen::Quaterniond(yaw) * pitch * roll;
+	SceneConfig scene;
+	scene.yawOnlyMotion = yawOnly;
+	return RotationAt(t, scene);
 }
 
 Eigen::Vector3d PositionAt(double t)
@@ -65,9 +92,10 @@ Eigen::Vector3d PositionAt(double t)
 }
 
 // Pose of the reference device (device A) in the reference universe at time t.
-void DevicePoseAt(double t, bool yawOnly, Eigen::Quaterniond &rot, Eigen::Vector3d &pos)
+void DevicePoseAt(double t, const SceneConfig &scene,
+                  Eigen::Quaterniond &rot, Eigen::Vector3d &pos)
 {
-	rot = RotationAt(t, yawOnly);
+	rot = RotationAt(t, scene);
 	pos = PositionAt(t);
 }
 
@@ -78,7 +106,7 @@ PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
 {
 	Eigen::Quaterniond rotA;
 	Eigen::Vector3d posA;
-	DevicePoseAt(poseTime, scene.yawOnlyMotion, rotA, posA);
+	DevicePoseAt(poseTime, scene, rotA, posA);
 
 	Eigen::Quaterniond rot;
 	Eigen::Vector3d pos;
@@ -104,7 +132,7 @@ PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
 	{
 		Eigen::Quaterniond ra;
 		Eigen::Vector3d pa;
-		DevicePoseAt(tt, scene.yawOnlyMotion, ra, pa);
+		DevicePoseAt(tt, scene, ra, pa);
 		if (!isTarget) { r = ra; p = pa; return; }
 		Eigen::Quaterniond rb = ra * mountRot;
 		Eigen::Vector3d pb = pa + ra * mountPos;
@@ -167,6 +195,52 @@ void GenerateStreams(const SceneConfig &scene, const GroundTruth &truth, uint32_
 		targetStream.push_back(MakeSample(t, t - truth.latency, scene, truth, true, mountRot, mountPos, rng));
 }
 
+// Replay the same trajectory `factor` times slower: timestamps stretch,
+// velocities shrink, poses unchanged.
+std::vector<PoseSample> StretchTime(const std::vector<PoseSample> &stream, double factor)
+{
+	std::vector<PoseSample> out = stream;
+	for (auto &s : out)
+	{
+		s.time *= factor;
+		s.vel /= factor;
+		s.angVel /= factor;
+	}
+	return out;
+}
+
+// Zero-phase low-pass (forward+backward one-pole) over a pose stream: models
+// what streamed Quest poses look like after smoothing plus the runtime's
+// prediction — the prediction restores the phase (latency) but cannot restore
+// the high-frequency amplitude the smoothing removed. Position and rotation
+// take separate time constants (real runtimes smooth position aggressively
+// while keeping orientation crisp for reprojection); velocities are filtered
+// with their pose's tau so they stay consistent.
+std::vector<PoseSample> SmoothStreamZeroPhase(const std::vector<PoseSample> &stream,
+                                              double posTau, double rotTau)
+{
+	std::vector<PoseSample> out = stream;
+	auto pass = [&](auto begin, auto end)
+	{
+		auto it = begin;
+		PoseSample prev = *it;
+		for (++it; it != end; ++it)
+		{
+			double dt = std::abs(it->time - prev.time);
+			double aPos = dt / (posTau + dt);
+			double aRot = dt / (rotTau + dt);
+			it->pos = prev.pos + aPos * (it->pos - prev.pos);
+			it->vel = prev.vel + aPos * (it->vel - prev.vel);
+			it->angVel = prev.angVel + aRot * (it->angVel - prev.angVel);
+			it->rot = prev.rot.slerp(aRot, it->rot);
+			prev = *it;
+		}
+	};
+	pass(out.begin(), out.end());
+	pass(out.rbegin(), out.rend());
+	return out;
+}
+
 struct Expectation
 {
 	bool expectValid = true;
@@ -217,10 +291,10 @@ void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &
 		why += " message=\"" + r.message + "\"";
 	}
 
-	printf("%-28s %s  rot %.4f deg  trans %.4f m  offset %+.1f ms (true %+.1f)  scale %.4f  spread %.4f  pairs %zu%s%s\n",
+	printf("%-28s %s  rot %.4f deg  trans %.4f m  offset %+.1f ms (true %+.1f)  scale %.4f  spread %.4f  cond %.4f  pairs %zu%s%s\n",
 		name, pass ? "PASS" : "FAIL",
 		rotErr, transErr, r.timeOffset * 1000.0, truth.latency * 1000.0,
-		r.scale, r.axisSpread, r.pairsUsed,
+		r.scale, r.axisSpread, r.transEigRatio, r.pairsUsed,
 		why.empty() ? "" : "  <-", why.c_str());
 
 	if (!pass)
@@ -615,8 +689,9 @@ protocol::SetAlignmentField BuildField(const FieldTransform &base,
 	Eigen::Quaterniond baseInv = base.R.conjugate();
 	for (size_t i = 0; i < anchors.size(); ++i)
 	{
-		Eigen::Quaterniond dR = (anchors[i].R * baseInv).normalized();
-		Eigen::Vector3d dT = anchors[i].T - dR * base.T;
+		Eigen::Quaterniond dR;
+		Eigen::Vector3d dT;
+		AnchorDelta(anchors[i].R, anchors[i].T, baseInv, base.T, dR, dT);
 		f.anchors[i].rotationDelta = { dR.w(), dR.x(), dR.y(), dR.z() };
 		for (int k = 0; k < 3; ++k)
 		{
@@ -1078,6 +1153,33 @@ void RunBaseSlewScenarios()
 const Eigen::Quaterniond kMountRot(Eigen::AngleAxisd(2.7, Eigen::Vector3d(0.2, 0.7, -0.3).normalized()));
 const Eigen::Vector3d kMountPos(0.05, -0.08, 0.03);
 
+void ApplyTrackingWarble(double t, double stopTime, PoseSample &sample)
+{
+	if (t < 20.0 || t >= stopTime)
+		return;
+	double angle = (1.6 * EIGEN_PI / 180.0) * std::sin(2.0 * EIGEN_PI * t / 0.8);
+	sample.rot = (Eigen::Quaterniond(Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitX()))
+		* sample.rot).normalized();
+	sample.pos += Eigen::Vector3d(
+		0.008 * std::sin(2.0 * EIGEN_PI * t / 0.7),
+		0.008 * std::sin(2.0 * EIGEN_PI * t / 0.5 + 0.8),
+		0.008 * std::sin(2.0 * EIGEN_PI * t / 0.9 + 2.0));
+}
+
+void SetMountAfterSlip(double t, double slipTime,
+	Eigen::Quaterniond &rotation, Eigen::Vector3d &position)
+{
+	if (t < slipTime)
+	{
+		rotation = kMountRot;
+		position = kMountPos;
+		return;
+	}
+	rotation = kMountRot * Eigen::Quaterniond(Eigen::AngleAxisd(
+		3.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.2, 0.0).normalized()));
+	position = kMountPos + Eigen::Vector3d(0.02, 0.0, -0.01);
+}
+
 struct ContinuousSim
 {
 	ContinuousAlignment ca;
@@ -1421,15 +1523,7 @@ void RunContinuousScenarios()
 		std::mt19937 rng(505);
 		auto slipMount = [&](double t, Eigen::Quaterniond &r, Eigen::Vector3d &p)
 		{
-			if (t < 30.0)
-			{
-				r = kMountRot;
-				p = kMountPos;
-				return;
-			}
-			r = kMountRot * Eigen::Quaterniond(Eigen::AngleAxisd(
-				3.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.2, 0.0).normalized()));
-			p = kMountPos + Eigen::Vector3d(0.02, 0.0, -0.01);
+			SetMountAfterSlip(t, 30.0, r, p);
 		};
 
 		ContinuousSim sim;
@@ -1704,15 +1798,7 @@ void RunContinuousScenarios()
 		std::mt19937 rng(1010);
 		auto warble = [&](double t, PoseSample &s)
 		{
-			if (t < 20.0 || t >= 50.0)
-				return;
-			double a = (1.6 * EIGEN_PI / 180.0) * std::sin(2.0 * EIGEN_PI * t / 0.8);
-			s.rot = (Eigen::Quaterniond(Eigen::AngleAxisd(a, Eigen::Vector3d::UnitX()))
-				* s.rot).normalized();
-			s.pos += Eigen::Vector3d(
-				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.7),
-				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.5 + 0.8),
-				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.9 + 2.0));
+			ApplyTrackingWarble(t, 50.0, s);
 		};
 
 		ContinuousSim sim;
@@ -1746,6 +1832,38 @@ void RunContinuousScenarios()
 			holdingSeen, sim.freezes, sim.unstables, sim.corrections - before);
 		Check("continuous: unstable tracking holds, not freezes", heldDuring && recovered, detail);
 	}
+
+	// 12. Mount slip during degraded tracking: a long run of unstructured
+	// warble votes must not indefinitely delay the freeze once the mount then
+	// genuinely slips — the sliding vote window bounds the delay to
+	// ~scatterVoteWindow evaluations instead of the episode's whole history.
+	{
+		std::mt19937 rng(1111);
+		auto warble = [&](double t, PoseSample &s)
+		{
+			ApplyTrackingWarble(t, 90.0, s);
+		};
+		auto slipMount = [&](double t, Eigen::Quaterniond &r, Eigen::Vector3d &p)
+		{
+			SetMountAfterSlip(t, 45.0, r, p);
+		};
+
+		ContinuousSim sim;
+		sim.ca.SetExtrinsic(trueExtrinsic);
+		sim.solvedOffset = baseTruth.latency;
+		sim.calRot = baseTruth.rotation;
+		sim.calTrans = baseTruth.translation;
+
+		RunContinuousSegment(sim, scene, 0.0, 45.0, rng, constTruth, slipMount, alwaysVisible, warble);
+		bool quietBefore = sim.freezes == 0;
+		RunContinuousSegment(sim, scene, 45.0, 90.0, rng, constTruth, slipMount, alwaysVisible, warble);
+		bool frozeAfter = sim.freezes >= 1 &&
+			sim.ca.GetState() == ContinuousAlignment::State::Frozen;
+
+		snprintf(detail, sizeof detail, "quiet-before %d  freezes %d  frozen-at-end %d",
+			quietBefore, sim.freezes, frozeAfter);
+		Check("continuous: slip during warble freezes", quietBefore && frozeAfter, detail);
+	}
 }
 
 } // namespace
@@ -1757,6 +1875,40 @@ int main()
 	truth.translation = Eigen::Vector3d(1.2, 0.03, -0.7);
 
 	EngineConfig config;
+
+	// Production-path helpers used by profile loading and the driver. These
+	// checks pin the non-solver correctness fixes alongside the math suite.
+	{
+		Eigen::Quaterniond identity(1.0, 0.0, 0.0, 0.0);
+		Eigen::Quaterniond zero(0.0, 0.0, 0.0, 0.0);
+		Eigen::Vector3d finite(1.0, -2.0, 3.0);
+		Eigen::Vector3d nonfinite = finite;
+		nonfinite.x() = std::numeric_limits<double>::infinity();
+		bool pass =
+			IsValidCalibrationTransform(identity, finite, 1.0) &&
+			!IsValidCalibrationTransform(zero, finite, 1.0) &&
+			!IsValidCalibrationTransform(identity, nonfinite, 1.0) &&
+			!IsValidScale(0.0) && !IsValidScale(-1.0) &&
+			!IsValidScale(std::numeric_limits<double>::infinity()) &&
+			!IsValidScale(10.0);
+		printf("%-28s %s\n", "profile semantics", pass ? "PASS" : "FAIL");
+		if (!pass)
+			failures++;
+	}
+
+	{
+		double position[3] = { 2.0, -4.0, 6.0 };
+		double velocity[3] = { -8.0, 10.0, 12.0 };
+		double acceleration[3] = { 14.0, -16.0, 18.0 };
+		ScaleLinearPose(0.5, position, velocity, acceleration);
+		bool pass =
+			position[0] == 1.0 && position[1] == -2.0 && position[2] == 3.0 &&
+			velocity[0] == -4.0 && velocity[1] == 5.0 && velocity[2] == 6.0 &&
+			acceleration[0] == 7.0 && acceleration[1] == -8.0 && acceleration[2] == 9.0;
+		printf("%-28s %s\n", "driver linear scale", pass ? "PASS" : "FAIL");
+		if (!pass)
+			failures++;
+	}
 
 	// 1. Clean data: near-exact recovery.
 	{
@@ -1837,6 +1989,71 @@ int main()
 		RunScenario("yaw-only motion", scene, truth, config, e);
 	}
 
+	// 6b. Yaw sweeps with one brief nod burst that returns to neutral: the
+	// burst's tilted deltas push the axis cloud past the spread gate, but
+	// every LARGE delta is still pure yaw (long-lag pairs span the whole
+	// burst and see no net nod), so the eq. 8 translation system stays
+	// near-singular along the vertical — the conditioning gate must refuse
+	// rather than ship a noise-driven floor height.
+	{
+		SceneConfig scene;
+		scene.posNoise = 0.002;
+		scene.rotNoiseDeg = 0.2;
+		scene.offAxisScale = 0.6;
+		scene.offAxisRate = 2.0;
+		scene.offAxisBurstT0 = 5.0;
+		scene.offAxisBurstT1 = 6.5;
+		Expectation e;
+		e.expectValid = false;
+		e.messageContains = "pin the position";
+		RunScenario("yaw + one nod burst", scene, truth, config, e);
+	}
+
+	// 6b'. The accept side of the same boundary: SUSTAINED slight nodding at
+	// the same axis-spread scale keeps large deltas tilted too, so the
+	// translation system is conditioned and the solve must go through.
+	{
+		SceneConfig scene;
+		scene.posNoise = 0.002;
+		scene.rotNoiseDeg = 0.2;
+		scene.offAxisScale = 0.16;
+		scene.offAxisRate = 2.0;
+		Expectation e;
+		e.maxRotErrDeg = 0.6;
+		e.maxTransErrM = 0.02;
+		RunScenario("sustained slight nods", scene, truth, config, e);
+	}
+
+	// 6b''. Slow, cautious motion: everything scaled down so most admitted
+	// pairs sit just above the minimum pair angle, where axis-direction noise
+	// is amplified by 1/theta — the inverse-variance angle weighting keeps
+	// those pairs from dominating the rotation solve.
+	{
+		SceneConfig scene;
+		scene.posNoise = 0.002;
+		scene.rotNoiseDeg = 0.4;
+		scene.motionScale = 0.35;
+		Expectation e;
+		e.maxRotErrDeg = 0.35;
+		e.maxTransErrM = 0.02;
+		RunScenario("slow cautious motion", scene, truth, config, e);
+	}
+
+	// 6c. Long continuous sweeps: large-lag deltas pass through 180 deg, where
+	// the two streams' independent shortest-arc hemisphere choices decorrelate
+	// under noise. The near-pi pair gate must keep that band out of the
+	// initial Kabsch; recovery stays at normal-noise accuracy.
+	{
+		SceneConfig scene;
+		scene.duration = 40.0;
+		scene.posNoise = 0.002;
+		scene.rotNoiseDeg = 0.4;
+		Expectation e;
+		e.maxRotErrDeg = 0.6;
+		e.maxTransErrM = 0.02;
+		RunScenario("near-180 sweeps", scene, truth, config, e, 4321);
+	}
+
 	// 7. Playspace scale.
 	{
 		SceneConfig scene;
@@ -1850,6 +2067,112 @@ int main()
 		e.maxTransErrM = 0.03;
 		e.maxScaleErr = 0.005;
 		RunScenario("scale 1.03", scene, scaled, sc, e);
+	}
+
+	// 7b. Joint refinement: the closing Gauss-Newton polish over (R, t, mount,
+	// s) must never do worse than the sequential pipeline it starts from — it
+	// exists to stop residual Kabsch rotation error from leaking into the
+	// translation with a play-space lever arm.
+	{
+		SceneConfig scene;
+		scene.posNoise = 0.002;
+		scene.rotNoiseDeg = 0.3;
+
+		std::vector<PoseSample> refStream, targetStream;
+		GenerateStreams(scene, truth, 555, refStream, targetStream);
+
+		EngineConfig sequential = config;
+		sequential.refineIterations = 0;
+		EngineResult seq = CalibrationEngine::Solve(refStream, targetStream, sequential);
+		EngineResult joint = CalibrationEngine::Solve(refStream, targetStream, config);
+
+		double seqErr = (seq.translation - truth.translation).norm();
+		double jointErr = (joint.translation - truth.translation).norm();
+		double seqRot = truth.rotation.angularDistance(seq.rotation) * 180.0 / EIGEN_PI;
+		double jointRot = truth.rotation.angularDistance(joint.rotation) * 180.0 / EIGEN_PI;
+
+		bool pass = seq.valid && joint.valid &&
+			jointErr <= seqErr + 0.001 && jointRot <= seqRot + 0.05;
+		printf("%-28s %s  trans %.4f -> %.4f m  rot %.4f -> %.4f deg\n",
+			"joint refinement", pass ? "PASS" : "FAIL", seqErr, jointErr, seqRot, jointRot);
+		if (!pass)
+			failures++;
+	}
+
+	// 7c. Scale-artifact discriminator: validates the live-diagnosis advice
+	// ("solved scale that sinks with faster motion = reference-stream
+	// smoothing artifact; solved scale invariant to motion speed = genuine
+	// metric difference") against simulated ground truth for each hypothesis.
+	{
+		EngineConfig sc = config;
+		sc.solveScale = true;
+
+		SceneConfig scene;
+		scene.posNoise = 0.001;
+		scene.rotNoiseDeg = 0.1;
+
+		// Hypothesis A: true scale 1.0, reference stream amplitude-attenuated
+		// by zero-phase smoothing. tau puts the harness's ~1.2 rad/s motion in
+		// the same omega*tau regime as real 1-2 Hz calibration wiggling under
+		// ~60-80 ms streaming smoothing; the 3x time stretch is the "calibrate
+		// slowly" advice, which drops omega*tau and lets the amplitude through.
+		std::vector<PoseSample> ref, tgt;
+		GenerateStreams(scene, truth, 777, ref, tgt);
+		std::vector<PoseSample> refSm = SmoothStreamZeroPhase(ref, 0.3, 0.05);
+
+		EngineConfig rawCfg = sc;
+		rawCfg.pinScaleOnSmoothing = false;
+		EngineResult aRaw = CalibrationEngine::Solve(refSm, tgt, rawCfg);
+		EngineResult aFast = CalibrationEngine::Solve(refSm, tgt, sc);
+		EngineResult aSlow = CalibrationEngine::Solve(
+			SmoothStreamZeroPhase(StretchTime(ref, 3.0), 0.3, 0.05), StretchTime(tgt, 3.0), sc);
+
+		// Hypothesis B: genuine metric difference, no smoothing.
+		GroundTruth shrunk = truth;
+		shrunk.scale = 0.93;
+		std::vector<PoseSample> refB, tgtB;
+		GenerateStreams(scene, shrunk, 778, refB, tgtB);
+		EngineResult bFast = CalibrationEngine::Solve(refB, tgtB, sc);
+		EngineResult bSlow = CalibrationEngine::Solve(StretchTime(refB, 3.0), StretchTime(tgtB, 3.0), sc);
+
+		// The harness trajectory has no truly slow component (shortest omega
+		// ~0.8 rad/s), so at the simulated tau even the gross band is
+		// attenuated. That must select neutral 1.0 rather than bless a dirty
+		// "gross" estimate; the stretched trajectory supplies the clean-gross
+		// path. A genuine metric difference stays frequency-flat and passes
+		// through untouched.
+		bool artifact = aRaw.valid && aFast.valid && aSlow.valid &&
+			aRaw.scale < 0.97 &&                              // raw solve collapses at speed
+			aFast.motionGainValid && aFast.motionSmoothingDetected &&
+			aFast.motionGainHigh < aFast.motionGainLow - 0.02 &&  // diagnostic sees it
+			aFast.scaleNeutralizedForSmoothing &&
+			std::abs(aFast.scale - 1.0) < 0.001 &&             // dirty gross => neutral
+			aSlow.scale > 0.97;                               // slow motion nears truth
+		bool genuine = bFast.valid && bSlow.valid &&
+			!bFast.motionSmoothingDetected && !bSlow.motionSmoothingDetected &&
+			!bFast.scaleFromGrossMotion && !bSlow.scaleFromGrossMotion &&
+			!bFast.scaleNeutralizedForSmoothing && !bSlow.scaleNeutralizedForSmoothing &&
+			std::abs(bFast.scale - 0.93) < 0.01 &&            // speed-invariant either way
+			std::abs(bSlow.scale - 0.93) < 0.01;
+
+		bool pass = artifact && genuine;
+		printf("%-28s %s  smoothed raw %.3f guarded %.3f slow %.3f (gain %.3f/%.3f gross %d neutral %d)  genuine fast %.3f slow %.3f (gain %.3f/%.3f)  valid %d%d%d%d%d\n",
+			"scale discriminator", pass ? "PASS" : "FAIL",
+			aRaw.scale, aFast.scale, aSlow.scale,
+			aFast.motionGainLow, aFast.motionGainHigh,
+			aFast.scaleFromGrossMotion, aFast.scaleNeutralizedForSmoothing,
+			bFast.scale, bSlow.scale,
+			bFast.motionGainLow, bFast.motionGainHigh,
+			aRaw.valid, aFast.valid, aSlow.valid, bFast.valid, bSlow.valid);
+		if (!pass)
+		{
+			for (const EngineResult *r : { &aRaw, &aFast, &aSlow, &bFast, &bSlow })
+				if (!r->valid)
+					printf("%-28s      rotRms %.2f transRms %.4f spread %.4f cond %.4f: %s\n",
+						"", r->rotationRmsDeg, r->translationRmsMeters,
+						r->axisSpread, r->transEigRatio, r->message.c_str());
+			failures++;
+		}
 	}
 
 	// 8. Runtime application of the solved offset: sign and asymmetric clamp.

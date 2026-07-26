@@ -33,6 +33,22 @@ namespace questcal
 constexpr double FieldBlendSigmaMeters = 1.5;
 constexpr double FieldBlendIdentityFloor = 0.05;
 
+// The per-anchor delta the driver blends: delta_i = anchor_i o base^-1, the
+// correction that, applied after the base calibration, reproduces the absolute
+// solve at that anchor's spot. SINGLE SOURCE for the derivation:
+// SendAlignmentField ships exactly this, BlendedFieldCalibration mirrors it,
+// and the test harness builds reference fields from it — the continuous loop's
+// "corrections orthogonal to the field" invariant needs all three bit-equal.
+inline void AnchorDelta(const Eigen::Quaterniond &anchorRot,
+                        const Eigen::Vector3d &anchorTrans,
+                        const Eigen::Quaterniond &baseRotInv,
+                        const Eigen::Vector3d &baseTrans,
+                        Eigen::Quaterniond &dRot, Eigen::Vector3d &dTrans)
+{
+	dRot = (anchorRot * baseRotInv).normalized();
+	dTrans = anchorTrans - dRot * baseTrans;
+}
+
 // Expected local calibration delta_blend(queryBasePos) o base. Anchors carry
 // absolute per-spot solves (.position in reference space, .rotation /
 // .translationMeters the absolute transform); deltas against base are derived
@@ -60,10 +76,9 @@ inline void BlendedFieldCalibration(const AnchorVec &anchors,
 		double dz = queryBasePos.z() - a.position.z();
 		double w = std::exp(-(dx * dx + dz * dz) * invTwoSigmaSq);
 
-		// delta_i = anchor_i o base^-1, the same derivation SendAlignmentField
-		// ships to the driver.
-		Eigen::Quaterniond dR = (a.rotation * baseInv).normalized();
-		Eigen::Vector3d dT = a.translationMeters - dR * baseTrans;
+		Eigen::Quaterniond dR;
+		Eigen::Vector3d dT;
+		AnchorDelta(a.rotation, a.translationMeters, baseInv, baseTrans, dR, dT);
 
 		// Hemisphere alignment: deltas are small, w >= 0 is the short way.
 		Eigen::Vector4d qa = dR.coeffs();

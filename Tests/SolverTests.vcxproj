@@ -84,10 +84,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Driver\AlignmentField.h" />
+    <ClInclude Include="..\Driver\PoseScale.h" />
     <ClInclude Include="..\Overlay\CalibrationEngine.h" />
     <ClInclude Include="..\Overlay\ContinuousAlignment.h" />
     <ClInclude Include="..\Overlay\DriftMonitor.h" />
     <ClInclude Include="..\Overlay\JumpDetector.h" />
+    <ClInclude Include="..\Overlay\ProfileValidation.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

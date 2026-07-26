@@ -37,6 +37,12 @@ struct AxisPair
 	Eigen::Vector3d ref;
 	Eigen::Vector3d target;
 	double weight = 1.0;
+	// Inverse-variance base weight: the axis direction of a noisy delta
+	// rotation carries noise ~ sigma/theta, so a near-threshold pair's axis is
+	// several times noisier than a wide sweep's yet would otherwise vote
+	// equally (Park & Martin's insight, applied to the axis-pair form). The
+	// Huber IRLS factor multiplies on top of this rather than replacing it.
+	double base = 1.0;
 };
 
 // Weighted Kabsch solving ref ~= R * target over unit axis pairs,
@@ -110,6 +116,279 @@ double Mean(const std::vector<double> &v)
 	double s = 0.0;
 	for (double x : v) s += x;
 	return s / static_cast<double>(v.size());
+}
+
+// Frequency-split amplitude gain of the reference stream's position track
+// relative to the target's, over a time-aligned uniform resampling. The
+// comparison track is the SOLVED MODEL's prediction of the reference device's
+// position (R(s p_B) + T - Q_A d, with the mount arm d estimated from the
+// data): comparing against the raw target track instead would read the
+// rotation-driven mount-lever motion — which the target has and the reference
+// lacks — as a phantom frequency tilt. Gains are reported in ref-vs-target
+// terms (the solved scale times the measured ratio), so under a genuine
+// metric difference both bands sit at the true scale. See
+// EngineConfig::gainSplitSeconds for what the two bands mean.
+bool EstimateMotionGain(const std::vector<PoseSample> &refStream,
+                        const std::vector<PoseSample> &targetStream,
+                        double offset, const EngineConfig &config,
+                        const EngineResult &solved,
+                        double &lowOut, double &highOut)
+{
+	if (refStream.size() < 2 || targetStream.size() < 2)
+		return false;
+
+	const double dt = 0.02;
+	double start = std::max(refStream.front().time + offset, targetStream.front().time);
+	double end = std::min(refStream.back().time + offset, targetStream.back().time);
+	if (end - start < 5.0)
+		return false;
+
+	std::vector<PoseSample> refAt, tgtAt;
+	refAt.reserve(static_cast<size_t>((end - start) / dt) + 1);
+	tgtAt.reserve(refAt.capacity());
+	for (double t = start; t <= end; t += dt)
+	{
+		PoseSample a, b;
+		if (!CalibrationEngine::InterpolateAt(targetStream, t, config.maxInterpolationGap, b) ||
+		    !CalibrationEngine::InterpolateAt(refStream, t - offset, config.maxInterpolationGap, a))
+			continue;
+		tgtAt.push_back(b);
+		refAt.push_back(a);
+	}
+
+	const size_t n = refAt.size();
+	const size_t W = std::max<size_t>(3, static_cast<size_t>(config.gainSplitSeconds / dt));
+	if (n < 250 || n < 4 * W)
+		return false;
+
+	// Mount arm from the reference device to the target, in the reference body
+	// frame; rough is fine (the possibly contaminated solved scale moves it by
+	// millimeters, second-order here).
+	Eigen::Vector3d arm = Eigen::Vector3d::Zero();
+	for (size_t i = 0; i < n; ++i)
+		arm += refAt[i].rot.conjugate() *
+			(solved.rotation * (solved.scale * tgtAt[i].pos) + solved.translation - refAt[i].pos);
+	arm /= static_cast<double>(n);
+
+	// Predicted reference-device track: the model maps the target to the
+	// target's own position, so the reference sits one lever arm back from it.
+	std::vector<Eigen::Vector3d> rp(n), tp(n);
+	for (size_t i = 0; i < n; ++i)
+	{
+		rp[i] = refAt[i].pos;
+		tp[i] = solved.rotation * (solved.scale * tgtAt[i].pos) + solved.translation
+			- refAt[i].rot * arm;
+	}
+
+	auto bandRms = [n, W](const std::vector<Eigen::Vector3d> &p, double &lowRms, double &highRms)
+	{
+		std::vector<Eigen::Vector3d> prefix(n + 1, Eigen::Vector3d::Zero());
+		for (size_t i = 0; i < n; ++i)
+			prefix[i + 1] = prefix[i] + p[i];
+		Eigen::Vector3d meanAll = prefix[n] / static_cast<double>(n);
+
+		double sqLow = 0.0, sqHigh = 0.0;
+		size_t m = 0;
+		for (size_t i = W; i + W < n; ++i)
+		{
+			Eigen::Vector3d ma = (prefix[i + W + 1] - prefix[i - W])
+				/ static_cast<double>(2 * W + 1);
+			sqHigh += (p[i] - ma).squaredNorm();
+			sqLow += (ma - meanAll).squaredNorm();
+			++m;
+		}
+		lowRms = m ? std::sqrt(sqLow / static_cast<double>(m)) : 0.0;
+		highRms = m ? std::sqrt(sqHigh / static_cast<double>(m)) : 0.0;
+	};
+
+	double rLow = 0.0, rHigh = 0.0, tLow = 0.0, tHigh = 0.0;
+	bandRms(rp, rLow, rHigh);
+	bandRms(tp, tLow, tHigh);
+
+	// A band with too little motion cannot support a ratio (the slow-cautious
+	// or occluded cases); refuse rather than divide noise by noise.
+	if (tLow < 0.03 || tHigh < 0.008)
+		return false;
+
+	// The predicted track already carries the solved scale, so fold it back in
+	// to report gains in ref-vs-target terms: under a genuine metric
+	// difference both bands read the true scale, under smoothing the fine
+	// band reads below the gross band.
+	lowOut = solved.scale * (rLow / tLow);
+	highOut = solved.scale * (rHigh / tHigh);
+	return true;
+}
+
+// Rotation vector of a delta near the identity (shortest arc), zero-safe.
+Eigen::Vector3d LogVec(const Eigen::Quaterniond &q)
+{
+	Eigen::Quaterniond dq = q;
+	if (dq.w() < 0.0)
+		dq.coeffs() = -dq.coeffs();
+	double sinHalf = dq.vec().norm();
+	if (sinHalf < 1e-12)
+		return Eigen::Vector3d::Zero();
+	return dq.vec() * (2.0 * std::atan2(sinHalf, dq.w()) / sinHalf);
+}
+
+// Joint Gauss-Newton polish over rotation, translation, the body-frame mount
+// transform (offset d, rotation C — both nuisance parameters the pairwise
+// eq. 6/8 formulations eliminate), and optional scale, on BOTH residual sets:
+//   position:    e_p = pA_i - R (s pB_i) - t - QA_i d
+//   orientation: e_r = kRot * Log(QA_i^T R QB_i C)
+// plus the same gravity prior the Kabsch stage uses (as a virtual residual),
+// so the polish fuses the two information sources instead of trading one for
+// the other. The sequential pipeline treats the Kabsch rotation as exact in
+// the translation solve, so its residual error otherwise leaks into t as a
+// bias whose lever arm is the play-space size; positions alone, though, carry
+// far less rotation information than the orientations (short mount lever) and
+// a position-only polish would chase position noise away from the
+// orientation-optimal rotation. kRot converts radians to meters so one Huber
+// knee (huberTranslation) governs both sets. Writes back and returns true
+// only when the combined robust cost improved.
+bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &config,
+                 double gravityRatio,
+                 Eigen::Matrix3d &rotInOut, Eigen::Vector3d &transInOut, double &scaleInOut)
+{
+	const Eigen::Vector3d up(0.0, 1.0, 0.0);
+	const double n = static_cast<double>(samples.size());
+	const double kRot = config.huberTranslation / config.huberRotation;   // m per rad
+	const double gravityWeight = std::max(0.0, gravityRatio) * n;
+
+	Eigen::Matrix3d R = rotInOut;
+	Eigen::Vector3d t = transInOut;
+	double s = scaleInOut;
+	const bool solveS = config.solveScale;
+	const int dim = solveS ? 13 : 12;   // [omega, t, d, gamma, (s)]
+
+	// Initial mount transform: means of the per-sample values at the seed.
+	Eigen::Vector3d d = Eigen::Vector3d::Zero();
+	Eigen::Matrix4d cAccum = Eigen::Matrix4d::Zero();   // eigenvector quaternion mean
+	for (const auto &a : samples)
+	{
+		d += a.ref.rot.conjugate() * (a.ref.pos - R * (s * a.target.pos) - t);
+		Eigen::Quaterniond ci = (Eigen::Quaterniond(R) * a.target.rot).conjugate() * a.ref.rot;
+		Eigen::Vector4d v = ci.coeffs();
+		cAccum += v * v.transpose();
+	}
+	d /= n;
+	Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> cEig(cAccum);
+	Eigen::Vector4d cv = cEig.eigenvectors().col(3);
+	Eigen::Quaterniond C(cv(3), cv(0), cv(1), cv(2));
+	C.normalize();
+
+	auto robustCost = [&](const Eigen::Matrix3d &Rc, const Eigen::Vector3d &tc,
+	                      const Eigen::Vector3d &dc, const Eigen::Quaterniond &Cc,
+	                      double sc) -> double
+	{
+		Eigen::Quaterniond Rq(Rc);
+		double sq = 0.0;
+		for (const auto &a : samples)
+		{
+			double resP = (a.ref.pos - Rc * (sc * a.target.pos) - tc - a.ref.rot * dc).norm();
+			double wP = (resP <= config.huberTranslation) ? 1.0 : config.huberTranslation / resP;
+			double resR = kRot * LogVec(a.ref.rot.conjugate() * (Rq * a.target.rot * Cc)).norm();
+			double wR = (resR <= config.huberTranslation) ? 1.0 : config.huberTranslation / resR;
+			sq += wP * resP * resP + wR * resR * resR;
+		}
+		sq += gravityWeight * (kRot * kRot) * (Rc * up - up).squaredNorm();
+		return sq;
+	};
+
+	const double before = robustCost(R, t, d, C, s);
+
+	for (int iter = 0; iter < config.refineIterations; ++iter)
+	{
+		Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
+		Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
+		Eigen::Quaterniond Rq(R);
+
+		auto addResidual = [&](const Eigen::Matrix<double, 3, 13> &J, const Eigen::Vector3d &e)
+		{
+			double res = e.norm();
+			double w = (res <= config.huberTranslation) ? 1.0 : config.huberTranslation / res;
+			H += w * (J.leftCols(dim).transpose() * J.leftCols(dim));
+			g += w * (J.leftCols(dim).transpose() * e);
+		};
+
+		for (const auto &a : samples)
+		{
+			// Position residual.
+			Eigen::Vector3d rv = R * (s * a.target.pos);
+			Eigen::Vector3d eP = a.ref.pos - rv - t - a.ref.rot * d;
+
+			Eigen::Matrix<double, 3, 13> Jp = Eigen::Matrix<double, 3, 13>::Zero();
+			// Left perturbation R <- exp(omega) R: d eP / d omega = [R s pB]x.
+			Jp.block<3, 3>(0, 0) <<
+			        0.0, -rv.z(),  rv.y(),
+			     rv.z(),     0.0, -rv.x(),
+			    -rv.y(),  rv.x(),     0.0;
+			Jp.block<3, 3>(0, 3) = -Eigen::Matrix3d::Identity();
+			Jp.block<3, 3>(0, 6) = -a.ref.rot.toRotationMatrix();
+			if (solveS)
+				Jp.col(12) = -(R * a.target.pos);
+			addResidual(Jp, eP);
+
+			// Orientation residual (scaled to meters by kRot).
+			Eigen::Vector3d eR = kRot * LogVec(a.ref.rot.conjugate() * (Rq * a.target.rot * C));
+
+			Eigen::Matrix<double, 3, 13> Jr = Eigen::Matrix<double, 3, 13>::Zero();
+			// d eR / d omega = kRot * QA^T; right perturbation C <- C exp(gamma):
+			// d eR / d gamma = kRot * I (both to first order near small residuals).
+			Jr.block<3, 3>(0, 0) = kRot * a.ref.rot.conjugate().toRotationMatrix();
+			Jr.block<3, 3>(0, 9) = kRot * Eigen::Matrix3d::Identity();
+			addResidual(Jr, eR);
+		}
+
+		// Gravity prior as a virtual residual, mirroring the Kabsch stage's.
+		if (gravityWeight > 0.0)
+		{
+			Eigen::Vector3d ru = R * up;
+			Eigen::Vector3d eG = std::sqrt(gravityWeight) * kRot * (ru - up);
+			Eigen::Matrix<double, 3, 13> Jg = Eigen::Matrix<double, 3, 13>::Zero();
+			Jg.block<3, 3>(0, 0) <<
+			        0.0,  ru.z(), -ru.y(),
+			    -ru.z(),     0.0,  ru.x(),
+			     ru.y(), -ru.x(),     0.0;
+			Jg.block<3, 3>(0, 0) *= std::sqrt(gravityWeight) * kRot;
+			// Bypass addResidual's Huber: a prior is never an outlier.
+			H += Jg.leftCols(dim).transpose() * Jg.leftCols(dim);
+			g += Jg.leftCols(dim).transpose() * eG;
+		}
+
+		// Light damping keeps a weakly observed direction from blowing up the
+		// step (the conditioning gate has already rejected true degeneracy).
+		H.diagonal().array() += 1e-6 * H.diagonal().maxCoeff() + 1e-12;
+
+		Eigen::VectorXd delta = -H.ldlt().solve(g);
+
+		// The polish corrects sub-degree Kabsch error; a large rotation ask
+		// means an outlier regime this linearization should not chase.
+		Eigen::Vector3d omega = delta.segment<3>(0);
+		if (omega.norm() > 0.02)
+			omega *= 0.02 / omega.norm();
+		if (omega.norm() > 1e-14)
+			R = Eigen::AngleAxisd(omega.norm(), omega.normalized()).toRotationMatrix() * R;
+		t += delta.segment<3>(3);
+		d += delta.segment<3>(6);
+		Eigen::Vector3d gamma = delta.segment<3>(9);
+		if (gamma.norm() > 1e-14)
+			C = C * Eigen::Quaterniond(Eigen::AngleAxisd(gamma.norm(), gamma.normalized()));
+		if (solveS)
+		{
+			s += delta(12);
+			s = std::min(1.0 + config.scaleSearchRange, std::max(1.0 - config.scaleSearchRange, s));
+		}
+	}
+
+	R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
+
+	if (robustCost(R, t, d, C, s) >= before)
+		return false;
+	rotInOut = R;
+	transInOut = t;
+	scaleInOut = s;
+	return true;
 }
 
 } // namespace
@@ -258,6 +537,15 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				continue;
 			}
 
+			// Near a half turn the two streams' independent shortest-arc choices
+			// can land on opposite hemispheres, feeding Kabsch an anti-aligned
+			// pair the angle-mismatch gate below cannot catch (both angles ~pi).
+			if (refAngle > config.maxPairAngle || targetAngle > config.maxPairAngle)
+			{
+				result.pairsRejected++;
+				continue;
+			}
+
 			// The devices are rigid: both deltas must rotate by the same angle.
 			// A large mismatch means jitter or a timing glitch on this pair.
 			if (std::abs(refAngle - targetAngle) > 0.35)
@@ -266,7 +554,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				continue;
 			}
 
-			pairs.push_back({ refAxis, targetAxis, 1.0 });
+			pairs.push_back({ refAxis, targetAxis, 1.0, refAngle * targetAngle });
 		}
 	}
 	result.pairsUsed = pairs.size();
@@ -275,6 +563,20 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	{
 		result.message = "Not enough rotation — rotate the devices together, at least a quarter turn at a time.";
 		return result;
+	}
+
+	// Normalize the angle weights to mean 1 so the gravity-prior ratio and the
+	// Huber knee keep their configured meaning regardless of motion scale.
+	{
+		double sum = 0.0;
+		for (const auto &p : pairs)
+			sum += p.base;
+		double inv = static_cast<double>(pairs.size()) / std::max(1e-12, sum);
+		for (auto &p : pairs)
+		{
+			p.base *= inv;
+			p.weight = p.base;
+		}
 	}
 
 	// ---- axis diversity (conditioning) ------------------------------------
@@ -307,24 +609,34 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		{
 			double c = (rot * p.target).dot(p.ref);
 			double residual = std::acos(std::min(1.0, std::max(-1.0, c)));
-			p.weight = (residual <= config.huberRotation) ? 1.0 : config.huberRotation / residual;
+			p.weight = p.base *
+				((residual <= config.huberRotation) ? 1.0 : config.huberRotation / residual);
 		}
 		double wsum = 0.0;
 		for (const auto &p : pairs) wsum += p.weight;
 		rot = WeightedKabsch(pairs, gravityRatio * wsum);
 	}
 
-	double rotResidualSq = 0.0, rotWeight = 0.0;
-	for (const auto &p : pairs)
+	// Weighted axis-pair residual, reused to guard the joint refinement below.
+	auto axisRmsDeg = [&pairs](const Eigen::Matrix3d &rotM) -> double
 	{
-		double c = (rot * p.target).dot(p.ref);
-		double residual = std::acos(std::min(1.0, std::max(-1.0, c)));
-		rotResidualSq += p.weight * residual * residual;
-		rotWeight += p.weight;
-	}
-	result.rotationRmsDeg = std::sqrt(rotResidualSq / std::max(1e-12, rotWeight)) * 180.0 / EIGEN_PI;
-	result.rotation = Eigen::Quaterniond(rot);
-	result.tiltDeg = std::acos(std::min(1.0, std::max(-1.0, (rot * kUp).dot(kUp)))) * 180.0 / EIGEN_PI;
+		double rotResidualSq = 0.0, rotWeight = 0.0;
+		for (const auto &p : pairs)
+		{
+			double c = (rotM * p.target).dot(p.ref);
+			double residual = std::acos(std::min(1.0, std::max(-1.0, c)));
+			rotResidualSq += p.weight * residual * residual;
+			rotWeight += p.weight;
+		}
+		return std::sqrt(rotResidualSq / std::max(1e-12, rotWeight)) * 180.0 / EIGEN_PI;
+	};
+	// Reported after the joint refinement below, on the rotation that ships.
+	auto rotationMetrics = [&axisRmsDeg, &result](const Eigen::Matrix3d &rotM)
+	{
+		result.rotationRmsDeg = axisRmsDeg(rotM);
+		result.rotation = Eigen::Quaterniond(rotM);
+		result.tiltDeg = std::acos(std::min(1.0, std::max(-1.0, (rotM * kUp).dot(kUp)))) * 180.0 / EIGEN_PI;
+	};
 
 	// ---- translation (+ optional scale): weighted linear least squares -----
 	// math.pdf eq. 8 over sample pairs, with the target universe pre-rotated by
@@ -339,36 +651,50 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	};
 	std::vector<TransRow> rows;
 
-	static const size_t kTransLags[] = { 1, 3, 8, 21, 55, 144 };
-	for (size_t lag : kTransLags)
+	auto buildRows = [&samples, &rows](const Eigen::Matrix3d &rotM)
 	{
-		if (lag >= samples.size())
-			break;
-		for (size_t i = 0; i + lag < samples.size(); ++i)
+		rows.clear();
+		static const size_t kTransLags[] = { 1, 3, 8, 21, 55, 144 };
+		for (size_t lag : kTransLags)
 		{
-			const AlignedSample &si = samples[i];
-			const AlignedSample &sj = samples[i + lag];
+			if (lag >= samples.size())
+				break;
+			for (size_t i = 0; i + lag < samples.size(); ++i)
+			{
+				const AlignedSample &si = samples[i];
+				const AlignedSample &sj = samples[i + lag];
 
-			Eigen::Matrix3d QAi = si.ref.rot.toRotationMatrix().transpose();
-			Eigen::Matrix3d QAj = sj.ref.rot.toRotationMatrix().transpose();
-			Eigen::Matrix3d QBi = (rot * si.target.rot.toRotationMatrix()).transpose();
-			Eigen::Matrix3d QBj = (rot * sj.target.rot.toRotationMatrix()).transpose();
+				Eigen::Matrix3d QAi = si.ref.rot.toRotationMatrix().transpose();
+				Eigen::Matrix3d QAj = sj.ref.rot.toRotationMatrix().transpose();
+				Eigen::Matrix3d QBi = (rotM * si.target.rot.toRotationMatrix()).transpose();
+				Eigen::Matrix3d QBj = (rotM * sj.target.rot.toRotationMatrix()).transpose();
 
-			Eigen::Vector3d refI = si.ref.pos, refJ = sj.ref.pos;
-			Eigen::Vector3d tgtI = rot * si.target.pos, tgtJ = rot * sj.target.pos;
+				Eigen::Vector3d refI = si.ref.pos, refJ = sj.ref.pos;
+				Eigen::Vector3d tgtI = rotM * si.target.pos, tgtJ = rotM * sj.target.pos;
 
-			TransRow ra;
-			ra.dQ = QAj - QAi;
-			ra.base = QAj * refJ - QAi * refI;
-			ra.scalePart = -(QAj * tgtJ - QAi * tgtI);
-			rows.push_back(ra);
+				TransRow ra;
+				ra.dQ = QAj - QAi;
+				ra.base = QAj * refJ - QAi * refI;
+				ra.scalePart = -(QAj * tgtJ - QAi * tgtI);
+				rows.push_back(ra);
 
-			TransRow rb;
-			rb.dQ = QBj - QBi;
-			rb.base = QBj * refJ - QBi * refI;
-			rb.scalePart = -(QBj * tgtJ - QBi * tgtI);
-			rows.push_back(rb);
+				TransRow rb;
+				rb.dQ = QBj - QBi;
+				rb.base = QBj * refJ - QBi * refI;
+				rb.scalePart = -(QBj * tgtJ - QBi * tgtI);
+				rows.push_back(rb);
+			}
 		}
+	};
+	buildRows(rot);
+
+	// Conditioning of the translation system itself: see minTransEigRatio.
+	{
+		Eigen::Matrix3d ata = Eigen::Matrix3d::Zero();
+		for (const auto &r : rows)
+			ata += r.dQ.transpose() * r.dQ;
+		Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig(ata);
+		result.transEigRatio = eig.eigenvalues()(0) / std::max(1e-12, eig.eigenvalues()(2));
 	}
 
 	auto solveTranslation = [&rows, &config](double scale, Eigen::Vector3d &tOut) -> double
@@ -426,6 +752,46 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		transRms = solveTranslation(scale, translation);
 	}
 
+	// ---- joint refinement (see EngineConfig::refineIterations) -------------
+	// Pareto guard: the polish only optimizes position residuals, which carry
+	// far less rotation information than the axis pairs (short mount lever),
+	// so it is accepted only when it does not measurably worsen the axis-pair
+	// fit — otherwise it would chase position noise away from the
+	// orientation-optimal rotation. Rejected polishes leave the sequential
+	// result untouched.
+	if (config.refineIterations > 0)
+	{
+		Eigen::Matrix3d rotJ = rot;
+		Eigen::Vector3d transJ = translation;
+		double scaleJ = scale;
+		if (JointRefine(samples, config, gravityRatio, rotJ, transJ, scaleJ) &&
+		    axisRmsDeg(rotJ) <= axisRmsDeg(rot) * 1.02)
+		{
+			rot = rotJ;
+			translation = transJ;
+			scale = scaleJ;
+
+			// Rebuild the eq. 8 system at the refined rotation so the reported
+			// residual (and the gates below) judge the transform that ships.
+			buildRows(rot);
+			for (auto &r : rows)
+			{
+				double residual = (r.dQ * translation - (r.base + scale * r.scalePart)).norm();
+				r.weight = (residual <= config.huberTranslation) ? 1.0 : config.huberTranslation / residual;
+			}
+			double sq = 0.0, wsum = 0.0;
+			for (const auto &r : rows)
+			{
+				double residual = (r.dQ * translation - (r.base + scale * r.scalePart)).norm();
+				sq += r.weight * residual * residual;
+				wsum += r.weight;
+			}
+			transRms = std::sqrt(sq / std::max(1e-12, wsum));
+		}
+	}
+
+	rotationMetrics(rot);
+
 	// The solved translation maps pre-rotated, pre-scaled target space; what the
 	// driver applies is world-from-driver, which matches this frame directly.
 	result.translation = translation;
@@ -437,6 +803,12 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	{
 		result.message = "Rotation happened around only one axis — tilt and roll are unconstrained. "
 		                 "Rotate the devices together around two different axes and recalibrate.";
+		return result;
+	}
+	if (result.transEigRatio < config.minTransEigRatio)
+	{
+		result.message = "Not enough two-axis rotation to pin the position along every direction — "
+		                 "add clear nodding and tilting motion and recalibrate.";
 		return result;
 	}
 	if (result.rotationRmsDeg > config.maxRotationRms)
@@ -509,6 +881,64 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	}
 
 	EngineResult result = SolveAligned(aligned, config);
+
+	// ---- motion-amplitude gain diagnostic + scale guard --------------------
+	// (see EngineConfig::gainSplitSeconds). When the fine band's gain sits
+	// below the gross band's, the reference stream is low-passing motion and
+	// the least-squares scale is dragged toward the fine-band gain; the
+	// gross-band gain is usable only when it remains near unity. If gross is
+	// attenuated too, neither measured band identifies physical metric scale,
+	// so re-solve at neutral scale rather than applying contaminated motion.
+	double gainLow = 0.0, gainHigh = 0.0;
+	bool gainValid = result.valid &&
+		EstimateMotionGain(refStream, targetStream, offset, config, result, gainLow, gainHigh);
+	bool smoothingDetected = gainValid &&
+		gainHigh < gainLow - config.gainSmoothingMargin;
+
+	if (result.valid && config.solveScale && config.pinScaleOnSmoothing && gainValid &&
+	    smoothingDetected)
+	{
+		bool grossClean = std::abs(gainLow - 1.0) <= config.maxCleanGrossDeviation;
+		double guardedScale = grossClean
+			? std::min(1.0 + config.scaleSearchRange,
+				std::max(1.0 - config.scaleSearchRange, gainLow))
+			: 1.0;
+
+		// Pre-scaling the target and solving with scale fixed composes exactly
+		// with the driver's scale-then-transform application (same trick as
+		// the anchor path).
+		EngineConfig pinnedConfig = config;
+		pinnedConfig.solveScale = false;
+		std::vector<AlignedSample> scaled = aligned;
+		for (auto &a : scaled)
+		{
+			a.target.pos *= guardedScale;
+			a.target.vel *= guardedScale;
+		}
+		EngineResult r2 = SolveAligned(scaled, pinnedConfig);
+		if (r2.valid)
+		{
+			r2.scale = guardedScale;
+			r2.scaleFromGrossMotion = grossClean;
+			r2.scaleNeutralizedForSmoothing = !grossClean;
+			r2.message += grossClean
+				? " Fine-motion attenuation detected (streamed-pose smoothing); scale taken from clean gross motion."
+				: " Gross and fine motion are attenuated (streamed-pose smoothing); scale held at neutral 1.0.";
+			result = r2;
+		}
+		else
+		{
+			// Never silently fall back to the contaminated free-scale fit.
+			result.valid = false;
+			result.message = "Streamed-pose smoothing was detected, but the guarded fixed-scale re-solve failed: " +
+				r2.message;
+		}
+	}
+
+	result.motionGainValid = gainValid;
+	result.motionGainLow = gainLow;
+	result.motionGainHigh = gainHigh;
+	result.motionSmoothingDetected = smoothingDetected;
 	result.timeOffset = offset;
 	result.samplesGated = gated;
 	if (config.estimateTimeOffset && !offsetKnown)

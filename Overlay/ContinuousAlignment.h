@@ -92,6 +92,7 @@ public:
 		double scatterFreezeConfirmSeconds = 8.0;   // structured scatter -> freeze
 		double scatterNotifySeconds = 10.0;         // unstructured -> one info event
 		double structuredScatterFactor = 1.6;       // window RMS vs noise estimate
+		int    scatterVoteWindow = 8;               // sliding votes (evaluateInterval apart) behind the majority
 
 		// --- apply policy ---
 		double evaluateInterval = 2.0;     // s between decisions
@@ -251,11 +252,14 @@ private:
 	double freezeExceededSince = -1.0;
 	double resumeBelowSince = -1.0;
 
-	// Scatter episode bookkeeping: one timer, with a running structured/noise
-	// classification vote so a flickering classification still converges.
+	// Scatter episode bookkeeping: one timer, plus a SLIDING window of
+	// structured/noise classification votes so a flickering classification
+	// converges to its majority — sliding rather than whole-episode counters
+	// so a slip that starts deep into a long degraded-tracking episode still
+	// freezes within ~scatterVoteWindow evaluations instead of having to
+	// outvote the entire episode's history.
 	double scatterSince = -1.0;
-	int scatterVotes = 0;
-	int structuredVotes = 0;
+	std::deque<char> scatterStructuredVotes;
 	bool unstableNotified = false;
 
 	// Jump-guard candidate: a discontinuous observation awaiting confirmation

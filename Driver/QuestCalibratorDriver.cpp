@@ -7,7 +7,7 @@
 #include <cstring>
 #include <openvr_driver.h>
 
-QUESTCALIBRATORDRIVER_API void *HmdDriverFactory(const char *pInterfaceName, int *pReturnCode)
+extern "C" __declspec(dllexport) void *HmdDriverFactory(const char *pInterfaceName, int *pReturnCode)
 {
 	TRACE("HmdDriverFactory(%s)", pInterfaceName);
 

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "solution": "QuestCalibrator.sln",
+  "configuration": "Release",
+  "platform": "x64",
+  "duplicateMinLines": 20,
+  "duplicateMinTokens": 120
+}

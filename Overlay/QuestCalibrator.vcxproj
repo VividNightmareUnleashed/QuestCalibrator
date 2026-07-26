@@ -93,6 +93,7 @@
     <ClInclude Include="CalibrationEngine.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
+    <ClInclude Include="ProfileValidation.h" />
     <ClInclude Include="ContinuousAlignment.h" />
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="EmbeddedFiles.h" />

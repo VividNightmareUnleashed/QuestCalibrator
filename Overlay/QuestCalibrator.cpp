@@ -75,19 +75,31 @@ static int fboTextureWidth = 0, fboTextureHeight = 0;
 // NOT come from the process working directory - installers, Start Menu shortcuts
 // and SteamVR auto-launch all start us from somewhere else, and registering a
 // manifest path relative to the wrong directory fails silently.
-static char appDir[MAX_PATH];
+static char appDir[MAX_PATH * 3];   // UTF-8; up to 3 bytes per UTF-16 unit
 
 static void ResolveAppDir()
 {
-	DWORD len = GetModuleFileNameA(nullptr, appDir, MAX_PATH);
+	// The OpenVR APIs this feeds (manifest registration, SetOverlayFromFile)
+	// take UTF-8; the ANSI variants would hand SteamVR mojibake for any
+	// non-ASCII install path, silently breaking auto-launch and the icon.
+	wchar_t wide[MAX_PATH];
+	DWORD len = GetModuleFileNameW(nullptr, wide, MAX_PATH);
 	if (len == 0 || len >= MAX_PATH)
 	{
-		_getcwd(appDir, MAX_PATH);
-		return;
+		if (!_wgetcwd(wide, MAX_PATH))
+		{
+			appDir[0] = '\0';
+			return;
+		}
 	}
-	char *lastSlash = strrchr(appDir, '\\');
-	if (lastSlash)
-		*lastSlash = '\0';
+	else
+	{
+		wchar_t *lastSlash = wcsrchr(wide, L'\\');
+		if (lastSlash)
+			*lastSlash = L'\0';
+	}
+	if (WideCharToMultiByte(CP_UTF8, 0, wide, -1, appDir, sizeof appDir, nullptr, nullptr) == 0)
+		appDir[0] = '\0';
 }
 
 // Release builds are a GUI binary with no console, so printf/cerr from the
@@ -397,6 +409,14 @@ void RunLoop()
 		if (dashboardVisible && waitEventsTimeout > dashboardInterval)
 			waitEventsTimeout = dashboardInterval;
 
+		// A zero interval (calibration collection) must not busy-spin: sample
+		// ingestion happens on the PoseStreamHub thread and CalibrationTick
+		// self-gates to 50 Hz, so nothing needs more than a short wait — and
+		// the iconified window skips the vsync throttle that would otherwise
+		// pace this loop.
+		if (waitEventsTimeout < 0.005)
+			waitEventsTimeout = 0.005;
+
 		glfwWaitEventsTimeout(waitEventsTimeout);
 	}
 }
@@ -405,6 +425,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 {
 	ResolveAppDir();
 	HandleCommandLine(lpCmdLine);
+
+	// Before the try block so even InitVR/window-creation failures land in the
+	// log; skipped for UI preview so a dev preview never rotates a real
+	// session's log away.
+	if (!g_uiPreviewMode)
+		InitSessionLog();
 
 #ifdef DEBUG_LOGS
 	CreateConsole();
@@ -452,6 +478,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	catch (std::runtime_error &e)
 	{
 		std::cerr << "Runtime error: " << e.what() << std::endl;
+		AppendSessionLog(std::string("Runtime error: ") + e.what());
 		wchar_t message[1024];
 		swprintf(message, 1024, L"%hs", e.what());
 		MessageBox(nullptr, message, L"Runtime Error", 0);

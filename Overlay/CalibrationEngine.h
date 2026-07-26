@@ -12,9 +12,11 @@
 //   2. Velocity gating: samples taken during fast motion carry the largest
 //      residual timing error and are dropped (they can be re-enabled by config).
 //   3. Rotation: paired delta-rotation axes -> weighted Kabsch with
-//      reflection handling, IRLS/Huber reweighting, and a gravity prior in the
-//      form of weighted virtual up-axis pairs (prior, not constraint: rich
-//      motion outvotes it, so genuinely tilted universes are still recovered).
+//      reflection handling, inverse-variance angle weighting (a small delta's
+//      axis is noise-amplified by 1/theta), IRLS/Huber reweighting, and a
+//      gravity prior in the form of weighted virtual up-axis pairs (prior,
+//      not constraint: rich motion outvotes it, so genuinely tilted universes
+//      are still recovered).
 //   4. Translation: linear least squares over sample pairs (math.pdf eq. 8)
 //      with the same IRLS weights; optional playspace scale via a 1-D search.
 //   5. Validation: rotation and translation residuals, axis-cloud conditioning,
@@ -62,20 +64,58 @@ struct EngineConfig
 
 	// --- rotation solve ---
 	double minPairAngle = 0.4;         // rad; both deltas must rotate at least this much
+	// Within noise of a half turn the shortest-arc hemisphere choice
+	// decorrelates between the two streams, so a pair can enter Kabsch with
+	// anti-aligned axes that no downstream check can detect (both angles are
+	// ~pi, so the angle-mismatch gate passes). Reject the ambiguous band.
+	double maxPairAngle = 2.9;         // rad
 	size_t maxPairs = 20000;           // all-pairs count is thinned above this
 	double gravityPriorRatio = 0.5;    // virtual up-pair weight as a fraction of data weight; 0 disables
 	int    irlsIterations = 4;
 	double huberRotation = 0.06;       // rad; residuals above this are downweighted
 	double huberTranslation = 0.03;    // m
 
+	// --- joint refinement ---
+	// Gauss-Newton polish over (R, t, mount offset, s) on the full pose-pair
+	// position residuals after the sequential pipeline: the eq. 8 solve treats
+	// the Kabsch rotation as exact, so its residual error otherwise leaks into
+	// the translation as a bias that grows with distance from the sampled
+	// cloud. 0 disables.
+	int    refineIterations = 3;
+
 	// --- scale ---
 	bool   solveScale = false;
 	double scaleSearchRange = 0.15;    // searched as [1-r, 1+r]
+
+	// --- motion-amplitude gain diagnostic + scale guard ---
+	// The two position tracks' amplitude ratio, split into a gross-motion band
+	// and a fine-motion band by a moving average of gainSplitSeconds. A
+	// genuine metric scale difference is frequency-flat (both bands ~= s);
+	// streamed-pose smoothing is a low-pass, so its fingerprint is the fine
+	// band's gain sitting below the gross band's — and it drags the solved
+	// scale down with it (the least-squares scale reflects the motion the
+	// calibration wiggling actually contains). When that fingerprint is
+	// detected, the gross-band gain is used only if it is demonstrably clean
+	// (near unity). If both bands are attenuated, unity is the only defensible
+	// scale: the observed motion cannot identify a physical metric difference.
+	double gainSplitSeconds = 1.2;
+	double gainSmoothingMargin = 0.03; // fine below gross by this = smoothing detected
+	double maxCleanGrossDeviation = 0.03;
+	bool   pinScaleOnSmoothing = true; // replace the contaminated solved scale with guarded fixed scale
 
 	// --- validation gates ---
 	double maxRotationRms = 3.0;       // degrees
 	double maxTranslationRms = 0.05;   // meters
 	double minAxisSpread = 0.010;      // second/first eigenvalue ratio of the axis cloud
+	// Observability of the translation itself (math.pdf eq. 8): each pair row
+	// constrains Fp only perpendicular to its relative-rotation axis, so a
+	// near-common axis leaves that direction (the vertical, under yaw-dominant
+	// motion) resting on noise. The axis-spread gate is a poor proxy — axis
+	// outer products ignore the rotation magnitudes that weight the rows, so
+	// a brief nod burst can pass it while every LARGE delta is still pure yaw
+	// — hence the translation normal matrix is gated on its own eigenvalue
+	// ratio. 0.008 ~= 11x noise amplification along the weak direction.
+	double minTransEigRatio = 0.008;   // smallest/largest eigenvalue of sum dQ^T dQ
 	size_t minPairs = 30;
 };
 
@@ -92,6 +132,15 @@ struct EngineResult
 	double rotationRmsDeg = 0.0;       // axis-pair residual after the solve
 	double translationRmsMeters = 0.0; // translation LS residual
 	double axisSpread = 0.0;           // rotation-axis diversity; ~0 = single-axis motion
+	double transEigRatio = 0.0;        // translation-system conditioning; ~0 = a direction is unobservable
+
+	// Motion-amplitude gain diagnostic (see EngineConfig::gainSplitSeconds).
+	bool   motionGainValid = false;
+	double motionGainLow = 0.0;        // gross-motion band; ~true scale under either hypothesis
+	double motionGainHigh = 0.0;       // fine-motion band; sits below gross under smoothing
+	bool   motionSmoothingDetected = false;
+	bool   scaleFromGrossMotion = false;   // guard replaced the solved scale with motionGainLow
+	bool   scaleNeutralizedForSmoothing = false; // both bands attenuated; guard used unity
 	double tiltDeg = 0.0;              // pitch+roll magnitude of the solution (diagnostic)
 	size_t samplesUsed = 0;
 	size_t samplesGated = 0;
