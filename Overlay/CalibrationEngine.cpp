@@ -11,6 +11,42 @@ namespace
 
 const Eigen::Vector3d kUp(0.0, 1.0, 0.0);
 
+bool IsFinitePose(const PoseSample &sample)
+{
+	return std::isfinite(sample.time) &&
+		sample.rot.coeffs().allFinite() &&
+		sample.rot.squaredNorm() > 1e-12 &&
+		sample.pos.allFinite() &&
+		sample.vel.allFinite() &&
+		sample.angVel.allFinite();
+}
+
+bool IsValidStream(const std::vector<PoseSample> &stream)
+{
+	for (size_t i = 0; i < stream.size(); ++i)
+	{
+		if (!IsFinitePose(stream[i]))
+			return false;
+		if (i > 0 && !(stream[i].time > stream[i - 1].time))
+			return false;
+	}
+	return true;
+}
+
+bool IsValidAlignedSamples(const std::vector<AlignedSample> &samples)
+{
+	for (size_t i = 0; i < samples.size(); ++i)
+	{
+		if (!std::isfinite(samples[i].time) ||
+		    !IsFinitePose(samples[i].ref) ||
+		    !IsFinitePose(samples[i].target))
+			return false;
+		if (i > 0 && !(samples[i].time > samples[i - 1].time))
+			return false;
+	}
+	return true;
+}
+
 // Shortest-arc axis/angle of a delta rotation, via quaternions.
 // Quaternion extraction keeps the axis well-conditioned even near 180 degrees,
 // where the matrix off-diagonal method degrades.
@@ -396,7 +432,8 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 bool CalibrationEngine::InterpolateAt(const std::vector<PoseSample> &stream, double t,
                                       double maxGap, PoseSample &out)
 {
-	if (stream.size() < 2 || t < stream.front().time || t > stream.back().time)
+	if (stream.size() < 2 || !std::isfinite(t) || !std::isfinite(maxGap) || maxGap < 0.0 ||
+	    t < stream.front().time || t > stream.back().time)
 		return false;
 
 	// Binary search for the first sample with time >= t.
@@ -427,10 +464,13 @@ bool CalibrationEngine::InterpolateAt(const std::vector<PoseSample> &stream, dou
 bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStream,
                                            const std::vector<PoseSample> &targetStream,
                                            const EngineConfig &config,
-                                           double &offsetOut)
+                                           double &offsetOut,
+                                           bool validateInputs)
 {
 	offsetOut = 0.0;
 	if (refStream.size() < 8 || targetStream.size() < 8)
+		return false;
+	if (validateInputs && (!IsValidStream(refStream) || !IsValidStream(targetStream)))
 		return false;
 
 	double start = std::max(refStream.front().time, targetStream.front().time) + config.timeOffsetRange;
@@ -500,7 +540,8 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 }
 
 EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &samples,
-                                             const EngineConfig &config)
+                                             const EngineConfig &config,
+                                             bool validateInputs)
 {
 	EngineResult result;
 	result.samplesUsed = samples.size();
@@ -508,6 +549,11 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	if (samples.size() < 8)
 	{
 		result.message = "Not enough samples collected.";
+		return result;
+	}
+	if (validateInputs && !IsValidAlignedSamples(samples))
+	{
+		result.message = "Pose samples contain non-finite values or non-increasing timestamps.";
 		return result;
 	}
 
@@ -767,6 +813,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		if (JointRefine(samples, config, gravityRatio, rotJ, transJ, scaleJ) &&
 		    axisRmsDeg(rotJ) <= axisRmsDeg(rot) * 1.02)
 		{
+			result.refinementApplied = true;
 			rot = rotJ;
 			translation = transJ;
 			scale = scaleJ;
@@ -799,6 +846,17 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	result.translationRmsMeters = transRms;
 
 	// ---- validation --------------------------------------------------------
+	if (!result.rotation.coeffs().allFinite() ||
+	    !result.translation.allFinite() ||
+	    !std::isfinite(result.scale) ||
+	    !std::isfinite(result.rotationRmsDeg) ||
+	    !std::isfinite(result.translationRmsMeters) ||
+	    !std::isfinite(result.axisSpread) ||
+	    !std::isfinite(result.transEigRatio))
+	{
+		result.message = "Calibration solve produced non-finite values.";
+		return result;
+	}
 	if (result.axisSpread < config.minAxisSpread)
 	{
 		result.message = "Rotation happened around only one axis — tilt and roll are unconstrained. "
@@ -841,12 +899,17 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 		failure.message = "Not enough samples collected.";
 		return failure;
 	}
+	if (!IsValidStream(refStream) || !IsValidStream(targetStream))
+	{
+		failure.message = "Pose streams contain non-finite values or non-increasing timestamps.";
+		return failure;
+	}
 
 	// ---- inter-system time alignment --------------------------------------
 	double offset = 0.0;
 	bool offsetKnown = false;
 	if (config.estimateTimeOffset)
-		offsetKnown = EstimateTimeOffset(refStream, targetStream, config, offset);
+		offsetKnown = EstimateTimeOffset(refStream, targetStream, config, offset, false);
 
 	// ---- pair up samples at target timestamps ------------------------------
 	std::vector<AlignedSample> aligned;
@@ -880,7 +943,8 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 		aligned.swap(thinned);
 	}
 
-	EngineResult result = SolveAligned(aligned, config);
+	// Streams were validated above and alignment preserves order/finiteness.
+	EngineResult result = SolveAligned(aligned, config, false);
 
 	// ---- motion-amplitude gain diagnostic + scale guard --------------------
 	// (see EngineConfig::gainSplitSeconds). When the fine band's gain sits
@@ -915,7 +979,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 			a.target.pos *= guardedScale;
 			a.target.vel *= guardedScale;
 		}
-		EngineResult r2 = SolveAligned(scaled, pinnedConfig);
+		EngineResult r2 = SolveAligned(scaled, pinnedConfig, false);
 		if (r2.valid)
 		{
 			r2.scale = guardedScale;

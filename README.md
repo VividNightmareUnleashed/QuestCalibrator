@@ -108,6 +108,16 @@ MSBuild Tests\SolverTests.vcxproj /p:Configuration=Release /p:Platform=x64
 Tests\x64\Release\SolverTests.exe
 ```
 
+The deterministic harness includes fixed regression scenarios plus randomized
+property trials over general rotations, translations, rigid mount transforms,
+both latency signs, sample rates, irregular sample timing, scale, noise, and
+outliers.
+It also tests interpolation/gating/rejection contracts and compares the exact
+driver pose-transform path against an independent Eigen oracle, then stresses
+the actual named shared-memory pose ring with concurrent publishers.
+For a longer deterministic campaign, pass `--property-trials N` and optionally
+`--property-seed N` to `SolverTests.exe`; the default validation uses 64 trials.
+
 Repository-aware validation is configured through `cpp-validation.json`:
 
 ```powershell
@@ -119,13 +129,14 @@ tools\validate-cpp.ps1 -Mode Duplicates
 tools\validate-cpp.ps1 -Mode Analyze -All
 ```
 
-Fast mode runs the evaluated MSVC solution build plus conservative C++ clone
-detection. Deep mode additionally uses Visual Studio's integrated Clang-Tidy,
-so every translation unit is analyzed with its real MSVC defines, include
-paths, PCH, SDK, and per-file options. Build failures block changed files;
-Clang-Tidy and clone findings are advisory pending human review. Thresholds and
-the solution/configuration live in `cpp-validation.json`; the implementation is
-`tools/validate-cpp.ps1`.
+Fast mode runs the evaluated MSVC solution build, executes the deterministic
+solver/property harness, and provides conservative C++ clone detection. Deep
+mode additionally uses Visual Studio's integrated Clang-Tidy, then executes the
+same harness, so every translation unit is analyzed with its real MSVC defines,
+include paths, PCH, SDK, and per-file options. Build or test failures block
+changed files; Clang-Tidy and clone findings are advisory pending human review.
+Thresholds, solution/configuration, and test executable live in
+`cpp-validation.json`; the implementation is `tools/validate-cpp.ps1`.
 
 A from-source setup is manual — copy `Driver\01questcalibrator` into SteamVR's `drivers`
 folder, put the built `driver_01questcalibrator.dll` in its `bin\win64`, and run the

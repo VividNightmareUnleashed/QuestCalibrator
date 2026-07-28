@@ -17,9 +17,13 @@ $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $solution = [System.IO.Path]::GetFullPath((Join-Path $Root ([string]$config.solution)))
 $configuration = [string]$config.configuration
 $platform = [string]$config.platform
+$testExecutable = [System.IO.Path]::GetFullPath(
+    (Join-Path $Root ([string]$config.testExecutable)))
 $duplicateMinLines = [int]$config.duplicateMinLines
 $duplicateMinTokens = [int]$config.duplicateMinTokens
 if (-not $solution.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]$config.testExecutable -or
+    -not $testExecutable.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not $configuration -or -not $platform -or
     $duplicateMinLines -lt 1 -or $duplicateMinTokens -lt 1) {
     Write-Output "Invalid C++ validation config: $configPath"
@@ -113,12 +117,32 @@ function Invoke-MSBuildValidation {
         }
     }
 
-    exit 0
+    return
+}
+
+function Invoke-SolverTests {
+    if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) {
+        Write-Output "Solver test executable not found after build: $testExecutable"
+        exit 2
+    }
+
+    $output = @(& $testExecutable 2>&1 | ForEach-Object { [string]$_ })
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        $output | Write-Output
+        # Normalize: the exe returns its failing-scenario count, which would
+        # collide with this script's reserved codes (2 = config, 3 = advisory).
+        exit 1
+    }
+
+    $summary = $output | Select-Object -Last 1
+    Write-Output "Solver tests passed: $summary"
 }
 
 switch ($Mode) {
     'Build' {
         Invoke-MSBuildValidation
+        Invoke-SolverTests
     }
 
     'Analyze' {
@@ -130,6 +154,7 @@ switch ($Mode) {
             exit 0
         }
         Invoke-MSBuildValidation -ClangTidy
+        Invoke-SolverTests
     }
 
     'Duplicates' {

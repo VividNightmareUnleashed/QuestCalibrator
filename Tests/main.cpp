@@ -7,6 +7,7 @@
 
 #include "../Driver/AlignmentField.h"
 #include "../Driver/PoseScale.h"
+#include "../Driver/PoseTransform.h"
 #include "../Overlay/CalibrationEngine.h"
 #include "../Overlay/ChaperoneMath.h"
 #include "../Overlay/ContinuousAlignment.h"
@@ -14,13 +15,18 @@
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/ProfileValidation.h"
+#include "../common/PoseChannel.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <random>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace questcal;
@@ -44,6 +50,7 @@ struct SceneConfig
 	double posNoise = 0.0;          // meters, 1 sigma per axis
 	double rotNoiseDeg = 0.0;       // degrees, 1 sigma
 	double outlierRate = 0.0;       // probability per sample of a 0.5 m glitch
+	double timestampJitter = 0.0;   // seconds, 1 sigma; clamped to preserve ordering
 	bool   yawOnlyMotion = false;
 	double motionScale = 1.0;       // scales ALL rotation amplitudes (slow, cautious motion)
 	double offAxisScale = 1.0;      // scales the pitch/roll motion amplitudes
@@ -177,22 +184,49 @@ PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
 	return s;
 }
 
-void GenerateStreams(const SceneConfig &scene, const GroundTruth &truth, uint32_t seed,
-                     std::vector<PoseSample> &refStream, std::vector<PoseSample> &targetStream)
+void GenerateStreamsWithMount(const SceneConfig &scene, const GroundTruth &truth, uint32_t seed,
+                              const Eigen::Quaterniond &mountRot,
+                              const Eigen::Vector3d &mountPos,
+                              std::vector<PoseSample> &refStream,
+                              std::vector<PoseSample> &targetStream)
 {
 	std::mt19937 rng(seed);
-	Eigen::Quaterniond mountRot(Eigen::AngleAxisd(2.7, Eigen::Vector3d(0.2, 0.7, -0.3).normalized()));
-	Eigen::Vector3d mountPos(0.05, -0.08, 0.03);   // ~10 cm mount offset
+	// normal_distribution requires sigma > 0 at construction (MSVC's debug STL
+	// asserts it); substitute a dummy sigma when jitter is off — the
+	// distribution is only ever sampled when timestampJitter > 0.
+	std::normal_distribution<double> timestampNoise(
+		0.0, scene.timestampJitter > 0.0 ? scene.timestampJitter : 1.0);
 
 	refStream.clear();
 	targetStream.clear();
 
 	for (double t = 0.0; t < scene.duration; t += 1.0 / scene.refRate)
-		refStream.push_back(MakeSample(t, t, scene, truth, false, mountRot, mountPos, rng));
+	{
+		double stamp = scene.timestampJitter > 0.0 ? t + timestampNoise(rng) : t;
+		if (!refStream.empty())
+			stamp = std::max(stamp, refStream.back().time + 1e-6);
+		refStream.push_back(MakeSample(stamp, stamp, scene, truth, false, mountRot, mountPos, rng));
+	}
 
 	// The target stream lags: the pose stamped t is the physical state at t - latency.
 	for (double t = 0.0; t < scene.duration; t += 1.0 / scene.targetRate)
-		targetStream.push_back(MakeSample(t, t - truth.latency, scene, truth, true, mountRot, mountPos, rng));
+	{
+		double stamp = scene.timestampJitter > 0.0 ? t + timestampNoise(rng) : t;
+		if (!targetStream.empty())
+			stamp = std::max(stamp, targetStream.back().time + 1e-6);
+		targetStream.push_back(
+			MakeSample(stamp, stamp - truth.latency, scene, truth, true, mountRot, mountPos, rng));
+	}
+}
+
+void GenerateStreams(const SceneConfig &scene, const GroundTruth &truth, uint32_t seed,
+                     std::vector<PoseSample> &refStream, std::vector<PoseSample> &targetStream)
+{
+	const Eigen::Quaterniond mountRot(
+		Eigen::AngleAxisd(2.7, Eigen::Vector3d(0.2, 0.7, -0.3).normalized()));
+	const Eigen::Vector3d mountPos(0.05, -0.08, 0.03);   // ~10 cm mount offset
+	GenerateStreamsWithMount(
+		scene, truth, seed, mountRot, mountPos, refStream, targetStream);
 }
 
 // Replay the same trajectory `factor` times slower: timestamps stretch,
@@ -246,7 +280,7 @@ struct Expectation
 	bool expectValid = true;
 	double maxRotErrDeg = 0.1;
 	double maxTransErrM = 0.005;
-	double maxOffsetErr = 0.004;       // only checked when latency != 0
+	double maxOffsetErr = 0.004;       // checked whenever time-offset estimation is enabled
 	double maxScaleErr = 0.0;          // only checked when > 0
 	const char *messageContains = nullptr;
 };
@@ -279,7 +313,7 @@ void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &
 	{
 		if (rotErr > expect.maxRotErrDeg) { pass = false; why += " rotErr"; }
 		if (transErr > expect.maxTransErrM) { pass = false; why += " transErr"; }
-		if (truth.latency != 0.0 && config.estimateTimeOffset && offsetErr > expect.maxOffsetErr)
+		if (config.estimateTimeOffset && offsetErr > expect.maxOffsetErr)
 		{
 			pass = false; why += " offsetErr";
 		}
@@ -369,6 +403,698 @@ void Check(const char *name, bool pass, const char *detail)
 	printf("%-28s %s%s%s\n", name, pass ? "PASS" : "FAIL", detail[0] ? "  " : "", detail);
 	if (!pass)
 		failures++;
+}
+
+Eigen::Quaterniond RandomQuaternion(std::mt19937 &rng, double maxAngle = EIGEN_PI)
+{
+	std::uniform_real_distribution<double> u(-1.0, 1.0);
+	std::uniform_real_distribution<double> angle(-maxAngle, maxAngle);
+	Eigen::Vector3d axis;
+	do
+	{
+		axis = Eigen::Vector3d(u(rng), u(rng), u(rng));
+	} while (axis.squaredNorm() < 1e-8);
+	return Eigen::Quaterniond(Eigen::AngleAxisd(angle(rng), axis.normalized()));
+}
+
+Eigen::Vector3d RandomVector(std::mt19937 &rng, double magnitude)
+{
+	std::uniform_real_distribution<double> u(-magnitude, magnitude);
+	return Eigen::Vector3d(u(rng), u(rng), u(rng));
+}
+
+void RunDriverPoseTransformScenarios()
+{
+	std::mt19937 rng(0xD12E4u);
+	std::uniform_real_distribution<double> scaleDist(0.85, 1.15);
+	std::uniform_real_distribution<double> timeDist(-0.05, 0.05);
+
+	double worstWorld = 0.0;
+	double worstVelocity = 0.0;
+	double worstRotation = 0.0;
+	double worstTime = 0.0;
+	bool untouched = true;
+
+	for (int trial = 0; trial < 256; ++trial)
+	{
+		Eigen::Quaterniond calR = RandomQuaternion(rng);
+		Eigen::Vector3d calT = RandomVector(rng, 3.0);
+		Eigen::Quaterniond wfdR = RandomQuaternion(rng);
+		Eigen::Vector3d wfdT = RandomVector(rng, 2.0);
+		Eigen::Quaterniond localR = RandomQuaternion(rng);
+		Eigen::Vector3d localP = RandomVector(rng, 2.0);
+		Eigen::Vector3d velocity = RandomVector(rng, 5.0);
+		Eigen::Vector3d acceleration = RandomVector(rng, 8.0);
+		Eigen::Vector3d angularVelocity = RandomVector(rng, 4.0);
+		double scale = scaleDist(rng);
+		double timeShift = timeDist(rng);
+		double initialTime = timeDist(rng);
+
+		vr::DriverPose_t pose{};
+		pose.qWorldFromDriverRotation = { wfdR.w(), wfdR.x(), wfdR.y(), wfdR.z() };
+		pose.qRotation = { localR.w(), localR.x(), localR.y(), localR.z() };
+		pose.poseTimeOffset = initialTime;
+		for (int i = 0; i < 3; ++i)
+		{
+			pose.vecWorldFromDriverTranslation[i] = wfdT(i);
+			pose.vecPosition[i] = localP(i);
+			pose.vecVelocity[i] = velocity(i);
+			pose.vecAcceleration[i] = acceleration(i);
+			pose.vecAngularVelocity[i] = angularVelocity(i);
+		}
+
+		const Eigen::Vector3d expectedWorld =
+			calR * (scale * (wfdR * localP + wfdT)) + calT;
+		const Eigen::Quaterniond expectedWorldRotation = calR * wfdR * localR;
+		const Eigen::Vector3d expectedVelocity = scale * velocity;
+		const Eigen::Vector3d expectedAcceleration = scale * acceleration;
+		double translation[3] = { calT.x(), calT.y(), calT.z() };
+		vr::HmdQuaternion_t rotation{ calR.w(), calR.x(), calR.y(), calR.z() };
+
+		questcal::driverpose::Apply(pose, rotation, translation, scale, timeShift);
+
+		Eigen::Quaterniond actualWfd(
+			pose.qWorldFromDriverRotation.w, pose.qWorldFromDriverRotation.x,
+			pose.qWorldFromDriverRotation.y, pose.qWorldFromDriverRotation.z);
+		Eigen::Quaterniond actualLocal(
+			pose.qRotation.w, pose.qRotation.x, pose.qRotation.y, pose.qRotation.z);
+		Eigen::Vector3d actualPosition(
+			pose.vecPosition[0], pose.vecPosition[1], pose.vecPosition[2]);
+		Eigen::Vector3d actualWfdT(
+			pose.vecWorldFromDriverTranslation[0],
+			pose.vecWorldFromDriverTranslation[1],
+			pose.vecWorldFromDriverTranslation[2]);
+		Eigen::Vector3d actualWorld = actualWfd * actualPosition + actualWfdT;
+		Eigen::Quaterniond actualWorldRotation = actualWfd * actualLocal;
+		Eigen::Vector3d actualVelocity(
+			pose.vecVelocity[0], pose.vecVelocity[1], pose.vecVelocity[2]);
+		Eigen::Vector3d actualAcceleration(
+			pose.vecAcceleration[0], pose.vecAcceleration[1], pose.vecAcceleration[2]);
+		Eigen::Vector3d actualAngularVelocity(
+			pose.vecAngularVelocity[0], pose.vecAngularVelocity[1], pose.vecAngularVelocity[2]);
+
+		worstWorld = std::max(worstWorld, (actualWorld - expectedWorld).norm());
+		worstVelocity = std::max(worstVelocity,
+			std::max((actualVelocity - expectedVelocity).norm(),
+				(actualAcceleration - expectedAcceleration).norm()));
+		worstRotation = std::max(worstRotation,
+			actualWorldRotation.angularDistance(expectedWorldRotation));
+		worstTime = std::max(worstTime,
+			std::abs(pose.poseTimeOffset - (initialTime + timeShift)));
+		untouched = untouched &&
+			actualLocal.angularDistance(localR) < 1e-12 &&
+			(actualAngularVelocity - angularVelocity).norm() < 1e-12;
+	}
+
+	char detail[256];
+	snprintf(detail, sizeof detail,
+		"world %.2e  deriv %.2e  rot %.2e rad  time %.2e  angular/local %d",
+		worstWorld, worstVelocity, worstRotation, worstTime, untouched);
+	Check("driver: randomized transform oracle",
+		worstWorld < 1e-11 && worstVelocity < 1e-11 &&
+		worstRotation < 1e-11 && worstTime < 1e-12 && untouched, detail);
+}
+
+void RunPoseChannelScenarios()
+{
+	// Exercise the actual named shared-memory implementation with concurrent
+	// publishers. Every payload carries redundant token fields so a torn or
+	// mismatched sample is distinguishable from a merely missing one.
+	const int producerCount = 4;
+	const int samplesPerProducer = 200;
+	const int total = producerCount * samplesPerProducer;
+
+	char mappingName[128];
+	snprintf(mappingName, sizeof mappingName,
+		"Local\\QuestCalibratorSolverTests_%lu_%llu",
+		static_cast<unsigned long>(GetCurrentProcessId()),
+		static_cast<unsigned long long>(GetTickCount64()));
+
+	protocol::PoseRingWriter writer;
+	protocol::PoseRingReader reader;
+	bool opened = writer.Create(mappingName) && reader.Open(mappingName);
+	if (!opened)
+	{
+		Check("pose ring: concurrent integrity", false, "could not create/open mapping");
+		return;
+	}
+
+	std::unique_ptr<std::atomic<int>[]> seen(new std::atomic<int>[total]);
+	for (int i = 0; i < total; ++i)
+		seen[i].store(0, std::memory_order_relaxed);
+	std::atomic<int> producersDone{ 0 };
+	std::atomic<int> received{ 0 };
+	std::atomic<int> corrupt{ 0 };
+
+	std::thread consumer([&]()
+	{
+		auto consume = [&](const protocol::DevicePoseSample &sample)
+		{
+			int token = static_cast<int>(sample.sampleTimeQpc - 1);
+			bool valid = token >= 0 && token < total &&
+				sample.deviceId == static_cast<uint32_t>(token / samplesPerProducer) &&
+				sample.position[0] == static_cast<double>(token) &&
+				sample.position[1] == static_cast<double>(-token) &&
+				sample.rotation.w == 1.0;
+			if (!valid)
+				corrupt.fetch_add(1, std::memory_order_relaxed);
+			else
+				seen[token].fetch_add(1, std::memory_order_relaxed);
+			received.fetch_add(1, std::memory_order_relaxed);
+		};
+		ULONGLONG started = GetTickCount64();
+		while (producersDone.load(std::memory_order_acquire) < producerCount ||
+		       received.load(std::memory_order_relaxed) < total)
+		{
+			reader.Drain(consume);
+			if (received.load(std::memory_order_relaxed) >= total)
+				break;
+			if (producersDone.load(std::memory_order_acquire) == producerCount &&
+			    GetTickCount64() - started > 5000)
+				break;
+			Sleep(0);
+		}
+		// The timeout break can race a producer's final publishes; one more
+		// drain keeps a starved run from miscounting that tail as missing.
+		reader.Drain(consume);
+	});
+
+	std::vector<std::thread> producers;
+	producers.reserve(producerCount);
+	for (int producer = 0; producer < producerCount; ++producer)
+	{
+		producers.emplace_back([&, producer]()
+		{
+			for (int i = 0; i < samplesPerProducer; ++i)
+			{
+				int token = producer * samplesPerProducer + i;
+				protocol::DevicePoseSample sample{};
+				sample.sampleTimeQpc = static_cast<int64_t>(token + 1);
+				sample.deviceId = static_cast<uint32_t>(producer);
+				sample.poseIsValid = true;
+				sample.deviceIsConnected = true;
+				sample.rotation.w = 1.0;
+				sample.position[0] = static_cast<double>(token);
+				sample.position[1] = static_cast<double>(-token);
+				writer.Publish(sample);
+			}
+			producersDone.fetch_add(1, std::memory_order_release);
+		});
+	}
+
+	for (auto &producer : producers)
+		producer.join();
+	consumer.join();
+
+	int missing = 0;
+	int duplicate = 0;
+	for (int i = 0; i < total; ++i)
+	{
+		int count = seen[i].load(std::memory_order_relaxed);
+		if (count == 0) ++missing;
+		if (count > 1) duplicate += count - 1;
+	}
+
+	char detail[192];
+	snprintf(detail, sizeof detail,
+		"received %d/%d missing %d duplicate %d corrupt %d",
+		received.load(), total, missing, duplicate, corrupt.load());
+	Check("pose ring: concurrent integrity",
+		received.load() == total && missing == 0 && duplicate == 0 && corrupt.load() == 0,
+		detail);
+
+	// Let the reader fall a full ring behind. Its documented recovery policy
+	// skips to the newest safe half-ring and must resume in order without
+	// wedging on overwritten sequence numbers.
+	for (uint64_t i = 0; i < protocol::PoseRing::Capacity; ++i)
+	{
+		protocol::DevicePoseSample sample{};
+		sample.sampleTimeQpc = static_cast<int64_t>(1000000 + i);
+		sample.deviceId = 7;
+		sample.rotation.w = 1.0;
+		sample.position[0] = static_cast<double>(i);
+		writer.Publish(sample);
+	}
+	int overflowCount = 0;
+	int overflowCorrupt = 0;
+	int64_t firstToken = -1;
+	int64_t lastToken = -1;
+	reader.Drain([&](const protocol::DevicePoseSample &sample)
+	{
+		int64_t token = sample.sampleTimeQpc - 1000000;
+		if (overflowCount == 0)
+			firstToken = token;
+		lastToken = token;
+		if (sample.deviceId != 7 || sample.rotation.w != 1.0 ||
+		    sample.position[0] != static_cast<double>(token))
+			++overflowCorrupt;
+		++overflowCount;
+	});
+	int expectedRetained = static_cast<int>(protocol::PoseRing::Capacity / 2);
+	snprintf(detail, sizeof detail,
+		"retained %d/%d first %lld last %lld corrupt %d",
+		overflowCount, expectedRetained,
+		static_cast<long long>(firstToken), static_cast<long long>(lastToken),
+		overflowCorrupt);
+	Check("pose ring: overwrite recovery",
+		overflowCount == expectedRetained &&
+		firstToken == expectedRetained &&
+		lastToken == static_cast<int64_t>(protocol::PoseRing::Capacity - 1) &&
+		overflowCorrupt == 0, detail);
+}
+
+void RunSolverPrimitiveScenarios()
+{
+	char detail[256];
+
+	// Direct interpolation contract: endpoints, linear fields, quaternion
+	// shortest-arc interpolation, out-of-range rejection, and gap rejection.
+	{
+		PoseSample a, b, out;
+		a.time = 1.0;
+		b.time = 2.0;
+		a.rot = Eigen::Quaterniond::Identity();
+		b.rot = Eigen::Quaterniond(Eigen::AngleAxisd(EIGEN_PI / 2.0, Eigen::Vector3d::UnitY()));
+		a.pos = Eigen::Vector3d(1.0, 2.0, 3.0);
+		b.pos = Eigen::Vector3d(5.0, 6.0, 7.0);
+		a.vel = Eigen::Vector3d(-1.0, 0.0, 1.0);
+		b.vel = Eigen::Vector3d(3.0, 4.0, 5.0);
+		a.angVel = Eigen::Vector3d(0.0, 1.0, 0.0);
+		b.angVel = Eigen::Vector3d(0.0, 3.0, 0.0);
+		std::vector<PoseSample> stream{ a, b };
+
+		bool ok = CalibrationEngine::InterpolateAt(stream, 1.25, 1.1, out);
+		Eigen::Quaterniond expected(
+			Eigen::AngleAxisd(EIGEN_PI / 8.0, Eigen::Vector3d::UnitY()));
+		bool pass = ok &&
+			(out.pos - Eigen::Vector3d(2.0, 3.0, 4.0)).norm() < 1e-12 &&
+			(out.vel - Eigen::Vector3d(0.0, 1.0, 2.0)).norm() < 1e-12 &&
+			(out.angVel - Eigen::Vector3d(0.0, 1.5, 0.0)).norm() < 1e-12 &&
+			out.rot.angularDistance(expected) < 1e-12 &&
+			!CalibrationEngine::InterpolateAt(stream, 0.9, 1.1, out) &&
+			!CalibrationEngine::InterpolateAt(stream, 1.5, 0.5, out);
+		Check("solver: interpolation contract", pass, "");
+	}
+
+	// Both offset signs, exact zero, and the edges of the configured search
+	// range. Reported angular velocity is cleared to exercise finite-difference
+	// correlation rather than the driver's fast path.
+	{
+		GroundTruth truth;
+		truth.rotation = Eigen::Quaterniond(
+			Eigen::AngleAxisd(1.2, Eigen::Vector3d(0.2, 0.9, -0.1).normalized()));
+		truth.translation = Eigen::Vector3d(0.7, -0.2, 1.1);
+		SceneConfig scene;
+		scene.duration = 18.0;
+		scene.refRate = 83.0;
+		scene.targetRate = 71.0;
+
+		const double offsets[] = { -0.055, -0.018, 0.0, 0.018, 0.055 };
+		double worst = 0.0;
+		bool pass = true;
+		for (size_t i = 0; i < sizeof offsets / sizeof offsets[0]; ++i)
+		{
+			truth.latency = offsets[i];
+			std::vector<PoseSample> ref, target;
+			GenerateStreams(scene, truth, static_cast<uint32_t>(3100 + i), ref, target);
+			for (auto &s : ref) s.angVel.setZero();
+			for (auto &s : target) s.angVel.setZero();
+
+			EngineConfig cfg;
+			double solved = 0.0;
+			bool estimated = CalibrationEngine::EstimateTimeOffset(ref, target, cfg, solved);
+			worst = std::max(worst, std::abs(solved - truth.latency));
+			pass = pass && estimated && std::abs(solved - truth.latency) < 0.004;
+		}
+		snprintf(detail, sizeof detail, "worst %.2f ms", worst * 1000.0);
+		Check("solver: offset signs + bounds", pass, detail);
+	}
+
+	// Explicitly exercise both velocity gates and even thinning. The corrupted
+	// velocity metadata must be dropped without perturbing the recovered pose.
+	{
+		GroundTruth truth{
+			Eigen::Quaterniond(Eigen::AngleAxisd(1.4, Eigen::Vector3d::UnitY())),
+			Eigen::Vector3d(0.5, 0.1, -0.8) };
+		SceneConfig scene;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 3200, ref, target);
+		for (size_t i = 0; i < target.size(); ++i)
+		{
+			if (i % 5 == 0) target[i].vel.x() = 5.0;
+			if (i % 7 == 0) target[i].angVel.y() = 20.0;
+		}
+
+		EngineConfig cfg;
+		cfg.estimateTimeOffset = false;
+		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double transErr = (truth.translation - r.translation).norm();
+		bool pass = r.valid && r.samplesGated > 300 &&
+			r.samplesUsed == cfg.maxAlignedSamples &&
+			rotErr < 0.1 && transErr < 0.005;
+		snprintf(detail, sizeof detail,
+			"gated %zu used %zu rot %.3f deg trans %.2f mm",
+			r.samplesGated, r.samplesUsed, rotErr, transErr * 1000.0);
+		Check("solver: gating + thinning", pass, detail);
+	}
+
+	// A reference dropout must not be interpolated across. Enough data remains
+	// on both sides for an accurate solve.
+	{
+		GroundTruth truth{
+			Eigen::Quaterniond(Eigen::AngleAxisd(1.0, Eigen::Vector3d::UnitY())),
+			Eigen::Vector3d(-0.4, 0.2, 0.9) };
+		SceneConfig scene;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 3300, ref, target);
+		ref.erase(std::remove_if(ref.begin(), ref.end(), [](const PoseSample &s)
+		{
+			return s.time > 8.0 && s.time < 9.0;
+		}), ref.end());
+
+		EngineConfig cfg;
+		cfg.estimateTimeOffset = false;
+		cfg.maxAlignedSamples = 10000;
+		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double transErr = (truth.translation - r.translation).norm();
+		bool pass = r.valid && r.samplesUsed < target.size() - 50 &&
+			rotErr < 0.1 && transErr < 0.005;
+		snprintf(detail, sizeof detail, "used %zu/%zu rot %.3f trans %.2f mm",
+			r.samplesUsed, target.size(), rotErr, transErr * 1000.0);
+		Check("solver: dropout gap", pass, detail);
+	}
+
+	// Pair-budget truncation is a configured complexity bound. The earliest
+	// accepted multi-lag pairs must still form a usable, exactly bounded solve.
+	{
+		GroundTruth truth{
+			Eigen::Quaterniond(Eigen::AngleAxisd(
+				1.1, Eigen::Vector3d(0.2, 0.9, 0.1).normalized())),
+			Eigen::Vector3d(0.3, -0.1, 0.8) };
+		SceneConfig scene;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 3400, ref, target);
+		EngineConfig cfg;
+		cfg.estimateTimeOffset = false;
+		cfg.maxPairs = 80;
+		cfg.minPairs = 30;
+		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double transErr = (truth.translation - r.translation).norm();
+		snprintf(detail, sizeof detail, "pairs %zu rot %.3f trans %.2f mm",
+			r.pairsUsed, rotErr, transErr * 1000.0);
+		Check("solver: pair budget",
+			r.valid && r.pairsUsed == cfg.maxPairs &&
+			rotErr < 0.5 && transErr < 0.015, detail);
+	}
+}
+
+void RunSolverRobustnessScenarios()
+{
+	char detail[320];
+	const GroundTruth truth{
+		Eigen::Quaterniond(
+			Eigen::AngleAxisd(1.7, Eigen::Vector3d(0.1, 0.95, -0.2).normalized())),
+		Eigen::Vector3d(1.0, -0.15, -0.6) };
+
+	// Alternating q/-q representations must be invisible to interpolation,
+	// delta extraction, and the refinement's quaternion mean.
+	{
+		SceneConfig scene;
+		scene.posNoise = 0.001;
+		scene.rotNoiseDeg = 0.1;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 4100, ref, target);
+		for (size_t i = 1; i < target.size(); i += 2)
+			target[i].rot.coeffs() = -target[i].rot.coeffs();
+		EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double transErr = (truth.translation - r.translation).norm();
+		snprintf(detail, sizeof detail, "rot %.3f deg trans %.2f mm",
+			rotErr, transErr * 1000.0);
+		Check("solver: quaternion double cover",
+			r.valid && rotErr < 0.5 && transErr < 0.015, detail);
+	}
+
+	// Catastrophic orientation samples, not merely position spikes. Each bad
+	// sample contaminates many delta pairs, exercising angle rejection and
+	// rotation IRLS together.
+	{
+		SceneConfig scene;
+		scene.posNoise = 0.002;
+		scene.rotNoiseDeg = 0.2;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 4200, ref, target);
+		std::mt19937 rng(4201);
+		size_t corrupt = 0;
+		for (size_t i = 23; i < target.size(); i += 47)
+		{
+			target[i].rot = RandomQuaternion(rng, 1.4) * target[i].rot;
+			++corrupt;
+		}
+		EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double transErr = (truth.translation - r.translation).norm();
+		snprintf(detail, sizeof detail,
+			"%zu corrupt rot %.3f deg trans %.2f mm rejected %zu",
+			corrupt, rotErr, transErr * 1000.0, r.pairsRejected);
+		Check("solver: rotation outliers",
+			r.valid && rotErr < 0.8 && transErr < 0.02 && r.pairsRejected > corrupt,
+			detail);
+	}
+
+	// A contiguous tracking-fault burst combines orientation and position
+	// corruption; robust estimators must recover from the healthy majority.
+	{
+		SceneConfig scene;
+		scene.posNoise = 0.001;
+		scene.rotNoiseDeg = 0.1;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 4300, ref, target);
+		for (auto &s : target)
+		{
+			if (s.time >= 10.0 && s.time <= 10.35)
+			{
+				s.pos += Eigen::Vector3d(0.35, -0.25, 0.20);
+				s.rot = Eigen::Quaterniond(Eigen::AngleAxisd(
+					0.8, Eigen::Vector3d(0.3, 0.4, 0.5).normalized())) * s.rot;
+			}
+		}
+		EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double transErr = (truth.translation - r.translation).norm();
+		snprintf(detail, sizeof detail, "rot %.3f deg trans %.2f mm rejected %zu",
+			rotErr, transErr * 1000.0, r.pairsRejected);
+		Check("solver: burst corruption",
+			r.valid && rotErr < 0.8 && transErr < 0.02, detail);
+	}
+
+	// Each quality gate gets a deliberately non-rigid data set while the other
+	// residual gate is relaxed, pinning both the decision and its explanation.
+	{
+		SceneConfig scene;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 4350, ref, target);
+		for (auto &s : target)
+		{
+			Eigen::Vector3d axis(
+				std::sin(0.7 * s.time), 0.3, std::cos(0.9 * s.time));
+			s.rot = Eigen::Quaterniond(Eigen::AngleAxisd(
+				0.18 * std::sin(2.3 * s.time), axis.normalized())) * s.rot;
+		}
+		EngineConfig rotCfg;
+		rotCfg.maxRotationRms = 0.5;
+		rotCfg.maxTranslationRms = 10.0;
+		EngineResult badRotation = CalibrationEngine::Solve(ref, target, rotCfg);
+
+		GenerateStreams(scene, truth, 4351, ref, target);
+		for (auto &s : target)
+		{
+			s.pos += Eigen::Vector3d(
+				0.10 * std::sin(1.7 * s.time),
+				0.08 * std::sin(2.1 * s.time + 0.4),
+				0.09 * std::cos(1.3 * s.time));
+		}
+		EngineConfig posCfg;
+		posCfg.maxRotationRms = 180.0;
+		posCfg.maxTranslationRms = 0.01;
+		EngineResult badPosition = CalibrationEngine::Solve(ref, target, posCfg);
+
+		bool pass = !badRotation.valid && !badPosition.valid &&
+			badRotation.message.find("Rotation residual") != std::string::npos &&
+			badPosition.message.find("Position residual") != std::string::npos;
+		snprintf(detail, sizeof detail, "rotation %.2f deg (%d) position %.1f mm (%d)",
+			badRotation.rotationRmsDeg,
+			badRotation.message.find("Rotation residual") != std::string::npos,
+			badPosition.translationRmsMeters * 1000.0,
+			badPosition.message.find("Position residual") != std::string::npos);
+		Check("solver: residual rejection gates", pass, detail);
+	}
+
+	// Validation and input-integrity matrix. These inputs must fail closed with
+	// useful reasons rather than producing a plausible-looking transform.
+	{
+		SceneConfig scene;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 4400, ref, target);
+
+		std::vector<PoseSample> shortRef(ref.begin(), ref.begin() + 7);
+		std::vector<PoseSample> shortTarget(target.begin(), target.begin() + 7);
+		EngineResult tooShort = CalibrationEngine::Solve(
+			shortRef, shortTarget, EngineConfig());
+
+		SceneConfig stillScene;
+		stillScene.motionScale = 0.02;
+		std::vector<PoseSample> stillRef, stillTarget;
+		GenerateStreams(stillScene, truth, 4401, stillRef, stillTarget);
+		EngineResult tooStill = CalibrationEngine::Solve(
+			stillRef, stillTarget, EngineConfig());
+
+		auto nanRef = ref;
+		nanRef[20].pos.x() = std::numeric_limits<double>::quiet_NaN();
+		EngineResult nanResult = CalibrationEngine::Solve(
+			nanRef, target, EngineConfig());
+
+		auto zeroQuat = target;
+		zeroQuat[30].rot = Eigen::Quaterniond(0.0, 0.0, 0.0, 0.0);
+		EngineResult zeroResult = CalibrationEngine::Solve(
+			ref, zeroQuat, EngineConfig());
+
+		auto duplicateTime = ref;
+		duplicateTime[40].time = duplicateTime[39].time;
+		EngineResult duplicateResult = CalibrationEngine::Solve(
+			duplicateTime, target, EngineConfig());
+
+		bool pass = !tooShort.valid && !tooStill.valid &&
+			!nanResult.valid && !zeroResult.valid && !duplicateResult.valid &&
+			tooShort.message.find("Not enough samples") != std::string::npos &&
+			tooStill.message.find("Not enough rotation") != std::string::npos &&
+			nanResult.message.find("non-finite") != std::string::npos &&
+			zeroResult.message.find("non-finite") != std::string::npos &&
+			duplicateResult.message.find("non-increasing") != std::string::npos;
+		snprintf(detail, sizeof detail,
+			"short %d still %d nan %d zero-q %d duplicate %d",
+			!tooShort.valid, !tooStill.valid, !nanResult.valid,
+			!zeroResult.valid, !duplicateResult.valid);
+		Check("solver: fail-closed inputs", pass, detail);
+	}
+}
+
+void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
+{
+	std::mt19937 rng(propertySeed);
+	std::uniform_real_distribution<double> rateDist(60.0, 110.0);
+	std::uniform_real_distribution<double> latencyDist(-0.035, 0.035);
+	std::uniform_real_distribution<double> scaleDist(0.87, 1.13);
+	std::uniform_real_distribution<double> noiseDist(0.0, 0.002);
+
+	double worstRot = 0.0;
+	double worstTrans = 0.0;
+	double worstOffset = 0.0;
+	double worstScale = 0.0;
+	int firstFailure = -1;
+	std::string firstMessage;
+
+	for (int trial = 0; trial < trials; ++trial)
+	{
+		GroundTruth truth;
+		truth.rotation = RandomQuaternion(rng);
+		truth.translation = RandomVector(rng, 2.5);
+		truth.latency = latencyDist(rng);
+
+		EngineConfig cfg;
+		cfg.gravityPriorRatio = 0.0;   // validate general SO(3), independent of the physical up prior
+		cfg.solveScale = trial % 3 == 0;
+		cfg.pinScaleOnSmoothing = false;
+		truth.scale = cfg.solveScale ? scaleDist(rng) : 1.0;
+
+		SceneConfig scene;
+		scene.duration = 14.0;
+		scene.refRate = rateDist(rng);
+		scene.targetRate = rateDist(rng);
+		scene.posNoise = noiseDist(rng);
+		scene.rotNoiseDeg = 0.05 + 80.0 * scene.posNoise;
+		scene.timestampJitter = 0.00035;
+		if (trial % 7 == 0)
+			scene.outlierRate = 0.003;
+
+		Eigen::Quaterniond mountRot = RandomQuaternion(rng);
+		Eigen::Vector3d mountPos = RandomVector(rng, 0.18);
+		std::vector<PoseSample> ref, target;
+		GenerateStreamsWithMount(scene, truth, static_cast<uint32_t>(rng()),
+			mountRot, mountPos, ref, target);
+		if (trial % 4 == 0)
+			for (size_t i = 1; i < target.size(); i += 2)
+				target[i].rot.coeffs() = -target[i].rot.coeffs();
+
+		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double transErr = (truth.translation - r.translation).norm();
+		double offsetErr = std::abs(truth.latency - r.timeOffset);
+		double scaleErr = std::abs(truth.scale - r.scale);
+		worstRot = std::max(worstRot, rotErr);
+		worstTrans = std::max(worstTrans, transErr);
+		worstOffset = std::max(worstOffset, offsetErr);
+		worstScale = std::max(worstScale, scaleErr);
+
+		bool pass = r.valid && rotErr < 0.8 && transErr < 0.025 &&
+			offsetErr < 0.005 && (!cfg.solveScale || scaleErr < 0.012);
+		if (!pass && firstFailure < 0)
+		{
+			firstFailure = trial;
+			firstMessage = r.message;
+		}
+	}
+
+	char detail[384];
+	if (firstFailure >= 0)
+	{
+		snprintf(detail, sizeof detail,
+			"%d trials seed %u worst %.3f deg / %.1f mm / %.2f ms / scale %.4f  first failure %d: %s",
+			trials, propertySeed,
+			worstRot, worstTrans * 1000.0, worstOffset * 1000.0, worstScale,
+			firstFailure, firstMessage.c_str());
+	}
+	else
+	{
+		snprintf(detail, sizeof detail,
+			"%d trials seed %u worst %.3f deg / %.1f mm / %.2f ms / scale %.4f",
+			trials, propertySeed,
+			worstRot, worstTrans * 1000.0, worstOffset * 1000.0, worstScale);
+	}
+	Check("solver: randomized properties", firstFailure < 0, detail);
+
+	// The production gravity prior must remain a prior: rich motion should
+	// recover a realistic range of tilted universes rather than flatten them.
+	{
+		const double tilts[] = { -12.0, -6.0, 0.0, 6.0, 12.0 };
+		double worst = 0.0;
+		bool pass = true;
+		for (size_t i = 0; i < sizeof tilts / sizeof tilts[0]; ++i)
+		{
+			double t = tilts[i] * EIGEN_PI / 180.0;
+			GroundTruth truth;
+			truth.rotation =
+				Eigen::Quaterniond(Eigen::AngleAxisd(1.3, Eigen::Vector3d::UnitY())) *
+				Eigen::Quaterniond(Eigen::AngleAxisd(t, Eigen::Vector3d::UnitX())) *
+				Eigen::Quaterniond(Eigen::AngleAxisd(-0.5 * t, Eigen::Vector3d::UnitZ()));
+			truth.translation = Eigen::Vector3d(0.8, 0.12, -1.0);
+			SceneConfig scene;
+			scene.posNoise = 0.001;
+			scene.rotNoiseDeg = 0.1;
+			std::vector<PoseSample> ref, target;
+			GenerateStreams(scene, truth, static_cast<uint32_t>(5100 + i), ref, target);
+			EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
+			double err = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+			worst = std::max(worst, err);
+			pass = pass && r.valid && err < 1.0 &&
+				(truth.translation - r.translation).norm() < 0.02;
+		}
+		snprintf(detail, sizeof detail, "worst %.3f deg", worst);
+		Check("solver: gravity-prior tilt sweep", pass, detail);
+	}
 }
 
 // Re-express a world state after the universe re-bases by (R, T).
@@ -1218,12 +1944,12 @@ void CalError(const ContinuousSim &sim, const GroundTruth &truth, double t,
 // overlay's ApplyAlignmentDelta will do), and tally events.
 void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t0, double t1,
 	std::mt19937 &rng,
-	std::function<GroundTruth(double)> truthAt,
-	std::function<void(double, Eigen::Quaterniond &, Eigen::Vector3d &)> mountAt,
-	std::function<bool(double)> targetVisible,
-	std::function<void(double, PoseSample &)> refPost = nullptr,
+	const std::function<GroundTruth(double)> &truthAt,
+	const std::function<void(double, Eigen::Quaterniond &, Eigen::Vector3d &)> &mountAt,
+	const std::function<bool(double)> &targetVisible,
+	const std::function<void(double, PoseSample &)> &refPost = nullptr,
 	bool negateTargetQuat = false,
-	std::function<void(double)> onUpdate = nullptr)
+	const std::function<void(double)> &onUpdate = nullptr)
 {
 	if (sim.nextRef < 0.0) sim.nextRef = t0;
 	if (sim.nextTarget < 0.0) sim.nextTarget = t0;
@@ -1868,8 +2594,46 @@ void RunContinuousScenarios()
 
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+	int propertyTrials = 64;
+	uint32_t propertySeed = 0x5EED1234u;
+	for (int i = 1; i < argc; ++i)
+	{
+		std::string arg = argv[i];
+		if ((arg == "--property-trials" || arg == "--property-seed") && i + 1 < argc)
+		{
+			try
+			{
+				size_t used = 0;
+				unsigned long value = std::stoul(argv[++i], &used, 0);
+				if (used != std::string(argv[i]).size())
+					throw std::invalid_argument("trailing characters");
+				if (arg == "--property-trials")
+				{
+					if (value < 1 || value > 100000)
+						throw std::out_of_range("property trial count");
+					propertyTrials = static_cast<int>(value);
+				}
+				else
+				{
+					propertySeed = static_cast<uint32_t>(value);
+				}
+			}
+			catch (const std::exception &)
+			{
+				fprintf(stderr, "Invalid value for %s\n", arg.c_str());
+				return 2;
+			}
+		}
+		else
+		{
+			fprintf(stderr,
+				"Usage: SolverTests.exe [--property-trials N] [--property-seed N]\n");
+			return 2;
+		}
+	}
+
 	GroundTruth truth;
 	truth.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(1.9, Eigen::Vector3d::UnitY()));   // yaw-only truth
 	truth.translation = Eigen::Vector3d(1.2, 0.03, -0.7);
@@ -1909,6 +2673,13 @@ int main()
 		if (!pass)
 			failures++;
 	}
+
+	// Production-shared driver algebra and broad solver edge/property passes.
+	RunDriverPoseTransformScenarios();
+	RunPoseChannelScenarios();
+	RunSolverPrimitiveScenarios();
+	RunSolverRobustnessScenarios();
+	RunSolverPropertyScenarios(propertyTrials, propertySeed);
 
 	// 1. Clean data: near-exact recovery.
 	{
@@ -2091,10 +2862,15 @@ int main()
 		double seqRot = truth.rotation.angularDistance(seq.rotation) * 180.0 / EIGEN_PI;
 		double jointRot = truth.rotation.angularDistance(joint.rotation) * 180.0 / EIGEN_PI;
 
+		// "Never worse" is the contract (the production guard accepts ties and
+		// up to 2% axis-RMS regression); don't demand strict improvement.
 		bool pass = seq.valid && joint.valid &&
-			jointErr <= seqErr + 0.001 && jointRot <= seqRot + 0.05;
-		printf("%-28s %s  trans %.4f -> %.4f m  rot %.4f -> %.4f deg\n",
-			"joint refinement", pass ? "PASS" : "FAIL", seqErr, jointErr, seqRot, jointRot);
+			!seq.refinementApplied && joint.refinementApplied &&
+			jointErr <= seqErr + 0.001 &&
+			jointRot <= seqRot + 0.05;
+		printf("%-28s %s  applied %d  trans %.4f -> %.4f m  rot %.4f -> %.4f deg\n",
+			"joint refinement", pass ? "PASS" : "FAIL",
+			joint.refinementApplied, seqErr, jointErr, seqRot, jointRot);
 		if (!pass)
 			failures++;
 	}
@@ -2173,6 +2949,53 @@ int main()
 						r->axisSpread, r->transEigRatio, r->message.c_str());
 			failures++;
 		}
+	}
+
+	// 7d. Scale diagnostic branch coverage: a short otherwise-valid session
+	// cannot identify frequency bands and must leave gain diagnostics disabled;
+	// a moderate low-pass with clean gross motion must take the guarded scale
+	// from that band rather than neutralizing it.
+	{
+		EngineConfig sc = config;
+		sc.solveScale = true;
+
+		SceneConfig shortScene;
+		shortScene.duration = 4.0;
+		shortScene.posNoise = 0.001;
+		GroundTruth shortTruth = truth;
+		shortTruth.scale = 1.02;
+		std::vector<PoseSample> shortRef, shortTgt;
+		GenerateStreams(shortScene, shortTruth, 779, shortRef, shortTgt);
+		EngineResult shortResult = CalibrationEngine::Solve(shortRef, shortTgt, sc);
+
+		SceneConfig scene;
+		scene.posNoise = 0.001;
+		scene.rotNoiseDeg = 0.1;
+		std::vector<PoseSample> ref, tgt;
+		GenerateStreams(scene, truth, 780, ref, tgt);
+
+		// The default threshold's neutral branch is pinned by "scale
+		// discriminator" above. Widen only the definition of clean gross here
+		// so the alternate replacement branch is deterministically reachable
+		// with the same known attenuation fingerprint.
+		EngineConfig grossCfg = sc;
+		grossCfg.maxCleanGrossDeviation = 0.10;
+		EngineResult cleanGross = CalibrationEngine::Solve(
+			SmoothStreamZeroPhase(ref, 0.30, 0.05), tgt, grossCfg);
+		bool cleanGrossSeen = cleanGross.valid && cleanGross.scaleFromGrossMotion;
+
+		bool pass = shortResult.valid && !shortResult.motionGainValid &&
+			std::abs(shortResult.scale - shortTruth.scale) < 0.01 &&
+			cleanGrossSeen && cleanGross.motionSmoothingDetected &&
+			!cleanGross.scaleNeutralizedForSmoothing &&
+			std::abs(cleanGross.scale - cleanGross.motionGainLow) < 1e-6 &&
+			std::abs(cleanGross.scale - 1.0) <= grossCfg.maxCleanGrossDeviation + 1e-6;
+		printf("%-28s %s  short valid/gain/scale %d/%d/%.3f  clean gross %d scale %.3f gain %.3f/%.3f\n",
+			"scale diagnostic branches", pass ? "PASS" : "FAIL",
+			shortResult.valid, shortResult.motionGainValid, shortResult.scale,
+			cleanGrossSeen, cleanGross.scale, cleanGross.motionGainLow, cleanGross.motionGainHigh);
+		if (!pass)
+			failures++;
 	}
 
 	// 8. Runtime application of the solved offset: sign and asymmetric clamp.

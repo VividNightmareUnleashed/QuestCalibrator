@@ -1,7 +1,7 @@
 #include "ServerTrackedDeviceProvider.h"
 #include "Logging.h"
 #include "InterfaceHookInjector.h"
-#include "PoseScale.h"
+#include "PoseTransform.h"
 
 // Vertical displacement applied to a hidden device's forwarded pose.
 static constexpr double HiddenPoseOffsetY = 1000.0;   // meters
@@ -35,22 +35,6 @@ void ServerTrackedDeviceProvider::Cleanup()
 	DisableHooks();
 	poseRing.Close();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
-}
-
-inline vr::HmdQuaternion_t operator*(const vr::HmdQuaternion_t &lhs, const vr::HmdQuaternion_t &rhs) {
-	return {
-		(lhs.w * rhs.w) - (lhs.x * rhs.x) - (lhs.y * rhs.y) - (lhs.z * rhs.z),
-		(lhs.w * rhs.x) + (lhs.x * rhs.w) + (lhs.y * rhs.z) - (lhs.z * rhs.y),
-		(lhs.w * rhs.y) + (lhs.y * rhs.w) + (lhs.z * rhs.x) - (lhs.x * rhs.z),
-		(lhs.w * rhs.z) + (lhs.z * rhs.w) + (lhs.x * rhs.y) - (lhs.y * rhs.x)
-	};
-}
-
-inline vr::HmdVector3d_t quaternionRotateVector(const vr::HmdQuaternion_t& quat, const double(&vector)[3]) {
-	vr::HmdQuaternion_t vectorQuat = { 0.0, vector[0], vector[1] , vector[2] };
-	vr::HmdQuaternion_t conjugate = { quat.w, -quat.x, -quat.y, -quat.z };
-	auto rotatedVectorQuat = quat * vectorQuat * conjugate;
-	return { rotatedVectorQuat.x, rotatedVectorQuat.y, rotatedVectorQuat.z };
 }
 
 void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform &newTransform)
@@ -212,13 +196,15 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 					pose.vecPosition[1] * tf.scale,
 					pose.vecPosition[2] * tf.scale,
 				};
-				vr::HmdVector3d_t world = quaternionRotateVector(pose.qWorldFromDriverRotation, scaled);
+				vr::HmdVector3d_t world =
+					questcal::driverpose::RotateVector(pose.qWorldFromDriverRotation, scaled);
 				double raw[3] = {
 					world.v[0] + pose.vecWorldFromDriverTranslation[0] * tf.scale,
 					world.v[1] + pose.vecWorldFromDriverTranslation[1] * tf.scale,
 					world.v[2] + pose.vecWorldFromDriverTranslation[2] * tf.scale,
 				};
-				vr::HmdVector3d_t based = quaternionRotateVector(baseRot, raw);
+				vr::HmdVector3d_t based =
+					questcal::driverpose::RotateVector(baseRot, raw);
 				double basePos[3] = {
 					based.v[0] + baseTrans.v[0],
 					based.v[1] + baseTrans.v[1],
@@ -234,43 +220,18 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 		if (fs.hasCurrent)
 		{
-			calRot = fs.rot * baseRot;
-			vr::HmdVector3d_t rotatedBase = quaternionRotateVector(fs.rot, baseTrans.v);
+			calRot = questcal::driverpose::Multiply(fs.rot, baseRot);
+			vr::HmdVector3d_t rotatedBase =
+				questcal::driverpose::RotateVector(fs.rot, baseTrans.v);
 			calTrans.v[0] = rotatedBase.v[0] + fs.trans[0];
 			calTrans.v[1] = rotatedBase.v[1] + fs.trans[1];
 			calTrans.v[2] = rotatedBase.v[2] + fs.trans[2];
 		}
 
-		pose.qWorldFromDriverRotation = calRot * pose.qWorldFromDriverRotation;
-
-		// Linear position and its time derivatives share the same length unit.
-		// Scaling position alone makes vrserver predict with incompatible
-		// velocity/acceleration, creating a motion-dependent offset.
-		questcal::ScaleLinearPose(tf.scale, pose.vecPosition,
-			pose.vecVelocity, pose.vecAcceleration);
-
-		// The solved scale applies to the COMPOSED raw-world position (the
-		// solver's model, mirrored by the drift monitor and continuous loop), so
-		// worldFromDriver's own translation must scale along with the
-		// driver-local position; scaling only vecPosition would leave the
-		// applied transform off from the solved one by R*(s-1)*wfdT whenever the
-		// target driver carries a nonzero worldFromDriver translation.
-		double scaledWfdTranslation[3] = {
-			pose.vecWorldFromDriverTranslation[0] * tf.scale,
-			pose.vecWorldFromDriverTranslation[1] * tf.scale,
-			pose.vecWorldFromDriverTranslation[2] * tf.scale,
-		};
-		vr::HmdVector3d_t rotatedTranslation = quaternionRotateVector(calRot, scaledWfdTranslation);
-		pose.vecWorldFromDriverTranslation[0] = rotatedTranslation.v[0] + calTrans.v[0];
-		pose.vecWorldFromDriverTranslation[1] = rotatedTranslation.v[1] + calTrans.v[1];
-		pose.vecWorldFromDriverTranslation[2] = rotatedTranslation.v[2] + calTrans.v[2];
-
-		// Align this device's timeline with the reference system: a positive
-		// shift declares the pose newer, so vrserver predicts less and the
-		// device is presented slightly in the past (matching a laggy wireless
-		// reference). Sign convention pinned by the live spike; see
-		// questcal::ComputeAppliedTimeOffset.
-		pose.poseTimeOffset += tf.timeOffset;
+		// Apply the exact solver model to the composed raw-world pose, including
+		// scale on worldFromDriver translation and every linear derivative.
+		questcal::driverpose::Apply(
+			pose, calRot, calTrans.v, tf.scale, tf.timeOffset);
 	}
 	else
 	{

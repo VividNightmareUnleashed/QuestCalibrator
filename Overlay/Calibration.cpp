@@ -8,6 +8,7 @@
 #include "IPCClient.h"
 #include "JumpDetector.h"
 #include "PoseStreamHub.h"
+#include "ProfileValidation.h"
 #include "../common/PoseChannel.h"
 #include "../common/Version.h"
 
@@ -361,6 +362,16 @@ static questcal::PoseSample EngineSampleFromRing(const protocol::DevicePoseSampl
 	return out;
 }
 
+// A misbehaving driver can publish poseIsValid=true with non-finite fields;
+// gate them out at ingestion so no consumer (solver, continuous alignment)
+// ever sees one.
+static bool IsUsableEngineSample(const questcal::PoseSample &s)
+{
+	return std::isfinite(s.time) && questcal::IsValidRotation(s.rot) &&
+		questcal::IsFinite(s.pos) && questcal::IsFinite(s.vel) &&
+		questcal::IsFinite(s.angVel);
+}
+
 // Drop the collector's backlog so a new collection starts fresh.
 static void DiscardPoseRingBacklog()
 {
@@ -377,14 +388,28 @@ static void CollectFromPoseRing(CalibrationContext &ctx, double now)
 		if (!s.poseIsValid || s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK))
 			continue;
 
+		// The composed time folds in the driver's jittery poseTimeOffset, so
+		// the odd inversion occurs in healthy data; drop it here rather than
+		// let the solver fail the whole collection (same policy as
+		// ContinuousAlignment::PushReference).
 		if (s.deviceId == ctx.referenceID)
 		{
-			ctx.refSamples.push_back(EngineSampleFromRing(s));
+			questcal::PoseSample sample = EngineSampleFromRing(s);
+			if (!IsUsableEngineSample(sample))
+				continue;
+			if (!ctx.refSamples.empty() && sample.time <= ctx.refSamples.back().time)
+				continue;
+			ctx.refSamples.push_back(sample);
 			ctx.lastRefSampleTime = now;
 		}
 		else if (s.deviceId == ctx.targetID)
 		{
-			ctx.targetSamples.push_back(EngineSampleFromRing(s));
+			questcal::PoseSample sample = EngineSampleFromRing(s);
+			if (!IsUsableEngineSample(sample))
+				continue;
+			if (!ctx.targetSamples.empty() && sample.time <= ctx.targetSamples.back().time)
+				continue;
+			ctx.targetSamples.push_back(sample);
 			ctx.lastTargetSampleTime = now;
 		}
 	}
@@ -791,10 +816,17 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			continue;
 
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
-			Continuous->PushReference(EngineSampleFromRing(s));
+		{
+			questcal::PoseSample sample = EngineSampleFromRing(s);
+			if (!IsUsableEngineSample(sample))
+				continue;
+			Continuous->PushReference(sample);
+		}
 		else if (s.deviceId == ctx.continuousTrackerId)
 		{
 			questcal::PoseSample sample = EngineSampleFromRing(s);
+			if (!IsUsableEngineSample(sample))
+				continue;
 			Continuous->PushTarget(sample);
 			lastTrackerRawPos = sample.pos;
 			hasTrackerRawPos = true;

@@ -141,6 +141,7 @@ struct EngineResult
 	bool   motionSmoothingDetected = false;
 	bool   scaleFromGrossMotion = false;   // guard replaced the solved scale with motionGainLow
 	bool   scaleNeutralizedForSmoothing = false; // both bands attenuated; guard used unity
+	bool   refinementApplied = false;      // joint Gauss-Newton result passed its Pareto guard
 	double tiltDeg = 0.0;              // pitch+roll magnitude of the solution (diagnostic)
 	size_t samplesUsed = 0;
 	size_t samplesGated = 0;
@@ -158,18 +159,21 @@ public:
 	                          const std::vector<PoseSample> &targetStream,
 	                          const EngineConfig &config);
 
-	// Exposed for tests and diagnostics.
+	// Exposed for tests and diagnostics. validateInputs=false skips the
+	// stream-integrity scan; internal callers pass it after validating once.
 	static bool EstimateTimeOffset(const std::vector<PoseSample> &refStream,
 	                               const std::vector<PoseSample> &targetStream,
 	                               const EngineConfig &config,
-	                               double &offsetOut);
+	                               double &offsetOut,
+	                               bool validateInputs = true);
 
 	static bool InterpolateAt(const std::vector<PoseSample> &stream, double t,
 	                          double maxGap, PoseSample &out);
 
 	// Solve over pre-aligned pairs (skips alignment; used internally and by tests).
 	static EngineResult SolveAligned(const std::vector<AlignedSample> &samples,
-	                                 const EngineConfig &config);
+	                                 const EngineConfig &config,
+	                                 bool validateInputs = true);
 };
 
 // Runtime application of the solved inter-system time offset.
