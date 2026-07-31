@@ -2,6 +2,7 @@
 
 #include "CalibrationEngine.h"
 #include "ContinuousAlignment.h"
+#include "ProfileValidation.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -31,6 +32,11 @@ struct CalibrationContext
 {
 	CalibrationState state = CalibrationState::None;
 	uint32_t referenceID = 0xFFFFFFFF, targetID = 0xFFFFFFFF;
+	// Frozen with the tracking-system names when a collection starts. The UI's
+	// live device panes may refresh/reselect while the modal is open, but an
+	// in-flight solve must continue consuming the exact pair the user started.
+	uint32_t calibrationReferenceID = 0xFFFFFFFF;
+	uint32_t calibrationTargetID = 0xFFFFFFFF;
 
 	// The quaternion is the source of truth for the calibrated rotation.
 	// calibratedRotation (Euler, degrees, [roll, yaw, pitch] to match the
@@ -131,13 +137,39 @@ struct CalibrationContext
 	// Debounced profile persistence for runtime compensation updates: dirty
 	// profiles save after a quiet period and always on shutdown.
 	bool profileSaveDirty = false;
-	double profileSaveDirtyTime = 0.0;
+	// Universe rebases update both the calibration and the protected standing
+	// center.  Keep the two registry records on one revision and retry the
+	// Settings half if a partial write occurs.
+	bool settingsSaveDirty = false;
+	// Both records share one quiet-period clock: any persistent mutation restarts
+	// the debounce, while the independent dirty bits retain partial-write state.
+	double persistenceDirtyTime = 0.0;
+	uint32_t persistenceRevision = 0;
+	// Older releases embedded global settings in Config.  Until their first
+	// Settings write succeeds, SaveProfile must not replace that only copy.
+	bool legacySettingsMigrationPending = false;
+	// Missing, successfully loaded, and unreadable are deliberately closed
+	// states. In particular, unreadable is not absence: automatic migration must
+	// preserve that record for diagnosis instead of overwriting it with defaults.
+	questcal::RecordLoadState profileLoadState = questcal::RecordLoadState::Missing;
+	questcal::RecordLoadState settingsLoadState = questcal::RecordLoadState::Missing;
 
 	std::string referenceTrackingSystem;
 	std::string targetTrackingSystem;
+	// Device-pane choices are candidates for the next base calibration.  They
+	// deliberately stay separate from the active profile identity above so
+	// browsing another tracking system cannot apply the old transform to it.
+	std::string pendingReferenceTrackingSystem;
+	std::string pendingTargetTrackingSystem;
+	std::string calibrationReferenceTrackingSystem;
+	std::string calibrationTargetTrackingSystem;
 
 	bool enabled = false;
 	bool validProfile = false;
+	// Runtime fail-closed latch: a persisted HMD universe baseline changed
+	// while normal multi-device monitoring had no continuity. Only a fresh
+	// base calibration can safely re-enable this profile.
+	bool profileUniverseUnsafe = false;
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
 
@@ -165,14 +197,74 @@ struct CalibrationContext
 	{
 		bool valid = false;
 		bool autoApply = true;
+		// A raw-space snapshot belongs to the HMD/runtime universe which
+		// produced it.  Unknown ownership is deliberately not restorable.
+		std::string ownerTrackingSystem;
+		std::string ownerHmdSerial;
+		// Raw-universe transform observed on the owning HMD when the snapshot
+		// was last anchored. Persisting it lets the first pose after an app or
+		// ring outage reveal a same-headset worldFromDriver rebase.
+		bool worldFromDriverValid = false;
+		Eigen::Quaterniond worldFromDriverRotation{ 1, 0, 0, 0 };
+		Eigen::Vector3d worldFromDriverTranslation{ 0, 0, 0 };
+		bool baselineVerifiedThisSession = false; // runtime only; never serialized
 		// Quads are relative to the standing/play-area center (see
 		// ChaperoneMath.h) — jump-invariant; only standingCenter re-anchors.
 		std::vector<vr::HmdQuad_t> geometry;
 		vr::HmdMatrix34_t standingCenter;
 		vr::HmdVector2_t playSpaceSize;
 		double copyUnixTime = 0.0;     // when the snapshot was taken (persisted)
-		double lastRestoreTime = 0.0;  // auto-restore cooldown (runtime only)
+		double lastRestoreTime = 0.0;  // last auto-restore attempt (runtime cooldown)
 	} chaperone;
+
+	void AdvancePersistenceRevision()
+	{
+		if (++persistenceRevision == 0)
+			persistenceRevision = 1;
+	}
+
+	bool HasDirtyPersistence() const
+	{
+		return profileSaveDirty || settingsSaveDirty;
+	}
+
+	void MarkProfileDirty(double now)
+	{
+		profileSaveDirty = true;
+		persistenceDirtyTime = now;
+	}
+
+	void MarkSettingsDirty(double now)
+	{
+		settingsSaveDirty = true;
+		persistenceDirtyTime = now;
+	}
+
+	void MarkProfileAndSettingsDirty(double now)
+	{
+		profileSaveDirty = true;
+		settingsSaveDirty = true;
+		persistenceDirtyTime = now;
+	}
+
+	void DelayPersistenceRetry(double now)
+	{
+		if (HasDirtyPersistence())
+			persistenceDirtyTime = now;
+	}
+
+	void DisarmChaperone()
+	{
+		chaperone.valid = false;
+		chaperone.autoApply = false;
+		chaperone.ownerTrackingSystem.clear();
+		chaperone.ownerHmdSerial.clear();
+		chaperone.worldFromDriverValid = false;
+		chaperone.baselineVerifiedThisSession = false;
+		chaperone.worldFromDriverRotation = Eigen::Quaterniond::Identity();
+		chaperone.worldFromDriverTranslation = Eigen::Vector3d::Zero();
+		chaperone.geometry.clear();
+	}
 
 	void SetCalibration(const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translationMeters, double scale)
 	{
@@ -221,13 +313,8 @@ struct CalibrationContext
 
 	void Clear()
 	{
-		chaperone.geometry.clear();
-		chaperone.standingCenter = vr::HmdMatrix34_t();
-		chaperone.playSpaceSize = vr::HmdVector2_t();
-		chaperone.valid = false;
-		chaperone.copyUnixTime = 0.0;
-		chaperone.lastRestoreTime = 0.0;
-
+		// Chaperone protection and global preferences are independent settings;
+		// clearing a calibration must not silently disarm the room boundary.
 		calibratedRotationQ = Eigen::Quaterniond(1, 0, 0, 0);
 		calibratedRotation = Eigen::Vector3d();
 		calibratedTranslation = Eigen::Vector3d();
@@ -256,6 +343,9 @@ struct CalibrationContext
 		targetTrackingSystem = "";
 		enabled = false;
 		validProfile = false;
+		profileUniverseUnsafe = false;
+		profileSaveDirty = false;
+		timeLastScan = -1e9;
 		ClearSampleBuffers();
 	}
 
@@ -288,6 +378,20 @@ struct CalibrationContext
 	};
 
 	std::vector<Message> messages;
+	// Persistent banner for failures that occur outside the calibration modal
+	// (registry/chaperone operations in the settings screen).
+	enum class ErrorSource
+	{
+		None,
+		General,
+		Driver,
+		ProfilePersistence,
+		SettingsPersistence,
+		Chaperone,
+		ChaperoneMonitor
+	};
+	std::string uiError;
+	ErrorSource uiErrorSource = ErrorSource::None;
 
 	void Log(const std::string &msg)
 	{
@@ -297,6 +401,23 @@ struct CalibrationContext
 		messages.back().str += msg;
 		AppendSessionLog(msg);
 		std::cerr << msg;
+	}
+
+	void ReportError(const std::string &msg, ErrorSource source = ErrorSource::General)
+	{
+		uiError = msg;
+		uiErrorSource = source;
+		while (!uiError.empty() && (uiError.back() == '\n' || uiError.back() == '\r'))
+			uiError.pop_back();
+		Log(msg);
+	}
+
+	void ClearError(ErrorSource source)
+	{
+		if (uiErrorSource != source)
+			return;
+		uiError.clear();
+		uiErrorSource = ErrorSource::None;
 	}
 
 	void Progress(int current, int target)
@@ -314,12 +435,12 @@ extern CalibrationContext CalCtx;
 class PoseStreamHub;
 
 void InitCalibrator();
-void ShutdownCalibrator();
+void ShutdownCalibrator(bool cleanExit = true);
 void CalibrationTick(double time);
-void StartCalibration();
-void StartAnchorCalibration();     // same collection; result becomes a field anchor
-void LoadChaperoneBounds();
-void ApplyChaperoneBounds();
+bool StartCalibration();
+bool StartAnchorCalibration();     // same collection; result becomes a field anchor
+bool LoadChaperoneBounds();
+bool ApplyChaperoneBounds(bool logSuccess = true);
 
 // Shared pose-stream access for runtime monitors (jump detection, drift).
 PoseStreamHub &GetPoseHub();

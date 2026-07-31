@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../common/Protocol.h"
+#include "RingPoseMath.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -9,27 +9,6 @@
 #include <deque>
 #include <string>
 #include <vector>
-
-// Eigen views of a ring sample's transform fields, shared by everything that
-// composes world poses from the shmem stream.
-struct RingSampleParts
-{
-	Eigen::Quaterniond wfdRot;
-	Eigen::Vector3d wfdTrans;
-	Eigen::Quaterniond drvRot;
-	Eigen::Vector3d drvPos;
-};
-
-inline RingSampleParts UnpackRingSample(const protocol::DevicePoseSample &s)
-{
-	return {
-		Eigen::Quaterniond(s.worldFromDriverRotation.w, s.worldFromDriverRotation.x,
-		                   s.worldFromDriverRotation.y, s.worldFromDriverRotation.z),
-		Eigen::Vector3d(s.worldFromDriverTranslation[0], s.worldFromDriverTranslation[1], s.worldFromDriverTranslation[2]),
-		Eigen::Quaterniond(s.rotation.w, s.rotation.x, s.rotation.y, s.rotation.z),
-		Eigen::Vector3d(s.position[0], s.position[1], s.position[2])
-	};
-}
 
 // Universe-jump detection over the reference system's pose stream.
 //
@@ -56,7 +35,9 @@ public:
 		double wfdTransEps = 1e-4;         // meters
 		double discontinuityPos = 0.20;    // meters of unexplained motion in one frame pair
 		double discontinuityYawRad = 5.0 * 3.14159265358979 / 180.0;
-		double maxFrameGap = 0.1;          // seconds; larger gaps are not classifiable as jumps
+		double maxFrameGap = ringpose::MaxAdjacentFrameSeconds;
+		double localContinuityPos = ringpose::MaxLocalPositionErrorMeters;
+		double localContinuityRotRad = ringpose::MaxLocalRotationErrorRadians;
 		double window = 0.2;               // seconds of history on each side of a candidate
 		double agreeWindow = 0.25;         // seconds within which devices must agree
 		double agreePosTol = 0.10;         // meters between per-device delta translations
@@ -77,6 +58,10 @@ public:
 		int devicesAgreeing = 0;
 		double residualTiltRad = 0.0;      // non-rigid part discarded by the yaw constraint
 		double residualSpread = 0.0;       // meters; disagreement between devices (heuristic)
+		// Absolute HMD worldFromDriver endpoint captured by this exact sample.
+		// `exact` is the validity discriminator; heuristic deltas leave identity.
+		Eigen::Quaterniond worldFromDriverRotation{ 1, 0, 0, 0 };
+		Eigen::Vector3d worldFromDriverTranslation{ 0, 0, 0 };
 	};
 
 	struct GapEvent
@@ -127,6 +112,8 @@ private:
 		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
 		Eigen::Vector3d trans{ 0, 0, 0 };
 		double residualTiltRad = 0.0;
+		Eigen::Quaterniond worldFromDriverRotation{ 1, 0, 0, 0 };
+		Eigen::Vector3d worldFromDriverTranslation{ 0, 0, 0 };
 		// Heuristic candidates: pre-jump window snapshot, evaluated once the
 		// post-jump window has filled.
 		std::vector<Hist> preWindow;
@@ -137,6 +124,10 @@ private:
 		bool wfdValid = false;
 		Eigen::Quaterniond wfdRot{ 1, 0, 0, 0 };
 		Eigen::Vector3d wfdTrans{ 0, 0, 0 };
+		Eigen::Quaterniond drvRot{ 1, 0, 0, 0 };
+		Eigen::Vector3d drvPos{ 0, 0, 0 };
+		Eigen::Vector3d drvVel{ 0, 0, 0 };
+		Eigen::Vector3d drvAngVel{ 0, 0, 0 };
 		double lastValidTime = -1.0;
 		std::deque<Hist> hist;
 	};

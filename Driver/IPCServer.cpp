@@ -2,25 +2,26 @@
 #include "Logging.h"
 #include "ServerTrackedDeviceProvider.h"
 
-#include <vector>
+#include <algorithm>
+#include <exception>
+#include <new>
 
-void IPCServer::HandleRequest(const protocol::Request &request, protocol::Response &response)
+void IPCServer::HandleRequest(const protocol::Request &request, protocol::Response &response,
+	questcal::ipc::ConnectionState &connection)
 {
+	if (!questcal::ipc::PrepareRequest(request, connection, response))
+		return;
+
 	switch (request.type)
 	{
-	case protocol::RequestHandshake:
-		response.type = protocol::ResponseHandshake;
-		response.protocol.version = protocol::Version;
-		break;
-
 	case protocol::RequestSetDeviceTransform:
-		driver->SetDeviceTransform(request.setDeviceTransform);
-		response.type = protocol::ResponseSuccess;
+		response.type = driver->TrySetDeviceTransform(request.setDeviceTransform)
+			? protocol::ResponseSuccess : protocol::ResponseInvalid;
 		break;
 
 	case protocol::RequestSetAlignmentField:
-		driver->SetAlignmentField(request.setAlignmentField);
-		response.type = protocol::ResponseSuccess;
+		response.type = driver->TrySetAlignmentField(request.setAlignmentField)
+			? protocol::ResponseSuccess : protocol::ResponseInvalid;
 		break;
 
 	default:
@@ -35,12 +36,15 @@ IPCServer::~IPCServer()
 	Stop();
 }
 
-void IPCServer::Run()
+bool IPCServer::Run()
 {
 	if (mainThread.joinable())
-		return;
+		return !stop.load(std::memory_order_acquire);
 
 	stop.store(false, std::memory_order_release);
+	connectOverlap = {};
+	listenerPipe = INVALID_HANDLE_VALUE;
+	listenerConnectPending = false;
 
 	// Created here rather than in RunThread so Stop() always has valid handles,
 	// however early it runs. The connect event is reset before every accept;
@@ -57,23 +61,63 @@ void IPCServer::Run()
 			CloseHandle(stopEvent);
 		connectEvent = nullptr;
 		stopEvent = nullptr;
-		return;
+		return false;
+	}
+	connectOverlap.hEvent = connectEvent;
+
+	// Establish the first listener synchronously. Init must not report success
+	// for a driver instance that can never accept control requests.
+	if (!CreateAndConnectInstance(&connectOverlap, listenerPipe, listenerConnectPending))
+	{
+		CloseHandle(connectEvent);
+		CloseHandle(stopEvent);
+		connectEvent = nullptr;
+		stopEvent = nullptr;
+		return false;
 	}
 
-	mainThread = std::thread(RunThread, this);
+	try
+	{
+		mainThread = std::thread(RunThread, this);
+	}
+	catch (const std::exception &e)
+	{
+		LOG("Could not start IPC server thread: %s", e.what());
+		CloseListenerInstance(&connectOverlap, listenerPipe, listenerConnectPending);
+		CloseHandle(connectEvent);
+		CloseHandle(stopEvent);
+		connectEvent = nullptr;
+		stopEvent = nullptr;
+		return false;
+	}
+	catch (...)
+	{
+		LOG("Could not start IPC server thread: unknown exception");
+		CloseListenerInstance(&connectOverlap, listenerPipe, listenerConnectPending);
+		CloseHandle(connectEvent);
+		CloseHandle(stopEvent);
+		connectEvent = nullptr;
+		stopEvent = nullptr;
+		return false;
+	}
+	return true;
 }
 
 void IPCServer::Stop()
 {
 	TRACE("IPCServer::Stop()");
-	if (!mainThread.joinable())
-		return;
-
 	stop.store(true, std::memory_order_release);
-	SetEvent(stopEvent);
-	mainThread.join();
-	CloseHandle(connectEvent);
-	CloseHandle(stopEvent);
+	if (mainThread.joinable())
+	{
+		if (stopEvent)
+			SetEvent(stopEvent);
+		mainThread.join();
+	}
+	CloseListenerInstance(&connectOverlap, listenerPipe, listenerConnectPending);
+	if (connectEvent)
+		CloseHandle(connectEvent);
+	if (stopEvent)
+		CloseHandle(stopEvent);
 	connectEvent = nullptr;
 	stopEvent = nullptr;
 	TRACE("IPCServer::Stop() finished");
@@ -81,10 +125,24 @@ void IPCServer::Stop()
 
 IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 {
-	auto pipeInst = new PipeInstance{};
+	auto pipeInst = new (std::nothrow) PipeInstance{};
+	if (!pipeInst)
+	{
+		LOG("Could not allocate IPC pipe state");
+		return nullptr;
+	}
 	pipeInst->pipe = pipe;
 	pipeInst->server = this;
-	pipes.insert(pipeInst);
+	try
+	{
+		pipes.insert(pipeInst);
+	}
+	catch (...)
+	{
+		LOG("Could not register IPC pipe state");
+		delete pipeInst;
+		return nullptr;
+	}
 	return pipeInst;
 }
 
@@ -98,79 +156,116 @@ void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 
 void IPCServer::RunThread(IPCServer *_this)
 {
-	OVERLAPPED connectOverlap{};
-	connectOverlap.hEvent = _this->connectEvent;
-
-	HANDLE nextPipe = INVALID_HANDLE_VALUE;
-	bool connectPending = false;
 	HANDLE waitHandles[2] = { _this->stopEvent, _this->connectEvent };
-	if (!CreateAndConnectInstance(&connectOverlap, nextPipe, connectPending))
-		goto cleanup;
+	constexpr DWORD InitialListenerRetryMs = 50;
+	constexpr DWORD MaximumListenerRetryMs = 1000;
+	DWORD listenerRetryDelay = InitialListenerRetryMs;
+	ULONGLONG nextListenerAttempt = 0;
+	auto scheduleListenerRetry = [&]()
+	{
+		nextListenerAttempt = GetTickCount64() + listenerRetryDelay;
+		listenerRetryDelay = std::min(listenerRetryDelay * 2, MaximumListenerRetryMs);
+	};
 
 	while (!_this->stop.load(std::memory_order_acquire))
 	{
-		DWORD wait = WaitForMultipleObjectsEx(2, waitHandles, FALSE, INFINITE, TRUE);
+		if (_this->listenerPipe == INVALID_HANDLE_VALUE)
+		{
+			ULONGLONG now = GetTickCount64();
+			if (now >= nextListenerAttempt)
+			{
+				if (CreateAndConnectInstance(&_this->connectOverlap,
+					_this->listenerPipe, _this->listenerConnectPending))
+				{
+					listenerRetryDelay = InitialListenerRetryMs;
+					nextListenerAttempt = 0;
+				}
+				else
+				{
+					scheduleListenerRetry();
+				}
+			}
+		}
+
+		DWORD handleCount = _this->listenerPipe == INVALID_HANDLE_VALUE ? 1 : 2;
+		DWORD timeout = INFINITE;
+		if (handleCount == 1)
+		{
+			ULONGLONG now = GetTickCount64();
+			ULONGLONG remaining = nextListenerAttempt > now
+				? nextListenerAttempt - now : 0;
+			timeout = static_cast<DWORD>(std::min<ULONGLONG>(remaining, MAXDWORD));
+		}
+
+		DWORD wait = WaitForMultipleObjectsEx(handleCount, waitHandles, FALSE, timeout, TRUE);
 
 		if (wait == WAIT_OBJECT_0)
 		{
 			break;
 		}
-		else if (wait == WAIT_OBJECT_0 + 1)
+		else if (handleCount == 2 && wait == WAIT_OBJECT_0 + 1)
 		{
-			if (connectPending)
+			if (_this->listenerConnectPending)
 			{
 				DWORD bytesConnect = 0;
-				BOOL success = GetOverlappedResult(nextPipe, &connectOverlap, &bytesConnect, FALSE);
+				BOOL success = GetOverlappedResult(_this->listenerPipe,
+					&_this->connectOverlap, &bytesConnect, FALSE);
 				if (!success)
 				{
 					DWORD error = GetLastError();
+					// ERROR_IO_INCOMPLETE means the OVERLAPPED storage is still
+					// kernel-owned; preserve that fact so CloseListenerInstance
+					// cancels and drains it before the next accept reuses the object.
+					_this->listenerConnectPending = error == ERROR_IO_INCOMPLETE;
 					if (error != ERROR_OPERATION_ABORTED ||
 					    !_this->stop.load(std::memory_order_acquire))
 						LOG("GetOverlappedResult failed in RunThread. Error: %d", error);
-					break;
+					CloseListenerInstance(&_this->connectOverlap,
+						_this->listenerPipe, _this->listenerConnectPending);
+					if (!_this->stop.load(std::memory_order_acquire))
+						scheduleListenerRetry();
+					continue;
 				}
+				_this->listenerConnectPending = false;
 			}
 
 			LOG("IPC client connected");
 
-			HANDLE connectedPipe = nextPipe;
-			nextPipe = INVALID_HANDLE_VALUE;
+			HANDLE connectedPipe = _this->listenerPipe;
+			_this->listenerPipe = INVALID_HANDLE_VALUE;
+			_this->listenerConnectPending = false;
 			auto pipeInst = _this->CreatePipeInstance(connectedPipe);
-			CompletedWriteCallback(0, sizeof(protocol::Response), (LPOVERLAPPED) pipeInst);
-
-			if (!CreateAndConnectInstance(&connectOverlap, nextPipe, connectPending))
-				break;
+			if (pipeInst)
+				CompletedWriteCallback(0, sizeof(protocol::Response), (LPOVERLAPPED) pipeInst);
+			else
+			{
+				DisconnectNamedPipe(connectedPipe);
+				CloseHandle(connectedPipe);
+			}
 		}
-		else if (wait != WAIT_IO_COMPLETION)
+		else if (wait == WAIT_TIMEOUT || wait == WAIT_IO_COMPLETION)
+		{
+			continue;
+		}
+		else
 		{
 			LOG("WaitForMultipleObjectsEx failed in RunThread. Error: %d", GetLastError());
 			break;
 		}
 	}
 
-cleanup:
 	_this->stop.store(true, std::memory_order_release);
 
 	// The listener is not in `pipes`, but its OVERLAPPED storage lives on this
-	// stack. Cancel and drain it before closing the handle or returning.
-	if (nextPipe != INVALID_HANDLE_VALUE)
-	{
-		if (connectPending)
-		{
-			CancelIoEx(nextPipe, &connectOverlap);
-			DWORD ignored = 0;
-			GetOverlappedResult(nextPipe, &connectOverlap, &ignored, TRUE);
-		}
-		DisconnectNamedPipe(nextPipe);
-		CloseHandle(nextPipe);
-	}
+	// object. Cancel and drain it before closing the handle or returning.
+	CloseListenerInstance(&_this->connectOverlap,
+		_this->listenerPipe, _this->listenerConnectPending);
 
 	// Every accepted pipe has exactly one APC-style read/write outstanding.
 	// Cancel them first, then stay alertable until every completion callback
 	// observes `stop` and closes its own instance. This preserves OVERLAPPED
 	// lifetime and prevents use-after-free during fast vrserver teardown.
-	std::vector<PipeInstance *> pending(_this->pipes.begin(), _this->pipes.end());
-	for (PipeInstance *pipeInst : pending)
+	for (PipeInstance *pipeInst : _this->pipes)
 		CancelIoEx(pipeInst->pipe, &pipeInst->overlap);
 
 	while (!_this->pipes.empty())
@@ -181,6 +276,26 @@ cleanup:
 			LOG("Alertable IPC drain failed in RunThread. Error: %d", GetLastError());
 		}
 	}
+}
+
+void IPCServer::CloseListenerInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending)
+{
+	if (pipe == INVALID_HANDLE_VALUE)
+	{
+		pending = false;
+		return;
+	}
+
+	if (pending)
+	{
+		CancelIoEx(pipe, overlap);
+		DWORD ignored = 0;
+		GetOverlappedResult(pipe, overlap, &ignored, TRUE);
+	}
+	DisconnectNamedPipe(pipe);
+	CloseHandle(pipe);
+	pipe = INVALID_HANDLE_VALUE;
+	pending = false;
 }
 
 bool IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending)
@@ -197,8 +312,8 @@ bool IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, boo
 		PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
 		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
 		PIPE_UNLIMITED_INSTANCES,
-		sizeof(protocol::Request),
 		sizeof(protocol::Response),
+		sizeof(protocol::Request),
 		1000,
 		0
 	);
@@ -254,7 +369,8 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 	// buffer; only dispatch exactly-sized messages.
 	if (err == 0 && bytesRead == sizeof(protocol::Request))
 	{
-		pipeInst->server->HandleRequest(pipeInst->request, pipeInst->response);
+		pipeInst->server->HandleRequest(pipeInst->request, pipeInst->response,
+			pipeInst->connection);
 		success = WriteFileEx(
 			pipeInst->pipe,
 			&pipeInst->response,

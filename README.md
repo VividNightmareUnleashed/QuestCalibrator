@@ -41,9 +41,13 @@ Driver and IPC:
 - Transform slots are seqlock-protected against the IPC-thread/pose-thread race, with
   identity-quaternion / scale = 1 defaults instead of a zeroing `memset`.
 - Device ids arriving over the pipe are bounds-checked; short pipe messages are rejected;
-  the wire protocol (v5) only ever carries complete transforms.
-- Lock-free multi-producer pose ring in shared memory (vrserver invokes pose updates from
-  each device driver's own thread).
+  the wire protocol (v6) requires a same-version per-connection handshake and only ever
+  carries complete, transactionally validated transforms/fields.
+- Race-free bounded multi-producer pose ring in shared memory (vrserver invokes pose
+  updates from each device driver's own thread), with fail-fast contention handling,
+  exact positional loss markers, and clean recovery across vrserver restarts. Its named
+  mapping is layout-versioned separately from the v6 pipe protocol so an older overlay
+  cannot pin an incompatible mapping across an upgrade.
 - The driver log lands next to the driver DLL instead of vrserver's working directory.
 
 Profiles:
@@ -95,7 +99,9 @@ decided to do.
 
 ## Building
 
-Visual Studio 2022 build tools (v143, Windows 10 SDK). No external dependencies.
+Visual Studio 2022 build tools (v143, Windows 10 SDK). Build dependencies are
+vendored, so no package restore is required. The checked-in components and their
+available notice files are recorded in [vendored dependencies](docs/vendored-dependencies.md).
 
 ```
 MSBuild QuestCalibrator.sln /p:Configuration=Release /p:Platform=x64
@@ -138,6 +144,17 @@ changed files; Clang-Tidy and clone findings are advisory pending human review.
 Thresholds, solution/configuration, and test executable live in
 `cpp-validation.json`; the implementation is `tools/validate-cpp.ps1`.
 
+`compile_flags.txt` contains only target, define, and repository-relative include
+flags for clangd. It intentionally does not pin one developer's Visual Studio or
+Windows SDK directories. Let clangd discover the installed MSVC toolchain, or set
+its `--query-driver` option locally when discovery is unavailable; do not commit
+machine-specific paths. MSBuild project evaluation remains authoritative.
+
+Windows CI runs the Release build, solver tests, and duplicate scan on pushes and
+pull requests. A whole-project Clang-Tidy rebuild can also be requested manually
+and runs on the weekly schedule. Clang-Tidy and clone findings remain review
+signals; configuration, build, or test failures fail the workflow.
+
 A from-source setup is manual — copy `Driver\01questcalibrator` into SteamVR's `drivers`
 folder, put the built `driver_01questcalibrator.dll` in its `bin\win64`, and run the
 overlay exe (with `openvr_api.dll`, `manifest.vrmanifest`, and `icon.png` beside it)
@@ -166,3 +183,6 @@ raw-driver-pose sampling) were inspired by the
 [hyblocker fork](https://github.com/hyblocker/OpenVR-SpaceCalibrator) and
 reimplemented from scratch; no code from that fork is included.
 MinHook is vendored under its BSD-2-Clause license (`lib/MinHook/LICENSE`).
+
+Maintainers should follow the [release provenance checklist](docs/releasing.md)
+before creating a fork release or producing the private store package.

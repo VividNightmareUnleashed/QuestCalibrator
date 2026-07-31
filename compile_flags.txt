@@ -6,19 +6,14 @@
 -D_UNICODE
 -D_WINDOWS
 -D_SCL_SECURE_NO_WARNINGS
--isystem
-C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/include
--isystem
-C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/ucrt
--isystem
-C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/um
--isystem
-C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/shared
--isystem
-C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/winrt
+-I.
+-IDriver
+-IOverlay
+-ITests
 -Ilib/openvr
 -Ilib
 -Icommon
 -Ilib/imgui
 -Ilib/glfw/include
 -Ilib/gl3w/include
+-Ilib/MinHook/include

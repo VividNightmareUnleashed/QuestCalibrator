@@ -21,6 +21,7 @@
 #include <openvr.h>
 #include <direct.h>
 #include <ctime>
+#include <vector>
 
 #pragma comment(linker,"\"/manifestdependency:type='win32' \
 name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
@@ -62,6 +63,9 @@ static void SetupPreviewState();
 
 static GLFWwindow *glfwWindow = nullptr;
 static vr::VROverlayHandle_t overlayMainHandle = 0, overlayThumbnailHandle = 0;
+static bool imguiContextInitialized = false;
+static bool imguiGlfwInitialized = false;
+static bool imguiOpenGLInitialized = false;
 
 vr::VROverlayHandle_t GetMainOverlayHandle()
 {
@@ -142,7 +146,8 @@ void CreateGLFWWindow()
 
 	glfwMakeContextCurrent(glfwWindow);
 	glfwSwapInterval(1);
-	gl3wInit();
+	if (gl3wInit() != 0)
+		throw std::runtime_error("Failed to initialize OpenGL functions");
 
 	// Dark titlebar on Windows 10 20H1+ (attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE).
 	BOOL darkTitlebar = TRUE;
@@ -156,7 +161,9 @@ void CreateGLFWWindow()
 	glEnable(GL_DEBUG_OUTPUT);
 #endif
 
-	ImGui::CreateContext();
+	imguiContextInitialized = ImGui::CreateContext() != nullptr;
+	if (!imguiContextInitialized)
+		throw std::runtime_error("Failed to initialize ImGui");
 	ImGuiIO &io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
@@ -166,8 +173,12 @@ void CreateGLFWWindow()
 	g_fontTitle = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 27.0f);
 	io.FontDefault = g_fontBody;
 
-	ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
-	ImGui_ImplOpenGL3_Init("#version 330");
+	imguiGlfwInitialized = ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
+	if (!imguiGlfwInitialized)
+		throw std::runtime_error("Failed to initialize the ImGui GLFW backend");
+	imguiOpenGLInitialized = ImGui_ImplOpenGL3_Init("#version 330");
+	if (!imguiOpenGLInitialized)
+		throw std::runtime_error("Failed to initialize the ImGui OpenGL backend");
 
 	ApplyTheme();
 
@@ -250,7 +261,7 @@ void ActivateMultipleDrivers()
 	}
 }
 
-void InitVR()
+void InitVR(bool &initialized)
 {
 	auto initError = vr::VRInitError_None;
 	vr::VR_Init(&initError, vr::VRApplication_Other);
@@ -259,6 +270,10 @@ void InitVR()
 		auto error = vr::VR_GetVRInitErrorAsEnglishDescription(initError);
 		throw std::runtime_error("OpenVR error:" + std::string(error));
 	}
+	// Publish successful OpenVR ownership immediately. Interface validation and
+	// settings setup below can still throw; the caller must then shut this
+	// session down even though InitVR itself did not return normally.
+	initialized = true;
 
 	if (!vr::VR_IsInterfaceVersionValid(vr::IVRSystem_Version))
 	{
@@ -443,10 +458,57 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	}
 
 	glfwSetErrorCallback(GLFWErrorCallback);
+	bool vrInitialized = false;
+	bool calibratorInitialized = false;
+	auto shutdownRuntime = [&](bool cleanExit)
+	{
+		// Clear ownership before calling out so a cleanup exception cannot make
+		// the catch path invoke the same shutdown operation twice.
+		if (calibratorInitialized)
+		{
+			calibratorInitialized = false;
+			ShutdownCalibrator(cleanExit);
+		}
+		if (vrInitialized)
+		{
+			vrInitialized = false;
+			vr::VR_Shutdown();
+		}
+	};
+	auto shutdownGraphics = [&]()
+	{
+		if (glfwWindow)
+			glfwMakeContextCurrent(glfwWindow);
+		if (fboHandle)
+		{
+			glDeleteFramebuffers(1, &fboHandle);
+			fboHandle = 0;
+		}
+		if (fboTextureHandle)
+		{
+			glDeleteTextures(1, &fboTextureHandle);
+			fboTextureHandle = 0;
+		}
+		if (imguiOpenGLInitialized)
+		{
+			imguiOpenGLInitialized = false;
+			ImGui_ImplOpenGL3_Shutdown();
+		}
+		if (imguiGlfwInitialized)
+		{
+			imguiGlfwInitialized = false;
+			ImGui_ImplGlfw_Shutdown();
+		}
+		if (imguiContextInitialized)
+		{
+			imguiContextInitialized = false;
+			ImGui::DestroyContext();
+		}
+	};
 
 	try {
 		if (!g_uiPreviewMode)
-			InitVR();
+			InitVR(vrInitialized);
 		CreateGLFWWindow();
 		if (g_uiPreviewMode)
 		{
@@ -455,34 +517,41 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		else
 		{
 			InitCalibrator();
+			calibratorInitialized = true;
 			LoadProfile(CalCtx);
 		}
 		RunLoop();
-
-		if (!g_uiPreviewMode)
-		{
-			ShutdownCalibrator();
-			vr::VR_Shutdown();
-		}
-
-		if (fboHandle)
-			glDeleteFramebuffers(1, &fboHandle);
-
-		if (fboTextureHandle)
-			glDeleteTextures(1, &fboTextureHandle);
-
-		ImGui_ImplOpenGL3_Shutdown();
-		ImGui_ImplGlfw_Shutdown();
-		ImGui::DestroyContext();
+		shutdownRuntime(true);
+		shutdownGraphics();
 	}
-	catch (std::runtime_error &e)
+	catch (const std::exception &e)
 	{
+		// Flush persistent state and release live runtime/graphics resources
+		// before the modal error dialog can block this process indefinitely.
+		shutdownRuntime(false);
+		shutdownGraphics();
 		std::cerr << "Runtime error: " << e.what() << std::endl;
 		AppendSessionLog(std::string("Runtime error: ") + e.what());
 		wchar_t message[1024];
 		swprintf(message, 1024, L"%hs", e.what());
 		MessageBox(nullptr, message, L"Runtime Error", 0);
 	}
+	catch (...)
+	{
+		shutdownRuntime(false);
+		shutdownGraphics();
+		const char *message = "QuestCalibrator stopped because of an unknown fatal error.";
+		std::cerr << message << std::endl;
+		AppendSessionLog(message);
+		MessageBoxA(nullptr, message, "Runtime Error", MB_OK | MB_ICONERROR);
+	}
+
+	// Also covers every exception after initialization. In particular,
+	// ShutdownCalibrator flushes debounced profile/settings updates before
+	// stopping the pose hub. The ownership flags make this a no-op after the
+	// normal shutdown above.
+	shutdownRuntime(false);
+	shutdownGraphics();
 
 	if (glfwWindow)
 		glfwDestroyWindow(glfwWindow);
@@ -604,15 +673,39 @@ static void HandleCommandLine(LPWSTR lpCmdLine)
 		if (vrErr != vr::VRInitError_None)
 			CliExit(InitErrorMessage(vrErr), true);
 
-		char cruntimePath[MAX_PATH] = { 0 };
-		unsigned int pathLen;
-		vr::VR_GetRuntimePath(cruntimePath, MAX_PATH, &pathLen);
+		char stackRuntimePath[MAX_PATH] = { 0 };
+		uint32_t requiredBytes = 0;
+		bool pathRead = vr::VR_GetRuntimePath(stackRuntimePath,
+			static_cast<uint32_t>(sizeof stackRuntimePath), &requiredBytes);
+		char *runtimePath = stackRuntimePath;
+		size_t runtimePathCapacity = sizeof stackRuntimePath;
+		std::vector<char> extendedRuntimePath;
+		constexpr uint32_t MaxRuntimePathBytes = 1024 * 1024;
+		if (!pathRead && requiredBytes > sizeof stackRuntimePath &&
+			requiredBytes <= MaxRuntimePathBytes)
+		{
+			extendedRuntimePath.resize(requiredBytes, '\0');
+			uint32_t retryRequiredBytes = 0;
+			pathRead = vr::VR_GetRuntimePath(extendedRuntimePath.data(),
+				requiredBytes, &retryRequiredBytes);
+			requiredBytes = retryRequiredBytes;
+			runtimePath = extendedRuntimePath.data();
+			runtimePathCapacity = extendedRuntimePath.size();
+		}
+
+		if (!pathRead || requiredBytes == 0 ||
+			requiredBytes > runtimePathCapacity ||
+			!std::memchr(runtimePath, '\0', runtimePathCapacity) ||
+			runtimePath[0] == '\0')
+		{
+			CliExit("Failed to read the OpenVR runtime path.", true);
+		}
 
 		// Machine-readable, so no trailing newline: callers capture this on
 		// stdout and use it directly as a path.
-		printf("%s", cruntimePath);
+		printf("%s", runtimePath);
 		if (!g_cliNoUi)
-			MessageBoxA(nullptr, cruntimePath, "QuestCalibrator", MB_OK | MB_ICONINFORMATION);
+			MessageBoxA(nullptr, runtimePath, "QuestCalibrator", MB_OK | MB_ICONINFORMATION);
 		vr::VR_Shutdown();
 		exit(0);
 	}
@@ -630,14 +723,23 @@ static void HandleCommandLine(LPWSTR lpCmdLine)
 			vr::VRApplications()->GetApplicationPropertyString(OPENVR_APPLICATION_KEY, vr::VRApplicationProperty_WorkingDirectory_String, oldWd, MAX_PATH, &vrAppErr);
 			if (vrAppErr != vr::VRApplicationError_None)
 			{
-				fprintf(stderr, "Failed to get old working dir, skipping removal: %s\n", vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr));
+				CliExit("Failed to locate the previously registered QuestCalibrator manifest. "
+					"The old registration was left unchanged.\n\n" +
+					std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr)), true);
 			}
 			else
 			{
 				std::string oldManifest = oldWd;
 				oldManifest += "\\manifest.vrmanifest";
 				std::cout << "Removing old manifest path: " << oldManifest << std::endl;
-				vr::VRApplications()->RemoveApplicationManifest(oldManifest.c_str());
+				vrAppErr = vr::VRApplications()->RemoveApplicationManifest(
+					oldManifest.c_str());
+				if (vrAppErr != vr::VRApplicationError_None)
+				{
+					CliExit("Failed to remove the previously registered QuestCalibrator manifest. "
+						"The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
+						vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
+				}
 			}
 		}
 
@@ -651,7 +753,13 @@ static void HandleCommandLine(LPWSTR lpCmdLine)
 				+ manifestPath + "\n\n"
 				+ vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
 		}
-		vr::VRApplications()->SetApplicationAutoLaunch(OPENVR_APPLICATION_KEY, true);
+		vrAppErr = vr::VRApplications()->SetApplicationAutoLaunch(
+			OPENVR_APPLICATION_KEY, true);
+		if (vrAppErr != vr::VRApplicationError_None)
+		{
+			CliExit("QuestCalibrator was registered, but SteamVR could not enable auto-launch.\n\n" +
+				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr)), true);
+		}
 		CliExit("QuestCalibrator registered with SteamVR.\n\n" + manifestPath, false);
 	}
 	else if (cmd == L"-removemanifest")
@@ -664,7 +772,16 @@ static void HandleCommandLine(LPWSTR lpCmdLine)
 		std::string manifestPath = appDir;
 		manifestPath += "\\manifest.vrmanifest";
 		if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
-			vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
+		{
+			auto vrAppErr = vr::VRApplications()->RemoveApplicationManifest(
+				manifestPath.c_str());
+			if (vrAppErr != vr::VRApplicationError_None)
+			{
+				CliExit("Failed to deregister QuestCalibrator from SteamVR.\n\n" +
+					manifestPath + "\n\n" +
+					vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
+			}
+		}
 
 		CliExit("QuestCalibrator deregistered from SteamVR.", false);
 	}

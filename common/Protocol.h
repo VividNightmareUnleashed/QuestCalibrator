@@ -7,7 +7,11 @@
 #endif
 
 #define QUESTCALIBRATOR_PIPE_NAME "\\\\.\\pipe\\QuestCalibratorDriver"
-#define QUESTCALIBRATOR_SHMEM_NAME "Local\\QuestCalibratorPoseRing"
+// The mapping name is layout-versioned independently from the pipe protocol.
+// A named mapping survives while either process still has it open, so reusing
+// an earlier name after PoseRing changes layout could strand an upgraded driver
+// behind an incompatible overlay-held mapping.
+#define QUESTCALIBRATOR_SHMEM_NAME "Local\\QuestCalibratorPoseRing.v6.layout3"
 
 namespace protocol
 {
@@ -22,7 +26,12 @@ namespace protocol
 	// handshake requires exact version equality, so every bump costs users a
 	// driver reinstall + SteamVR restart); the driver may store-and-ignore
 	// fields until the matching feature lands.
-	const uint32_t Version = 5;
+	// v6: the driver validates complete transform/field messages transactionally,
+	// pipe flags are canonical fixed-width integers, every mutating request is
+	// versioned and requires a same-version handshake on that connection, and the
+	// shared-memory pose ring uses race-free ownership. Older overlays must
+	// reinstall the driver rather than silently relying on prior trust semantics.
+	const uint32_t Version = 6;
 
 	enum RequestType : uint32_t
 	{
@@ -49,7 +58,7 @@ namespace protocol
 	struct SetDeviceTransform
 	{
 		uint32_t openVRID = 0xFFFFFFFF;   // k_unTrackedDeviceIndexInvalid
-		bool enabled = false;
+		uint32_t enabled = 0;          // canonical wire flag: validation requires 0 or 1
 		vr::HmdVector3d_t translation{ { 0.0, 0.0, 0.0 } };
 		vr::HmdQuaternion_t rotation{ 1.0, 0.0, 0.0, 0.0 };
 		double scale = 1.0;
@@ -67,7 +76,7 @@ namespace protocol
 		// Displace this device's forwarded pose far away so applications ignore
 		// it (the HMD-mounted continuous-calibration tracker). The raw pose the
 		// overlay's solver consumes is published before the displacement.
-		bool hidden = false;
+		uint32_t hidden = 0;           // canonical wire flag: validation requires 0 or 1
 
 		SetDeviceTransform() = default;
 
@@ -96,7 +105,7 @@ namespace protocol
 	{
 		static const uint32_t MaxAnchors = 8;
 
-		bool enabled = false;
+		uint32_t enabled = 0;          // canonical wire flag: validation requires 0 or 1
 		uint32_t generation = 0;
 		uint32_t anchorCount = 0;
 		double sigmaMeters = 1.5;         // RBF falloff in the horizontal plane
@@ -128,6 +137,7 @@ namespace protocol
 	// (padding bytes are not scrubbed — the pipe never leaves this machine).
 	struct Request
 	{
+		Protocol protocol;
 		RequestType type = RequestInvalid;
 		SetDeviceTransform setDeviceTransform;
 		SetAlignmentField setAlignmentField;

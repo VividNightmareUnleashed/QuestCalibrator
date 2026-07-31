@@ -90,14 +90,18 @@
   <ItemGroup>
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\Protocol.h" />
+    <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\common\Version.h" />
     <ClInclude Include="AlignmentField.h" />
+    <ClInclude Include="AtomicSnapshot.h" />
     <ClInclude Include="Hooking.h" />
     <ClInclude Include="InterfaceHookInjector.h" />
     <ClInclude Include="IPCServer.h" />
+    <ClInclude Include="IPCProtocolGate.h" />
     <ClInclude Include="Logging.h" />
     <ClInclude Include="PoseScale.h" />
     <ClInclude Include="PoseTransform.h" />
+    <ClInclude Include="ProtocolValidation.h" />
     <ClInclude Include="QuestCalibratorDriver.h" />
     <ClInclude Include="ServerTrackedDeviceProvider.h" />
     <ClInclude Include="VRWatchdogProvider.h" />
@@ -112,7 +116,6 @@
       </PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="AlignmentField.cpp" />
-    <ClCompile Include="Hooking.cpp" />
     <ClCompile Include="InterfaceHookInjector.cpp" />
     <ClCompile Include="IPCServer.cpp" />
     <ClCompile Include="Logging.cpp" />

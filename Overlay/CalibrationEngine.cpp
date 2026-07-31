@@ -1,4 +1,5 @@
 #include "CalibrationEngine.h"
+#include "../common/TransformLimits.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,15 +11,80 @@ namespace
 {
 
 const Eigen::Vector3d kUp(0.0, 1.0, 0.0);
+// Eigen's slerp/toRotationMatrix paths require unit quaternions. A 1e-3
+// squared-norm tolerance admits ordinary floating-point drift (~0.05% in the
+// norm) while rejecting scaled representations that would corrupt the solve.
+constexpr double MaxQuaternionNormSquaredError = 1e-3;
+constexpr size_t MaxSolverSampleBudget = 1000000;
+constexpr size_t MaxSolverPairBudget = 1000000;
+constexpr double MaxTimeOffsetSearchSteps = 100000.0;
+constexpr double MaxResampledPointCount = 1000000.0;
+constexpr double MaxCorrelationWork = 100000000.0;
+
+bool IsValidConfig(const EngineConfig &config)
+{
+	auto finiteNonnegative = [](double value)
+	{
+		return std::isfinite(value) && value >= 0.0;
+	};
+	auto finitePositive = [](double value)
+	{
+		return std::isfinite(value) && value > 0.0;
+	};
+
+	return finiteNonnegative(config.timeOffsetRange) &&
+		config.timeOffsetRange <= protocol::limits::MaxAbsTimeOffsetSeconds &&
+		finitePositive(config.timeOffsetStep) &&
+		config.timeOffsetRange / config.timeOffsetStep <= MaxTimeOffsetSearchSteps &&
+		finiteNonnegative(config.maxLinearSpeed) &&
+		config.maxLinearSpeed <=
+			protocol::limits::MaxAbsLinearVelocityMetersPerSecond &&
+		finiteNonnegative(config.maxAngularSpeed) &&
+		config.maxAngularSpeed <=
+			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond &&
+		finiteNonnegative(config.maxInterpolationGap) &&
+		config.maxInterpolationGap <= protocol::limits::MaxAbsTimeOffsetSeconds &&
+		config.maxAlignedSamples >= 8 &&
+		config.maxAlignedSamples <= MaxSolverSampleBudget &&
+		finiteNonnegative(config.minPairAngle) &&
+		std::isfinite(config.maxPairAngle) &&
+		config.maxPairAngle > config.minPairAngle &&
+		config.maxPairAngle <= EIGEN_PI &&
+		config.minPairs >= 3 && config.maxPairs >= config.minPairs &&
+		config.maxPairs <= MaxSolverPairBudget &&
+		finiteNonnegative(config.gravityPriorRatio) && config.gravityPriorRatio <= 1000000.0 &&
+		config.irlsIterations >= 0 && config.irlsIterations <= 100 &&
+		finitePositive(config.huberRotation) &&
+		finitePositive(config.huberTranslation) &&
+		config.refineIterations >= 0 && config.refineIterations <= 100 &&
+		finiteNonnegative(config.scaleSearchRange) &&
+		config.scaleSearchRange <= 1.0 - protocol::limits::MinScale &&
+		finitePositive(config.gainSplitSeconds) && config.gainSplitSeconds <= 3600.0 &&
+		finiteNonnegative(config.gainSmoothingMargin) &&
+		finiteNonnegative(config.maxCleanGrossDeviation) &&
+		finiteNonnegative(config.maxRotationRms) &&
+		finiteNonnegative(config.maxTranslationRms) &&
+		finiteNonnegative(config.minAxisSpread) && config.minAxisSpread <= 1.0 &&
+		finiteNonnegative(config.minTransEigRatio) && config.minTransEigRatio <= 1.0;
+}
 
 bool IsFinitePose(const PoseSample &sample)
 {
+	double rotationNormSquared = sample.rot.squaredNorm();
 	return std::isfinite(sample.time) &&
+		std::abs(sample.time) <= protocol::limits::MaxAbsPoseTimestampSeconds &&
 		sample.rot.coeffs().allFinite() &&
-		sample.rot.squaredNorm() > 1e-12 &&
+		std::isfinite(rotationNormSquared) &&
+		std::abs(rotationNormSquared - 1.0) <= MaxQuaternionNormSquaredError &&
 		sample.pos.allFinite() &&
+		sample.pos.cwiseAbs().maxCoeff() <=
+			protocol::limits::MaxAbsPosePositionMeters &&
 		sample.vel.allFinite() &&
-		sample.angVel.allFinite();
+		sample.vel.cwiseAbs().maxCoeff() <=
+			protocol::limits::MaxAbsLinearVelocityMetersPerSecond &&
+		sample.angVel.allFinite() &&
+		sample.angVel.cwiseAbs().maxCoeff() <=
+			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond;
 }
 
 bool IsValidStream(const std::vector<PoseSample> &stream)
@@ -38,6 +104,7 @@ bool IsValidAlignedSamples(const std::vector<AlignedSample> &samples)
 	for (size_t i = 0; i < samples.size(); ++i)
 	{
 		if (!std::isfinite(samples[i].time) ||
+		    std::abs(samples[i].time) > protocol::limits::MaxAbsPoseTimestampSeconds ||
 		    !IsFinitePose(samples[i].ref) ||
 		    !IsFinitePose(samples[i].target))
 			return false;
@@ -178,9 +245,12 @@ bool EstimateMotionGain(const std::vector<PoseSample> &refStream,
 	double end = std::min(refStream.back().time + offset, targetStream.back().time);
 	if (end - start < 5.0)
 		return false;
+	double resampledCount = (end - start) / dt + 1.0;
+	if (!std::isfinite(resampledCount) || resampledCount > MaxResampledPointCount)
+		return false;
 
 	std::vector<PoseSample> refAt, tgtAt;
-	refAt.reserve(static_cast<size_t>((end - start) / dt) + 1);
+	refAt.reserve(static_cast<size_t>(resampledCount));
 	tgtAt.reserve(refAt.capacity());
 	for (double t = start; t <= end; t += dt)
 	{
@@ -332,6 +402,8 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 	};
 
 	const double before = robustCost(R, t, d, C, s);
+	if (!std::isfinite(before))
+		return false;
 
 	for (int iter = 0; iter < config.refineIterations; ++iter)
 	{
@@ -397,6 +469,8 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 		H.diagonal().array() += 1e-6 * H.diagonal().maxCoeff() + 1e-12;
 
 		Eigen::VectorXd delta = -H.ldlt().solve(g);
+		if (!delta.allFinite())
+			return false;
 
 		// The polish corrects sub-degree Kabsch error; a large rotation ask
 		// means an outlier regime this linearization should not chase.
@@ -419,7 +493,9 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 
 	R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
 
-	if (robustCost(R, t, d, C, s) >= before)
+	double after = robustCost(R, t, d, C, s);
+	if (!std::isfinite(after) || after >= before || !R.allFinite() ||
+		!t.allFinite() || !d.allFinite() || !C.coeffs().allFinite() || !std::isfinite(s))
 		return false;
 	rotInOut = R;
 	transInOut = t;
@@ -470,6 +546,8 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	offsetOut = 0.0;
 	if (refStream.size() < 8 || targetStream.size() < 8)
 		return false;
+	if (!IsValidConfig(config))
+		return false;
 	if (validateInputs && (!IsValidStream(refStream) || !IsValidStream(targetStream)))
 		return false;
 
@@ -479,9 +557,14 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 		return false;   // not enough overlap to correlate
 
 	double dt = std::max(1e-3, config.timeOffsetStep * 0.5);
-	size_t count = static_cast<size_t>((end - start) / dt);
-	if (count < 64)
+	double resampledCount = (end - start) / dt;
+	if (!std::isfinite(resampledCount) || resampledCount < 64.0 ||
+		resampledCount > MaxResampledPointCount)
 		return false;
+	double searchSteps = config.timeOffsetRange / config.timeOffsetStep;
+	if ((2.0 * searchSteps + 1.0) * resampledCount > MaxCorrelationWork)
+		return false;
+	size_t count = static_cast<size_t>(resampledCount);
 
 	std::vector<double> targetSpeed = ResampleSpeed(targetStream, start, dt, count);
 	double targetMean = Mean(targetSpeed);
@@ -545,6 +628,11 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 {
 	EngineResult result;
 	result.samplesUsed = samples.size();
+	if (!IsValidConfig(config))
+	{
+		result.message = "Invalid calibration engine configuration.";
+		return result;
+	}
 
 	if (samples.size() < 8)
 	{
@@ -553,7 +641,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	}
 	if (validateInputs && !IsValidAlignedSamples(samples))
 	{
-		result.message = "Pose samples contain non-finite values or non-increasing timestamps.";
+		result.message = "Pose samples contain an invalid or out-of-range value, or non-increasing timestamps.";
 		return result;
 	}
 
@@ -745,6 +833,13 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 
 	auto solveTranslation = [&rows, &config](double scale, Eigen::Vector3d &tOut) -> double
 	{
+		// Each scale candidate is a separate robust objective evaluation. Do
+		// not inherit IRLS weights from whichever candidate the golden-section
+		// search happened to visit previously: that makes scores path-dependent
+		// and therefore incomparable.
+		for (auto &r : rows)
+			r.weight = 1.0;
+
 		for (int iter = 0; iter <= config.irlsIterations; ++iter)
 		{
 			Eigen::Matrix3d ata = Eigen::Matrix3d::Zero();
@@ -893,6 +988,11 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
                                       const EngineConfig &config)
 {
 	EngineResult failure;
+	if (!IsValidConfig(config))
+	{
+		failure.message = "Invalid calibration engine configuration.";
+		return failure;
+	}
 
 	if (refStream.size() < 8 || targetStream.size() < 8)
 	{
@@ -901,7 +1001,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	}
 	if (!IsValidStream(refStream) || !IsValidStream(targetStream))
 	{
-		failure.message = "Pose streams contain non-finite values or non-increasing timestamps.";
+		failure.message = "Pose streams contain an invalid or out-of-range value, or non-increasing timestamps.";
 		return failure;
 	}
 

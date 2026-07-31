@@ -20,8 +20,9 @@
 //    tremor, weight shifts -- so they cannot qualify, which is the point:
 //    the first live session produced a storm of false "slides" from a
 //    just-stopped user and set-down peripherals under the old variance gate.
-//    Raw ring positions are used on purpose -- slide magnitude is invariant
-//    under the applied calibration, so there is no feedback loop.
+//    Raw ring positions are converted to calibrated meters with the caller's
+//    uniform scale. Rotation and translation are omitted because they preserve
+//    displacement magnitude, so there is still no calibration feedback loop.
 //  - Discontinuous tracking-loss recovery: lighthouse occlusion losses are
 //    constant and benign; only a short loss whose recovery pose is far from
 //    the pre-loss pose counts as evidence (glitch / base-station re-seat).
@@ -64,7 +65,10 @@ public:
 
 	// Feed an eligible device's ring samples; each device is evaluated
 	// independently.
-	void Push(const protocol::DevicePoseSample &sample);
+	// `linearScale` converts the sample's raw tracking units into calibrated
+	// meters. Reference-system samples use 1; target-system samples use the
+	// active calibration scale.
+	void Push(const protocol::DevicePoseSample &sample, double linearScale = 1.0);
 
 	bool PollEvent(Event &out);
 
@@ -82,7 +86,9 @@ private:
 		std::deque<Snap> window;
 		double lastValidTime = -1.0;
 		double lastEvalTime = -1.0;
+		double lastLinearScale = 0.0;
 		Eigen::Vector3d lastValidPos{ 0, 0, 0 };
+		Eigen::Vector3d lastValidVel{ 0, 0, 0 };
 	};
 
 	void EvaluateWindow(uint32_t id, DeviceState &dev);

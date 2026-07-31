@@ -88,12 +88,14 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\common\PoseChannel.h" />
+    <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\common\Version.h" />
     <ClInclude Include="Calibration.h" />
     <ClInclude Include="CalibrationEngine.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
     <ClInclude Include="ProfileValidation.h" />
+    <ClInclude Include="RingPoseMath.h" />
     <ClInclude Include="ContinuousAlignment.h" />
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="EmbeddedFiles.h" />

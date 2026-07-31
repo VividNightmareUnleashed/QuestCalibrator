@@ -32,13 +32,128 @@ static std::unique_ptr<DriftMonitor> Drift;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
+static bool MonitorHasComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
+static double MonitorLastComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
+
+// Conservative knowledge of driver slot state across scans. A failed batch
+// does not erase it: a request may have reached the driver immediately before
+// a pipe failure, so only a confirmed disable (or a complete connection-wide
+// neutralization) proves a slot is no longer live.
+static bool DriverSlotMayBeEnabled[vr::k_unMaxTrackedDeviceCount] = {};
+static uint64_t SynchronizedDriverConnectionGeneration = 0;
+
+// Dedicated consumer/cache for the HMD's raw-universe transform. It drains
+// even without a profile or protected room, so captures always bind to a
+// current validated worldFromDriver baseline.
+static int ChaperoneMonitorConsumer = -1;
+static std::vector<protocol::DevicePoseSample> ChaperoneMonitorScratch;
+
+struct HmdUniverseObservation
+{
+	enum class State
+	{
+		Empty,
+		EndpointOnly,
+		Usable
+	};
+
+	State state = State::Empty;
+	Eigen::Quaterniond rotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d translation{ 0, 0, 0 };
+	double sampleTime = -1e9;
+	double captureTime = -1e9;
+	ringpose::DriverLocalPoseSample localPose;
+
+	bool HasEndpoint() const noexcept
+	{
+		return state != State::Empty;
+	}
+
+	bool IsUsable() const noexcept
+	{
+		return state == State::Usable;
+	}
+
+	void Reset() noexcept
+	{
+		*this = HmdUniverseObservation();
+	}
+
+	void BreakContinuity() noexcept
+	{
+		if (HasEndpoint())
+			state = State::EndpointOnly;
+	}
+
+	void Accept(const Eigen::Quaterniond &acceptedRotation,
+		const Eigen::Vector3d &acceptedTranslation, double acceptedSampleTime,
+		double acceptedCaptureTime,
+		const ringpose::DriverLocalPoseSample &acceptedLocalPose)
+	{
+		state = State::Usable;
+		rotation = acceptedRotation;
+		translation = acceptedTranslation;
+		sampleTime = acceptedSampleTime;
+		captureTime = acceptedCaptureTime;
+		localPose = acceptedLocalPose;
+	}
+};
+
+static HmdUniverseObservation CurrentHmdObservation;
+
+struct HmdWorldTransition
+{
+	bool worldChanged = false;
+	bool localPoseContinuous = false;
+	Eigen::Quaterniond previousRotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d previousTranslation{ 0, 0, 0 };
+	Eigen::Quaterniond currentRotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d currentTranslation{ 0, 0, 0 };
+};
 
 static std::unique_ptr<questcal::ContinuousAlignment> Continuous;
 static int ContinuousConsumer = -1;
 static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
+static double LastDriverRequestErrorTime = -1e9;
 
 CalibrationContext CalCtx;
+
+static void AbortCalibration(CalibrationContext &ctx, const std::string &reason);
+static void ChaperoneMonitorTick(CalibrationContext &ctx, double now);
+
+static bool SaveDirtyPersistence(CalibrationContext &ctx)
+{
+	// Coupled changes always write Config first.  A crash after that first
+	// write is detected by the shared revision at the next launch.
+	if (ctx.profileSaveDirty)
+	{
+		if (!ctx.validProfile || !SaveProfile(ctx))
+			return false;
+		ctx.profileSaveDirty = false;
+	}
+	if (ctx.settingsSaveDirty && !SaveSettings(ctx))
+		return false;
+	return true;
+}
+
+static void PersistenceTick(CalibrationContext &ctx, double now)
+{
+	if (!ctx.HasDirtyPersistence())
+		return;
+
+	if (now - ctx.persistenceDirtyTime <= 5.0)
+		return;
+
+	if (!SaveDirtyPersistence(ctx))
+		ctx.DelayPersistenceRetry(now);
+}
+
+static void ResetMonitorIngestionTimes()
+{
+	for (bool &hasTime : MonitorHasComposedTime)
+		hasTime = false;
+}
 
 // ---------------------------------------------------------------------------
 // Session log (see Calibration.h)
@@ -119,21 +234,21 @@ void InitCalibrator()
 	Drift = std::make_unique<DriftMonitor>(QpcToSeconds);
 	MonitorConsumer = PoseHub.CreateConsumer();
 
+	ChaperoneMonitorConsumer = PoseHub.CreateConsumer();
+
 	Continuous = std::make_unique<questcal::ContinuousAlignment>();
 	ContinuousConsumer = PoseHub.CreateConsumer();
 }
 
-void ShutdownCalibrator()
+void ShutdownCalibrator(bool cleanExit)
 {
 	// A quit inside the save-debounce window must not lose a runtime
 	// compensation update.
-	if (CalCtx.profileSaveDirty && CalCtx.validProfile)
-	{
-		SaveProfile(CalCtx);
-		CalCtx.profileSaveDirty = false;
-	}
+	if (CalCtx.HasDirtyPersistence())
+		SaveDirtyPersistence(CalCtx);
 	PoseHub.Stop();
-	AppendSessionLog("session ended cleanly");
+	if (cleanExit)
+		AppendSessionLog("session ended cleanly");
 }
 
 PoseStreamHub &GetPoseHub()
@@ -165,11 +280,56 @@ static vr::HmdVector3d_t VRVec(const Eigen::Vector3d &meters)
 	return out;
 }
 
-static void ResetAndDisableOffsets(uint32_t id)
+static bool SendDriverRequest(CalibrationContext &ctx, const protocol::Request &request,
+	const char *operation, uint64_t *batchConnectionGeneration = nullptr)
+{
+	try
+	{
+		protocol::Response response = Driver.SendBlocking(request);
+		bool accepted = response.type == protocol::ResponseSuccess ||
+			(request.type == protocol::RequestHandshake &&
+				response.type == protocol::ResponseHandshake &&
+				response.protocol.version == protocol::Version);
+		if (accepted)
+		{
+			if (batchConnectionGeneration)
+			{
+				uint64_t generation = Driver.ConnectionGeneration();
+				if (*batchConnectionGeneration == 0)
+					*batchConnectionGeneration = generation;
+				else if (*batchConnectionGeneration != generation)
+					return false;
+			}
+			return true;
+		}
+		if (ctx.timeLastTick - LastDriverRequestErrorTime >= 30.0)
+		{
+			ctx.ReportError(std::string("QuestCalibrator driver rejected ") + operation +
+				"; the requested live state was not applied\n",
+				CalibrationContext::ErrorSource::Driver);
+			LastDriverRequestErrorTime = ctx.timeLastTick;
+		}
+	}
+	catch (const std::exception &e)
+	{
+		if (ctx.timeLastTick - LastDriverRequestErrorTime >= 30.0)
+		{
+			ctx.ReportError(std::string("QuestCalibrator driver communication failed while ") +
+				operation + ": " + e.what() + "\n",
+				CalibrationContext::ErrorSource::Driver);
+			LastDriverRequestErrorTime = ctx.timeLastTick;
+		}
+	}
+	return false;
+}
+
+static bool ResetAndDisableOffsets(CalibrationContext &ctx, uint32_t id,
+	uint64_t *batchConnectionGeneration = nullptr)
 {
 	protocol::Request req(protocol::RequestSetDeviceTransform);
 	req.setDeviceTransform = protocol::SetDeviceTransform(id, false);
-	Driver.SendBlocking(req);
+	return SendDriverRequest(ctx, req, "disabling a device transform",
+		batchConnectionGeneration);
 }
 
 static_assert(vr::k_unTrackedDeviceIndex_Hmd == 0, "HMD index expected to be 0");
@@ -178,13 +338,23 @@ static_assert(vr::k_unTrackedDeviceIndex_Hmd == 0, "HMD index expected to be 0")
 // current base calibration: delta_i = anchor_i o base^-1 is the correction
 // that, applied after the base calibration, reproduces the absolute solve at
 // that anchor's spot.
-static void SendAlignmentField(CalibrationContext &ctx)
+static bool SendAlignmentField(CalibrationContext &ctx, bool baseBatchComplete,
+	uint64_t *batchConnectionGeneration)
 {
 	protocol::Request req(protocol::RequestSetAlignmentField);
 	auto &f = req.setAlignmentField;
 
-	f.enabled = ctx.enabled && ctx.fieldEnabled && !ctx.fieldAnchors.empty();
+	f.enabled = baseBatchComplete && ctx.enabled && ctx.fieldEnabled &&
+		!ctx.fieldAnchors.empty();
 	f.generation = ctx.fieldGeneration;
+	if (!f.enabled)
+	{
+		// Disabled messages are canonical and independent of live calibration
+		// numerics. This guarantees a bad base can still clear a stale field.
+		f.anchorCount = 0;
+		return SendDriverRequest(ctx, req, "disabling the alignment field",
+			batchConnectionGeneration);
+	}
 	f.anchorCount = static_cast<uint32_t>(std::min(
 		ctx.fieldAnchors.size(), static_cast<size_t>(protocol::SetAlignmentField::MaxAnchors)));
 
@@ -205,13 +375,195 @@ static void SendAlignmentField(CalibrationContext &ctx)
 		f.anchors[i].rotationDelta = VRQuat(dR);
 	}
 
-	Driver.SendBlocking(req);
+	return SendDriverRequest(ctx, req, "applying the alignment field",
+		batchConnectionGeneration);
 }
 
-static void ScanAndApplyProfile(CalibrationContext &ctx)
+// Put a single, positively identified driver connection into canonical neutral
+// state. A pipe can reconnect during any request; restart from slot zero so no
+// generation ever receives only a suffix of the reset pass. Retries are bounded
+// so a flapping vrserver cannot stall the UI tick indefinitely.
+static bool NeutralizeDriverConnection(CalibrationContext &ctx,
+	uint64_t &neutralizedConnectionGeneration)
 {
-	char buffer[vr::k_unMaxPropertyStringSize];
-	ctx.enabled = ctx.validProfile;
+	constexpr int MaxNeutralizationAttempts = 3;
+	neutralizedConnectionGeneration = 0;
+
+	for (int attempt = 0; attempt < MaxNeutralizationAttempts; ++attempt)
+	{
+		uint64_t passConnectionGeneration = 0;
+		protocol::Request handshake(protocol::RequestHandshake);
+		if (!SendDriverRequest(ctx, handshake,
+			"checking the driver connection before neutralizing it",
+			&passConnectionGeneration))
+			continue;
+
+		bool complete = SendAlignmentField(ctx, false,
+			&passConnectionGeneration);
+		bool generationChanged =
+			Driver.ConnectionGeneration() != passConnectionGeneration;
+		for (uint32_t id = 0;
+			id < vr::k_unMaxTrackedDeviceCount && !generationChanged; ++id)
+		{
+			complete = ResetAndDisableOffsets(ctx, id,
+				&passConnectionGeneration) && complete;
+			generationChanged =
+				Driver.ConnectionGeneration() != passConnectionGeneration;
+		}
+
+		if (generationChanged)
+			continue;
+		if (!complete)
+			continue;
+
+		for (bool &mayBeEnabled : DriverSlotMayBeEnabled)
+			mayBeEnabled = false;
+		neutralizedConnectionGeneration = passConnectionGeneration;
+		return true;
+	}
+
+	return false;
+}
+
+static bool ReadTrackedDeviceString(uint32_t id,
+	vr::ETrackedDeviceProperty property, std::string &value)
+{
+	value.clear();
+	auto system = vr::VRSystem();
+	if (!system || id >= vr::k_unMaxTrackedDeviceCount)
+		return false;
+
+	char buffer[vr::k_unMaxPropertyStringSize] = {};
+	vr::ETrackedPropertyError error = vr::TrackedProp_Success;
+	uint32_t size = system->GetStringTrackedDeviceProperty(id, property, buffer,
+		static_cast<uint32_t>(sizeof buffer), &error);
+	if (error != vr::TrackedProp_Success || size <= 1 || size > sizeof buffer ||
+		buffer[size - 1] != '\0')
+		return false;
+
+	value.assign(buffer, size - 1);
+	return !value.empty();
+}
+
+static bool ReadCurrentHmdIdentity(std::string &trackingSystem, std::string &serial)
+{
+	return ReadTrackedDeviceString(vr::k_unTrackedDeviceIndex_Hmd,
+		vr::Prop_TrackingSystemName_String, trackingSystem) &&
+		ReadTrackedDeviceString(vr::k_unTrackedDeviceIndex_Hmd,
+			vr::Prop_SerialNumber_String, serial);
+}
+
+static bool CacheHmdWorldFromDriver(
+	const protocol::DevicePoseSample &sample, HmdWorldTransition &transition)
+{
+	transition = HmdWorldTransition();
+	if (sample.deviceId != vr::k_unTrackedDeviceIndex_Hmd ||
+		!sample.poseIsValid ||
+		sample.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK) ||
+		!IsUsableRingSample(sample, QpcToSeconds))
+		return false;
+
+	double sampleTime = RingSampleTime(sample, QpcToSeconds);
+	if (CurrentHmdObservation.HasEndpoint() &&
+		sampleTime <= CurrentHmdObservation.sampleTime)
+		return false;
+
+	RingSampleParts parts = UnpackRingSample(sample);
+	ringpose::DriverLocalPoseSample localPose;
+	localPose.time = sampleTime;
+	localPose.rotation = parts.drvRot;
+	localPose.position = parts.drvPos;
+	localPose.velocity = Eigen::Vector3d(
+		sample.velocity[0], sample.velocity[1], sample.velocity[2]);
+	localPose.angularVelocity = Eigen::Vector3d(
+		sample.angularVelocity[0], sample.angularVelocity[1],
+		sample.angularVelocity[2]);
+
+	if (CurrentHmdObservation.HasEndpoint() &&
+		questcal::WorldFromDriverChanged(
+			CurrentHmdObservation.rotation,
+			CurrentHmdObservation.translation,
+			parts.wfdRot, parts.wfdTrans))
+	{
+		transition.worldChanged = true;
+		transition.previousRotation = CurrentHmdObservation.rotation;
+		transition.previousTranslation = CurrentHmdObservation.translation;
+		transition.currentRotation = parts.wfdRot;
+		transition.currentTranslation = parts.wfdTrans;
+		transition.localPoseContinuous = CurrentHmdObservation.IsUsable() &&
+			ringpose::IsDriverLocalPoseContinuous(
+				CurrentHmdObservation.localPose, localPose);
+	}
+
+	CurrentHmdObservation.Accept(parts.wfdRot, parts.wfdTrans, sampleTime,
+		RingCaptureTime(sample, QpcToSeconds), localPose);
+	return true;
+}
+
+static bool HasFreshHmdWorldFromDriver()
+{
+	LARGE_INTEGER qpcNow;
+	if (!QueryPerformanceCounter(&qpcNow))
+		return false;
+	double sampleClockNow = static_cast<double>(qpcNow.QuadPart) * QpcToSeconds;
+	return PoseHub.RingOpen() && CurrentHmdObservation.IsUsable() &&
+		ringpose::IsFreshCaptureTime(
+			CurrentHmdObservation.captureTime, sampleClockNow, 2.0);
+}
+
+static bool ChaperoneBaselineIsCurrent(
+	const CalibrationContext::Chaperone &snapshot)
+{
+	return snapshot.worldFromDriverValid &&
+		snapshot.baselineVerifiedThisSession && HasFreshHmdWorldFromDriver() &&
+		!questcal::WorldFromDriverChanged(
+			snapshot.worldFromDriverRotation, snapshot.worldFromDriverTranslation,
+			CurrentHmdObservation.rotation, CurrentHmdObservation.translation);
+}
+
+static bool CopyCurrentHmdWorldFromDriver(
+	CalibrationContext::Chaperone &snapshot)
+{
+	if (!HasFreshHmdWorldFromDriver())
+		return false;
+	snapshot.worldFromDriverRotation = CurrentHmdObservation.rotation;
+	snapshot.worldFromDriverTranslation = CurrentHmdObservation.translation;
+	snapshot.worldFromDriverValid = true;
+	snapshot.baselineVerifiedThisSession = true;
+	return true;
+}
+
+static void SynchronizeDriverState(CalibrationContext &ctx)
+{
+	ctx.enabled = ctx.validProfile && !ctx.profileUniverseUnsafe;
+	uint64_t batchConnectionGeneration = 0;
+	protocol::Request handshake(protocol::RequestHandshake);
+	bool connectionReady = SendDriverRequest(ctx, handshake,
+		"checking the driver connection", &batchConnectionGeneration);
+	bool driverSynchronized = connectionReady;
+	if (ctx.enabled && !questcal::IsValidTrackingSystemPair(
+		ctx.referenceTrackingSystem, ctx.targetTrackingSystem))
+	{
+		ctx.ReportError(
+			"The live profile has invalid tracking-system identities and was disabled before sending it to the driver\n");
+		ctx.enabled = false;
+	}
+
+	// Resolve the reference HMD before any target transform can be enabled.
+	// Device 0 may be absent/invalid during startup; relying on the loop below
+	// would skip that check and could briefly apply a profile to the wrong rig.
+	if (ctx.enabled)
+	{
+		std::string hmdTrackingSystem;
+		std::string hmdSerial;
+		if (vr::VRSystem()->GetTrackedDeviceClass(vr::k_unTrackedDeviceIndex_Hmd) !=
+				vr::TrackedDeviceClass_HMD ||
+			!ReadCurrentHmdIdentity(hmdTrackingSystem, hmdSerial) ||
+			hmdTrackingSystem != ctx.referenceTrackingSystem)
+		{
+			ctx.enabled = false;
+		}
+	}
 
 	// Timeline shift for target devices (runtime latency re-prediction). The
 	// manual override bypasses the solved value; it exists to pin the sign
@@ -221,80 +573,165 @@ static void ScanAndApplyProfile(CalibrationContext &ctx)
 		timeShift = ctx.manualTimeOffsetMs / 1000.0;
 	else if (ctx.applyTimeOffset)
 		timeShift = questcal::ComputeAppliedTimeOffset(ctx.calibratedTimeOffset);
+	if (!std::isfinite(timeShift) ||
+		std::abs(timeShift) > protocol::limits::MaxAbsTimeOffsetSeconds ||
+		(ctx.enabled && !questcal::IsValidCalibrationTransform(ctx.calibratedRotationQ,
+			ctx.TranslationMeters(), ctx.calibratedScale)))
+	{
+		ctx.ReportError("The live calibration contains invalid numeric values and was disabled before sending it to the driver\n");
+		ctx.enabled = false;
+		timeShift = 0.0;
+	}
 	ctx.appliedTimeOffset = timeShift;
 
+	// A new pipe generation may be a restarted vrserver (fresh slots) or a new
+	// pipe to the same provider (retained slots). Treat both alike: neutralize
+	// the complete connection before rebuilding desired state. This one-time
+	// pass is intentionally not paid on steady-state scans.
+	bool newlyObservedConnection = connectionReady &&
+		batchConnectionGeneration != SynchronizedDriverConnectionGeneration;
+	if (newlyObservedConnection)
+	{
+		uint64_t neutralizedConnectionGeneration = 0;
+		bool neutralized = NeutralizeDriverConnection(ctx,
+			neutralizedConnectionGeneration);
+		connectionReady = neutralized;
+		driverSynchronized = neutralized;
+		if (neutralized)
+			batchConnectionGeneration = neutralizedConnectionGeneration;
+	}
+
 	ctx.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+	bool desiredMutationAttempted = false;
+	auto disableSlot = [&](uint32_t id)
+	{
+		desiredMutationAttempted = true;
+		bool disabled = ResetAndDisableOffsets(ctx, id,
+			&batchConnectionGeneration);
+		if (disabled)
+			DriverSlotMayBeEnabled[id] = false;
+		if (Driver.ConnectionGeneration() != batchConnectionGeneration)
+			connectionReady = false;
+		driverSynchronized = disabled && driverSynchronized;
+	};
 
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
 		ctx.referenceDeviceMask[id] = false;
 		ctx.targetDeviceMask[id] = false;
+	}
 
-		auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
-		if (deviceClass == vr::TrackedDeviceClass_Invalid)
-			continue;
-
-		if (!ctx.enabled)
+	if (!ctx.enabled)
+	{
+		// No OpenVR device scan is needed to converge to neutral state. The
+		// conservative slot ledger already identifies every transform that may
+		// still be live, including response-loss uncertainty.
+		for (uint32_t id = 0;
+			id < vr::k_unMaxTrackedDeviceCount && connectionReady && driverSynchronized;
+			++id)
 		{
-			ResetAndDisableOffsets(id);
-			continue;
+			if (DriverSlotMayBeEnabled[id])
+				disableSlot(id);
 		}
-
-		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-		vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
-
-		if (err != vr::TrackedProp_Success)
+	}
+	else
+	{
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 		{
-			ResetAndDisableOffsets(id);
-			continue;
-		}
-
-		std::string trackingSystem(buffer);
-		ctx.referenceDeviceMask[id] = (trackingSystem == ctx.referenceTrackingSystem);
-		ctx.targetDeviceMask[id] = (trackingSystem == ctx.targetTrackingSystem);
-
-		if (id == vr::k_unTrackedDeviceIndex_Hmd)
-		{
-			if (trackingSystem != ctx.referenceTrackingSystem)
+			if (!connectionReady || !driverSynchronized)
+				continue;
+			if (!ctx.enabled)
 			{
-				// Currently using an HMD with a different tracking system than the calibration.
-				ctx.enabled = false;
+				if (DriverSlotMayBeEnabled[id])
+					disableSlot(id);
+				continue;
 			}
 
-			ResetAndDisableOffsets(id);
-			continue;
-		}
+			auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
+			if (deviceClass == vr::TrackedDeviceClass_Invalid)
+			{
+				// OpenVR no longer exposes this ID, but the driver slot survives the
+				// disappearance. Retire any transform that a prior successful or
+				// uncertain enable may have left behind.
+				if (DriverSlotMayBeEnabled[id])
+					disableSlot(id);
+				continue;
+			}
 
-		if (trackingSystem != ctx.targetTrackingSystem)
-		{
-			ResetAndDisableOffsets(id);
-			continue;
-		}
+			std::string trackingSystem;
+			if (!ReadTrackedDeviceString(id, vr::Prop_TrackingSystemName_String,
+				trackingSystem))
+			{
+				if (DriverSlotMayBeEnabled[id])
+					disableSlot(id);
+				continue;
+			}
 
-		// The continuous-calibration tracker is identified by serial (ids are
-		// not stable across sessions).
-		if (!ctx.continuousTrackerSerial.empty())
-		{
-			vr::ETrackedPropertyError serialErr = vr::TrackedProp_Success;
-			vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String,
-				buffer, vr::k_unMaxPropertyStringSize, &serialErr);
-			if (serialErr == vr::TrackedProp_Success && ctx.continuousTrackerSerial == buffer)
-				ctx.continuousTrackerId = id;
-		}
+			ctx.referenceDeviceMask[id] =
+				trackingSystem == ctx.referenceTrackingSystem;
+			ctx.targetDeviceMask[id] = trackingSystem == ctx.targetTrackingSystem;
 
-		protocol::Request req(protocol::RequestSetDeviceTransform);
-		req.setDeviceTransform = {
-			id,
-			true,
-			VRVec(ctx.TranslationMeters()),
-			VRQuat(ctx.calibratedRotationQ),
-			ctx.calibratedScale,
-			timeShift
-		};
-		req.setDeviceTransform.generation = ctx.baseGeneration;
-		req.setDeviceTransform.hidden = ctx.continuousEnabled && ctx.hideMountedTracker &&
-			id == ctx.continuousTrackerId;
-		Driver.SendBlocking(req);
+			if (id == vr::k_unTrackedDeviceIndex_Hmd)
+			{
+				if (trackingSystem != ctx.referenceTrackingSystem)
+				{
+					// Currently using an HMD with a different tracking system than the calibration.
+					ctx.enabled = false;
+				}
+
+				if (DriverSlotMayBeEnabled[id])
+					disableSlot(id);
+				continue;
+			}
+
+			if (trackingSystem != ctx.targetTrackingSystem)
+			{
+				if (DriverSlotMayBeEnabled[id])
+					disableSlot(id);
+				continue;
+			}
+
+			// The continuous-calibration tracker is identified by serial (ids are
+			// not stable across sessions).
+			if (!ctx.continuousTrackerSerial.empty())
+			{
+				std::string serial;
+				if (ReadTrackedDeviceString(id, vr::Prop_SerialNumber_String, serial) &&
+					ctx.continuousTrackerSerial == serial)
+					ctx.continuousTrackerId = id;
+			}
+
+			protocol::Request req(protocol::RequestSetDeviceTransform);
+			req.setDeviceTransform = {
+				id,
+				true,
+				VRVec(ctx.TranslationMeters()),
+				VRQuat(ctx.calibratedRotationQ),
+				ctx.calibratedScale,
+				timeShift
+			};
+			req.setDeviceTransform.generation = ctx.baseGeneration;
+			req.setDeviceTransform.hidden =
+				ctx.continuousEnabled && ctx.hideMountedTracker &&
+				id == ctx.continuousTrackerId;
+			// Mark before sending: a response loss can leave an accepted enable
+			// indistinguishable from a failed request, so future disappearance must
+			// conservatively issue a disable.
+			DriverSlotMayBeEnabled[id] = true;
+			desiredMutationAttempted = true;
+			bool applied = SendDriverRequest(ctx, req,
+				"applying a device transform", &batchConnectionGeneration);
+			if (Driver.ConnectionGeneration() != batchConnectionGeneration)
+			{
+				connectionReady = false;
+				// The enable may have landed just before the response path exposed
+				// the reconnect. Neutralize that one known slot on the new pipe now;
+				// the generation-wide recovery pass below clears every other slot.
+				if (ResetAndDisableOffsets(ctx, id, nullptr))
+					DriverSlotMayBeEnabled[id] = false;
+			}
+			driverSynchronized = applied && driverSynchronized;
+		}
 	}
 
 	// Re-asserted alongside the per-device transforms so a restarted driver
@@ -302,8 +739,56 @@ static void ScanAndApplyProfile(CalibrationContext &ctx)
 	// land first and the field one pipe round-trip later; the mixed window is
 	// bounded by the (small) delta magnitudes and the generation bump snaps
 	// driver-side smoothing when it arrives.
-	SendAlignmentField(ctx);
+	// A spatial field is meaningful only on top of a complete base-transform
+	// batch from this same driver connection. Never send a field enable after a
+	// failed base request. If any mutation failed or reconnected, immediately
+	// neutralize the whole current connection before retrying desired state on
+	// the next periodic scan.
+	bool fieldSynchronized = false;
+	if (connectionReady && driverSynchronized)
+	{
+		desiredMutationAttempted = true;
+		fieldSynchronized = SendAlignmentField(ctx, true,
+			&batchConnectionGeneration);
+	}
+	driverSynchronized = fieldSynchronized && driverSynchronized;
+	if (!driverSynchronized && desiredMutationAttempted)
+	{
+		uint64_t neutralizedConnectionGeneration = 0;
+		if (NeutralizeDriverConnection(ctx, neutralizedConnectionGeneration))
+		{
+			// The profile batch still failed, but the connection is now known
+			// neutral. Next scan can safely apply desired state without another
+			// generation-wide reset.
+			SynchronizedDriverConnectionGeneration =
+				neutralizedConnectionGeneration;
+		}
+	}
 
+	// Never let the jump/drift/continuous monitors infer that the live driver
+	// matches the profile after a partial pipe failure. The next periodic scan
+	// rebuilds and retries the complete desired state, including after vrserver
+	// restarts; until then, all device identities are deliberately unavailable.
+	if (!driverSynchronized)
+	{
+		ctx.enabled = false;
+		ctx.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+		{
+			ctx.referenceDeviceMask[id] = false;
+			ctx.targetDeviceMask[id] = false;
+		}
+	}
+	else
+	{
+		SynchronizedDriverConnectionGeneration = batchConnectionGeneration;
+		ctx.ClearError(CalibrationContext::ErrorSource::Driver);
+		LastDriverRequestErrorTime = -1e9;
+	}
+}
+
+static void CheckProtectedChaperone(CalibrationContext &ctx)
+{
 	// Auto-restore of the protected chaperone snapshot. The trigger compares
 	// wall GEOMETRY content only: quads are standing-frame, so both universe
 	// jumps and play-space movers (which move the standing center, not the
@@ -312,32 +797,70 @@ static void ScanAndApplyProfile(CalibrationContext &ctx)
 	// walls (two 4-wall rectangles), hence the corner-wise comparison.
 	// An empty snapshot never auto-restores: it would stomp any bounds the
 	// runtime imports later (e.g. a Guardian arriving after session start).
-	if (ctx.enabled && ctx.chaperone.valid && ctx.chaperone.autoApply &&
-		!ctx.chaperone.geometry.empty())
+	const bool shouldCheckChaperone = ctx.chaperone.valid &&
+		ctx.chaperone.autoApply && !ctx.chaperone.geometry.empty() &&
+		ChaperoneBaselineIsCurrent(ctx.chaperone);
+	if (!shouldCheckChaperone)
+		ctx.ClearError(CalibrationContext::ErrorSource::ChaperoneMonitor);
+	else
 	{
-		uint32_t quadCount = 0;
-		vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(nullptr, &quadCount);
+		static double lastSetupFailure = -1e9;
+		static double lastReadFailure = -1e9;
+		auto setup = vr::VRChaperoneSetup();
+		if (!setup)
+		{
+			if (ctx.timeLastTick - lastSetupFailure >= 30.0)
+			{
+				ctx.ReportError(
+					"Protected chaperone could not be checked because OpenVR chaperone setup is unavailable\n",
+					CalibrationContext::ErrorSource::ChaperoneMonitor);
+				lastSetupFailure = ctx.timeLastTick;
+			}
+			return;
+		}
+		lastSetupFailure = -1e9;
 
-		bool differs = quadCount != ctx.chaperone.geometry.size();
-		if (!differs)
+		uint32_t quadCount = 0;
+		bool liveRead = setup->GetLiveCollisionBoundsInfo(nullptr, &quadCount);
+
+		bool differs = liveRead && quadCount != ctx.chaperone.geometry.size();
+		if (liveRead && !differs)
 		{
 			std::vector<vr::HmdQuad_t> live(quadCount);
-			if (vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(live.data(), &quadCount))
+			if (setup->GetLiveCollisionBoundsInfo(live.data(), &quadCount))
 				differs = !questcal::QuadsMatch(live, ctx.chaperone.geometry, 0.002f);
+			else
+				liveRead = false;
 		}
+		if (!liveRead)
+		{
+			if (ctx.timeLastTick - lastReadFailure >= 30.0)
+			{
+				ctx.ReportError(
+					"Could not read the live chaperone; protected bounds were not changed\n",
+					CalibrationContext::ErrorSource::ChaperoneMonitor);
+				lastReadFailure = ctx.timeLastTick;
+			}
+			return;
+		}
+		lastReadFailure = -1e9;
+		ctx.ClearError(CalibrationContext::ErrorSource::ChaperoneMonitor);
 
 		// Cooldown so a runtime that keeps reasserting its own bounds is
 		// contested every few seconds at worst, not at the 1 Hz scan rate.
 		if (differs && ctx.timeLastTick - ctx.chaperone.lastRestoreTime >= 5.0)
 		{
-			ApplyChaperoneBounds();
+			// Advance the cooldown for failures too. A runtime that rejects or
+			// rewrites bounds must not be hammered once per profile scan.
 			ctx.chaperone.lastRestoreTime = ctx.timeLastTick;
-
-			char buf[128];
-			snprintf(buf, sizeof buf,
-				"Chaperone changed outside the app (%u live / %zu saved walls); restored the protected bounds\n",
-				quadCount, ctx.chaperone.geometry.size());
-			ctx.Log(buf);
+			if (ApplyChaperoneBounds(false))
+			{
+				char buf[128];
+				snprintf(buf, sizeof buf,
+					"Chaperone changed outside the app (%u live / %zu saved walls); restored the protected bounds\n",
+					quadCount, ctx.chaperone.geometry.size());
+				ctx.Log(buf);
+			}
 		}
 	}
 }
@@ -368,8 +891,12 @@ static questcal::PoseSample EngineSampleFromRing(const protocol::DevicePoseSampl
 static bool IsUsableEngineSample(const questcal::PoseSample &s)
 {
 	return std::isfinite(s.time) && questcal::IsValidRotation(s.rot) &&
-		questcal::IsFinite(s.pos) && questcal::IsFinite(s.vel) &&
-		questcal::IsFinite(s.angVel);
+		questcal::IsBoundedVector(s.pos,
+			protocol::limits::MaxAbsPosePositionMeters) &&
+		questcal::IsBoundedVector(s.vel,
+			protocol::limits::MaxAbsLinearVelocityMetersPerSecond) &&
+		questcal::IsBoundedVector(s.angVel,
+			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond);
 }
 
 // Drop the collector's backlog so a new collection starts fresh.
@@ -378,21 +905,29 @@ static void DiscardPoseRingBacklog()
 	PoseHub.DiscardBacklog(CollectorConsumer);
 }
 
-static void CollectFromPoseRing(CalibrationContext &ctx, double now)
+static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 {
-	PoseHub.Drain(CollectorConsumer, CollectorScratch);
+	uint64_t dropped = PoseHub.Drain(CollectorConsumer, CollectorScratch);
+	if (dropped > 0)
+	{
+		AbortCalibration(ctx,
+			"Pose stream overran during collection; retry calibration so no samples are missing");
+		return false;
+	}
 	for (const auto &s : CollectorScratch)
 	{
 		// Strict validity: a pose the driver flagged invalid never enters the
 		// solve, even if the tracking result still claims "running OK".
-		if (!s.poseIsValid || s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK))
+		if (!s.poseIsValid ||
+			s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK) ||
+			!IsUsableRingSample(s, QpcToSeconds))
 			continue;
 
 		// The composed time folds in the driver's jittery poseTimeOffset, so
 		// the odd inversion occurs in healthy data; drop it here rather than
 		// let the solver fail the whole collection (same policy as
 		// ContinuousAlignment::PushReference).
-		if (s.deviceId == ctx.referenceID)
+		if (s.deviceId == ctx.calibrationReferenceID)
 		{
 			questcal::PoseSample sample = EngineSampleFromRing(s);
 			if (!IsUsableEngineSample(sample))
@@ -402,7 +937,7 @@ static void CollectFromPoseRing(CalibrationContext &ctx, double now)
 			ctx.refSamples.push_back(sample);
 			ctx.lastRefSampleTime = now;
 		}
-		else if (s.deviceId == ctx.targetID)
+		else if (s.deviceId == ctx.calibrationTargetID)
 		{
 			questcal::PoseSample sample = EngineSampleFromRing(s);
 			if (!IsUsableEngineSample(sample))
@@ -413,6 +948,7 @@ static void CollectFromPoseRing(CalibrationContext &ctx, double now)
 			ctx.lastTargetSampleTime = now;
 		}
 	}
+	return true;
 }
 
 // Fallback when the shmem channel is unavailable (e.g. running against an old
@@ -440,12 +976,36 @@ static void CollectFromRuntimePoses(CalibrationContext &ctx, double now)
 		s.pos = Eigen::Vector3d(m[0][3], m[1][3], m[2][3]);
 		s.vel = Eigen::Vector3d(p.vVelocity.v[0], p.vVelocity.v[1], p.vVelocity.v[2]);
 		s.angVel = Eigen::Vector3d(p.vAngularVelocity.v[0], p.vAngularVelocity.v[1], p.vAngularVelocity.v[2]);
+		if (!IsUsableEngineSample(s) || (!into.empty() && s.time <= into.back().time))
+			return;
 		into.push_back(s);
 		lastTime = now;
 	};
 
-	push(ctx.referenceID, ctx.refSamples, ctx.lastRefSampleTime);
-	push(ctx.targetID, ctx.targetSamples, ctx.lastTargetSampleTime);
+	push(ctx.calibrationReferenceID, ctx.refSamples, ctx.lastRefSampleTime);
+	push(ctx.calibrationTargetID, ctx.targetSamples, ctx.lastTargetSampleTime);
+}
+
+enum class ChaperoneOwnerStatus
+{
+	Match,
+	Mismatch,
+	Unavailable
+};
+
+static ChaperoneOwnerStatus CurrentChaperoneOwner(
+	const CalibrationContext::Chaperone &snapshot)
+{
+	if (snapshot.ownerTrackingSystem.empty() || snapshot.ownerHmdSerial.empty())
+		return ChaperoneOwnerStatus::Mismatch;
+
+	std::string trackingSystem;
+	std::string serial;
+	if (!ReadCurrentHmdIdentity(trackingSystem, serial))
+		return ChaperoneOwnerStatus::Unavailable;
+	return trackingSystem == snapshot.ownerTrackingSystem && serial == snapshot.ownerHmdSerial
+		? ChaperoneOwnerStatus::Match
+		: ChaperoneOwnerStatus::Mismatch;
 }
 
 // ---------------------------------------------------------------------------
@@ -480,19 +1040,20 @@ static void ApplyAlignmentDelta(CalibrationContext &ctx, const Eigen::Quaternion
 	if (snap && !ctx.fieldAnchors.empty())
 		ctx.fieldGeneration++;
 
-	// The chaperone snapshot's standing center maps the standing frame into
-	// the (just re-based) raw frame, so it re-anchors by D like everything
-	// else raw-frame; the wall quads are standing-frame and stay put. Without
-	// this, the ScanAndApplyProfile below could restore bounds displaced by
-	// exactly the delta we just compensated.
-	if (ctx.chaperone.valid)
-		ctx.chaperone.standingCenter =
-			questcal::DeltaTimesPose(dR, dT, ctx.chaperone.standingCenter);
+	if (snap)
+	{
+		ctx.AdvancePersistenceRevision();
+		// The chaperone snapshot's standing center maps the standing frame into
+		// the (just re-based) raw frame, so it re-anchors by D like everything
+		// else raw-frame; the wall quads are standing-frame and stay put.
+		if (ctx.chaperone.valid)
+			ctx.chaperone.standingCenter =
+				questcal::DeltaTimesPose(dR, dT, ctx.chaperone.standingCenter);
+		ctx.MarkSettingsDirty(now);
+	}
 
-	ScanAndApplyProfile(ctx);
-
-	ctx.profileSaveDirty = true;
-	ctx.profileSaveDirtyTime = now;
+	ctx.MarkProfileDirty(now);
+	SynchronizeDriverState(ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -503,6 +1064,18 @@ static void ApplyAlignmentDelta(CalibrationContext &ctx, const Eigen::Quaternion
 static void ApplyUniverseDelta(CalibrationContext &ctx, const JumpDetector::UniverseDelta &d, double now)
 {
 	ApplyAlignmentDelta(ctx, d.rotation, d.translation, /*snap=*/true, now);
+	if (d.exact && ctx.chaperone.valid)
+	{
+		// Bind to this accepted HMD sample's exact endpoint, never to the
+		// consumer's global latest value: a drained backlog may already contain
+		// a second rebase which retrigger hysteresis intentionally suppressed.
+		ctx.chaperone.worldFromDriverRotation =
+			d.worldFromDriverRotation.normalized();
+		ctx.chaperone.worldFromDriverTranslation =
+			d.worldFromDriverTranslation;
+		ctx.chaperone.worldFromDriverValid = true;
+		ctx.chaperone.baselineVerifiedThisSession = true;
+	}
 
 	ctx.jumpsCompensated++;
 	ctx.lastJumpUiTime = now;
@@ -514,6 +1087,235 @@ static void ApplyUniverseDelta(CalibrationContext &ctx, const JumpDetector::Univ
 	snprintf(buf, sizeof buf, "Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)\n",
 		d.exact ? "exact" : "estimated", yawDeg, d.translation.norm(), d.devicesAgreeing);
 	ctx.Log(buf);
+}
+
+static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
+{
+	std::vector<HmdWorldTransition> transitions;
+
+	// Drain independently of profile/snapshot state. The first valid HMD sample
+	// after startup or a ring outage is compared with the persisted baseline
+	// before any protected bounds are eligible for restoration.
+	if (!PoseHub.RingOpen())
+	{
+		CurrentHmdObservation.Reset();
+		ctx.chaperone.baselineVerifiedThisSession = false;
+	}
+	else
+	{
+		uint64_t dropped = PoseHub.Drain(
+			ChaperoneMonitorConsumer, ChaperoneMonitorScratch);
+		if (dropped > 0)
+		{
+			ctx.chaperone.baselineVerifiedThisSession = false;
+			// Keep the last WFD endpoint so a later mismatch is still visible,
+			// but never call the pose pair adjacent across an overrun or let the
+			// old observation immediately re-verify the baseline below. A later
+			// accepted HMD frame restores both freshness and adjacency.
+			CurrentHmdObservation.BreakContinuity();
+		}
+		for (const auto &sample : ChaperoneMonitorScratch)
+		{
+			HmdWorldTransition transition;
+			bool accepted = CacheHmdWorldFromDriver(sample, transition);
+			if (!accepted)
+			{
+				if (sample.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
+				{
+					// Invalid, malformed, and composed-time-inverted HMD frames are
+					// observed discontinuities, not invisible absence. Retain the last
+					// WFD endpoint/sample time so a later mismatch remains detectable,
+					// but invalidate freshness as well as adjacency. Otherwise the old,
+					// still-fresh endpoint can re-verify the baseline later in this tick.
+					CurrentHmdObservation.BreakContinuity();
+					ctx.chaperone.baselineVerifiedThisSession = false;
+				}
+				continue;
+			}
+			if (transition.worldChanged)
+			{
+				if (!transition.localPoseContinuous)
+					ctx.chaperone.baselineVerifiedThisSession = false;
+				transitions.push_back(std::move(transition));
+			}
+		}
+		if (!HasFreshHmdWorldFromDriver())
+			ctx.chaperone.baselineVerifiedThisSession = false;
+	}
+
+	// Device properties are stable for a session but comparatively expensive
+	// OpenVR calls; the tick runs at up to 50 Hz. Recheck once per second, or
+	// immediately when a newly captured/loaded snapshot changes ownership.
+	static double lastOwnerCheck = -1e9;
+	static std::string checkedTrackingSystem;
+	static std::string checkedHmdSerial;
+	static ChaperoneOwnerStatus owner = ChaperoneOwnerStatus::Unavailable;
+	if (!ctx.chaperone.valid)
+	{
+		owner = ChaperoneOwnerStatus::Unavailable;
+		checkedTrackingSystem.clear();
+		checkedHmdSerial.clear();
+		lastOwnerCheck = -1e9;
+	}
+	else if (ctx.chaperone.ownerTrackingSystem != checkedTrackingSystem ||
+		ctx.chaperone.ownerHmdSerial != checkedHmdSerial ||
+		now - lastOwnerCheck >= 1.0)
+	{
+		checkedTrackingSystem = ctx.chaperone.ownerTrackingSystem;
+		checkedHmdSerial = ctx.chaperone.ownerHmdSerial;
+		owner = CurrentChaperoneOwner(ctx.chaperone);
+		lastOwnerCheck = now;
+	}
+	if (ctx.chaperone.valid && owner == ChaperoneOwnerStatus::Mismatch)
+	{
+		ctx.DisarmChaperone();
+		ctx.MarkSettingsDirty(now);
+		ctx.ReportError(
+			"The protected chaperone belongs to a different headset/runtime and has been disarmed. "
+			"Capture it again for the current headset.\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		SaveSettings(ctx);
+		return;
+	}
+
+	if (!ctx.chaperone.valid || owner != ChaperoneOwnerStatus::Match ||
+		!HasFreshHmdWorldFromDriver())
+		return;
+
+	if (!ctx.chaperone.worldFromDriverValid)
+	{
+		ctx.DisarmChaperone();
+		ctx.MarkSettingsDirty(now);
+		ctx.ReportError(
+			"The protected chaperone has no raw-universe baseline and was disarmed. "
+			"Capture it again before restoring it.\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		SaveSettings(ctx);
+		return;
+	}
+
+	if (!questcal::WorldFromDriverChanged(
+		ctx.chaperone.worldFromDriverRotation,
+		ctx.chaperone.worldFromDriverTranslation,
+		CurrentHmdObservation.rotation,
+		CurrentHmdObservation.translation))
+	{
+		// Keep the persisted baseline fixed so sub-epsilon changes accumulate
+		// instead of being silently chased one sample at a time.
+		ctx.chaperone.baselineVerifiedThisSession = true;
+		return;
+	}
+
+	if (ctx.validProfile)
+	{
+		// Across a monitor discontinuity we know the reference universe moved,
+		// but not whether the target universe also moved. Applying only the HMD
+		// delta could silently corrupt alignment; keep both profile and room
+		// fail-closed until a fresh base calibration establishes the relation.
+		bool newlyUnsafe = !ctx.profileUniverseUnsafe;
+		bool autoApplyChanged = ctx.chaperone.autoApply;
+		ctx.profileUniverseUnsafe = true;
+		ctx.enabled = false;
+		ctx.chaperone.autoApply = false;
+		ctx.chaperone.baselineVerifiedThisSession = false;
+		if (newlyUnsafe)
+		{
+			ctx.ReportError(
+				"The headset raw universe changed while calibration monitoring had no continuity. "
+				"The profile and protected chaperone are disabled until you run a new base calibration.\n",
+				CalibrationContext::ErrorSource::Chaperone);
+			// Fail closed in the driver immediately; waiting for the periodic
+			// one-second scan would leave the previous transforms live.
+			SynchronizeDriverState(ctx);
+		}
+		if (autoApplyChanged)
+		{
+			ctx.MarkSettingsDirty(now);
+			SaveSettings(ctx);
+		}
+		return;
+	}
+
+	// With no calibration profile there is no target-space evidence available.
+	// Re-anchor the protected room only along a complete chain of adjacent HMD
+	// samples whose driver-local pose stayed continuous across each WFD change.
+	// A startup, ring outage, overrun, or inverse local-pose rewrite deliberately
+	// leaves no such chain and therefore requires a fresh room capture.
+	bool reanchored = false;
+	bool continuityLost = false;
+	double accumulatedShift = 0.0;
+	for (const auto &transition : transitions)
+	{
+		if (questcal::WorldFromDriverChanged(
+			ctx.chaperone.worldFromDriverRotation,
+			ctx.chaperone.worldFromDriverTranslation,
+			transition.previousRotation, transition.previousTranslation))
+			continue;
+
+		if (!transition.localPoseContinuous)
+		{
+			continuityLost = true;
+			break;
+		}
+
+		Eigen::Quaterniond deltaRotation;
+		Eigen::Vector3d deltaTranslation;
+		if (!questcal::WorldFromDriverDelta(
+			transition.previousRotation, transition.previousTranslation,
+			transition.currentRotation, transition.currentTranslation,
+			deltaRotation, deltaTranslation))
+		{
+			continuityLost = true;
+			break;
+		}
+
+		ctx.chaperone.standingCenter = questcal::DeltaTimesPose(
+			deltaRotation, deltaTranslation, ctx.chaperone.standingCenter);
+		ctx.chaperone.worldFromDriverRotation =
+			transition.currentRotation.normalized();
+		ctx.chaperone.worldFromDriverTranslation =
+			transition.currentTranslation;
+		ctx.chaperone.worldFromDriverValid = true;
+		ctx.chaperone.baselineVerifiedThisSession = true;
+		accumulatedShift += deltaTranslation.norm();
+		reanchored = true;
+	}
+
+	if (continuityLost || questcal::WorldFromDriverChanged(
+		ctx.chaperone.worldFromDriverRotation,
+		ctx.chaperone.worldFromDriverTranslation,
+		CurrentHmdObservation.rotation,
+		CurrentHmdObservation.translation))
+	{
+		ctx.DisarmChaperone();
+		ctx.MarkSettingsDirty(now);
+		ctx.ReportError(
+			"The headset raw universe changed without an adjacent continuous HMD pose pair. "
+			"The protected chaperone was disarmed; capture it again before restoring it.\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		SaveSettings(ctx);
+		return;
+	}
+
+	if (!reanchored)
+		return;
+
+	ctx.AdvancePersistenceRevision();
+	ctx.MarkSettingsDirty(now);
+
+	char buf[192];
+	snprintf(buf, sizeof buf,
+		"Protected chaperone re-anchored after HMD universe rebase (shift %.3f m)\n",
+		accumulatedShift);
+	ctx.Log(buf);
+	if (SaveSettings(ctx))
+		ctx.ClearError(CalibrationContext::ErrorSource::Chaperone);
+	else
+	{
+		ctx.chaperone.autoApply = false;
+		ctx.chaperone.baselineVerifiedThisSession = false;
+		ctx.MarkSettingsDirty(now);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -622,6 +1424,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		{
 			Jumps->Reset();
 			Drift->Reset();
+			ResetMonitorIngestionTimes();
 			MonitorActive = false;
 		}
 		PoseHub.DiscardBacklog(MonitorConsumer);
@@ -631,6 +1434,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	if (!MonitorActive)
 	{
 		PoseHub.DiscardBacklog(MonitorConsumer);
+		ResetMonitorIngestionTimes();
 		MonitorActive = true;
 	}
 
@@ -642,6 +1446,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		// tracking loss and could fake a discontinuity event.
 		Jumps->Reset();
 		Drift->Reset();
+		ResetMonitorIngestionTimes();
 	}
 
 	// The HMD's latest raw position, for the worn-device heuristic below.
@@ -653,17 +1458,38 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
 			continue;
+		// JumpDetector owns the observation-continuity policy and must see bad
+		// frames as well as good ones. Drift/HMD caches below remain valid-only.
 		if (ctx.referenceDeviceMask[s.deviceId])
 			Jumps->Push(s);
 
 		bool sampleValid = s.poseIsValid &&
-			s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK);
+			s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK) &&
+			IsUsableRingSample(s, QpcToSeconds);
+		double composedTime = 0.0;
+		questcal::PoseSample sample;
+		if (sampleValid)
+		{
+			composedTime = RingSampleTime(s, QpcToSeconds);
+			if (MonitorHasComposedTime[s.deviceId] &&
+				composedTime <= MonitorLastComposedTime[s.deviceId])
+				sampleValid = false;
+			else
+			{
+				sample = EngineSampleFromRing(s);
+				sampleValid = IsUsableEngineSample(sample);
+			}
+		}
+		if (!sampleValid)
+			continue;
+		MonitorHasComposedTime[s.deviceId] = true;
+		MonitorLastComposedTime[s.deviceId] = composedTime;
+
 		if (sampleValid && s.deviceId == vr::k_unTrackedDeviceIndex_Hmd &&
 			ctx.referenceDeviceMask[s.deviceId])
 		{
-			RingSampleParts p = UnpackRingSample(s);
-			lastHmdRawPos = p.wfdRot * p.drvPos + p.wfdTrans;
-			lastHmdRawTime = static_cast<double>(s.sampleTimeQpc) * QpcToSeconds;
+			lastHmdRawPos = sample.pos;
+			lastHmdRawTime = composedTime;
 		}
 
 		// Drift evidence must come from devices that anchor a universe. On the
@@ -681,19 +1507,18 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 			(s.deviceId == vr::k_unTrackedDeviceIndex_Hmd && ctx.referenceDeviceMask[s.deviceId]) ||
 			(ctx.targetDeviceMask[s.deviceId] && s.deviceId != ctx.continuousTrackerId);
 
-		if (anchorsUniverse && sampleValid && s.deviceId != vr::k_unTrackedDeviceIndex_Hmd &&
-			static_cast<double>(s.sampleTimeQpc) * QpcToSeconds - lastHmdRawTime < 3.0)
+		if (anchorsUniverse && s.deviceId != vr::k_unTrackedDeviceIndex_Hmd &&
+			composedTime - lastHmdRawTime < 3.0)
 		{
-			RingSampleParts p = UnpackRingSample(s);
-			Eigen::Vector3d rawPos = p.wfdRot * p.drvPos + p.wfdTrans;
 			Eigen::Vector3d refPos = ctx.calibratedRotationQ
-				* (ctx.calibratedScale * rawPos) + ctx.TranslationMeters();
+				* (ctx.calibratedScale * sample.pos) + ctx.TranslationMeters();
 			if ((refPos - lastHmdRawPos).norm() < 1.2)
 				anchorsUniverse = false;
 		}
 
 		if (anchorsUniverse)
-			Drift->Push(s);
+			Drift->Push(s,
+				ctx.targetDeviceMask[s.deviceId] ? ctx.calibratedScale : 1.0);
 	}
 
 	std::string note;
@@ -754,12 +1579,6 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		ctx.Log(buf);
 	}
 
-	// Debounced persistence of compensation updates.
-	if (ctx.profileSaveDirty && now - ctx.profileSaveDirtyTime > 5.0)
-	{
-		SaveProfile(ctx);
-		ctx.profileSaveDirty = false;
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -812,7 +1631,9 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	{
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
 			continue;
-		if (!s.poseIsValid || s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK))
+		if (!s.poseIsValid ||
+			s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK) ||
+			!IsUsableRingSample(s, QpcToSeconds))
 			continue;
 
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
@@ -934,10 +1755,9 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		double appliedBefore = questcal::ComputeAppliedTimeOffset(ctx.calibratedTimeOffset);
 		double appliedAfter = questcal::ComputeAppliedTimeOffset(updated);
 		ctx.calibratedTimeOffset = updated;
-		ctx.profileSaveDirty = true;
-		ctx.profileSaveDirtyTime = now;
+		ctx.MarkProfileDirty(now);
 		if (std::abs(appliedAfter - appliedBefore) > 0.0005)
-			ScanAndApplyProfile(ctx);
+			SynchronizeDriverState(ctx);
 	}
 
 	ctx.continuousState = static_cast<int>(Continuous->GetState());
@@ -983,6 +1803,8 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	// Replace an anchor measured near this spot (horizontal distance, matching
 	// the driver's XZ blend metric); otherwise append.
 	CalibrationContext::FieldAnchor anchor{ centroidRef, result.rotation, result.translation };
+	auto previousAnchors = ctx.fieldAnchors;
+	uint32_t previousGeneration = ctx.fieldGeneration;
 	size_t slot = ctx.fieldAnchors.size();
 	for (size_t i = 0; i < ctx.fieldAnchors.size(); ++i)
 	{
@@ -1009,8 +1831,14 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	}
 
 	ctx.fieldGeneration++;
-	SaveProfile(ctx);
-	ScanAndApplyProfile(ctx);
+	if (!SaveProfile(ctx))
+	{
+		ctx.fieldAnchors = std::move(previousAnchors);
+		ctx.fieldGeneration = previousGeneration;
+		ctx.Log("Field anchor was not applied because the updated profile could not be saved\n");
+		return;
+	}
+	SynchronizeDriverState(ctx);
 
 	snprintf(buf, sizeof buf, "Field anchor %zu stored at (%.2f, %.2f): %.2f deg / %.1f cm from base\n",
 		slot + 1, centroidRef.x(), centroidRef.z(), rotDeltaDeg, posDeltaM * 100.0);
@@ -1058,25 +1886,30 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// hand-held calibration from arming continuous mode; on failure any
 	// previously learned mount (which did not move just because this solve
 	// happened without the tracker) is kept.
-	if (result.valid && !asAnchor && ctx.referenceID == vr::k_unTrackedDeviceIndex_Hmd)
+	if (result.valid && !asAnchor && ctx.calibrationReferenceID == vr::k_unTrackedDeviceIndex_Hmd)
 	{
 		questcal::ContinuousAlignment::Config contCfg;
 		questcal::MountExtrinsic extrinsic;
 		if (questcal::ContinuousAlignment::DeriveMountExtrinsic(
 			ctx.refSamples, ctx.targetSamples, result, contCfg, extrinsic))
 		{
-			ctx.mountExtrinsic = extrinsic;
-
-			char serial[256] = { 0 };
-			vr::VRSystem()->GetStringTrackedDeviceProperty(
-				ctx.targetID, vr::Prop_SerialNumber_String, serial, sizeof serial);
-			if (serial[0])
+			std::string serial;
+			if (ReadTrackedDeviceString(ctx.calibrationTargetID,
+				vr::Prop_SerialNumber_String, serial))
+			{
+				// The learned transform and physical-device identity are one
+				// credential. Commit neither if the checked serial read failed.
+				ctx.mountExtrinsic = extrinsic;
 				ctx.continuousTrackerSerial = serial;
-
-			snprintf(buf, sizeof buf,
-				"Mount offset learned for continuous calibration (%.2f deg / %.1f mm spread, %zu pairs)\n",
-				extrinsic.rotRmsDeg, extrinsic.posRmsM * 1000.0, extrinsic.pairs);
-			ctx.Log(buf);
+				snprintf(buf, sizeof buf,
+					"Mount offset learned for continuous calibration (%.2f deg / %.1f mm spread, %zu pairs)\n",
+					extrinsic.rotRmsDeg, extrinsic.posRmsM * 1000.0, extrinsic.pairs);
+				ctx.Log(buf);
+			}
+			else
+			{
+				ctx.Log("The mounted target's serial could not be read safely -- keeping the previous mount offset\n");
+			}
 		}
 		else if (ctx.continuousEnabled)
 		{
@@ -1127,6 +1960,10 @@ static void FinishCalibration(CalibrationContext &ctx)
 		return;
 	}
 
+	// Commit the tracking-system identity atomically with the successful base
+	// solve. The UI's pending selection must never redirect an old transform.
+	ctx.referenceTrackingSystem = ctx.calibrationReferenceTrackingSystem;
+	ctx.targetTrackingSystem = ctx.calibrationTargetTrackingSystem;
 	ctx.SetCalibration(result.rotation, result.translation, result.scale);
 	ctx.calibratedTimeOffset = result.timeOffset;
 	ctx.validProfile = true;
@@ -1155,9 +1992,25 @@ static void FinishCalibration(CalibrationContext &ctx)
 	ctx.autoCorrectionsApplied = 0;
 	Drift->Reset();
 
-	SaveProfile(ctx);
-	ScanAndApplyProfile(ctx);
-	ctx.Log("Finished calibration, profile saved\n");
+	bool priorUniverseUnsafe = ctx.profileUniverseUnsafe;
+	ctx.profileUniverseUnsafe = false;
+	ctx.AdvancePersistenceRevision();
+	if (ctx.chaperone.valid &&
+		(ctx.chaperone.ownerTrackingSystem != ctx.referenceTrackingSystem ||
+			priorUniverseUnsafe ||
+			!ChaperoneBaselineIsCurrent(ctx.chaperone)))
+	{
+		ctx.DisarmChaperone();
+		ctx.ReportError(
+			"The protected chaperone is not anchored to the newly calibrated reference universe. "
+			"It has been disarmed; capture it again for this profile.\n",
+			CalibrationContext::ErrorSource::Chaperone);
+	}
+	ctx.MarkProfileAndSettingsDirty(ctx.timeLastTick);
+	bool saved = SaveDirtyPersistence(ctx);
+	SynchronizeDriverState(ctx);
+	ctx.Log(saved ? "Finished calibration, profile and settings saved\n"
+		: "Finished calibration and applied it for this session, but all persistence writes did not complete\n");
 
 	if (result.scale != 1.0)
 	{
@@ -1166,26 +2019,52 @@ static void FinishCalibration(CalibrationContext &ctx)
 	}
 }
 
-void StartCalibration()
+bool StartCalibration()
 {
+	if (!questcal::IsValidTrackingSystemPair(
+		CalCtx.pendingReferenceTrackingSystem,
+		CalCtx.pendingTargetTrackingSystem))
+	{
+		CalCtx.ReportError("Choose two different tracking systems before starting calibration\n");
+		return false;
+	}
+
+	CalCtx.calibrationReferenceTrackingSystem = CalCtx.pendingReferenceTrackingSystem;
+	CalCtx.calibrationTargetTrackingSystem = CalCtx.pendingTargetTrackingSystem;
+	CalCtx.calibrationReferenceID = CalCtx.referenceID;
+	CalCtx.calibrationTargetID = CalCtx.targetID;
 	CalCtx.collectAsAnchor = false;
 	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
 	CalCtx.messages.clear();
+	return true;
 }
 
-void StartAnchorCalibration()
+bool StartAnchorCalibration()
 {
-	StartCalibration();
+	if (CalCtx.pendingReferenceTrackingSystem != CalCtx.referenceTrackingSystem ||
+		CalCtx.pendingTargetTrackingSystem != CalCtx.targetTrackingSystem)
+	{
+		CalCtx.ReportError("Select the active profile's tracking systems before collecting a field anchor\n");
+		return false;
+	}
+	if (!StartCalibration())
+		return false;
 	CalCtx.collectAsAnchor = true;
+	return true;
 }
 
 void CalibrationTick(double time)
 {
+	auto &ctx = CalCtx;
+	// Persistence is independent of SteamVR, profile validity, and the current
+	// UI/calibration state. In particular, settings-only retries must continue
+	// while the runtime is unavailable or the advanced editor is open.
+	PersistenceTick(ctx, time);
+
 	if (!vr::VRSystem())
 		return;
 
-	auto &ctx = CalCtx;
 	if ((time - ctx.timeLastTick) < 0.02)
 		return;
 
@@ -1196,6 +2075,7 @@ void CalibrationTick(double time)
 	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseRawAndUncalibrated, 0.0f, ctx.devicePoses, vr::k_unMaxTrackedDeviceCount);
 
 	RuntimeMonitorTick(ctx, time);
+	ChaperoneMonitorTick(ctx, time);
 	// After the monitors: an accepted jump must land (and reset the continuous
 	// window) before the continuous loop reads the calibration this tick.
 	ContinuousTick(ctx, time);
@@ -1206,7 +2086,8 @@ void CalibrationTick(double time)
 
 		if ((time - ctx.timeLastScan) >= 1.0)
 		{
-			ScanAndApplyProfile(ctx);
+			SynchronizeDriverState(ctx);
+			CheckProtectedChaperone(ctx);
 			ctx.timeLastScan = time;
 		}
 		return;
@@ -1214,14 +2095,14 @@ void CalibrationTick(double time)
 
 	if (ctx.state == CalibrationState::Editing)
 	{
-		ctx.wantedUpdateInterval = 0.1;
+		ctx.wantedUpdateInterval = 1.0;
 
-		if ((time - ctx.timeLastScan) >= 0.1)
+		if ((time - ctx.timeLastScan) >= 1.0)
 		{
-			// Live edits are intentional: every re-apply snaps rather than
-			// letting the base slew smear a user's drag over seconds.
-			ctx.baseGeneration++;
-			ScanAndApplyProfile(ctx);
+			// Editor values are draft-only. Keep reasserting the last committed
+			// profile in case vrserver restarts while the editor is open.
+			SynchronizeDriverState(ctx);
+			CheckProtectedChaperone(ctx);
 			ctx.timeLastScan = time;
 		}
 		return;
@@ -1231,23 +2112,23 @@ void CalibrationTick(double time)
 	{
 		bool ok = true;
 
-		if (ctx.referenceID >= vr::k_unMaxTrackedDeviceCount)
+		if (ctx.calibrationReferenceID >= vr::k_unMaxTrackedDeviceCount)
 		{
 			ctx.Log("Missing reference device\n");
 			ok = false;
 		}
-		else if (!ctx.devicePoses[ctx.referenceID].bPoseIsValid)
+		else if (!ctx.devicePoses[ctx.calibrationReferenceID].bPoseIsValid)
 		{
 			ctx.Log("Reference device is not tracking\n");
 			ok = false;
 		}
 
-		if (ctx.targetID >= vr::k_unMaxTrackedDeviceCount)
+		if (ctx.calibrationTargetID >= vr::k_unMaxTrackedDeviceCount)
 		{
 			ctx.Log("Missing target device\n");
 			ok = false;
 		}
-		else if (!ctx.devicePoses[ctx.targetID].bPoseIsValid)
+		else if (!ctx.devicePoses[ctx.calibrationTargetID].bPoseIsValid)
 		{
 			ctx.Log("Target device is not tracking\n");
 			ok = false;
@@ -1260,17 +2141,43 @@ void CalibrationTick(double time)
 			return;
 		}
 
-		char referenceSerial[256] = { 0 }, targetSerial[256] = { 0 };
-		vr::VRSystem()->GetStringTrackedDeviceProperty(ctx.referenceID, vr::Prop_SerialNumber_String, referenceSerial, 256);
-		vr::VRSystem()->GetStringTrackedDeviceProperty(ctx.targetID, vr::Prop_SerialNumber_String, targetSerial, 256);
+		auto matchesCapturedSystem = [](uint32_t id, const std::string &expected)
+		{
+			std::string system;
+			return ReadTrackedDeviceString(id,
+				vr::Prop_TrackingSystemName_String, system) && expected == system;
+		};
+		if (!matchesCapturedSystem(ctx.calibrationReferenceID,
+			ctx.calibrationReferenceTrackingSystem) ||
+			!matchesCapturedSystem(ctx.calibrationTargetID,
+				ctx.calibrationTargetTrackingSystem))
+		{
+			ctx.state = CalibrationState::None;
+			ctx.Log("Selected devices no longer belong to the chosen tracking systems; calibration aborted\n");
+			return;
+		}
+
+		std::string referenceSerial;
+		std::string targetSerial;
+		ReadTrackedDeviceString(ctx.calibrationReferenceID,
+			vr::Prop_SerialNumber_String, referenceSerial);
+		ReadTrackedDeviceString(ctx.calibrationTargetID,
+			vr::Prop_SerialNumber_String, targetSerial);
 
 		char buf[256];
-		snprintf(buf, sizeof buf, "Reference device ID: %u, serial: %s\n", ctx.referenceID, referenceSerial);
+		snprintf(buf, sizeof buf, "Reference device ID: %u, serial: %s\n",
+			ctx.calibrationReferenceID, referenceSerial.c_str());
 		ctx.Log(buf);
-		snprintf(buf, sizeof buf, "Target device ID: %u, serial: %s\n", ctx.targetID, targetSerial);
+		snprintf(buf, sizeof buf, "Target device ID: %u, serial: %s\n",
+			ctx.calibrationTargetID, targetSerial.c_str());
 		ctx.Log(buf);
 
-		ResetAndDisableOffsets(ctx.targetID);
+		if (!ResetAndDisableOffsets(ctx, ctx.calibrationTargetID))
+		{
+			ctx.state = CalibrationState::None;
+			ctx.Log("Could not disable the existing target transform; calibration aborted\n");
+			return;
+		}
 
 		ctx.ClearSampleBuffers();
 		if (PoseHub.RingOpen())
@@ -1289,7 +2196,7 @@ void CalibrationTick(double time)
 		ctx.state = CalibrationState::Collecting;
 		ctx.wantedUpdateInterval = 0.0;
 
-		if (ctx.referenceID == vr::k_unTrackedDeviceIndex_Hmd)
+		if (ctx.calibrationReferenceID == vr::k_unTrackedDeviceIndex_Hmd)
 			ctx.Log("Wear the headset with the tracker firmly mounted.\nSlowly turn and tilt your head in wide arcs, and lean side to side.\n");
 		else
 			ctx.Log("Hold the devices firmly together.\nSlowly move them in wide circles, both side to side and up and down.\n");
@@ -1298,7 +2205,10 @@ void CalibrationTick(double time)
 
 	// ---- Collecting ----
 	if (PoseHub.RingOpen())
-		CollectFromPoseRing(ctx, time);
+	{
+		if (!CollectFromPoseRing(ctx, time))
+			return;
+	}
 	else
 		CollectFromRuntimePoses(ctx, time);
 
@@ -1321,24 +2231,129 @@ void CalibrationTick(double time)
 		FinishCalibration(ctx);
 }
 
-void LoadChaperoneBounds()
+static bool FiniteChaperone(const CalibrationContext::Chaperone &snapshot)
 {
-	vr::VRChaperoneSetup()->RevertWorkingCopy();
+	return questcal::IsPlausibleChaperone(snapshot.geometry,
+		snapshot.standingCenter, snapshot.playSpaceSize);
+}
+
+static bool FailClosedChaperoneCapture(const std::string &message)
+{
+	// A failed replacement means the previously captured room may now be
+	// stale. Keep its data for diagnosis/manual recapture, but make it neither
+	// auto- nor manually restorable until a current baseline is verified.
+	bool persistDisarm = CalCtx.chaperone.valid;
+	if (persistDisarm)
+	{
+		CalCtx.chaperone.autoApply = false;
+		CalCtx.chaperone.baselineVerifiedThisSession = false;
+		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+	}
+	CalCtx.ReportError(message, CalibrationContext::ErrorSource::Chaperone);
+	if (persistDisarm && !SaveSettings(CalCtx))
+	{
+		// SaveSettings preserves dirty on a failed record write; restate it for
+		// failures that occurred before the low-level Settings write as well.
+		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+	}
+	return false;
+}
+
+bool LoadChaperoneBounds()
+{
+	if (CalCtx.profileUniverseUnsafe)
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: run a new base calibration first because the previous profile lost raw-universe continuity\n");
+
+	auto setup = vr::VRChaperoneSetup();
+	if (!setup)
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: OpenVR chaperone setup is unavailable\n");
+
+	setup->RevertWorkingCopy();
+	CalibrationContext::Chaperone snapshot;
+	snapshot.autoApply = true;
+	if (!ReadCurrentHmdIdentity(snapshot.ownerTrackingSystem, snapshot.ownerHmdSerial))
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: the current headset/runtime identity is unavailable\n");
+	if (CalCtx.validProfile &&
+		snapshot.ownerTrackingSystem != CalCtx.referenceTrackingSystem)
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: the active profile uses a different reference "
+			"tracking system than the headset which owns this play area\n");
+	if (!CopyCurrentHmdWorldFromDriver(snapshot))
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: no fresh validated HMD raw-universe pose is available yet\n");
 
 	uint32_t quadCount = 0;
-	vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(nullptr, &quadCount);
+	if (!setup->GetLiveCollisionBoundsInfo(nullptr, &quadCount) || quadCount > 16384)
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: failed to read the live wall count\n");
 
-	CalCtx.chaperone.geometry.resize(quadCount);
+	snapshot.geometry.resize(quadCount);
 
 	if (quadCount != 0)
 	{
-		vr::VRChaperoneSetup()->GetLiveCollisionBoundsInfo(&CalCtx.chaperone.geometry[0], &quadCount);
+		uint32_t returnedCount = quadCount;
+		if (!setup->GetLiveCollisionBoundsInfo(snapshot.geometry.data(), &returnedCount) ||
+			returnedCount > quadCount)
+			return FailClosedChaperoneCapture(
+				"Could not protect the chaperone: failed to read the live walls\n");
+		snapshot.geometry.resize(returnedCount);
+		quadCount = returnedCount;
 	}
 
-	vr::VRChaperoneSetup()->GetWorkingStandingZeroPoseToRawTrackingPose(&CalCtx.chaperone.standingCenter);
-	vr::VRChaperoneSetup()->GetWorkingPlayAreaSize(&CalCtx.chaperone.playSpaceSize.v[0], &CalCtx.chaperone.playSpaceSize.v[1]);
-	CalCtx.chaperone.valid = true;
-	CalCtx.chaperone.copyUnixTime = static_cast<double>(std::time(nullptr));
+	if (!setup->GetWorkingStandingZeroPoseToRawTrackingPose(&snapshot.standingCenter) ||
+		!setup->GetWorkingPlayAreaSize(&snapshot.playSpaceSize.v[0], &snapshot.playSpaceSize.v[1]) ||
+		!FiniteChaperone(snapshot))
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: play-area data is missing or invalid\n");
+
+	std::time_t copyTime = std::time(nullptr);
+	double copyUnixTime = static_cast<double>(copyTime);
+	if (copyTime == static_cast<std::time_t>(-1) ||
+		!std::isfinite(copyUnixTime) || copyUnixTime < 0.0 ||
+		copyUnixTime > protocol::limits::MaxPlausibleUnixTimeSeconds)
+		return FailClosedChaperoneCapture(
+			"Could not protect the chaperone: the capture time is unavailable or invalid\n");
+
+	snapshot.copyUnixTime = copyUnixTime;
+	snapshot.valid = true;
+
+	// Replacement is a two-stage transaction. Persistently disarm any valid old
+	// snapshot before replacing it in memory, so a failure writing the new
+	// snapshot cannot resurrect an older armed record after restart. Do this even
+	// when the in-memory copy is already disarmed: its prior disarm write may have
+	// failed, leaving the registry copy armed.
+	if (CalCtx.chaperone.valid)
+	{
+		CalCtx.chaperone.autoApply = false;
+		CalCtx.chaperone.baselineVerifiedThisSession = false;
+		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+		if (!SaveSettings(CalCtx))
+		{
+			CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+			CalCtx.ReportError(
+				"Could not protect the chaperone: the existing snapshot could not be "
+				"safely disarmed before replacement; no new snapshot was installed\n",
+				CalibrationContext::ErrorSource::Chaperone);
+			return false;
+		}
+	}
+
+	CalCtx.chaperone = std::move(snapshot);
+	if (!SaveSettings(CalCtx))
+	{
+		// Do not resurrect the previous (possibly stale and armed) snapshot.
+		// Retain the newly captured data only in a fail-closed state so the
+		// centralized retry can persist it without ever auto-restoring it first.
+		CalCtx.chaperone.autoApply = false;
+		CalCtx.chaperone.baselineVerifiedThisSession = false;
+		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+		CalCtx.Log("The new chaperone snapshot was kept disarmed because it could not be persisted\n");
+		return false;
+	}
+	CalCtx.ClearError(CalibrationContext::ErrorSource::Chaperone);
 
 	char buf[128];
 	if (quadCount == 0)
@@ -1349,16 +2364,101 @@ void LoadChaperoneBounds()
 			"Chaperone snapshot saved: %u wall segment(s), %.1f x %.1f m play area\n",
 			quadCount, CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1]);
 	CalCtx.Log(buf);
+	return true;
 }
 
-void ApplyChaperoneBounds()
+bool ApplyChaperoneBounds(bool logSuccess)
 {
-	vr::VRChaperoneSetup()->RevertWorkingCopy();
+	if (!CalCtx.chaperone.valid || !FiniteChaperone(CalCtx.chaperone))
+	{
+		CalCtx.ReportError("Could not restore the chaperone: the protected snapshot is invalid\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		return false;
+	}
+	ChaperoneOwnerStatus owner = CurrentChaperoneOwner(CalCtx.chaperone);
+	if (owner == ChaperoneOwnerStatus::Unavailable)
+	{
+		CalCtx.ReportError(
+			"Could not restore the chaperone: the current headset/runtime identity is unavailable\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		return false;
+	}
+	if (owner == ChaperoneOwnerStatus::Mismatch)
+	{
+		CalCtx.DisarmChaperone();
+		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+		CalCtx.ReportError(
+			"Could not restore the chaperone: the snapshot belongs to a different headset/runtime. "
+			"It has been disarmed; capture it again for this headset.\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		SaveSettings(CalCtx);
+		return false;
+	}
+	if (!ChaperoneBaselineIsCurrent(CalCtx.chaperone))
+	{
+		CalCtx.ReportError(
+			"Could not restore the chaperone: its raw-universe baseline has not been verified against a current HMD pose\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		return false;
+	}
+	auto setup = vr::VRChaperoneSetup();
+	if (!setup)
+	{
+		CalCtx.ReportError("Could not restore the chaperone: OpenVR chaperone setup is unavailable\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		return false;
+	}
+
+	setup->RevertWorkingCopy();
+	if (!CalCtx.chaperone.geometry.empty())
+		setup->SetWorkingCollisionBoundsInfo(CalCtx.chaperone.geometry.data(),
+			static_cast<uint32_t>(CalCtx.chaperone.geometry.size()));
+	setup->SetWorkingStandingZeroPoseToRawTrackingPose(&CalCtx.chaperone.standingCenter);
+	setup->SetWorkingPlayAreaSize(CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1]);
+	if (!setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live))
+	{
+		setup->RevertWorkingCopy();
+		CalCtx.ReportError("Could not restore the chaperone: SteamVR rejected the update\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		return false;
+	}
+
+	// Verify every value that OpenVR exposes after commit. Setters are void,
+	// so this is the only truthful way to know the live update landed.
+	bool verified = true;
 	if (!CalCtx.chaperone.geometry.empty())
 	{
-		vr::VRChaperoneSetup()->SetWorkingCollisionBoundsInfo(&CalCtx.chaperone.geometry[0], (uint32_t) CalCtx.chaperone.geometry.size());
+		uint32_t count = 0;
+		verified = setup->GetLiveCollisionBoundsInfo(nullptr, &count) &&
+			count == CalCtx.chaperone.geometry.size();
+		if (verified)
+		{
+			std::vector<vr::HmdQuad_t> live(count);
+			verified = setup->GetLiveCollisionBoundsInfo(live.data(), &count) &&
+				questcal::QuadsMatch(live, CalCtx.chaperone.geometry, 0.002f);
+		}
 	}
-	vr::VRChaperoneSetup()->SetWorkingStandingZeroPoseToRawTrackingPose(&CalCtx.chaperone.standingCenter);
-	vr::VRChaperoneSetup()->SetWorkingPlayAreaSize(CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1]);
-	vr::VRChaperoneSetup()->CommitWorkingCopy(vr::EChaperoneConfigFile_Live);
+	setup->RevertWorkingCopy();
+	vr::HmdMatrix34_t standing = {};
+	vr::HmdVector2_t size = {};
+	verified = verified && setup->GetWorkingStandingZeroPoseToRawTrackingPose(&standing) &&
+		setup->GetWorkingPlayAreaSize(&size.v[0], &size.v[1]);
+	for (int row = 0; verified && row < 3; ++row)
+		for (int column = 0; verified && column < 4; ++column)
+			verified = std::abs(standing.m[row][column] -
+				CalCtx.chaperone.standingCenter.m[row][column]) <= 0.002f;
+	verified = verified && std::abs(size.v[0] - CalCtx.chaperone.playSpaceSize.v[0]) <= 0.002f &&
+		std::abs(size.v[1] - CalCtx.chaperone.playSpaceSize.v[1]) <= 0.002f;
+	if (!verified)
+	{
+		CalCtx.ReportError("Could not verify the restored chaperone; check SteamVR Room Setup before relying on it\n",
+			CalibrationContext::ErrorSource::Chaperone);
+		return false;
+	}
+	if (logSuccess)
+	{
+		CalCtx.Log("Protected chaperone restored successfully\n");
+	}
+	CalCtx.ClearError(CalibrationContext::ErrorSource::Chaperone);
+	return true;
 }

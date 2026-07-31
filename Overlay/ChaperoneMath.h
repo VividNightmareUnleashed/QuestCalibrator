@@ -23,8 +23,52 @@
 #include <cmath>
 #include <vector>
 
+#include "ProfileValidation.h"
+#include "../common/TransformLimits.h"
+
 namespace questcal
 {
+
+// Derive the same gravity-preserving (yaw + translation) raw-universe delta
+// used by JumpDetector. worldFromDriver may contain a tiny tilt residual, but
+// applying that tilt to a room-scale calibration would move gravity; retain
+// only the twist around +Y and make translation self-consistent with it.
+inline bool WorldFromDriverDelta(
+	const Eigen::Quaterniond &oldRotation, const Eigen::Vector3d &oldTranslation,
+	const Eigen::Quaterniond &newRotation, const Eigen::Vector3d &newTranslation,
+	Eigen::Quaterniond &deltaRotation, Eigen::Vector3d &deltaTranslation)
+{
+	if (!IsValidRotation(oldRotation) || !IsValidRotation(newRotation) ||
+		!IsBoundedVector(oldTranslation, protocol::limits::MaxAbsTranslationMeters) ||
+		!IsBoundedVector(newTranslation, protocol::limits::MaxAbsTranslationMeters))
+		return false;
+
+	Eigen::Quaterniond fullDelta =
+		(newRotation.normalized() * oldRotation.normalized().conjugate()).normalized();
+	Eigen::Quaterniond yaw(fullDelta.w(), 0.0, fullDelta.y(), 0.0);
+	if (yaw.squaredNorm() <= 1e-12)
+		yaw = Eigen::Quaterniond::Identity();
+	else
+		yaw.normalize();
+
+	deltaRotation = yaw;
+	deltaTranslation = newTranslation - yaw * oldTranslation;
+	return IsValidRotation(deltaRotation) &&
+		IsBoundedVector(deltaTranslation, protocol::limits::MaxAbsTranslationMeters);
+}
+
+inline bool WorldFromDriverChanged(
+	const Eigen::Quaterniond &oldRotation, const Eigen::Vector3d &oldTranslation,
+	const Eigen::Quaterniond &newRotation, const Eigen::Vector3d &newTranslation,
+	double rotationEpsilonRadians = 1e-5, double translationEpsilonMeters = 1e-4)
+{
+	if (!IsValidRotation(oldRotation) || !IsValidRotation(newRotation) ||
+		!IsFinite(oldTranslation) || !IsFinite(newTranslation))
+		return true;
+	return oldRotation.normalized().angularDistance(newRotation.normalized()) >
+			rotationEpsilonRadians ||
+		(newTranslation - oldTranslation).norm() > translationEpsilonMeters;
+}
 
 // Left-compose a rigid universe delta (R, T) onto a standing-center pose:
 // out = [R|T] * m, i.e. the same physical pose expressed in the post-jump
@@ -68,6 +112,47 @@ inline bool QuadsMatch(const std::vector<vr::HmdQuad_t> &a,
 				if (std::fabs(a[i].vCorners[c].v[k] - b[i].vCorners[c].v[k]) > epsMeters)
 					return false;
 
+	return true;
+}
+
+// Broad trust-boundary validation for persisted/live room geometry. Values
+// are intentionally generous enough for warehouses, while rejecting FLT_MAX
+// payloads and non-rigid standing transforms before they can be auto-committed.
+inline bool IsPlausibleChaperone(const std::vector<vr::HmdQuad_t> &geometry,
+	const vr::HmdMatrix34_t &standingCenter, const vr::HmdVector2_t &playSpaceSize)
+{
+	for (float size : playSpaceSize.v)
+		if (!std::isfinite(size) || size <= 0.0f ||
+			size > protocol::limits::MaxPlayAreaSizeMeters)
+			return false;
+
+	Eigen::Matrix3d basis;
+	for (int row = 0; row < 3; ++row)
+	{
+		for (int column = 0; column < 3; ++column)
+		{
+			float value = standingCenter.m[row][column];
+			if (!std::isfinite(value) || std::abs(value) > 2.0f)
+				return false;
+			basis(row, column) = value;
+		}
+		float translation = standingCenter.m[row][3];
+		if (!std::isfinite(translation) ||
+			std::abs(translation) > protocol::limits::MaxAbsChaperoneCoordinateMeters)
+			return false;
+	}
+	Eigen::Matrix3d orthogonality = basis.transpose() * basis;
+	if ((orthogonality - Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff() >
+		protocol::limits::MaxStandingBasisError ||
+		std::abs(basis.determinant() - 1.0) > protocol::limits::MaxStandingBasisError)
+		return false;
+
+	for (const auto &quad : geometry)
+		for (const auto &corner : quad.vCorners)
+			for (float value : corner.v)
+				if (!std::isfinite(value) ||
+					std::abs(value) > protocol::limits::MaxAbsChaperoneCoordinateMeters)
+					return false;
 	return true;
 }
 

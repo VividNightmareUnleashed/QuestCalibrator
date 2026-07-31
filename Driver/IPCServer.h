@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "../common/Protocol.h"
+#include "IPCProtocolGate.h"
 
 #include <atomic>
 #include <thread>
@@ -17,11 +18,14 @@ public:
 	IPCServer(ServerTrackedDeviceProvider *driver) : driver(driver) { }
 	~IPCServer();
 
-	void Run();
+	// Returns only after the first listener has been created successfully. A
+	// false result means no server thread owns the IPC resources.
+	bool Run();
 	void Stop();
 
 private:
-	void HandleRequest(const protocol::Request &request, protocol::Response &response);
+	void HandleRequest(const protocol::Request &request, protocol::Response &response,
+		questcal::ipc::ConnectionState &connection);
 
 	struct PipeInstance
 	{
@@ -31,6 +35,7 @@ private:
 
 		protocol::Request request;
 		protocol::Response response;
+		questcal::ipc::ConnectionState connection;
 	};
 
 	PipeInstance *CreatePipeInstance(HANDLE pipe);
@@ -39,6 +44,7 @@ private:
 
 	static void RunThread(IPCServer *_this);
 	static bool CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending);
+	static void CloseListenerInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending);
 	static void WINAPI CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED overlap);
 	static void WINAPI CompletedWriteCallback(DWORD err, DWORD bytesWritten, LPOVERLAPPED overlap);
 
@@ -51,6 +57,9 @@ private:
 	std::set<PipeInstance *> pipes;
 	HANDLE connectEvent = nullptr;
 	HANDLE stopEvent = nullptr;
+	OVERLAPPED connectOverlap{};
+	HANDLE listenerPipe = INVALID_HANDLE_VALUE;
+	bool listenerConnectPending = false;
 
 	ServerTrackedDeviceProvider *driver;
 };

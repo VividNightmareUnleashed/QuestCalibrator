@@ -2,6 +2,7 @@
 #include "UserInterface.h"
 #include "Calibration.h"
 #include "Configuration.h"
+#include "ProfileValidation.h"
 #include "../common/Version.h"
 
 #include <algorithm>
@@ -9,9 +10,9 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <limits>
 #include <map>
 #include <string>
-#include <thread>
 #include <vector>
 #include <imgui/imgui.h>
 #include <imgui/imgui_internal.h>
@@ -31,10 +32,10 @@ struct VRDevice
 {
 	int id = -1;
 	vr::TrackedDeviceClass deviceClass;
-	std::string model = "";
-	std::string serial = "";
-	std::string trackingSystem = "";
-	std::string iconPath = "";   // absolute path to the SteamVR device icon, matched to state (ready/low/off)
+	std::string model;
+	std::string serial;
+	std::string trackingSystem;
+	std::string iconPath;   // absolute path to the SteamVR device icon, matched to state (ready/low/off)
 	vr::ETrackedControllerRole controllerRole = vr::TrackedControllerRole_Invalid;
 	bool connected = true;
 	float battery = -1.0f;       // 0..1, or -1 when the device reports none
@@ -53,8 +54,52 @@ static const float kLowBattery = 0.15f;
 
 VRState LoadVRState();
 static void BuildSpacesSection(const VRState &state);
-static void BuildProfileEditor();
+static bool BuildProfileEditor();
+static bool SaveProfileEditorDraft();
+static void ResetTransformEditorDraft();
 static void BuildMenu(const VRState &state, bool runningInOverlay);
+
+template<typename T>
+static void SaveSettingOrRestore(T &value, const T &previous)
+{
+	if (!SaveSettings(CalCtx))
+		value = previous;
+}
+
+struct IdentifyPulseState
+{
+	bool active = false;
+	uint32_t targetId = vr::k_unTrackedDeviceIndexInvalid;
+	uint32_t referenceId = vr::k_unTrackedDeviceIndexInvalid;
+	unsigned pulsesRemaining = 0;
+	double nextPulseTime = 0.0;
+};
+
+static IdentifyPulseState g_identifyPulse;
+
+static void UpdateIdentifyPulse(double now)
+{
+	if (!g_identifyPulse.active)
+		return;
+	auto system = vr::VRSystem();
+	if (!system || g_identifyPulse.pulsesRemaining == 0)
+	{
+		g_identifyPulse = IdentifyPulseState();
+		return;
+	}
+
+	// Main-loop ownership makes shutdown safe. Wake at the original 5 ms
+	// cadence without creating detached workers or overlapping pulse trains.
+	CalCtx.wantedUpdateInterval = std::min(CalCtx.wantedUpdateInterval, 0.005);
+	if (now < g_identifyPulse.nextPulseTime)
+		return;
+	if (g_identifyPulse.targetId < vr::k_unMaxTrackedDeviceCount)
+		system->TriggerHapticPulse(g_identifyPulse.targetId, 0, 2000);
+	if (g_identifyPulse.referenceId < vr::k_unMaxTrackedDeviceCount)
+		system->TriggerHapticPulse(g_identifyPulse.referenceId, 0, 2000);
+	--g_identifyPulse.pulsesRemaining;
+	g_identifyPulse.nextPulseTime = now + 0.005;
+}
 
 // ---------------------------------------------------------------------------
 // Palette + theme
@@ -763,9 +808,16 @@ static ImVec4 RatingColor(CalRating r)
 
 static void FormatUnixAge(char *buf, size_t len, double unixTime)
 {
-	if (unixTime > 0.0)
+	double now = static_cast<double>(std::time(nullptr));
+	if (std::isfinite(unixTime) && unixTime > 0.0 && now > 0.0)
 	{
-		double hours = (static_cast<double>(std::time(nullptr)) - unixTime) / 3600.0;
+		double seconds = now - unixTime;
+		if (seconds < -300.0)
+		{
+			snprintf(buf, len, "time is in the future");
+			return;
+		}
+		double hours = std::max(0.0, seconds) / 3600.0;
 		if (hours < 1.0)
 			snprintf(buf, len, "%d min ago", static_cast<int>(hours * 60.0));
 		else if (hours < 48.0)
@@ -784,13 +836,11 @@ static void FormatCalibrationAge(char *buf, size_t len)
 
 // Snapshot the live chaperone and arm auto-restore (the "protect" action).
 // In preview mode there is no VR system to read bounds from.
-static void ProtectChaperone()
+static bool ProtectChaperone()
 {
 	if (g_uiPreviewMode)
-		return;
-	LoadChaperoneBounds();
-	CalCtx.chaperone.autoApply = true;
-	SaveProfile(CalCtx);
+		return true;
+	return LoadChaperoneBounds();
 }
 
 // When the one-time drift warning modal was opened; gates its accept button.
@@ -985,6 +1035,7 @@ static void BuildDeviceList(const VRState &state, int &selected, const std::stri
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 
 	std::vector<const VRDevice *> devices;
+	devices.reserve(state.devices.size());
 	for (auto &device : state.devices)
 		if (device.trackingSystem == system)
 			devices.push_back(&device);
@@ -1062,23 +1113,26 @@ static void BuildSpacesSection(const VRState &state)
 		return;
 	}
 
-	// -- Tracking-system pairing logic (unchanged from the original) --
+	// The panes edit pending calibration choices. Active profile system names
+	// are committed only by FinishCalibration after a successful base solve.
 	int currentReferenceSystem = -1;
 	int currentTargetSystem = -1;
 	int firstReferenceSystemNotTargetSystem = -1;
 
 	std::vector<std::string> referenceRaw, referenceDisp;
+	referenceRaw.reserve(state.trackingSystems.size());
+	referenceDisp.reserve(state.trackingSystems.size());
 	for (auto &str : state.trackingSystems)
 	{
-		if (str == CalCtx.referenceTrackingSystem)
+		if (str == CalCtx.pendingReferenceTrackingSystem)
 			currentReferenceSystem = (int)referenceRaw.size();
-		else if (firstReferenceSystemNotTargetSystem == -1 && str != CalCtx.targetTrackingSystem)
+		else if (firstReferenceSystemNotTargetSystem == -1 && str != CalCtx.pendingTargetTrackingSystem)
 			firstReferenceSystemNotTargetSystem = (int)referenceRaw.size();
 		referenceRaw.push_back(str);
 		referenceDisp.push_back(FriendlySystemName(str));
 	}
 
-	if (currentReferenceSystem == -1 && CalCtx.referenceTrackingSystem == "")
+	if (currentReferenceSystem == -1)
 		currentReferenceSystem = firstReferenceSystemNotTargetSystem;
 
 	float cw = ImGui::GetWindowContentRegionWidth();
@@ -1092,6 +1146,7 @@ static void BuildSpacesSection(const VRState &state)
 	ImGui::BeginGroup();
 	SectionLabel("REFERENCE SPACE");
 	std::vector<const char *> referenceItems;
+	referenceItems.reserve(referenceDisp.size());
 	for (auto &s : referenceDisp)
 		referenceItems.push_back(s.c_str());
 	ImGui::PushItemWidth(paneW);
@@ -1100,28 +1155,30 @@ static void BuildSpacesSection(const VRState &state)
 
 	if (currentReferenceSystem != -1 && currentReferenceSystem < (int)referenceRaw.size())
 	{
-		CalCtx.referenceTrackingSystem = referenceRaw[currentReferenceSystem];
-		if (CalCtx.referenceTrackingSystem == CalCtx.targetTrackingSystem)
-			CalCtx.targetTrackingSystem = "";
+		CalCtx.pendingReferenceTrackingSystem = referenceRaw[currentReferenceSystem];
+		if (CalCtx.pendingReferenceTrackingSystem == CalCtx.pendingTargetTrackingSystem)
+			CalCtx.pendingTargetTrackingSystem = "";
 	}
 
 	static int selectedRefDevice = -1;
 	ImGui::Spacing();
-	BuildDeviceList(state, selectedRefDevice, CalCtx.referenceTrackingSystem, paneW);
+	BuildDeviceList(state, selectedRefDevice, CalCtx.pendingReferenceTrackingSystem, paneW);
 	CalCtx.referenceID = selectedRefDevice;
 	ImGui::EndGroup();
 	float leftBottom = ImGui::GetItemRectMax().y;
 
 	// ---- Right pane: target space ----
-	if (CalCtx.targetTrackingSystem == "")
+	if (CalCtx.pendingTargetTrackingSystem == "")
 		currentTargetSystem = 0;
 
 	std::vector<std::string> targetRaw, targetDisp;
+	targetRaw.reserve(state.trackingSystems.size());
+	targetDisp.reserve(state.trackingSystems.size());
 	for (auto &str : state.trackingSystems)
 	{
-		if (str != CalCtx.referenceTrackingSystem)
+		if (str != CalCtx.pendingReferenceTrackingSystem)
 		{
-			if (str != "" && str == CalCtx.targetTrackingSystem)
+			if (str != "" && str == CalCtx.pendingTargetTrackingSystem)
 				currentTargetSystem = (int)targetRaw.size();
 			targetRaw.push_back(str);
 			targetDisp.push_back(FriendlySystemName(str));
@@ -1134,6 +1191,7 @@ static void BuildSpacesSection(const VRState &state)
 	if (!targetRaw.empty())
 	{
 		std::vector<const char *> targetItems;
+		targetItems.reserve(targetDisp.size());
 		for (auto &s : targetDisp)
 			targetItems.push_back(s.c_str());
 		ImGui::PushItemWidth(paneW);
@@ -1141,11 +1199,11 @@ static void BuildSpacesSection(const VRState &state)
 		ImGui::PopItemWidth();
 
 		if (currentTargetSystem != -1 && currentTargetSystem < (int)targetRaw.size())
-			CalCtx.targetTrackingSystem = targetRaw[currentTargetSystem];
+			CalCtx.pendingTargetTrackingSystem = targetRaw[currentTargetSystem];
 
 		static int selectedCalDevice = -1;
 		ImGui::Spacing();
-		BuildDeviceList(state, selectedCalDevice, CalCtx.targetTrackingSystem, paneW);
+		BuildDeviceList(state, selectedCalDevice, CalCtx.pendingTargetTrackingSystem, paneW);
 		CalCtx.targetID = selectedCalDevice;
 	}
 	else
@@ -1170,21 +1228,11 @@ static void BuildSpacesSection(const VRState &state)
 	}
 	if (identifyPressed)
 	{
-		// Off the render thread: the pulse train takes ~500 ms of sleeps.
-		uint32_t targetID = CalCtx.targetID, referenceID = CalCtx.referenceID;
-		std::thread([targetID, referenceID]
-		{
-			for (unsigned i = 0; i < 100; ++i)
-			{
-				if (!vr::VRSystem())
-					return;
-				if (targetID < vr::k_unMaxTrackedDeviceCount)
-					vr::VRSystem()->TriggerHapticPulse(targetID, 0, 2000);
-				if (referenceID < vr::k_unMaxTrackedDeviceCount)
-					vr::VRSystem()->TriggerHapticPulse(referenceID, 0, 2000);
-				std::this_thread::sleep_for(std::chrono::milliseconds(5));
-			}
-		}).detach();
+		g_identifyPulse.active = true;
+		g_identifyPulse.targetId = CalCtx.targetID;
+		g_identifyPulse.referenceId = CalCtx.referenceID;
+		g_identifyPulse.pulsesRemaining = 100;
+		g_identifyPulse.nextPulseTime = ImGui::GetTime();
 	}
 }
 
@@ -1204,11 +1252,9 @@ static void OpenCalibrationPopup(bool anchor)
 		return;
 	}
 
-	ImGui::OpenPopup("Calibration Progress");
-	if (anchor)
-		StartAnchorCalibration();
-	else
-		StartCalibration();
+	bool started = anchor ? StartAnchorCalibration() : StartCalibration();
+	if (started)
+		ImGui::OpenPopup("Calibration Progress");
 }
 
 static void BuildMainScreen()
@@ -1221,7 +1267,10 @@ static void BuildMainScreen()
 		{
 			std::vector<StatusRowData> warn;
 			warn.push_back({ IconInfo, Pal::Bad,
-				FormatString("%s headset not detected -- profile disabled", FriendlySystemName(CalCtx.referenceTrackingSystem).c_str()) });
+				CalCtx.profileUniverseUnsafe
+					? "Raw tracking universe changed while monitoring was offline -- recalibrate before using this profile"
+					: FormatString("%s headset not detected -- profile disabled",
+						FriendlySystemName(CalCtx.referenceTrackingSystem).c_str()) });
 			DrawStatusCard(warn);
 			ImGui::Spacing();
 		}
@@ -1239,10 +1288,7 @@ static void BuildMainScreen()
 		{
 			ImGui::SameLine(0.0f, gap);
 			if (IconButton("clear", "Clear calibration", IconTrash, ImVec2(clearW, bh), BtnKind::Ghost))
-			{
-				CalCtx.Clear();
-				SaveProfile(CalCtx);
-			}
+				ClearSavedProfile(CalCtx);
 		}
 
 		// ---- Calibration speed (quiet row, no card chrome) ----
@@ -1257,8 +1303,11 @@ static void BuildMainScreen()
 			const char *speeds[] = { "Fast", "Slow", "Very Slow" };
 			float itemW = 110.0f, segH = 38.0f;
 			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - (itemW * 3.0f + 8.0f), p.y + (rowH - segH) * 0.5f));
-			CalCtx.calibrationSpeed = (CalibrationContext::Speed)
-				Segmented("speed", (int)CalCtx.calibrationSpeed, speeds, 3, itemW, segH);
+			auto previousSpeed = CalCtx.calibrationSpeed;
+			CalCtx.calibrationSpeed = static_cast<CalibrationContext::Speed>(
+				Segmented("speed", static_cast<int>(CalCtx.calibrationSpeed), speeds, 3, itemW, segH));
+			if (CalCtx.calibrationSpeed != previousSpeed)
+				SaveSettingOrRestore(CalCtx.calibrationSpeed, previousSpeed);
 			ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
 			ImGui::Dummy(ImVec2(0, 0));
 		}
@@ -1268,7 +1317,8 @@ static void BuildMainScreen()
 		// bounds AND arm auto-restore. People who rely on the Quest boundary
 		// transferring in each session simply never press it (or disarm the
 		// restore in settings).
-		float chapW = CalCtx.validProfile ? (cw - gap) * 0.5f : cw;
+		float chapW = CalCtx.validProfile && !CalCtx.profileUniverseUnsafe
+			? (cw - gap) * 0.5f : cw;
 		const char *chapLabel = CalCtx.chaperone.valid ? "Update protected chaperone" : "Protect chaperone";
 		if (IconButton("copychap", chapLabel, IconCopy, ImVec2(chapW, 46.0f), BtnKind::Ghost))
 		{
@@ -1292,7 +1342,7 @@ static void BuildMainScreen()
 				"Redrew your chaperone? Press again to save the new one.\n"
 				"Prefer the Quest's Guardian imported fresh each session? Don't use this.");
 		}
-		if (CalCtx.validProfile)
+		if (CalCtx.validProfile && !CalCtx.profileUniverseUnsafe)
 		{
 			ImGui::SameLine(0.0f, gap);
 			if (IconButton("addanchor", "Add field anchor", IconPin, ImVec2(chapW, 46.0f), BtnKind::Ghost))
@@ -1486,11 +1536,9 @@ static void BuildSettingsScreen(const VRState &state)
 		{
 			ImVec2 p = BeginRowCard(52.0f);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			bool previous = CalCtx.uiAdvanced;
 			if (QCCheckbox("##uiAdvanced", &CalCtx.uiAdvanced))
-			{
-				if (CalCtx.validProfile)
-					SaveProfile(CalCtx);
-			}
+				SaveSettingOrRestore(CalCtx.uiAdvanced, previous);
 			RowIconLabel(p, IconGauge, "Advanced mode (show raw calibration and drift stats)");
 			EndRowCard(p, 52.0f);
 		}
@@ -1505,8 +1553,14 @@ static void BuildSettingsScreen(const VRState &state)
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
 			if (QCCheckbox("##fieldEnabled", &CalCtx.fieldEnabled))
 			{
+				bool enabled = !CalCtx.fieldEnabled;
+				uint32_t generation = CalCtx.fieldGeneration;
 				CalCtx.fieldGeneration++;
-				SaveProfile(CalCtx);
+				if (!SaveProfile(CalCtx))
+				{
+					CalCtx.fieldEnabled = enabled;
+					CalCtx.fieldGeneration = generation;
+				}
 			}
 			if (ImGui::IsItemHovered())
 			{
@@ -1523,9 +1577,15 @@ static void BuildSettingsScreen(const VRState &state)
 				ImGui::SetCursorScreenPos(ImVec2(p.x + cw - 16.0f - btnW, p.y + 9.0f));
 				if (IconButton("clearanchors", "Clear anchors", IconTrash, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 				{
+					auto anchors = CalCtx.fieldAnchors;
+					uint32_t generation = CalCtx.fieldGeneration;
 					CalCtx.fieldAnchors.clear();
 					CalCtx.fieldGeneration++;
-					SaveProfile(CalCtx);
+					if (!SaveProfile(CalCtx))
+					{
+						CalCtx.fieldAnchors = std::move(anchors);
+						CalCtx.fieldGeneration = generation;
+					}
 				}
 
 				ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -1551,11 +1611,9 @@ static void BuildSettingsScreen(const VRState &state)
 		{
 			ImVec2 p = BeginRowCard(52.0f);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			bool previous = CalCtx.solveScale;
 			if (QCCheckbox("##solveScale", &CalCtx.solveScale))
-			{
-				if (CalCtx.validProfile)
-					SaveProfile(CalCtx);
-			}
+				SaveSettingOrRestore(CalCtx.solveScale, previous);
 			RowIconLabel(p, IconScale, "Solve playspace scale (experimental)");
 			EndRowCard(p, 52.0f);
 		}
@@ -1567,8 +1625,9 @@ static void BuildSettingsScreen(const VRState &state)
 			ImDrawList *dl = ImGui::GetWindowDrawList();
 
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			bool previous = CalCtx.applyTimeOffset;
 			if (QCCheckbox("##applyTimeOffset", &CalCtx.applyTimeOffset))
-				SaveProfile(CalCtx);
+				SaveSettingOrRestore(CalCtx.applyTimeOffset, previous);
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip(
@@ -1610,6 +1669,7 @@ static void BuildSettingsScreen(const VRState &state)
 			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 6));
 			if (ImGui::InputFloat("##manualTimeOffset", &manualMs, 0.0f, 0.0f, 1))
 			{
+				if (!std::isfinite(manualMs)) manualMs = 0.0f;
 				if (manualMs > 50.0f) manualMs = 50.0f;
 				if (manualMs < -50.0f) manualMs = -50.0f;
 				CalCtx.manualTimeOffsetMs = manualMs;
@@ -1631,8 +1691,10 @@ static void BuildSettingsScreen(const VRState &state)
 			ImDrawList *dl = ImGui::GetWindowDrawList();
 
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
-			if (QCCheckbox("##continuousEnabled", &CalCtx.continuousEnabled))
-				SaveProfile(CalCtx);
+			bool previousContinuousEnabled = CalCtx.continuousEnabled;
+			if (QCCheckbox("##continuousEnabled", &CalCtx.continuousEnabled) &&
+				!SaveProfile(CalCtx))
+				CalCtx.continuousEnabled = previousContinuousEnabled;
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip(
@@ -1662,12 +1724,14 @@ static void BuildSettingsScreen(const VRState &state)
 
 				// Candidates: every connected target-system device except the HMD.
 				std::vector<const VRDevice *> candidates;
+				candidates.reserve(state.devices.size());
 				for (const auto &d : state.devices)
 					if (d.trackingSystem == CalCtx.targetTrackingSystem &&
 						d.deviceClass != vr::TrackedDeviceClass_HMD)
 						candidates.push_back(&d);
 
 				std::vector<std::string> labels;
+				labels.reserve(candidates.size() + 1);
 				int sel = -1;
 				for (size_t i = 0; i < candidates.size(); ++i)
 				{
@@ -1681,6 +1745,7 @@ static void BuildSettingsScreen(const VRState &state)
 					sel = (int)labels.size() - 1;
 				}
 				std::vector<const char *> items;
+				items.reserve(labels.size());
 				for (const auto &l : labels)
 					items.push_back(l.c_str());
 
@@ -1693,19 +1758,27 @@ static void BuildSettingsScreen(const VRState &state)
 				{
 					if (CalCtx.continuousTrackerSerial != candidates[sel]->serial)
 					{
+						std::string previousSerial = CalCtx.continuousTrackerSerial;
+						auto previousExtrinsic = CalCtx.mountExtrinsic;
 						CalCtx.continuousTrackerSerial = candidates[sel]->serial;
 						// The learned mount offset described the previous tracker;
 						// a different physical device needs a fresh calibration.
 						CalCtx.mountExtrinsic = questcal::MountExtrinsic();
-						SaveProfile(CalCtx);
+						if (!SaveProfile(CalCtx))
+						{
+							CalCtx.continuousTrackerSerial = std::move(previousSerial);
+							CalCtx.mountExtrinsic = previousExtrinsic;
+						}
 					}
 				}
 				ImGui::PopStyleVar();
 				ImGui::PopItemWidth();
 
 				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 40.0f));
-				if (QCCheckbox("##hideTracker", &CalCtx.hideMountedTracker))
-					SaveProfile(CalCtx);
+				bool previousHide = CalCtx.hideMountedTracker;
+				if (QCCheckbox("##hideTracker", &CalCtx.hideMountedTracker) &&
+					!SaveProfile(CalCtx))
+					CalCtx.hideMountedTracker = previousHide;
 				if (ImGui::IsItemHovered())
 				{
 					ImGui::SetTooltip(
@@ -1718,8 +1791,10 @@ static void BuildSettingsScreen(const VRState &state)
 					"Hide the mounted tracker from games");
 
 				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 74.0f));
-				if (QCCheckbox("##contLatency", &CalCtx.continuousLatencyReestimation))
-					SaveProfile(CalCtx);
+				bool previousLatency = CalCtx.continuousLatencyReestimation;
+				if (QCCheckbox("##contLatency", &CalCtx.continuousLatencyReestimation) &&
+					!SaveProfile(CalCtx))
+					CalCtx.continuousLatencyReestimation = previousLatency;
 				if (ImGui::IsItemHovered())
 				{
 					ImGui::SetTooltip(
@@ -1750,7 +1825,16 @@ static void BuildSettingsScreen(const VRState &state)
 			ImVec2 p = BeginRowCard(rowH);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
 			if (QCCheckbox("##chapAuto", &CalCtx.chaperone.autoApply))
-				SaveProfile(CalCtx);
+			{
+				// Disarming is fail-closed: a failed write must never roll the
+				// in-memory state back to armed. A failed enable is likewise
+				// reverted to false until Settings can be persisted truthfully.
+				if (!SaveSettings(CalCtx))
+				{
+					CalCtx.chaperone.autoApply = false;
+					CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+				}
+			}
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip(
@@ -1783,11 +1867,14 @@ static void BuildSettingsScreen(const VRState &state)
 		}
 
 		// Raw transform editor -- power users only.
-		if (CalCtx.validProfile)
+		if (CalCtx.validProfile && !CalCtx.profileUniverseUnsafe)
 		{
 			ImGui::Spacing();
 			if (IconButton("edit", "Edit calibration (advanced)", IconPencil, ImVec2(cw, 46.0f), BtnKind::Ghost))
+			{
+				ResetTransformEditorDraft();
 				CalCtx.state = CalibrationState::Editing;
+			}
 		}
 	}
 }
@@ -1806,13 +1893,28 @@ static void BuildMenu(const VRState &state, bool runningInOverlay)
 	}
 	else if (CalCtx.state == CalibrationState::Editing)
 	{
-		BuildProfileEditor();
+		bool transformValid = BuildProfileEditor();
 
 		ImGui::Spacing();
-		if (IconButton("saveprofile", "Save profile", IconCheck, ImVec2(cw, 52.0f), BtnKind::Primary))
+		const float gap = 10.0f;
+		const float cancelWidth = 130.0f;
+		const char *saveLabel = transformValid ? "Save profile" : "Fix invalid values before saving";
+		if (IconButton("saveprofile", saveLabel, IconCheck,
+			ImVec2(cw - cancelWidth - gap, 52.0f),
+			transformValid ? BtnKind::Primary : BtnKind::Ghost) && transformValid)
 		{
-			SaveProfile(CalCtx);
+			if (SaveProfileEditorDraft())
+			{
+				ResetTransformEditorDraft();
+			}
+		}
+		ImGui::SameLine(0.0f, gap);
+		if (IconButton("cancelprofile", "Cancel", nullptr,
+			ImVec2(cancelWidth, 52.0f), BtnKind::Ghost))
+		{
+			ResetTransformEditorDraft();
 			CalCtx.state = CalibrationState::None;
+			CalCtx.timeLastScan = -1e9;
 		}
 	}
 	else
@@ -1930,6 +2032,11 @@ static void BuildMenu(const VRState &state, bool runningInOverlay)
 			"Always check that your chaperone bounds are aligned with the real room "
 			"before engaging in activities such as dancing.");
 		ImGui::PopStyleColor();
+		if (!CalCtx.uiError.empty())
+		{
+			ImGui::Spacing();
+			ImGui::TextColored(Pal::Bad, "%s", CalCtx.uiError.c_str());
+		}
 		ImGui::Spacing();
 		ImGui::Spacing();
 
@@ -1953,9 +2060,20 @@ static void BuildMenu(const VRState &state, bool runningInOverlay)
 		}
 		else if (IconButton("chapwarnok", "I understand", nullptr, ImVec2(bw - cancelW - bgap, 46.0f), BtnKind::Primary))
 		{
+			bool previousAck = CalCtx.chaperoneWarningAck;
 			CalCtx.chaperoneWarningAck = true;
-			ProtectChaperone();
-			ImGui::CloseCurrentPopup();
+			if (ProtectChaperone())
+				ImGui::CloseCurrentPopup();
+			else
+			{
+				CalCtx.chaperoneWarningAck = previousAck;
+				// A failed capture may have persisted the fail-closed chaperone
+				// state immediately; keep the acknowledgement rollback consistent.
+				if (!SaveSettings(CalCtx))
+				{
+					CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+				}
+			}
 		}
 		ImGui::SameLine(0.0f, bgap);
 		if (IconButton("chapwarncancel", "Cancel", nullptr, ImVec2(cancelW, 46.0f), BtnKind::Ghost))
@@ -1969,8 +2087,37 @@ static void BuildMenu(const VRState &state, bool runningInOverlay)
 // Profile editor
 // ---------------------------------------------------------------------------
 
-static void BuildProfileEditor()
+struct TransformEditorDraft
 {
+	bool active = false;
+	bool valid = true;
+	bool rotationEdited = false;
+	Eigen::Quaterniond rotationQ{ 1, 0, 0, 0 };
+	Eigen::Vector3d rotationEuler{ 0, 0, 0 };
+	Eigen::Vector3d translationCm{ 0, 0, 0 };
+	double scale = 1.0;
+};
+
+static TransformEditorDraft g_transformDraft;
+
+static void ResetTransformEditorDraft()
+{
+	g_transformDraft.active = false;
+}
+
+static bool BuildProfileEditor()
+{
+	if (!g_transformDraft.active)
+	{
+		g_transformDraft.active = true;
+		g_transformDraft.rotationQ = CalCtx.calibratedRotationQ;
+		g_transformDraft.rotationEuler = CalCtx.calibratedRotation;
+		g_transformDraft.translationCm = CalCtx.calibratedTranslation;
+		g_transformDraft.scale = CalCtx.calibratedScale;
+		g_transformDraft.rotationEdited = false;
+		g_transformDraft.valid = true;
+	}
+
 	ImGuiStyle &style = ImGui::GetStyle();
 	float cw = ImGui::GetWindowContentRegionWidth();
 	float width = cw / 3.0f - style.FramePadding.x;
@@ -1980,31 +2127,83 @@ static void BuildProfileEditor()
 
 	ImGui::PushItemWidth(widthF);
 	bool rotationEdited = false;
-	rotationEdited |= ImGui::InputDouble("Yaw##Yaw", &CalCtx.calibratedRotation(1), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble("Yaw##Yaw", &g_transformDraft.rotationEuler(1), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	rotationEdited |= ImGui::InputDouble("Pitch##Pitch", &CalCtx.calibratedRotation(2), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble("Pitch##Pitch", &g_transformDraft.rotationEuler(2), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	rotationEdited |= ImGui::InputDouble("Roll##Roll", &CalCtx.calibratedRotation(0), 0.1, 1.0, "%.8f");
-
-	// Euler fields are display/editing copies; fold an explicit edit back into
-	// the quaternion truth immediately.
-	if (rotationEdited)
-		CalCtx.RebuildRotationFromEuler();
+	rotationEdited |= ImGui::InputDouble("Roll##Roll", &g_transformDraft.rotationEuler(0), 0.1, 1.0, "%.8f");
 
 	ImGui::Spacing();
 	SectionLabel("TRANSLATION (CENTIMETERS)");
 
-	ImGui::InputDouble("X##X", &CalCtx.calibratedTranslation(0), 1.0, 10.0, "%.8f");
+	bool edited = rotationEdited;
+	edited |= ImGui::InputDouble("X##X", &g_transformDraft.translationCm(0), 1.0, 10.0, "%.8f");
 	ImGui::SameLine();
-	ImGui::InputDouble("Y##Y", &CalCtx.calibratedTranslation(1), 1.0, 10.0, "%.8f");
+	edited |= ImGui::InputDouble("Y##Y", &g_transformDraft.translationCm(1), 1.0, 10.0, "%.8f");
 	ImGui::SameLine();
-	ImGui::InputDouble("Z##Z", &CalCtx.calibratedTranslation(2), 1.0, 10.0, "%.8f");
+	edited |= ImGui::InputDouble("Z##Z", &g_transformDraft.translationCm(2), 1.0, 10.0, "%.8f");
 
 	ImGui::Spacing();
 	SectionLabel("SCALE");
 
-	ImGui::InputDouble("##Scale", &CalCtx.calibratedScale, 0.0001, 0.01, "%.8f");
+	edited |= ImGui::InputDouble("##Scale", &g_transformDraft.scale, 0.0001, 0.01, "%.8f");
 	ImGui::PopItemWidth();
+
+	if (edited)
+	{
+		if (rotationEdited)
+		{
+			g_transformDraft.rotationEdited = true;
+			if (g_transformDraft.rotationEuler.allFinite())
+			{
+				Eigen::Vector3d radians = g_transformDraft.rotationEuler * EIGEN_PI / 180.0;
+				g_transformDraft.rotationQ =
+					Eigen::AngleAxisd(radians(0), Eigen::Vector3d::UnitZ()) *
+					Eigen::AngleAxisd(radians(1), Eigen::Vector3d::UnitY()) *
+					Eigen::AngleAxisd(radians(2), Eigen::Vector3d::UnitX());
+			}
+			else
+			{
+				g_transformDraft.rotationQ.coeffs().setConstant(
+					std::numeric_limits<double>::quiet_NaN());
+			}
+		}
+
+		Eigen::Vector3d candidateTranslation = g_transformDraft.translationCm * 0.01;
+		g_transformDraft.valid = questcal::IsValidCalibrationTransform(
+			g_transformDraft.rotationQ,
+			candidateTranslation, g_transformDraft.scale);
+		for (const auto &anchor : CalCtx.fieldAnchors)
+		{
+			g_transformDraft.valid = g_transformDraft.valid &&
+				questcal::IsValidFieldAnchor(anchor.position, anchor.rotation,
+					anchor.translationMeters, g_transformDraft.rotationQ,
+					candidateTranslation);
+		}
+	}
+
+	if (!g_transformDraft.valid)
+	{
+		ImGui::Spacing();
+		ImGui::TextColored(Pal::Bad,
+			"Invalid transform or field-anchor delta: enter bounded finite values. The profile remains unchanged.");
+	}
+	return g_transformDraft.valid;
+}
+
+static bool SaveProfileEditorDraft()
+{
+	if (!g_transformDraft.active || !g_transformDraft.valid)
+		return false;
+
+	// Persistence validates and writes a narrow profile candidate before
+	// touching the live transform. Translation/scale-only edits keep the exact
+	// quaternion bits; Euler conversion occurs only after a rotation edit.
+	if (!SaveProfileTransformEdit(CalCtx, g_transformDraft.rotationQ,
+		g_transformDraft.translationCm * 0.01, g_transformDraft.scale,
+		g_transformDraft.rotationEdited))
+		return false;
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,6 +2231,8 @@ static std::string PreviewIconPath(const char *driverRelative)
 VRState LoadVRState()
 {
 	VRState state;
+	state.trackingSystems.reserve(vr::k_unMaxTrackedDeviceCount);
+	state.devices.reserve(vr::k_unMaxTrackedDeviceCount);
 
 	if (g_uiPreviewMode)
 	{
@@ -2099,22 +2300,29 @@ VRState LoadVRState()
 		return state;
 
 	auto &trackingSystems = state.trackingSystems;
-	char buffer[vr::k_unMaxPropertyStringSize];
+	auto readStringProperty = [](uint32_t id, vr::ETrackedDeviceProperty property)
+	{
+		char value[vr::k_unMaxPropertyStringSize] = {};
+		vr::ETrackedPropertyError error = vr::TrackedProp_Success;
+		uint32_t size = vr::VRSystem()->GetStringTrackedDeviceProperty(id,
+			property, value, static_cast<uint32_t>(sizeof value), &error);
+		if (error != vr::TrackedProp_Success || size <= 1 || size > sizeof value ||
+			value[size - 1] != '\0')
+			return std::string();
+		return std::string(value, size - 1);
+	};
 
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
-		vr::ETrackedPropertyError err = vr::TrackedProp_Success;
 		auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
 		if (deviceClass == vr::TrackedDeviceClass_Invalid)
 			continue;
 
 		if (deviceClass != vr::TrackedDeviceClass_TrackingReference)
 		{
-			vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_TrackingSystemName_String, buffer, vr::k_unMaxPropertyStringSize, &err);
-
-			if (err == vr::TrackedProp_Success)
+			std::string system = readStringProperty(id, vr::Prop_TrackingSystemName_String);
+			if (!system.empty())
 			{
-				std::string system(buffer);
 				auto existing = std::find(trackingSystems.begin(), trackingSystems.end(), system);
 				if (existing != trackingSystems.end())
 				{
@@ -2134,13 +2342,14 @@ VRState LoadVRState()
 				device.deviceClass = deviceClass;
 				device.trackingSystem = system;
 
-				vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_ModelNumber_String, buffer, vr::k_unMaxPropertyStringSize, &err);
-				device.model = std::string(buffer);
+				device.model = readStringProperty(id, vr::Prop_ModelNumber_String);
+				device.serial = readStringProperty(id, vr::Prop_SerialNumber_String);
 
-				vr::VRSystem()->GetStringTrackedDeviceProperty(id, vr::Prop_SerialNumber_String, buffer, vr::k_unMaxPropertyStringSize, &err);
-				device.serial = std::string(buffer);
-
-				device.controllerRole = (vr::ETrackedControllerRole) vr::VRSystem()->GetInt32TrackedDeviceProperty(id, vr::Prop_ControllerRoleHint_Int32, &err);
+				vr::ETrackedPropertyError roleError = vr::TrackedProp_Success;
+				int32_t role = vr::VRSystem()->GetInt32TrackedDeviceProperty(
+					id, vr::Prop_ControllerRoleHint_Int32, &roleError);
+				if (roleError == vr::TrackedProp_Success)
+					device.controllerRole = static_cast<vr::ETrackedControllerRole>(role);
 
 				device.connected = vr::VRSystem()->IsTrackedDeviceConnected(id);
 
@@ -2159,12 +2368,12 @@ VRState LoadVRState()
 				// the chain when a driver doesn't ship a variant.
 				// "{driver}/icons/x.png" resolves through IVRResources.
 				auto resolveIcon = [&](vr::ETrackedDeviceProperty prop) -> std::string {
-					vr::ETrackedPropertyError ierr = vr::TrackedProp_Success;
-					vr::VRSystem()->GetStringTrackedDeviceProperty(id, prop, buffer, vr::k_unMaxPropertyStringSize, &ierr);
-					if (ierr != vr::TrackedProp_Success || !buffer[0] || !vr::VRResources())
+					std::string resource = readStringProperty(id, prop);
+					if (resource.empty() || !vr::VRResources())
 						return std::string();
 					char fullPath[MAX_PATH] = {};
-					uint32_t len = vr::VRResources()->GetResourceFullPath(buffer, "", fullPath, MAX_PATH);
+					uint32_t len = vr::VRResources()->GetResourceFullPath(
+						resource.c_str(), "", fullPath, MAX_PATH);
 					if (len == 0 || len >= MAX_PATH || !FileExists(fullPath))
 						return std::string();
 					return Prefer2x(fullPath);
@@ -2220,6 +2429,7 @@ void BuildMainWindow(bool runningInOverlay)
 	static VRState state;
 	static double lastStateRefresh = -1e9;
 	double now = ImGui::GetTime();
+	UpdateIdentifyPulse(now);
 	if (now - lastStateRefresh >= 1.0)
 	{
 		state = LoadVRState();
@@ -2228,6 +2438,18 @@ void BuildMainWindow(bool runningInOverlay)
 
 	BuildHeader();
 	ImGui::Spacing();
+	if (!CalCtx.uiError.empty())
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
+		ImGui::TextWrapped("%s", CalCtx.uiError.c_str());
+		ImGui::PopStyleColor();
+		if (ImGui::SmallButton("Dismiss error"))
+		{
+			CalCtx.uiError.clear();
+			CalCtx.uiErrorSource = CalibrationContext::ErrorSource::None;
+		}
+		ImGui::Spacing();
+	}
 	// The settings screen replaces the whole content area; keeping the device
 	// panes above it buried the settings below the fold for no benefit.
 	bool inSettings = (CalCtx.state == CalibrationState::None && s_showSettings);

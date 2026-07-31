@@ -157,8 +157,23 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 
 		// Same time-alignment convention as the engine: the reference stream
 		// is interpolated at the target's timestamp minus the solved offset.
+		// A negative offset asks for a reference pose in the target sample's
+		// future. During live streaming that bracket may simply not have arrived
+		// yet: keep this target at the processing cursor so the next Update can
+		// retry it. Since both streams are monotonic, every later target would
+		// also need a future reference and can wait behind it. Conversely, a
+		// requested time before the retained reference window is irrecoverably
+		// old, and a failed interpolation inside the completed window is a hard
+		// tracking gap that future samples cannot repair.
+		double refTime = t.time - calTimeOffset;
+		if (refWindow.empty() || refTime > refWindow.back().time ||
+			(refWindow.size() < 2 && refTime >= refWindow.front().time))
+			break;
+		if (refTime < refWindow.front().time)
+			continue;
+
 		PoseSample h;
-		if (!CalibrationEngine::InterpolateAt(refWindow, t.time - calTimeOffset,
+		if (!CalibrationEngine::InterpolateAt(refWindow, refTime,
 			config.maxInterpolationGap, h))
 			continue;
 		if (h.angVel.norm() > config.maxAngularSpeed || h.vel.norm() > config.maxLinearSpeed)

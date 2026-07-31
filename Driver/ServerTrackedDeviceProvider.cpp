@@ -2,28 +2,72 @@
 #include "Logging.h"
 #include "InterfaceHookInjector.h"
 #include "PoseTransform.h"
+#include "ProtocolValidation.h"
 
 // Vertical displacement applied to a hidden device's forwarded pose.
 static constexpr double HiddenPoseOffsetY = 1000.0;   // meters
+static constexpr uint64_t PoseRingRetryIntervalMs = 1000;
 
 vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriverContext)
 {
 	TRACE("ServerTrackedDeviceProvider::Init()");
-	VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
-
+	// Pose callbacks can begin on other driver threads as soon as the global
+	// host detour is enabled. Initialize every callback-visible member first.
 	LARGE_INTEGER freq;
-	QueryPerformanceFrequency(&freq);
+	if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0)
+	{
+		LOG("QueryPerformanceFrequency failed (error %u)", GetLastError());
+		return vr::VRInitError_Driver_Failed;
+	}
 	qpcToSeconds = 1.0 / static_cast<double>(freq.QuadPart);
 
-	if (!poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME))
+	lastPoseRingCreateAttemptMs = GetTickCount64();
+	bool poseRingCreated = poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME);
+	poseRingReady.store(poseRingCreated, std::memory_order_release);
+	if (!poseRingCreated)
 	{
 		// Non-fatal: calibration transforms still apply, but the overlay will
 		// fall back to runtime-predicted poses instead of raw driver poses.
 		LOG("Failed to create pose ring shared memory (error %u)", GetLastError());
 	}
 
-	InjectHooks(this, pDriverContext);
-	server.Run();
+	// Install the context detour before OpenVR initializes its cached interfaces.
+	// InitServerDriverContext requests IVRServerDriverHost through the detour, so
+	// a successful return proves that one of the supported 005/006 pose hooks is
+	// active rather than letting the overlay handshake with a no-op driver.
+	if (!InjectHooks(this, pDriverContext))
+	{
+		poseRing.Close();
+		return vr::VRInitError_Driver_Failed;
+	}
+
+	vr::EVRInitError contextError = vr::InitServerDriverContext(pDriverContext);
+	if (contextError != vr::VRInitError_None)
+	{
+		DisableHooks();
+		poseRing.Close();
+		vr::CleanupDriverContext();
+		return contextError;
+	}
+
+	if (!IsPoseUpdateHookInstalled())
+	{
+		LOG("No supported IVRServerDriverHost pose hook was installed");
+		DisableHooks();
+		poseRing.Close();
+		vr::CleanupDriverContext();
+		return vr::VRInitError_Driver_Failed;
+	}
+
+	if (!server.Run())
+	{
+		LOG("IPC server could not establish its control listener");
+		server.Stop();
+		DisableHooks();
+		poseRing.Close();
+		vr::CleanupDriverContext();
+		return vr::VRInitError_Driver_Failed;
+	}
 
 	return vr::VRInitError_None;
 }
@@ -33,43 +77,70 @@ void ServerTrackedDeviceProvider::Cleanup()
 	TRACE("ServerTrackedDeviceProvider::Cleanup()");
 	server.Stop();
 	DisableHooks();
+	poseRingReady.store(false, std::memory_order_release);
 	poseRing.Close();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
-void ServerTrackedDeviceProvider::SetDeviceTransform(const protocol::SetDeviceTransform &newTransform)
+void ServerTrackedDeviceProvider::RunFrame()
 {
-	// The id arrives over the pipe from another process; never index with it unchecked.
-	if (newTransform.openVRID >= vr::k_unMaxTrackedDeviceCount)
-	{
-		LOG("SetDeviceTransform: rejected out-of-range device id %u", newTransform.openVRID);
+	if (poseRingReady.load(std::memory_order_acquire))
 		return;
+
+	uint64_t now = GetTickCount64();
+	if (now - lastPoseRingCreateAttemptMs < PoseRingRetryIntervalMs)
+		return;
+	lastPoseRingCreateAttemptMs = now;
+	if (poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME))
+	{
+		poseRingReady.store(true, std::memory_order_release);
+		LOG("Pose ring shared memory became available after retry");
 	}
-
-	auto &slot = transforms[newTransform.openVRID];
-	auto &tf = slot.transform;
-
-	// Seqlock write; single writer (the IPC thread). Odd sequence = write in flight.
-	slot.sequence.fetch_add(1, std::memory_order_acq_rel);
-
-	tf.enabled = newTransform.enabled;
-	tf.translation = newTransform.translation;
-	tf.rotation = newTransform.rotation;
-	tf.scale = newTransform.scale;
-	tf.timeOffset = newTransform.timeOffset;
-	tf.generation = newTransform.generation;
-	tf.hidden = newTransform.hidden;
-
-	slot.sequence.fetch_add(1, std::memory_order_acq_rel);
 }
 
-void ServerTrackedDeviceProvider::SetAlignmentField(const protocol::SetAlignmentField &newField)
+bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform)
 {
+	protocol::SetDeviceTransform sanitized;
+	if (!questcal::driverinput::ValidateAndSanitize(newTransform, sanitized))
+	{
+		LOG("SetDeviceTransform: rejected invalid transform for device id %u", newTransform.openVRID);
+		return false;
+	}
+
+	DeviceTransform tf;
+	tf.enabled = sanitized.enabled;
+	tf.translation = sanitized.translation;
+	tf.rotation = sanitized.rotation;
+	tf.scale = sanitized.scale;
+	tf.timeOffset = sanitized.timeOffset;
+	tf.generation = sanitized.generation;
+	tf.hidden = sanitized.hidden;
+
+	auto &slot = transforms[sanitized.openVRID];
+	// The IPC thread is the single writer. Odd means a coherent generation is
+	// in flight; payload stores are atomic so a failed reader attempt is safe.
+	slot.sequence.fetch_add(1, std::memory_order_acq_rel);
+	slot.Store(tf);
+	slot.sequence.fetch_add(1, std::memory_order_release);
+	return true;
+}
+
+bool ServerTrackedDeviceProvider::TrySetAlignmentField(const protocol::SetAlignmentField &newField)
+{
+	protocol::SetAlignmentField sanitized;
+	if (!questcal::driverinput::ValidateAndSanitize(newField, sanitized))
+	{
+		LOG("SetAlignmentField: rejected invalid field (enabled=%d, anchors=%u)",
+			newField.enabled ? 1 : 0, newField.anchorCount);
+		return false;
+	}
+
 	// Same seqlock discipline as the transform slots: IPC thread writes, pose
 	// threads read.
 	alignmentField.sequence.fetch_add(1, std::memory_order_acq_rel);
-	alignmentField.field = newField;
-	alignmentField.sequence.fetch_add(1, std::memory_order_acq_rel);
+	alignmentField.field.Store(sanitized);
+	alignmentField.sequence.fetch_add(1, std::memory_order_release);
+	return true;
 }
 
 bool ServerTrackedDeviceProvider::ReadAlignmentField(protocol::SetAlignmentField &out)
@@ -80,10 +151,9 @@ bool ServerTrackedDeviceProvider::ReadAlignmentField(protocol::SetAlignmentField
 		if (before & 1)
 			continue;
 
-		out = alignmentField.field;
+		out = alignmentField.field.Load();
 
-		std::atomic_thread_fence(std::memory_order_acquire);
-		uint32_t after = alignmentField.sequence.load(std::memory_order_relaxed);
+		uint32_t after = alignmentField.sequence.load(std::memory_order_acquire);
 		if (before == after)
 			return true;
 	}
@@ -100,10 +170,9 @@ bool ServerTrackedDeviceProvider::ReadDeviceTransform(uint32_t openVRID, DeviceT
 		if (before & 1)
 			continue;
 
-		out = slot.transform;
+		out = slot.Load();
 
-		std::atomic_thread_fence(std::memory_order_acquire);
-		uint32_t after = slot.sequence.load(std::memory_order_relaxed);
+		uint32_t after = slot.sequence.load(std::memory_order_acquire);
 		if (before == after)
 		{
 			lastGood[openVRID] = out;
@@ -133,6 +202,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	LARGE_INTEGER now;
 	QueryPerformanceCounter(&now);
 
+	if (poseRingReady.load(std::memory_order_acquire))
 	{
 		protocol::DevicePoseSample sample;
 		sample.sampleTimeQpc = now.QuadPart;

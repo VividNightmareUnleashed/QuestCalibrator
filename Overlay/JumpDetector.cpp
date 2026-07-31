@@ -56,12 +56,34 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	if (s.deviceId >= 64)
 		return;
 
-	bool valid = s.poseIsValid && s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK);
-	if (!valid)
-		return;   // treated as absence; gaps are measured between valid samples
-
 	auto &dev = devices[s.deviceId];
-	double t = static_cast<double>(s.sampleTimeQpc) * qpcToSeconds + s.poseTimeOffset;
+	auto breakObservationContinuity = [&]()
+	{
+		// An explicitly observed bad frame is stronger evidence than mere
+		// absence. Neither the exact WFD path nor the composed-pose heuristic may
+		// bridge it, even when the valid endpoints are less than gapSeconds apart.
+		dev.wfdValid = false;
+		dev.hist.clear();
+		for (auto &candidate : candidates)
+			if (candidate.deviceId == s.deviceId && !candidate.ready)
+				candidate.dead = true;
+	};
+
+	bool valid = s.poseIsValid && s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK);
+	if (!valid || !IsUsableRingSample(s, qpcToSeconds))
+	{
+		breakObservationContinuity();
+		return;   // long gaps are still measured from the last valid sample
+	}
+
+	double t = RingSampleTime(s, qpcToSeconds);
+	if (dev.lastValidTime >= 0.0 && t <= dev.lastValidTime)
+	{
+		// A composed-time inversion is a rejected observation too. Clear both
+		// continuity paths before accepting a later monotonic sample.
+		breakObservationContinuity();
+		return;
+	}
 
 	// A hard gap in the reference stream (disconnect, standby): the universe
 	// may have moved with no observable frame pair. Never compensate across
@@ -77,6 +99,17 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	}
 
 	RingSampleParts p = UnpackRingSample(s);
+	Eigen::Vector3d driverVelocity(s.velocity[0], s.velocity[1], s.velocity[2]);
+	Eigen::Vector3d driverAngularVelocity(
+		s.angularVelocity[0], s.angularVelocity[1], s.angularVelocity[2]);
+
+	Hist h;
+	h.t = t;
+	h.pos = p.wfdRot * p.drvPos + p.wfdTrans;
+	h.vel = p.wfdRot * driverVelocity;
+	Eigen::Vector3d worldAngVel = p.wfdRot * driverAngularVelocity;
+	h.yaw = YawOf(p.wfdRot * p.drvRot);
+	h.yawRate = worldAngVel.y();
 
 	bool rebased = false;
 	if (dev.wfdValid)
@@ -85,18 +118,41 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 		double dTrans = (p.wfdTrans - dev.wfdTrans).norm();
 		if (dRot > config.wfdRotEpsRad || dTrans > config.wfdTransEps)
 		{
-			DetectWfdRebase(s.deviceId, dev, t, p.wfdRot, p.wfdTrans);
-			rebased = true;
+			// A WFD change is exact only when the driver-local pose remained on
+			// its predicted trajectory. Some drivers can instead change WFD and
+			// inversely re-express the local pose, leaving the composed world pose
+			// continuous; compensating that bookkeeping change would create a
+			// jump that never happened. Ambiguous changes fall through to the
+			// composed-pose heuristic below.
+			ringpose::DriverLocalPoseSample previous;
+			previous.time = dev.lastValidTime;
+			previous.rotation = dev.drvRot;
+			previous.position = dev.drvPos;
+			previous.velocity = dev.drvVel;
+			previous.angularVelocity = dev.drvAngVel;
+			ringpose::DriverLocalPoseSample current;
+			current.time = t;
+			current.rotation = p.drvRot;
+			current.position = p.drvPos;
+			current.velocity = driverVelocity;
+			current.angularVelocity = driverAngularVelocity;
+			bool localContinuous = ringpose::IsDriverLocalPoseContinuous(
+				previous, current, config.maxFrameGap,
+				config.localContinuityPos, config.localContinuityRotRad);
+
+			if (localContinuous)
+			{
+				DetectWfdRebase(s.deviceId, dev, t, p.wfdRot, p.wfdTrans);
+				rebased = true;
+			}
+			else
+			{
+				notes.push_back(Format(
+					"worldFromDriver changed on device %u with discontinuous local pose; exact compensation ignored",
+					s.deviceId));
+			}
 		}
 	}
-
-	Hist h;
-	h.t = t;
-	h.pos = p.wfdRot * p.drvPos + p.wfdTrans;
-	h.vel = p.wfdRot * Eigen::Vector3d(s.velocity[0], s.velocity[1], s.velocity[2]);
-	Eigen::Vector3d worldAngVel = p.wfdRot * Eigen::Vector3d(s.angularVelocity[0], s.angularVelocity[1], s.angularVelocity[2]);
-	h.yaw = YawOf(p.wfdRot * p.drvRot);
-	h.yawRate = worldAngVel.y();
 
 	if (rebased)
 	{
@@ -115,6 +171,10 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 
 	dev.wfdRot = p.wfdRot;
 	dev.wfdTrans = p.wfdTrans;
+	dev.drvRot = p.drvRot;
+	dev.drvPos = p.drvPos;
+	dev.drvVel = driverVelocity;
+	dev.drvAngVel = driverAngularVelocity;
 	dev.wfdValid = true;
 	dev.lastValidTime = t;
 
@@ -144,6 +204,8 @@ void JumpDetector::DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	c.rot = yawRot;
 	c.trans = dTrans;
 	c.residualTiltRad = tilt;
+	c.worldFromDriverRotation = newRot;
+	c.worldFromDriverTranslation = newTrans;
 	candidates.push_back(c);
 
 	notes.push_back(Format("worldFromDriver rebase on device %u: yaw %+.2f deg, shift %.3f m (tilt residual %.2f deg)",
@@ -263,17 +325,11 @@ void JumpDetector::EvaluatePendingCandidates(double now)
 
 void JumpDetector::TryAccept(double now)
 {
-	// Hysteresis gates re-triggering only: candidates born inside the hold
-	// window after an accepted jump are echoes of the same event.
-	if (now - lastAcceptTime < config.retriggerHold)
-	{
-		candidates.clear();
-		return;
-	}
-
 	// Exact path: a worldFromDriver rebase on the HMD is authoritative (the
 	// HMD defines the reference universe). Agreement from other devices is a
-	// sanity check, not a requirement.
+	// sanity check, not a requirement. Evaluate it before heuristic hysteresis:
+	// two distinct WFD transitions telescope even inside retriggerHold, so
+	// dropping the second would leave the calibration one rebase behind.
 	for (auto &c : candidates)
 	{
 		if (!c.exact || c.dead || c.deviceId != vr::k_unTrackedDeviceIndex_Hmd)
@@ -286,6 +342,8 @@ void JumpDetector::TryAccept(double now)
 		d.exact = true;
 		d.devicesAgreeing = 1;
 		d.residualTiltRad = c.residualTiltRad;
+		d.worldFromDriverRotation = c.worldFromDriverRotation;
+		d.worldFromDriverTranslation = c.worldFromDriverTranslation;
 
 		for (const auto &o : candidates)
 		{
@@ -299,6 +357,14 @@ void JumpDetector::TryAccept(double now)
 
 		accepted.push_back(d);
 		lastAcceptTime = now;
+		candidates.clear();
+		return;
+	}
+
+	// Hysteresis suppresses heuristic echoes only. Non-HMD exact candidates
+	// inside this window describe the already-applied HMD event and can go too.
+	if (now - lastAcceptTime < config.retriggerHold)
+	{
 		candidates.clear();
 		return;
 	}

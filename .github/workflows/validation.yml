@@ -1,0 +1,80 @@
+name: Windows validation
+
+on:
+  # Validate every push and pull request. Resource files, vendored libraries,
+  # packaging inputs, and build-environment changes can all affect the shipped
+  # binaries even when no C/C++ source file changed.
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_deep_analysis:
+        description: Rebuild every translation unit with Clang-Tidy
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-duplicates:
+    if: github.event_name != 'schedule'
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js for clone detection
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install pinned clone detector
+        shell: pwsh
+        run: npm install --global --ignore-scripts jscpd@5.0.12
+
+      - name: Build Release x64 and run solver tests
+        shell: pwsh
+        run: tools\validate-cpp.ps1 -Mode Build
+
+      - name: Scan for substantial C/C++ clones
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File tools\validate-cpp.ps1 -Mode Duplicates
+          $validationExit = $LASTEXITCODE
+          if ($validationExit -eq 3) {
+              Write-Warning 'Clone findings require review but do not fail CI.'
+              exit 0
+          }
+          exit $validationExit
+
+  deep-analysis:
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_deep_analysis)
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Rebuild with project-aware Clang-Tidy and run solver tests
+        shell: pwsh
+        run: |
+          & pwsh -NoProfile -File tools\validate-cpp.ps1 -Mode Analyze -All
+          $validationExit = $LASTEXITCODE
+          if ($validationExit -eq 3) {
+              Write-Warning 'Clang-Tidy findings require review but do not fail CI.'
+              exit 0
+          }
+          exit $validationExit

@@ -2,11 +2,15 @@
 param(
     [ValidateSet('Build', 'Analyze', 'Duplicates')]
     [string]$Mode = 'Build',
-    [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [string]$Root = '',
     [switch]$All
 )
 
 $ErrorActionPreference = 'Stop'
+$script:analysisAdvisory = $false
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    $Root = Split-Path -Parent $PSScriptRoot
+}
 $Root = [System.IO.Path]::GetFullPath($Root)
 $configPath = Join-Path $Root 'cpp-validation.json'
 if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
@@ -29,21 +33,49 @@ if (-not $solution.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCas
     Write-Output "Invalid C++ validation config: $configPath"
     exit 2
 }
-$msbuild = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
+$msbuildCandidates = @()
+if (${env:ProgramFiles(x86)}) {
+    $msbuildCandidates += Join-Path ${env:ProgramFiles(x86)} `
+        'Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe'
+
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} `
+        'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
+        $msbuildCandidates += @(
+            & $vswhere -latest -products '*' -requires Microsoft.Component.MSBuild `
+                -find 'MSBuild\**\Bin\MSBuild.exe' 2>$null
+        )
+    }
+}
+
+$msbuildOnPath = Get-Command 'MSBuild.exe' -ErrorAction SilentlyContinue
+if ($msbuildOnPath) {
+    $msbuildCandidates += $msbuildOnPath.Source
+}
+
+$msbuild = $msbuildCandidates |
+    Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
+    Select-Object -First 1
 
 function Reset-ProcessPath {
     # Some hosts can carry both Path and PATH. MSBuild copies environment
     # variables into a case-insensitive dictionary and rejects that duplicate.
+    # Preserve action/dev-shell additions (for example setup-node and jscpd)
+    # while normalizing the process block to one spelling.
+    $processPath = [Environment]::GetEnvironmentVariable('Path', 'Process')
+    if (-not $processPath) {
+        $processPath = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+            [Environment]::GetEnvironmentVariable('Path', 'User')
+    }
     Remove-Item Env:Path -ErrorAction SilentlyContinue
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
-        [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = $processPath
 }
 
 function Invoke-MSBuildValidation {
     param([switch]$ClangTidy)
 
-    if (-not (Test-Path -LiteralPath $msbuild -PathType Leaf)) {
-        Write-Output "MSBuild not found: $msbuild"
+    if (-not $msbuild) {
+        Write-Output 'MSBuild not found. Install the VS 2022 C++ build tools with Microsoft.Component.MSBuild.'
         exit 2
     }
     if (-not (Test-Path -LiteralPath $solution -PathType Leaf)) {
@@ -113,7 +145,10 @@ function Invoke-MSBuildValidation {
         if ($findings.Count -gt 0) {
             Write-Output "Clang-Tidy reported $($findings.Count) first-party finding(s):"
             $findings | Write-Output
-            exit 3
+            # Tests still run after advisory findings. This matters for scheduled
+            # deep validation, where there is no separate fast-build job and an
+            # advisory must not mask a failing solver executable.
+            $script:analysisAdvisory = $true
         }
     }
 
@@ -155,6 +190,9 @@ switch ($Mode) {
         }
         Invoke-MSBuildValidation -ClangTidy
         Invoke-SolverTests
+        if ($script:analysisAdvisory) {
+            exit 3
+        }
     }
 
     'Duplicates' {
