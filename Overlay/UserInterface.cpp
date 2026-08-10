@@ -1721,7 +1721,7 @@ static void BuildSettingsScreen(const VRState &state)
 					"applied smoothly and continuously; if the tracker is bumped or lost,\n"
 					"updates pause and you get a notification instead.");
 			}
-			RowIconLabel(p, IconCrosshair, "Continuous calibration (headset-mounted tracker)");
+			RowIconLabel(p, IconCrosshair, "Continuous calibration (experimental)");
 
 			if (CalCtx.continuousEnabled)
 			{
