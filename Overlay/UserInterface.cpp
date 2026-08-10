@@ -1246,7 +1246,8 @@ static void OpenCalibrationPopup(bool anchor)
 	{
 		// Preview: fake progress so the modal can be styled without VR.
 		CalCtx.messages.clear();
-		CalCtx.Log("Hold the devices firmly together.\nSlowly move them in wide circles, both side to side and up and down.\n\n");
+		CalCtx.Log("Keep the selected devices rigidly together.\n"
+			"Move them through wide, varied rotations around at least two different axes and across the play area.\n\n");
 		CalCtx.Progress(65, 100);
 		ImGui::OpenPopup("Calibration Progress");
 		return;
@@ -1540,6 +1541,23 @@ static void BuildSettingsScreen(const VRState &state)
 			if (QCCheckbox("##uiAdvanced", &CalCtx.uiAdvanced))
 				SaveSettingOrRestore(CalCtx.uiAdvanced, previous);
 			RowIconLabel(p, IconGauge, "Advanced mode (show raw calibration and drift stats)");
+			EndRowCard(p, 52.0f);
+		}
+
+		// Poor calibration notification
+		{
+			ImVec2 p = BeginRowCard(52.0f);
+			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			bool previous = CalCtx.notifyPoorCalibration;
+			if (QCCheckbox("##notifyPoorCalibration", &CalCtx.notifyPoorCalibration))
+				SaveSettingOrRestore(CalCtx.notifyPoorCalibration, previous);
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(
+					"Show a SteamVR notification when alignment monitoring recommends\n"
+					"recalibration. The status and session log still update when disabled.");
+			}
+			RowIconLabel(p, IconInfo, "Poor calibration notification");
 			EndRowCard(p, 52.0f);
 		}
 

@@ -44,6 +44,7 @@ struct ChaperoneRecord
 struct SettingsRecord
 {
 	bool uiAdvanced = false;
+	bool notifyPoorCalibration = true;
 	bool chaperoneWarningAck = false;
 	CalibrationContext::Speed calibrationSpeed = CalibrationContext::FAST;
 	bool solveScale = false;
@@ -110,6 +111,7 @@ static SettingsRecord CaptureSettingsRecord(const CalibrationContext &ctx)
 {
 	SettingsRecord record;
 	record.uiAdvanced = ctx.uiAdvanced;
+	record.notifyPoorCalibration = ctx.notifyPoorCalibration;
 	record.chaperoneWarningAck = ctx.chaperoneWarningAck;
 	record.calibrationSpeed = ctx.calibrationSpeed;
 	record.solveScale = ctx.solveScale;
@@ -166,6 +168,7 @@ static void ApplyChaperoneRecord(CalibrationContext &ctx, ChaperoneRecord record
 static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 {
 	ctx.uiAdvanced = record.uiAdvanced;
+	ctx.notifyPoorCalibration = record.notifyPoorCalibration;
 	ctx.chaperoneWarningAck = record.chaperoneWarningAck;
 	ctx.calibrationSpeed = record.calibrationSpeed;
 	ctx.solveScale = record.solveScale;
@@ -717,6 +720,7 @@ static void WriteSettings(const SettingsRecord &record,
 	settings["persistence_revision"].set<double>(persistenceRevision);
 	settings["settings_version"].set<double>(settingsVersion);
 	settings["ui_advanced"].set<bool>(record.uiAdvanced);
+	settings["notify_poor_calibration"].set<bool>(record.notifyPoorCalibration);
 	settings["chaperone_warning_ack"].set<bool>(record.chaperoneWarningAck);
 	settings["calibration_speed"].set<double>(calibrationSpeed);
 	settings["solve_scale"].set<bool>(record.solveScale);
@@ -747,6 +751,8 @@ static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &s
 	}
 	if (HasTypedValue<bool>(obj, "ui_advanced"))
 		settings.uiAdvanced = obj.at("ui_advanced").get<bool>();
+	if (HasTypedValue<bool>(obj, "notify_poor_calibration"))
+		settings.notifyPoorCalibration = obj.at("notify_poor_calibration").get<bool>();
 	if (HasTypedValue<bool>(obj, "chaperone_warning_ack"))
 		settings.chaperoneWarningAck = obj.at("chaperone_warning_ack").get<bool>();
 	if (HasTypedValue<bool>(obj, "solve_scale"))

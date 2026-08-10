@@ -119,6 +119,8 @@ static double LastDriverRequestErrorTime = -1e9;
 
 CalibrationContext CalCtx;
 
+static constexpr const char *CalibrationAbortedMessage =
+	"Calibration aborted to avoid using bad data. Please try again.\n";
 static void AbortCalibration(CalibrationContext &ctx, const std::string &reason);
 static void ChaperoneMonitorTick(CalibrationContext &ctx, double now);
 
@@ -1321,8 +1323,9 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 // ---------------------------------------------------------------------------
 // Runtime monitoring: drift staleness (detect + notify only, never corrects)
 
-// One-shot log + VR toast; each caller owns its re-arm flag.
-static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logLine, const char *toast)
+// One-shot log + optional VR toast; each caller owns its re-arm flag.
+static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logLine,
+	const char *toast, bool showToast = true)
 {
 	if (notified)
 		return;
@@ -1330,7 +1333,7 @@ static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logL
 
 	ctx.Log(std::string(logLine) + "\n");
 
-	vr::VROverlayHandle_t overlay = GetMainOverlayHandle();
+	vr::VROverlayHandle_t overlay = showToast ? GetMainOverlayHandle() : 0;
 	if (overlay && vr::VRNotifications())
 	{
 		vr::VRNotificationId notifId = 0;
@@ -1355,7 +1358,8 @@ static void NotifyStaleAlignment(CalibrationContext &ctx)
 {
 	NotifyOnce(ctx, StaleNotified,
 		"Calibration quality looks poor -- recalibrating is recommended",
-		"QuestCalibrator: calibration quality looks poor. Recalibrating is recommended.");
+		"QuestCalibrator: calibration quality looks poor. Recalibrating is recommended.",
+		ctx.notifyPoorCalibration);
 }
 
 static void UpdateDriftScore(CalibrationContext &ctx)
@@ -1761,7 +1765,8 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 
 static void AbortCalibration(CalibrationContext &ctx, const std::string &reason)
 {
-	ctx.Log(reason + "\nAborting calibration!\n");
+	AppendSessionLog("Calibration aborted: " + reason + "\n");
+	ctx.Log(CalibrationAbortedMessage);
 	ctx.state = CalibrationState::None;
 	ctx.collectAsAnchor = false;
 	ctx.ClearSampleBuffers();
@@ -1914,6 +1919,12 @@ static void FinishCalibration(CalibrationContext &ctx)
 
 	ctx.ClearSampleBuffers();
 	ctx.state = CalibrationState::None;
+	if (!result.valid)
+	{
+		AppendSessionLog("Calibration failed: " + result.message + "\n");
+		ctx.Log(CalibrationAbortedMessage);
+		return;
+	}
 
 	snprintf(buf, sizeof buf,
 		"Rotation residual %.2f deg, position residual %.1f cm\n"
@@ -1939,12 +1950,6 @@ static void FinishCalibration(CalibrationContext &ctx)
 						? " -- streamed-pose smoothing detected"
 						: "")));
 		ctx.Log(buf);
-	}
-
-	if (!result.valid)
-	{
-		ctx.Log("Calibration failed: " + result.message + "\n");
-		return;
 	}
 
 	if (asAnchor)
@@ -2189,10 +2194,8 @@ void CalibrationTick(double time)
 		ctx.state = CalibrationState::Collecting;
 		ctx.wantedUpdateInterval = 0.0;
 
-		if (ctx.calibrationReferenceID == vr::k_unTrackedDeviceIndex_Hmd)
-			ctx.Log("Wear the headset with the tracker firmly mounted.\nSlowly turn and tilt your head in wide arcs, and lean side to side.\n");
-		else
-			ctx.Log("Hold the devices firmly together.\nSlowly move them in wide circles, both side to side and up and down.\n");
+		ctx.Log("Keep the selected devices rigidly together.\n"
+			"Move them through wide, varied rotations around at least two different axes and across the play area.\n");
 		return;
 	}
 

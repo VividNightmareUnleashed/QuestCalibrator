@@ -69,6 +69,7 @@ struct CalibrationContext
 	// UI preference (persisted): show raw solver/drift stats instead of the
 	// plain-language calibration rating.
 	bool uiAdvanced = false;
+	bool notifyPoorCalibration = true;
 
 	// One-time drift warning shown before the first chaperone protect.
 	// Top-level (not in Chaperone) so it survives Clear() and persists even

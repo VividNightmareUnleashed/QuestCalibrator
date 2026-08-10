@@ -960,8 +960,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	}
 	if (result.transEigRatio < config.minTransEigRatio)
 	{
-		result.message = "Not enough two-axis rotation to pin the position along every direction — "
-		                 "add clear nodding and tilting motion and recalibrate.";
+		result.message = "Not enough varied rotation to pin the position along every direction — "
+		                 "rotate the devices together around at least two different axes and recalibrate.";
 		return result;
 	}
 	if (result.rotationRmsDeg > config.maxRotationRms)
