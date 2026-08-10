@@ -184,9 +184,7 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 		Eigen::Quaterniond qObs = (h.rot * extrinsic.rot * t.rot.conjugate()).normalized();
 		Eigen::Vector3d tObs = (h.rot * extrinsic.pos + h.pos) - qObs * (calScale * t.pos);
 
-		lastObsTime = t.time;   // fresh valid pair (pre-thinning) for coast detection
-
-		Observation obs{ t.time, qObs, tObs };
+		Observation obs{ t.time, qObs, tObs, t.pos };
 
 		// Discontinuity guard: a step this large this fast is a universe jump.
 		// JumpDetector owns jumps; a window straddling one must never be
@@ -231,6 +229,11 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 			}
 		}
 
+		// A pair is fresh only after it survives the discontinuity guard. Keep
+		// this before normal thinning so a healthy high-rate stream does not coast,
+		// but rejected jump candidates cannot leave stale state marked Tracking.
+		lastObsTime = obs.time;
+
 		if (obs.time - lastKeptObsTime < config.obsMinSpacing)
 			continue;
 		lastKeptObsTime = obs.time;
@@ -265,7 +268,11 @@ void ContinuousAlignment::TrimWindows(double now)
 		observations.pop_front();
 }
 
-bool ContinuousAlignment::EstimateWindow(Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut)
+bool ContinuousAlignment::EstimateWindow(const Eigen::Quaterniond &calRotation,
+                                         const Eigen::Vector3d &calTranslationMeters,
+                                         const ExpectedCalibrationAt &expectedAt,
+                                         Eigen::Quaterniond &rotOut,
+                                         Eigen::Vector3d &transOut)
 {
 	std::vector<Eigen::Quaterniond> quats;
 	std::vector<Eigen::Vector3d> vecs;
@@ -273,8 +280,25 @@ bool ContinuousAlignment::EstimateWindow(Eigen::Quaterniond &rotOut, Eigen::Vect
 	vecs.reserve(observations.size());
 	for (const auto &o : observations)
 	{
-		quats.push_back(o.rot);
-		vecs.push_back(o.trans);
+		if (!expectedAt)
+		{
+			quats.push_back(o.rot);
+			vecs.push_back(o.trans);
+			continue;
+		}
+
+		Eigen::Quaterniond expectedRot;
+		Eigen::Vector3d expectedTrans;
+		expectedAt(o.targetRawPos, expectedRot, expectedTrans);
+
+		// Remove the position-specific field transform, then compose the residual
+		// over the canonical base calibration. A healthy field therefore reduces
+		// to one constant base transform before robust averaging, while a genuine
+		// universe delta remains unchanged at every position.
+		Eigen::Quaterniond dRot = (o.rot * expectedRot.conjugate()).normalized();
+		Eigen::Vector3d dTrans = o.trans - dRot * expectedTrans;
+		quats.push_back((dRot * calRotation).normalized());
+		vecs.push_back(dRot * calTranslationMeters + dTrans);
 	}
 
 	RobustStats stats;
@@ -319,11 +343,12 @@ bool ContinuousAlignment::EstimateWindow(Eigen::Quaterniond &rotOut, Eigen::Vect
 }
 
 void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotation,
-                                 const Eigen::Vector3d &calTranslationMeters)
+                                 const Eigen::Vector3d &calTranslationMeters,
+                                 const ExpectedCalibrationAt &expectedAt)
 {
 	Eigen::Quaterniond rBar;
 	Eigen::Vector3d tBar;
-	if (!EstimateWindow(rBar, tBar))
+	if (!EstimateWindow(calRotation, calTranslationMeters, expectedAt, rBar, tBar))
 	{
 		deviation.valid = false;
 		return;
@@ -495,7 +520,8 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 
 void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotation,
                                  const Eigen::Vector3d &calTranslationMeters,
-                                 double calScale, double calTimeOffset)
+                                 double calScale, double calTimeOffset,
+                                 const ExpectedCalibrationAt &expectedAt)
 {
 	if (!extrinsic.valid)
 	{
@@ -536,11 +562,13 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 
 	if (observations.size() < config.minObsForEstimate)
 	{
+		if (state == State::Tracking || state == State::Holding)
+			state = State::Inactive;
 		deviation.valid = false;
 		return;
 	}
 
-	Decide(now, calRotation, calTranslationMeters);
+	Decide(now, calRotation, calTranslationMeters, expectedAt);
 
 	// Opt-in online latency measurement, only while actively Tracking (a
 	// frozen or coasting pair proves nothing). Runs on the raw stream windows,

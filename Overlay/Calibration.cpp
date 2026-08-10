@@ -1622,11 +1622,6 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		Continuous->Reset();
 	}
 
-	// The mounted tracker's latest raw position anchors the field lookup
-	// below; it only has to be roughly current (the field varies over meters).
-	static Eigen::Vector3d lastTrackerRawPos;
-	static bool hasTrackerRawPos = false;
-
 	for (const auto &s : ContinuousScratch)
 	{
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
@@ -1649,36 +1644,34 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			if (!IsUsableEngineSample(sample))
 				continue;
 			Continuous->PushTarget(sample);
-			lastTrackerRawPos = sample.pos;
-			hasTrackerRawPos = true;
 		}
-	}
-
-	// The deviation baseline is the transform expected AT THE TRACKER'S SPOT:
-	// with field anchors active the true local alignment differs from base by
-	// each anchor's own delta BY DESIGN, so comparing against raw base would
-	// freeze on healthy anchors ("check the mount" while lying at an anchored
-	// spot) and, below the freeze threshold, emit corrections that drag the
-	// base -- and every anchor with it -- toward one spot's local deformation.
-	// Corrections stay exact under this baseline: ApplyAlignmentDelta shifts
-	// base and anchors together, so the blended expectation moves by exactly
-	// the applied delta.
-	Eigen::Quaterniond expectedRot = ctx.calibratedRotationQ;
-	Eigen::Vector3d expectedTrans = ctx.TranslationMeters();
-	if (ctx.fieldEnabled && !ctx.fieldAnchors.empty() && hasTrackerRawPos)
-	{
-		Eigen::Vector3d basePos = ctx.calibratedRotationQ
-			* (ctx.calibratedScale * lastTrackerRawPos) + ctx.TranslationMeters();
-		questcal::BlendedFieldCalibration(ctx.fieldAnchors, ctx.calibratedRotationQ,
-			ctx.TranslationMeters(), basePos, expectedRot, expectedTrans);
 	}
 
 	// The engine's clock is the ring's (QPC seconds), not the UI clock.
 	LARGE_INTEGER qnow;
 	QueryPerformanceCounter(&qnow);
 	double ringNow = static_cast<double>(qnow.QuadPart) * QpcToSeconds;
-	Continuous->Update(ringNow, expectedRot, expectedTrans,
-		ctx.calibratedScale, ctx.calibratedTimeOffset);
+	if (ctx.fieldEnabled && !ctx.fieldAnchors.empty())
+	{
+		// Re-evaluate the current field for each retained observation. Comparing a
+		// multi-position history with only the latest spot turns healthy anchor
+		// gradients into apparent temporal drift as the user walks through them.
+		auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
+			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
+		{
+			Eigen::Vector3d basePos = ctx.calibratedRotationQ
+				* (ctx.calibratedScale * targetRawPos) + ctx.TranslationMeters();
+			questcal::BlendedFieldCalibration(ctx.fieldAnchors, ctx.calibratedRotationQ,
+				ctx.TranslationMeters(), basePos, rotationOut, translationOut);
+		};
+		Continuous->Update(ringNow, ctx.calibratedRotationQ, ctx.TranslationMeters(),
+			ctx.calibratedScale, ctx.calibratedTimeOffset, expectedAt);
+	}
+	else
+	{
+		Continuous->Update(ringNow, ctx.calibratedRotationQ, ctx.TranslationMeters(),
+			ctx.calibratedScale, ctx.calibratedTimeOffset);
+	}
 
 	questcal::ContinuousAlignment::Correction corr;
 	while (Continuous->PollCorrection(corr))

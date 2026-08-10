@@ -3786,6 +3786,7 @@ void SetMountAfterSlip(double t, double slipTime,
 struct ContinuousSim
 {
 	ContinuousAlignment ca;
+	ContinuousAlignment::ExpectedCalibrationAt expectedAt;
 	Eigen::Quaterniond calRot{ 1, 0, 0, 0 };
 	Eigen::Vector3d calTrans{ 0, 0, 0 };
 	double calScale = 1.0;
@@ -3868,7 +3869,8 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 		}
 		else
 		{
-			sim.ca.Update(t, sim.calRot, sim.calTrans, sim.calScale, sim.solvedOffset);
+			sim.ca.Update(t, sim.calRot, sim.calTrans, sim.calScale,
+				sim.solvedOffset, sim.expectedAt);
 
 			ContinuousAlignment::Correction c;
 			while (sim.ca.PollCorrection(c))
@@ -4441,7 +4443,91 @@ void RunContinuousScenarios()
 		Check("continuous: anchors do not read as faults", baseFroze && fieldQuiet, detail);
 	}
 
-	// 11. Degraded tracking: mid-frequency warble (grazing lighthouse geometry
+	// 11. A moving field history must be compared position by position. The
+	// mounted tracker crosses from outside a 6 cm anchor into its center while
+	// the universes remain perfectly stable. Comparing the whole 10 s window to
+	// only the latest local transform produces a centimeter-scale false
+	// correction; rebasing every observation through its own field value stays
+	// at the unchanged base calibration.
+	{
+		const FieldTransform base{ Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero() };
+		std::vector<OverlayAnchor> anchors{
+			{ Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(),
+				Eigen::Vector3d(0.06, 0.0, 0.0) } };
+
+		auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
+			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
+		{
+			Eigen::Vector3d basePos = base.R * targetRawPos + base.T;
+			BlendedFieldCalibration(anchors, base.R, base.T, basePos,
+				rotationOut, translationOut);
+		};
+
+		MountExtrinsic identityMount;
+		identityMount.valid = true;
+		ContinuousAlignment perObservation;
+		ContinuousAlignment latestOnly;
+		perObservation.SetExtrinsic(identityMount);
+		latestOnly.SetExtrinsic(identityMount);
+
+		std::mt19937 rng(911);
+		std::normal_distribution<double> refNoise(0.0, 0.0001);
+		int correctCorrections = 0;
+		int latestCorrections = 0;
+		double latestMaxCorrection = 0.0;
+		for (double t = 0.0; t < 16.0; t += 1.0 / 90.0)
+		{
+			double x = t < 10.0 ? -5.0 + 0.5 * t : 0.0;
+			double vx = t < 10.0 ? 0.5 : 0.0;
+
+			PoseSample target;
+			target.time = t;
+			target.rot = Eigen::Quaterniond::Identity();
+			target.pos = Eigen::Vector3d(x, 0.0, 0.0);
+			target.vel = Eigen::Vector3d(vx, 0.0, 0.0);
+
+			Eigen::Quaterniond localRot;
+			Eigen::Vector3d localTrans;
+			expectedAt(target.pos, localRot, localTrans);
+
+			PoseSample reference;
+			reference.time = t;
+			reference.rot = localRot;
+			reference.pos = localRot * target.pos + localTrans +
+				Eigen::Vector3d(refNoise(rng), refNoise(rng), refNoise(rng));
+			reference.vel = Eigen::Vector3d(vx, 0.0, 0.0);
+
+			perObservation.PushReference(reference);
+			perObservation.PushTarget(target);
+			latestOnly.PushReference(reference);
+			latestOnly.PushTarget(target);
+
+			perObservation.Update(t, base.R, base.T, 1.0, 0.0, expectedAt);
+			latestOnly.Update(t, localRot, localTrans, 1.0, 0.0);
+
+			ContinuousAlignment::Correction correction;
+			while (perObservation.PollCorrection(correction))
+				correctCorrections++;
+			while (latestOnly.PollCorrection(correction))
+			{
+				latestCorrections++;
+				latestMaxCorrection = std::max(latestMaxCorrection,
+					correction.translation.norm());
+			}
+		}
+
+		snprintf(detail, sizeof detail,
+			"per-observation %d corrections / state %d; latest-only %d, max %.1f mm",
+			correctCorrections, static_cast<int>(perObservation.GetState()),
+			latestCorrections, latestMaxCorrection * 1000.0);
+		Check("continuous: moving field baseline",
+			correctCorrections == 0 &&
+			perObservation.GetState() == ContinuousAlignment::State::Tracking &&
+			latestCorrections > 0 && latestMaxCorrection > 0.005,
+			detail);
+	}
+
+	// 12. Degraded tracking: mid-frequency warble (grazing lighthouse geometry
 	// while lying down) inflates window scatter past the gates but decorrelates
 	// between consecutive observations, so the classifier calls it noise — the
 	// loop must hold quietly with one informational event, never freeze with
@@ -4485,7 +4571,63 @@ void RunContinuousScenarios()
 		Check("continuous: unstable tracking holds, not freezes", heldDuring && recovered, detail);
 	}
 
-	// 12. Mount slip during degraded tracking: a long run of unstructured
+	// 13. Alternating discontinuity candidates are valid pose pairs but not
+	// usable observations. They must not keep a stale Tracking state fresh after
+	// the last healthy observation ages out.
+	{
+		MountExtrinsic identityMount;
+		identityMount.valid = true;
+		ContinuousAlignment alignment;
+		alignment.SetExtrinsic(identityMount);
+
+		auto pushPair = [&](double time, double referenceShift)
+		{
+			PoseSample reference;
+			reference.pos.x() = referenceShift;
+			reference.time = time - 0.02;
+			alignment.PushReference(reference);
+			reference.time = time;
+			alignment.PushReference(reference);
+			PoseSample target;
+			target.time = time;
+			alignment.PushTarget(target);
+			alignment.Update(time, Eigen::Quaterniond::Identity(),
+				Eigen::Vector3d::Zero(), 1.0, 0.0);
+		};
+
+		double time = 0.0;
+		for (; time < 7.0; time += 0.11)
+			pushPair(time, 0.0);
+		bool startedTracking = alignment.GetState() == ContinuousAlignment::State::Tracking;
+
+		int corrections = 0;
+		int losses = 0;
+		long long mode = 0;
+		for (; time < 20.0; time += 0.20, ++mode)
+		{
+			pushPair(time, (mode & 1) ? -0.12 : 0.12);
+
+			ContinuousAlignment::Correction correction;
+			while (alignment.PollCorrection(correction))
+				corrections++;
+			ContinuousAlignment::Event event;
+			while (alignment.PollEvent(event))
+				if (event.type == ContinuousAlignment::Event::TrackerLost)
+					losses++;
+		}
+
+		bool leftTracking = alignment.GetState() != ContinuousAlignment::State::Tracking;
+		snprintf(detail, sizeof detail,
+			"started %d  final state %d  losses %d  corrections %d  observations %zu",
+			startedTracking, static_cast<int>(alignment.GetState()), losses, corrections,
+			alignment.ObservationCount());
+		Check("continuous: rejected jumps go stale",
+			startedTracking && leftTracking && alignment.ObservationCount() < 40 &&
+			corrections == 0,
+			detail);
+	}
+
+	// 14. Mount slip during degraded tracking: a long run of unstructured
 	// warble votes must not indefinitely delay the freeze once the mount then
 	// genuinely slips — the sliding vote window bounds the delay to
 	// ~scatterVoteWindow evaluations instead of the episode's whole history.

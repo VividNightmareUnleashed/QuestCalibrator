@@ -13,9 +13,9 @@
 //
 // A rolling window of observations is robust-averaged (hemisphere-safe
 // eigenvector quaternion mean + trimmed translation mean) and compared to the
-// current calibration — which the caller passes in as the transform expected
-// AT THE TRACKER'S SPOT (the field-blended local calibration when anchors
-// exist), so anchor deltas never read as deviations. Small deviations are
+// current calibration. With a spatial field, each observation is first rebased
+// through the field calibration expected at that observation's own target-raw
+// position, so movement across anchor gradients never reads as drift. Small deviations are
 // emitted as yaw+translation corrections for the caller to auto-apply (the
 // driver slews them); large or tilted sustained deviations mean a bumped
 // mount or a tracking fault and freeze auto-apply instead. Noisy windows only
@@ -33,6 +33,7 @@
 #include "CalibrationEngine.h"
 
 #include <deque>
+#include <functional>
 #include <vector>
 
 namespace questcal
@@ -163,6 +164,11 @@ public:
 		Deviation deviation;   // populated for a deviation-path FrozenLargeDeviation
 	};
 
+	using ExpectedCalibrationAt = std::function<void(
+		const Eigen::Vector3d &targetRawPos,
+		Eigen::Quaterniond &rotationOut,
+		Eigen::Vector3d &translationOut)>;
+
 	void SetConfig(const Config &c) { config = c; }
 	void SetExtrinsic(const MountExtrinsic &e) { extrinsic = e; }
 	const MountExtrinsic &Extrinsic() const { return extrinsic; }
@@ -177,9 +183,12 @@ public:
 	// cadence) estimate + decide. `now` is on the samples' clock. The current
 	// calibration is passed in every call so deviation is always measured
 	// against the caller-owned truth, including our own applied corrections.
+	// When supplied, expectedAt evaluates the local field calibration for every
+	// retained observation rather than only for the latest tracker position.
 	void Update(double now, const Eigen::Quaterniond &calRotation,
 	            const Eigen::Vector3d &calTranslationMeters,
-	            double calScale, double calTimeOffset);
+	            double calScale, double calTimeOffset,
+	            const ExpectedCalibrationAt &expectedAt = ExpectedCalibrationAt());
 
 	bool PollCorrection(Correction &out);
 	bool PollEvent(Event &out);
@@ -220,13 +229,18 @@ private:
 		double time = 0.0;
 		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
 		Eigen::Vector3d trans{ 0, 0, 0 };
+		Eigen::Vector3d targetRawPos{ 0, 0, 0 };
 	};
 
 	void FormObservations(double calScale, double calTimeOffset);
 	void TrimWindows(double now);
-	bool EstimateWindow(Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut);
+	bool EstimateWindow(const Eigen::Quaterniond &calRotation,
+	                    const Eigen::Vector3d &calTranslationMeters,
+	                    const ExpectedCalibrationAt &expectedAt,
+	                    Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut);
 	void Decide(double now, const Eigen::Quaterniond &calRotation,
-	            const Eigen::Vector3d &calTranslationMeters);
+	            const Eigen::Vector3d &calTranslationMeters,
+	            const ExpectedCalibrationAt &expectedAt);
 	void EnterState(State s);
 
 	Config config;
