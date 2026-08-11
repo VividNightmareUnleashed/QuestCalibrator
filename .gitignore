@@ -2,6 +2,6 @@
 x64/
 QuestCal.A61324AD/
 *.user
-# Local-only packaging: official installers ship exclusively via the store
-# listing, so the NSIS script and its output stay out of the repo.
+# Local-only packaging: official ZIPs are attached to GitHub Releases, while
+# packaging sources and build output stay out of the repository.
 install/

@@ -6,8 +6,8 @@ tags must therefore use the unambiguous form
 `questcalibrator-v1.0.1`). Do not retag or reuse an inherited version tag.
 
 The public repository intentionally ignores `install/`. Official packages are made
-with the private/local packaging tooling and distributed through the authorized
-store listing; installer sources or outputs must not be added to this repository.
+with the private/local packaging tooling and attached as ZIP assets to GitHub Releases;
+packaging sources and outputs must not be committed to the repository.
 
 ## Source preflight
 
@@ -41,7 +41,7 @@ store listing; installer sources or outputs must not be added to this repository
 - Push the tag explicitly and verify that the remote tag resolves to the recorded
   commit. Never use a force-updated release tag; issue a new patch version instead.
 
-## Private package and provenance record
+## Local package and provenance record
 
 - Build the package from the exact tagged source commit using the private/local
   installer tooling. Record the installer script revision or SHA-256 because that
@@ -56,5 +56,17 @@ store listing; installer sources or outputs must not be added to this repository
   on a clean supported Windows environment. Confirm the original Space Calibrator
   driver is disabled so transforms are not applied twice.
 - If artifacts are signed, verify the signatures after final packaging and record
-  their signer and timestamp details. Upload only the exact hashed artifact to the
-  authorized store listing and record the resulting listing/release identifier.
+  their signer and timestamp details.
+
+## Publish the GitHub Release
+
+- Create a draft GitHub Release from the pushed, annotated QuestCalibrator tag. Use
+  the version as the release title and include the upstream base commit, validation
+  result, installation notes, and user-visible changes in the release notes.
+- Attach only the exact tested and hashed package ZIP. GitHub's automatically generated
+  source archives are not substitutes for the install package.
+- Verify the draft's tag and attached ZIP name, size, and SHA-256 against the provenance
+  record, then publish it. Record the final GitHub Release URL in that record.
+- Download the ZIP from the published release and verify its SHA-256 once more. Never
+  replace an asset on an existing release; publish a new patch version if an artifact
+  must change.

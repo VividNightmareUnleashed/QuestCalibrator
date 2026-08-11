@@ -8,6 +8,15 @@ single SteamVR playspace, rebuilt around a hardened driver and a new calibration
 > it) before installing this. Both register a SteamVR driver that rewrites device poses;
 > two of them active at once will apply two transforms and mangle tracking.
 
+## Download and install
+
+Download the packaged ZIP attached to the latest
+[GitHub Release](https://github.com/VividNightmareUnleashed/QuestCalibrator/releases/latest).
+Do not use GitHub's automatically generated **Source code** archives unless you intend to
+build QuestCalibrator yourself. Extract the package, close Steam completely, then follow
+the included `README-INSTALL.txt` (the recommended path is to run `Install.ps1` with
+PowerShell).
+
 ## What changed vs. upstream
 
 Solver (new `CalibrationEngine`, covered by synthetic tests in `Tests/`):
@@ -185,4 +194,4 @@ reimplemented from scratch; no code from that fork is included.
 MinHook is vendored under its BSD-2-Clause license (`lib/MinHook/LICENSE`).
 
 Maintainers should follow the [release provenance checklist](docs/releasing.md)
-before creating a fork release or producing the private store package.
+before publishing a GitHub Release package.
