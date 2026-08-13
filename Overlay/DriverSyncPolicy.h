@@ -43,10 +43,13 @@ inline vr::HmdVector3d_t WireVector(const Eigen::Vector3d &meters)
 	return out;
 }
 
-// Device class reduced to the three cases that change a decision. Invalid is
-// the one OpenVR reports for an id it no longer exposes, which is not the same
-// as "absent": the driver slot outlives the disappearance, so it still has to
-// be retired.
+// A plain mirror of the three vr::ETrackedDeviceClass values this file cares
+// about. Invalid is what OpenVR reports for an id it no longer exposes, and
+// that is the one a decision reads: the driver slot outlives the
+// disappearance, so the slot still has to be retired. Hmd and Other are
+// distinguished because the headset is identified by id here (OpenVR pins it to
+// slot 0) while the caller's own pre-loop identity gate matches on the class,
+// and a fact set that collapsed them would not describe what was enumerated.
 enum class SyncDeviceClass
 {
 	Invalid,
@@ -146,8 +149,8 @@ class DriverSlotPolicy
 public:
 	bool SlotMayBeEnabled(uint32_t id) const
 	{
-		// Ids reaching this loop come from an OpenVR scan and from IPC-derived
-		// state; every entry point bounds-checks before indexing.
+		// Device ids are untrusted input, so every entry point here bounds-checks
+		// before indexing rather than trusting the enumeration that produced them.
 		return id < vr::k_unMaxTrackedDeviceCount && slotMayBeEnabled[id];
 	}
 

@@ -387,7 +387,7 @@ static bool SendAlignmentField(CalibrationContext &ctx, bool baseBatchComplete,
 			f.anchors[i].position[k] = a.position(k);
 			f.anchors[i].translationDelta[k] = dT(k);
 		}
-		f.anchors[i].rotationDelta = VRQuat(dR);
+		f.anchors[i].rotationDelta = questcal::WireQuaternion(dR);
 	}
 
 	return SendDriverRequest(ctx, req, "applying the alignment field",
@@ -431,8 +431,7 @@ static bool NeutralizeDriverConnection(CalibrationContext &ctx,
 		if (!complete)
 			continue;
 
-		for (bool &mayBeEnabled : DriverSlotMayBeEnabled)
-			mayBeEnabled = false;
+		DriverSlots.ForgetEverySlot();
 		neutralizedConnectionGeneration = passConnectionGeneration;
 		return true;
 	}
@@ -466,6 +465,46 @@ static bool ReadCurrentHmdIdentity(std::string &trackingSystem, std::string &ser
 		vr::Prop_TrackingSystemName_String, trackingSystem) &&
 		ReadTrackedDeviceString(vr::k_unTrackedDeviceIndex_Hmd,
 			vr::Prop_SerialNumber_String, serial);
+}
+
+// The whole OpenVR half of one slot's reconciliation: everything the slot
+// policy needs, and nothing else. The serial is a string property read per
+// device, so it is paid only for the slots SlotNeedsSerial names — the same
+// predicate the decision applies, so the two cannot disagree about which device
+// the serial is supposed to identify.
+static questcal::SyncDevice EnumerateSyncDevice(uint32_t id,
+	const questcal::DriverSyncDesired &desired)
+{
+	questcal::SyncDevice device;
+	if (id >= vr::k_unMaxTrackedDeviceCount)
+		return device;
+
+	device.id = id;
+	auto system = vr::VRSystem();
+	// No runtime means no description of this device, which is the same
+	// conservative answer as a slot OpenVR stopped exposing: retire it.
+	if (!system)
+		return device;
+
+	switch (system->GetTrackedDeviceClass(id))
+	{
+	case vr::TrackedDeviceClass_Invalid:
+		device.deviceClass = questcal::SyncDeviceClass::Invalid;
+		return device;
+	case vr::TrackedDeviceClass_HMD:
+		device.deviceClass = questcal::SyncDeviceClass::Hmd;
+		break;
+	default:
+		device.deviceClass = questcal::SyncDeviceClass::Other;
+		break;
+	}
+
+	device.trackingSystemKnown = ReadTrackedDeviceString(id,
+		vr::Prop_TrackingSystemName_String, device.trackingSystem);
+	if (questcal::SlotNeedsSerial(desired, device))
+		device.serialKnown = ReadTrackedDeviceString(id,
+			vr::Prop_SerialNumber_String, device.serial);
+	return device;
 }
 
 static bool CacheHmdWorldFromDriver(
@@ -622,7 +661,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 		bool disabled = ResetAndDisableOffsets(ctx, id,
 			&batchConnectionGeneration);
 		if (disabled)
-			DriverSlotMayBeEnabled[id] = false;
+			DriverSlots.NoteSlotDisabled(id);
 		if (Driver.ConnectionGeneration() != batchConnectionGeneration)
 			connectionReady = false;
 		driverSynchronized = disabled && driverSynchronized;
@@ -634,6 +673,21 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 		ctx.targetDeviceMask[id] = false;
 	}
 
+	// What the driver should be applying, as the slot policy reads it. Built
+	// once here, after the validity gates above have run, so every slot decides
+	// against the same transform.
+	questcal::DriverSyncDesired desired;
+	desired.referenceTrackingSystem = ctx.referenceTrackingSystem;
+	desired.targetTrackingSystem = ctx.targetTrackingSystem;
+	desired.rotation = ctx.calibratedRotationQ;
+	desired.translationMeters = ctx.TranslationMeters();
+	desired.scale = ctx.calibratedScale;
+	desired.timeShift = timeShift;
+	desired.baseGeneration = ctx.baseGeneration;
+	desired.continuousArmed = ctx.ContinuousArmed();
+	desired.hideMountedTracker = ctx.hideMountedTracker;
+	desired.continuousTrackerSerial = ctx.continuousTrackerSerial;
+
 	if (!ctx.enabled)
 	{
 		// No OpenVR device scan is needed to converge to neutral state. The
@@ -643,7 +697,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 			id < vr::k_unMaxTrackedDeviceCount && connectionReady && driverSynchronized;
 			++id)
 		{
-			if (DriverSlotMayBeEnabled[id])
+			if (DriverSlots.DecideNeutralSlot(id).action == questcal::SlotAction::Disable)
 				disableSlot(id);
 		}
 	}
@@ -655,82 +709,37 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 				continue;
 			if (!ctx.enabled)
 			{
-				if (DriverSlotMayBeEnabled[id])
+				if (DriverSlots.DecideNeutralSlot(id).action == questcal::SlotAction::Disable)
 					disableSlot(id);
 				continue;
 			}
 
-			auto deviceClass = vr::VRSystem()->GetTrackedDeviceClass(id);
-			if (deviceClass == vr::TrackedDeviceClass_Invalid)
+			// Enumerate, then decide, then send. The ledger mark for an enable
+			// happens inside DecideSlot, i.e. strictly before this loop can send
+			// anything — see DriverSyncPolicy.h for why marking on success instead
+			// is the dangerous direction.
+			questcal::SlotDecision decision =
+				DriverSlots.DecideSlot(desired, EnumerateSyncDevice(id, desired));
+			ctx.referenceDeviceMask[id] = decision.referenceDevice;
+			ctx.targetDeviceMask[id] = decision.targetDevice;
+			if (decision.continuousTracker)
+				ctx.continuousTrackerId = id;
+			if (decision.disableProfile)
 			{
-				// OpenVR no longer exposes this ID, but the driver slot survives the
-				// disappearance. Retire any transform that a prior successful or
-				// uncertain enable may have left behind.
-				if (DriverSlotMayBeEnabled[id])
-					disableSlot(id);
+				// Currently using an HMD with a different tracking system than the calibration.
+				ctx.enabled = false;
+			}
+
+			if (decision.action == questcal::SlotAction::Disable)
+			{
+				disableSlot(id);
 				continue;
 			}
-
-			std::string trackingSystem;
-			if (!ReadTrackedDeviceString(id, vr::Prop_TrackingSystemName_String,
-				trackingSystem))
-			{
-				if (DriverSlotMayBeEnabled[id])
-					disableSlot(id);
+			if (decision.action != questcal::SlotAction::ApplyTransform)
 				continue;
-			}
-
-			ctx.referenceDeviceMask[id] =
-				trackingSystem == ctx.referenceTrackingSystem;
-			ctx.targetDeviceMask[id] = trackingSystem == ctx.targetTrackingSystem;
-
-			if (id == vr::k_unTrackedDeviceIndex_Hmd)
-			{
-				if (trackingSystem != ctx.referenceTrackingSystem)
-				{
-					// Currently using an HMD with a different tracking system than the calibration.
-					ctx.enabled = false;
-				}
-
-				if (DriverSlotMayBeEnabled[id])
-					disableSlot(id);
-				continue;
-			}
-
-			if (trackingSystem != ctx.targetTrackingSystem)
-			{
-				if (DriverSlotMayBeEnabled[id])
-					disableSlot(id);
-				continue;
-			}
-
-			// The continuous-calibration tracker is identified by serial (ids are
-			// not stable across sessions).
-			if (!ctx.continuousTrackerSerial.empty())
-			{
-				std::string serial;
-				if (ReadTrackedDeviceString(id, vr::Prop_SerialNumber_String, serial) &&
-					ctx.continuousTrackerSerial == serial)
-					ctx.continuousTrackerId = id;
-			}
 
 			protocol::Request req(protocol::RequestSetDeviceTransform);
-			req.setDeviceTransform = {
-				id,
-				true,
-				VRVec(ctx.TranslationMeters()),
-				VRQuat(ctx.calibratedRotationQ),
-				ctx.calibratedScale,
-				timeShift
-			};
-			req.setDeviceTransform.generation = ctx.baseGeneration;
-			req.setDeviceTransform.hidden =
-				ctx.ContinuousArmed() && ctx.hideMountedTracker &&
-				id == ctx.continuousTrackerId;
-			// Mark before sending: a response loss can leave an accepted enable
-			// indistinguishable from a failed request, so future disappearance must
-			// conservatively issue a disable.
-			DriverSlotMayBeEnabled[id] = true;
+			req.setDeviceTransform = decision.transform;
 			desiredMutationAttempted = true;
 			bool applied = SendDriverRequest(ctx, req,
 				"applying a device transform", &batchConnectionGeneration);
@@ -741,7 +750,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 				// the reconnect. Neutralize that one known slot on the new pipe now;
 				// the generation-wide recovery pass below clears every other slot.
 				if (ResetAndDisableOffsets(ctx, id, nullptr))
-					DriverSlotMayBeEnabled[id] = false;
+					DriverSlots.NoteSlotDisabled(id);
 			}
 			driverSynchronized = applied && driverSynchronized;
 		}

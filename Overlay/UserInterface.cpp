@@ -66,6 +66,19 @@ static void SaveSettingOrRestore(T &value, const T &previous)
 		value = previous;
 }
 
+// Profile-backed counterpart, for the toggles that are not spatial-field edits
+// and so cannot go through CalibrationContext::WithProfileSave (that owns the
+// driver-visible field generation bump and snapshots only the field members).
+// One spelling for all of them: a refused write leaves no live member the
+// registry disagrees with. Every call site sits inside an `if (validProfile)`
+// block, which is the precondition SaveDirtyPersistence checks for itself.
+template<typename T>
+static void SaveProfileOrRestore(T &value, const T &previous)
+{
+	if (!SaveProfile(CalCtx))
+		value = previous;
+}
+
 struct IdentifyPulseState
 {
 	bool active = false;
@@ -719,7 +732,10 @@ static std::string FormatString(const char *fmt, ...)
 
 static bool s_showSettings = false;
 
-enum CalRating { Rating_Good = 0, Rating_Decent, Rating_Poor, Rating_VeryPoor };
+// Unknown is not a severity, it is the absence of one: nothing has been
+// measured to rate. Sorting it below Good keeps every "bad enough to say
+// something" test (>= Rating_Poor) reading false for it with no special case.
+enum CalRating { Rating_Unknown = -1, Rating_Good = 0, Rating_Decent, Rating_Poor, Rating_VeryPoor };
 
 // The driver's pose channel feeds every runtime monitor. Preview mode has no
 // driver at all, so it must not display a fault for it.
@@ -728,7 +744,86 @@ static bool PoseChannelDown()
 	return !g_uiPreviewMode && !CalCtx.poseRingOpen;
 }
 
-static CalRating ComputeCalibrationRating()
+// ---------------------------------------------------------------------------
+// Continuous-calibration status
+// ---------------------------------------------------------------------------
+
+// One derived answer to "what is the continuous loop actually doing", built
+// from the same terms ContinuousTick gates its own shouldRun on. The status
+// text, the rating, the advanced row's colour, the mount advisory and both
+// recalibration nudges all read this instead of each re-deriving a slice of
+// it -- which is how the state meaning "not running at all" came to render as
+// "gathering" forever, and how the two screens came to nudge from two rules.
+enum class ContinuousStatus
+{
+	Off,         // the feature is switched off
+	NoTracker,   // enabled, but no mounted tracker picked
+	NeedsMount,  // picked, but no mount offset learned for it yet
+	NotRunning,  // armed, yet the loop's runtime preconditions do not hold
+	Gathering,   // running, not enough observations yet (State::Inactive)
+	Tracking,
+	Coasting,
+	Frozen,
+	Holding,
+};
+
+// Pure over context fields, so asking again is free and no cached mirror of it
+// can go stale.
+static ContinuousStatus ContinuousStatusNow()
+{
+	using CA = questcal::ContinuousAlignment;
+
+	if (!CalCtx.continuousEnabled)
+		return ContinuousStatus::Off;
+	if (CalCtx.continuousTrackerSerial.empty())
+		return ContinuousStatus::NoTracker;
+	if (!CalCtx.ContinuousArmed())
+		return ContinuousStatus::NeedsMount;
+
+	// The rest of ContinuousTick's shouldRun conjunction. The tracker id is
+	// re-resolved by the driver sync and reset to invalid whenever that batch
+	// fails, so a sleeping tracker or a dropped pipe lands here rather than
+	// looking like a loop that is still warming up. Preview mode has no driver
+	// at all and so can satisfy none of these (see PoseChannelDown).
+	bool running = g_uiPreviewMode ||
+		(CalCtx.state == CalibrationState::None &&
+			CalCtx.enabled && CalCtx.validProfile && CalCtx.poseRingOpen &&
+			CalCtx.continuousTrackerId < vr::k_unMaxTrackedDeviceCount &&
+			CalCtx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd]);
+	if (!running)
+		return ContinuousStatus::NotRunning;
+
+	switch (CalCtx.continuousState)
+	{
+	case CA::State::Tracking: return ContinuousStatus::Tracking;
+	case CA::State::Coasting: return ContinuousStatus::Coasting;
+	case CA::State::Frozen:   return ContinuousStatus::Frozen;
+	case CA::State::Holding:  return ContinuousStatus::Holding;
+	default:                  return ContinuousStatus::Gathering;
+	}
+}
+
+static const char *ContinuousStatusText(ContinuousStatus status)
+{
+	switch (status)
+	{
+	case ContinuousStatus::Off:        return "off";
+	case ContinuousStatus::NoTracker:  return "no tracker selected";
+	case ContinuousStatus::NeedsMount: return "needs one calibration with the tracker mounted";
+	case ContinuousStatus::NotRunning: return "not running -- mounted tracker or driver unavailable";
+	case ContinuousStatus::Tracking:   return "maintaining";
+	case ContinuousStatus::Coasting:   return "paused -- tracker not tracking";
+	case ContinuousStatus::Frozen:     return "on hold -- check the mount";
+	case ContinuousStatus::Holding:    return "paused -- tracker tracking unstable";
+	default:                           return "gathering";
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Rating
+// ---------------------------------------------------------------------------
+
+static CalRating ComputeCalibrationRating(ContinuousStatus continuous)
 {
 	int r = Rating_Good;
 
@@ -754,8 +849,7 @@ static CalRating ComputeCalibrationRating()
 	// Staleness/drift only degrade the rating when nothing is maintaining the
 	// alignment; a healthy continuous loop re-measures it constantly. A frozen
 	// loop (bumped mount) is itself a Poor signal.
-	bool continuouslyMaintained = CalCtx.ContinuousArmed() &&
-		CalCtx.continuousState == questcal::ContinuousAlignment::State::Tracking;
+	bool continuouslyMaintained = continuous == ContinuousStatus::Tracking;
 	if (!continuouslyMaintained)
 	{
 		if (CalCtx.alignment == CalibrationContext::AlignmentHealth::Aging && r < Rating_Decent)
@@ -765,55 +859,54 @@ static CalRating ComputeCalibrationRating()
 		if (CalCtx.driftScore >= 0.85)
 			r = Rating_VeryPoor;
 	}
-	if (CalCtx.ContinuousArmed() &&
-		CalCtx.continuousState == questcal::ContinuousAlignment::State::Frozen &&
-		r < Rating_Poor)
+	if (continuous == ContinuousStatus::Frozen && r < Rating_Poor)
 		r = Rating_Poor;
+
+	// Solve residuals live only in lastResult, which FinishCalibration sets and
+	// nothing persists, so a profile restored from the registry has no evidence
+	// behind the quality half of this verdict. If none of the monitors above
+	// found a reason to demote it, what we have is an absence of evidence, not
+	// a good measurement -- say so instead of asserting the best label.
+	if (!CalCtx.lastResult.valid && r == Rating_Good)
+		return Rating_Unknown;
 
 	return (CalRating)r;
 }
 
 static const char *RatingLabels[] = { "Good", "Decent", "Poor", "Very Poor" };
 
-// Continuous-calibration status helpers (see ContinuousAlignment.h).
-static bool ContinuousHealthy()
+static const char *RatingLabel(CalRating r)
 {
-	return CalCtx.ContinuousArmed() &&
-		CalCtx.continuousState == questcal::ContinuousAlignment::State::Tracking;
-}
-
-static bool ContinuousFrozen()
-{
-	return CalCtx.ContinuousArmed() &&
-		CalCtx.continuousState == questcal::ContinuousAlignment::State::Frozen;
-}
-
-static const char *ContinuousStatusText()
-{
-	using CA = questcal::ContinuousAlignment;
-	if (CalCtx.continuousTrackerSerial.empty())
-		return "no tracker selected";
-	if (!CalCtx.ContinuousArmed())
-		return "needs one calibration with the tracker mounted";
-	switch (CalCtx.continuousState)
-	{
-	case CA::State::Tracking: return "maintaining";
-	case CA::State::Coasting: return "paused -- tracker not tracking";
-	case CA::State::Frozen:   return "on hold -- check the mount";
-	case CA::State::Holding:  return "paused -- tracker tracking unstable";
-	default:                  return "gathering";
-	}
+	return r == Rating_Unknown ? "Unknown" : RatingLabels[r];
 }
 
 static ImVec4 RatingColor(CalRating r)
 {
 	switch (r)
 	{
-	case Rating_Good:   return Pal::Good;
-	case Rating_Decent: return Pal::Warn;
-	case Rating_Poor:   return Pal::Bad;
-	default:            return Pal::VeryBad;
+	// Unknown claims nothing in either direction, so it gets the neutral ink
+	// rather than the green of a verdict we cannot support or the red of one
+	// we have no reason to give.
+	case Rating_Unknown: return Pal::Dim;
+	case Rating_Good:    return Pal::Good;
+	case Rating_Decent:  return Pal::Warn;
+	case Rating_Poor:    return Pal::Bad;
+	default:             return Pal::VeryBad;
 	}
+}
+
+// The one recalibration nudge both screens render. The rating already folds
+// solve quality, staleness, drift and a bumped mount into a single verdict;
+// re-deriving "should I nag" from alignment on one screen and from the rating
+// on the other let identical state produce contradictory advice. Returns null
+// when there is nothing to advise.
+static const char *RecalibrationNudge(CalRating rating, ContinuousStatus continuous)
+{
+	if (rating < Rating_Poor)
+		return nullptr;
+	return continuous == ContinuousStatus::Frozen
+		? "Check the headset-mounted tracker -- recalibrating is recommended."
+		: "Recalibrating is recommended.";
 }
 
 static void FormatUnixAge(char *buf, size_t len, double unixTime)
@@ -999,43 +1092,48 @@ static bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, b
 }
 
 // Preferred default: left-hand controller, else first device of the system.
-static void EnsureDeviceSelection(const VRState &state, int &selected, const std::string &system)
+// Reconciles the context's selection against the live device list in place --
+// it is the only owner of that selection, so there is no mirror to go stale
+// when a tracking system disappears between frames.
+static void EnsureDeviceSelection(const VRState &state, uint32_t &selected, const std::string &system)
 {
-	if (selected != -1)
+	const uint32_t none = vr::k_unTrackedDeviceIndexInvalid;
+
+	if (selected != none)
 	{
 		bool matched = false;
 		for (auto &device : state.devices)
-			if (device.trackingSystem == system && selected == device.id)
+			if (device.trackingSystem == system && selected == (uint32_t)device.id)
 			{
 				matched = true;
 				break;
 			}
 		if (!matched)
-			selected = -1;
+			selected = none;
 	}
 
-	if (selected == -1)
+	if (selected == none)
 	{
 		for (auto &device : state.devices)
 			if (device.trackingSystem == system && device.controllerRole == vr::TrackedControllerRole_LeftHand)
 			{
-				selected = device.id;
+				selected = (uint32_t)device.id;
 				break;
 			}
 	}
 
-	if (selected == -1)
+	if (selected == none)
 	{
 		for (auto &device : state.devices)
 			if (device.trackingSystem == system)
 			{
-				selected = device.id;
+				selected = (uint32_t)device.id;
 				break;
 			}
 	}
 }
 
-static void BuildDeviceList(const VRState &state, int &selected, const std::string &system, float paneW)
+static void BuildDeviceList(const VRState &state, uint32_t &selected, const std::string &system, float paneW)
 {
 	EnsureDeviceSelection(state, selected, system);
 
@@ -1081,8 +1179,8 @@ static void BuildDeviceList(const VRState &state, int &selected, const std::stri
 	for (size_t i = 0; i < devices.size(); ++i)
 	{
 		const VRDevice &device = *devices[i];
-		if (DeviceRow(device, selected == device.id, rowW, i == 0, i + 1 == devices.size()))
-			selected = device.id;
+		if (DeviceRow(device, selected == (uint32_t)device.id, rowW, i == 0, i + 1 == devices.size()))
+			selected = (uint32_t)device.id;
 	}
 	ImGui::EndChild();
 	ImGui::PopStyleVar();
@@ -1106,6 +1204,41 @@ static std::string FriendlySystemName(const std::string &raw)
 	return raw;
 }
 
+// Both space panes are the same control over a different candidate list: the
+// friendly labels, the index recovery for the current pick, the Combo, and the
+// write-back. `fallback` is the index to commit when `selection` is not among
+// the candidates (-1 to leave it alone) -- that is how an emptied or vanished
+// pick settles onto a real system instead of lingering as a name nothing shows.
+static void PickTrackingSystem(const char *id, const std::vector<std::string> &candidates,
+	int fallback, float width, std::string &selection)
+{
+	int current = -1;
+	for (size_t i = 0; i < candidates.size(); ++i)
+		if (candidates[i] == selection)
+		{
+			current = (int)i;
+			break;
+		}
+	if (current == -1)
+		current = fallback;
+
+	std::vector<std::string> display;
+	std::vector<const char *> items;
+	display.reserve(candidates.size());
+	items.reserve(candidates.size());
+	for (const auto &raw : candidates)
+		display.push_back(FriendlySystemName(raw));
+	for (const auto &label : display)
+		items.push_back(label.c_str());
+
+	ImGui::PushItemWidth(width);
+	ImGui::Combo(id, &current, items.data(), (int)items.size());
+	ImGui::PopItemWidth();
+
+	if (current >= 0 && current < (int)candidates.size())
+		selection = candidates[current];
+}
+
 static void BuildSpacesSection(const VRState &state)
 {
 	if (state.trackingSystems.empty())
@@ -1125,25 +1258,20 @@ static void BuildSpacesSection(const VRState &state)
 
 	// The panes edit pending calibration choices. Active profile system names
 	// are committed only by FinishCalibration after a successful base solve.
-	int currentReferenceSystem = -1;
-	int currentTargetSystem = -1;
+	// The reference pane offers every system in the list (HMD system first, as
+	// LoadVRState ordered it); when the current pick is gone it falls back to
+	// the first system that is not already the target.
 	int firstReferenceSystemNotTargetSystem = -1;
-
-	std::vector<std::string> referenceRaw, referenceDisp;
-	referenceRaw.reserve(state.trackingSystems.size());
-	referenceDisp.reserve(state.trackingSystems.size());
-	for (auto &str : state.trackingSystems)
+	for (size_t i = 0; i < state.trackingSystems.size(); ++i)
 	{
-		if (str == CalCtx.pendingReferenceTrackingSystem)
-			currentReferenceSystem = (int)referenceRaw.size();
-		else if (firstReferenceSystemNotTargetSystem == -1 && str != CalCtx.pendingTargetTrackingSystem)
-			firstReferenceSystemNotTargetSystem = (int)referenceRaw.size();
-		referenceRaw.push_back(str);
-		referenceDisp.push_back(FriendlySystemName(str));
+		const std::string &str = state.trackingSystems[i];
+		if (str != CalCtx.pendingReferenceTrackingSystem &&
+			str != CalCtx.pendingTargetTrackingSystem)
+		{
+			firstReferenceSystemNotTargetSystem = (int)i;
+			break;
+		}
 	}
-
-	if (currentReferenceSystem == -1)
-		currentReferenceSystem = firstReferenceSystemNotTargetSystem;
 
 	float cw = ImGui::GetWindowContentRegionWidth();
 	const float paneGap = 24.0f;
@@ -1155,70 +1283,48 @@ static void BuildSpacesSection(const VRState &state)
 	ImGui::SetCursorScreenPos(top);
 	ImGui::BeginGroup();
 	SectionLabel("REFERENCE SPACE");
-	std::vector<const char *> referenceItems;
-	referenceItems.reserve(referenceDisp.size());
-	for (auto &s : referenceDisp)
-		referenceItems.push_back(s.c_str());
-	ImGui::PushItemWidth(paneW);
-	ImGui::Combo("##ReferenceTrackingSystem", &currentReferenceSystem, referenceItems.data(), (int)referenceItems.size());
-	ImGui::PopItemWidth();
+	PickTrackingSystem("##ReferenceTrackingSystem", state.trackingSystems,
+		firstReferenceSystemNotTargetSystem, paneW, CalCtx.pendingReferenceTrackingSystem);
 
-	if (currentReferenceSystem != -1 && currentReferenceSystem < (int)referenceRaw.size())
-	{
-		CalCtx.pendingReferenceTrackingSystem = referenceRaw[currentReferenceSystem];
-		if (CalCtx.pendingReferenceTrackingSystem == CalCtx.pendingTargetTrackingSystem)
-			CalCtx.pendingTargetTrackingSystem = "";
-	}
+	// One space cannot be both sides of the calibration. The reference pane
+	// wins and the target pick is dropped; the target list below is rebuilt
+	// from the reference, so it can never collide in the other direction.
+	if (CalCtx.pendingReferenceTrackingSystem == CalCtx.pendingTargetTrackingSystem)
+		CalCtx.pendingTargetTrackingSystem = "";
 
-	static int selectedRefDevice = -1;
 	ImGui::Spacing();
-	BuildDeviceList(state, selectedRefDevice, CalCtx.pendingReferenceTrackingSystem, paneW);
-	CalCtx.referenceID = selectedRefDevice;
+	BuildDeviceList(state, CalCtx.referenceID, CalCtx.pendingReferenceTrackingSystem, paneW);
 	ImGui::EndGroup();
 	float leftBottom = ImGui::GetItemRectMax().y;
 
 	// ---- Right pane: target space ----
-	if (CalCtx.pendingTargetTrackingSystem == "")
-		currentTargetSystem = 0;
-
-	std::vector<std::string> targetRaw, targetDisp;
-	targetRaw.reserve(state.trackingSystems.size());
-	targetDisp.reserve(state.trackingSystems.size());
+	std::vector<std::string> targetSystems;
+	targetSystems.reserve(state.trackingSystems.size());
 	for (auto &str : state.trackingSystems)
-	{
 		if (str != CalCtx.pendingReferenceTrackingSystem)
-		{
-			if (str != "" && str == CalCtx.pendingTargetTrackingSystem)
-				currentTargetSystem = (int)targetRaw.size();
-			targetRaw.push_back(str);
-			targetDisp.push_back(FriendlySystemName(str));
-		}
-	}
+			targetSystems.push_back(str);
 
 	ImGui::SetCursorScreenPos(ImVec2(top.x + paneW + paneGap, top.y));
 	ImGui::BeginGroup();
 	SectionLabel("TARGET SPACE");
-	if (!targetRaw.empty())
+	if (!targetSystems.empty())
 	{
-		std::vector<const char *> targetItems;
-		targetItems.reserve(targetDisp.size());
-		for (auto &s : targetDisp)
-			targetItems.push_back(s.c_str());
-		ImGui::PushItemWidth(paneW);
-		ImGui::Combo("##TargetTrackingSystem", &currentTargetSystem, targetItems.data(), (int)targetItems.size());
-		ImGui::PopItemWidth();
+		// An emptied pick (the collision rule above) settles on the first
+		// remaining system; a pick that is simply absent this frame is left
+		// alone, so a system that flickers out does not silently retarget.
+		PickTrackingSystem("##TargetTrackingSystem", targetSystems,
+			CalCtx.pendingTargetTrackingSystem.empty() ? 0 : -1, paneW,
+			CalCtx.pendingTargetTrackingSystem);
 
-		if (currentTargetSystem != -1 && currentTargetSystem < (int)targetRaw.size())
-			CalCtx.pendingTargetTrackingSystem = targetRaw[currentTargetSystem];
-
-		static int selectedCalDevice = -1;
 		ImGui::Spacing();
-		BuildDeviceList(state, selectedCalDevice, CalCtx.pendingTargetTrackingSystem, paneW);
-		CalCtx.targetID = selectedCalDevice;
+		BuildDeviceList(state, CalCtx.targetID, CalCtx.pendingTargetTrackingSystem, paneW);
 	}
 	else
 	{
 		ImGui::TextDisabled("No second tracking system detected");
+		// The pane is showing nothing, so nothing may stay selected: this id is
+		// what the identify pulse buzzes and what StartCalibration freezes.
+		CalCtx.targetID = vr::k_unTrackedDeviceIndexInvalid;
 	}
 	ImGui::EndGroup();
 	float rightBottom = ImGui::GetItemRectMax().y;
@@ -1379,12 +1485,13 @@ static void BuildMainScreen()
 
 		// ---- Status ----
 		std::vector<StatusRowData> rows;
+		const ContinuousStatus continuous = ContinuousStatusNow();
 		if (!CalCtx.uiAdvanced)
 		{
 			// Quiet strip anchored just above the footer: no card, a rating-colored
 			// dot, and the recommendation on its own violet line when it matters.
-			CalRating rating = CalCtx.validProfile ? ComputeCalibrationRating() : Rating_Good;
-			bool nudge = CalCtx.validProfile && rating >= Rating_Poor;
+			CalRating rating = CalCtx.validProfile ? ComputeCalibrationRating(continuous) : Rating_Unknown;
+			const char *nudge = CalCtx.validProfile ? RecalibrationNudge(rating, continuous) : nullptr;
 			const float lineH = g_fontBody->FontSize + 8.0f;
 			float stripH = nudge ? lineH * 2.0f + 4.0f : lineH;
 
@@ -1414,13 +1521,14 @@ static void BuildMainScreen()
 				// names the symptom, the violet line names the cure.
 				ImVec4 rcol = RatingColor(rating);
 				float x = p.x;
+				const char *label = RatingLabel(rating);
 				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(Pal::Text), "Tracking quality: ");
 				x += ImGui::CalcTextSize("Tracking quality: ").x;
-				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(rcol), RatingLabels[rating]);
-				x += ImGui::CalcTextSize(RatingLabels[rating]).x;
+				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(rcol), label);
+				x += ImGui::CalcTextSize(label).x;
 
 				std::string ageLine;
-				if (ContinuousHealthy())
+				if (continuous == ContinuousStatus::Tracking)
 				{
 					if (CalCtx.autoCorrectionsApplied > 0 && CalCtx.lastAutoCorrectionUnixTime > 0.0)
 					{
@@ -1446,9 +1554,7 @@ static void BuildMainScreen()
 				if (nudge)
 					dl->AddText(g_fontBody, g_fontBody->FontSize,
 						ImVec2(p.x, ty + lineH + 4.0f),
-						Pal::U32(Pal::Violet), ContinuousFrozen()
-							? "Check the headset-mounted tracker -- recalibrating is recommended."
-							: "Recalibrating is recommended.");
+						Pal::U32(Pal::Violet), nudge);
 			}
 			else
 			{
@@ -1508,14 +1614,12 @@ static void BuildMainScreen()
 						FormatString("Alignment %s (%s)", healthLabel, age) });
 				}
 
-				if (CalCtx.continuousEnabled)
+				if (continuous != ContinuousStatus::Off)
 				{
-					using CAState = questcal::ContinuousAlignment::State;
-					CAState cs = CalCtx.continuousState;
-					ImVec4 col = ContinuousHealthy() ? Pal::Good :
-						cs == CAState::Frozen ? Pal::Bad : Pal::Warn;
+					ImVec4 col = continuous == ContinuousStatus::Tracking ? Pal::Good :
+						continuous == ContinuousStatus::Frozen ? Pal::Bad : Pal::Warn;
 					std::string line;
-					if (ContinuousHealthy() && CalCtx.continuousDeviation.valid)
+					if (continuous == ContinuousStatus::Tracking && CalCtx.continuousDeviation.valid)
 						line = FormatString(
 							"Continuous: maintaining -- scatter %.2f deg / %.1f cm, deviation %.2f deg / %.1f cm, %u corrections",
 							CalCtx.continuousScatterRotDeg, CalCtx.continuousScatterPosM * 100.0,
@@ -1524,16 +1628,12 @@ static void BuildMainScreen()
 							CalCtx.autoCorrectionsApplied);
 					else
 						line = FormatString("Continuous: %s -- %u corrections applied",
-							ContinuousStatusText(), CalCtx.autoCorrectionsApplied);
+							ContinuousStatusText(continuous), CalCtx.autoCorrectionsApplied);
 					rows.push_back({ IconCrosshair, col, line });
 				}
 
-				if (CalCtx.alignment == CalibrationContext::AlignmentHealth::Stale &&
-					!ContinuousHealthy())
-					rows.push_back({ IconInfo, Pal::Violet, "Recalibrating is recommended." });
-				if (ContinuousFrozen())
-					rows.push_back({ IconInfo, Pal::Violet,
-						"Check the headset-mounted tracker -- recalibrating is recommended." });
+				if (const char *nudge = RecalibrationNudge(ComputeCalibrationRating(continuous), continuous))
+					rows.push_back({ IconInfo, Pal::Violet, nudge });
 			}
 		}
 
@@ -1715,7 +1815,9 @@ static void BuildSettingsScreen(const VRState &state)
 		// Continuous calibration: enable + nested tracker pick / hide / latency
 		if (CalCtx.validProfile)
 		{
-			bool advisory = CalCtx.continuousEnabled && !CalCtx.mountExtrinsic.valid;
+			ContinuousStatus continuous = ContinuousStatusNow();
+			bool advisory = continuous == ContinuousStatus::NoTracker ||
+				continuous == ContinuousStatus::NeedsMount;
 			const float nestedH = CalCtx.continuousEnabled ? 116.0f : 0.0f;
 			const float advisoryH = advisory ? 26.0f : 0.0f;
 			float rowH = 52.0f + nestedH + advisoryH;
@@ -1724,9 +1826,8 @@ static void BuildSettingsScreen(const VRState &state)
 
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
 			bool previousContinuousEnabled = CalCtx.continuousEnabled;
-			if (QCCheckbox("##continuousEnabled", &CalCtx.continuousEnabled) &&
-				!SaveProfile(CalCtx))
-				CalCtx.continuousEnabled = previousContinuousEnabled;
+			if (QCCheckbox("##continuousEnabled", &CalCtx.continuousEnabled))
+				SaveProfileOrRestore(CalCtx.continuousEnabled, previousContinuousEnabled);
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip(
@@ -1739,7 +1840,10 @@ static void BuildSettingsScreen(const VRState &state)
 
 			if (CalCtx.continuousEnabled)
 			{
-				std::string status = ContinuousStatusText();
+				// The toggle above changes what the loop is doing; the row height
+				// for this frame is already committed, but the text is not.
+				continuous = ContinuousStatusNow();
+				std::string status = ContinuousStatusText(continuous);
 				ImVec2 ts = ImGui::CalcTextSize(status.c_str());
 				dl->AddText(g_fontBody, g_fontBody->FontSize,
 					ImVec2(p.x + cw - 16.0f - ts.x, p.y + 26.0f - g_fontBody->FontSize * 0.5f),
@@ -1790,11 +1894,14 @@ static void BuildSettingsScreen(const VRState &state)
 				{
 					if (CalCtx.continuousTrackerSerial != candidates[sel]->serial)
 					{
+						// The serial and the extrinsic are one edit -- the learned
+						// mount offset described the previous tracker, and a
+						// different physical device needs a fresh calibration --
+						// so they roll back together or not at all. Two members
+						// is the one case SaveProfileOrRestore cannot express.
 						std::string previousSerial = CalCtx.continuousTrackerSerial;
 						auto previousExtrinsic = CalCtx.mountExtrinsic;
 						CalCtx.continuousTrackerSerial = candidates[sel]->serial;
-						// The learned mount offset described the previous tracker;
-						// a different physical device needs a fresh calibration.
 						CalCtx.mountExtrinsic = questcal::MountExtrinsic();
 						if (!SaveProfile(CalCtx))
 						{
@@ -1808,9 +1915,8 @@ static void BuildSettingsScreen(const VRState &state)
 
 				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 40.0f));
 				bool previousHide = CalCtx.hideMountedTracker;
-				if (QCCheckbox("##hideTracker", &CalCtx.hideMountedTracker) &&
-					!SaveProfile(CalCtx))
-					CalCtx.hideMountedTracker = previousHide;
+				if (QCCheckbox("##hideTracker", &CalCtx.hideMountedTracker))
+					SaveProfileOrRestore(CalCtx.hideMountedTracker, previousHide);
 				if (ImGui::IsItemHovered())
 				{
 					ImGui::SetTooltip(
@@ -1824,9 +1930,8 @@ static void BuildSettingsScreen(const VRState &state)
 
 				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 74.0f));
 				bool previousLatency = CalCtx.continuousLatencyReestimation;
-				if (QCCheckbox("##contLatency", &CalCtx.continuousLatencyReestimation) &&
-					!SaveProfile(CalCtx))
-					CalCtx.continuousLatencyReestimation = previousLatency;
+				if (QCCheckbox("##contLatency", &CalCtx.continuousLatencyReestimation))
+					SaveProfileOrRestore(CalCtx.continuousLatencyReestimation, previousLatency);
 				if (ImGui::IsItemHovered())
 				{
 					ImGui::SetTooltip(

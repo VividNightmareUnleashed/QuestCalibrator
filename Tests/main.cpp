@@ -22,6 +22,7 @@
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/FieldMath.h"
 #include "../Overlay/DriftMonitor.h"
+#include "../Overlay/DriverSyncPolicy.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/ProfileValidation.h"
 #include "../Overlay/RingPoseMath.h"
@@ -728,6 +729,425 @@ void RunDriverProtocolValidationScenarios()
 		preHandshakeRejected &&
 		wrongRejected && handshakeAccepted && mutationAccepted && !staleMutation,
 		"pre-handshake/wrong-handshake/current/stale mutation matrix");
+}
+
+// ---------------------------------------------------------------------------
+// Overlay -> driver slot reconciliation (Overlay/DriverSyncPolicy.h)
+//
+// SynchronizeDriverState's decision half: which slot gets the calibration,
+// which slots must be retired, and the conservative ledger answering "what
+// might this slot still be applying?" across scans. Only the transport is faked
+// below; every decision and every ledger update is the production one.
+
+// A device table indexed by OpenVR id. A slot nobody filled in enumerates as
+// TrackedDeviceClass_Invalid, which is exactly what OpenVR reports for an id it
+// no longer exposes -- and the driver slot outlives that disappearance.
+struct SyncDeviceTable
+{
+	questcal::SyncDevice devices[vr::k_unMaxTrackedDeviceCount];
+
+	SyncDeviceTable()
+	{
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+			devices[id].id = id;
+	}
+
+	// A null trackingSystem models a failed property read, which is not the same
+	// as a device on an unnamed system.
+	void Place(uint32_t id, questcal::SyncDeviceClass deviceClass,
+		const char *trackingSystem, const char *serial = nullptr)
+	{
+		questcal::SyncDevice &device = devices[id];
+		device.id = id;
+		device.deviceClass = deviceClass;
+		device.trackingSystemKnown = trackingSystem != nullptr;
+		device.trackingSystem = trackingSystem ? trackingSystem : "";
+		device.serialKnown = serial != nullptr;
+		device.serial = serial ? serial : "";
+	}
+
+	void Remove(uint32_t id)
+	{
+		devices[id] = questcal::SyncDevice();
+		devices[id].id = id;
+	}
+};
+
+struct SyncPassResult
+{
+	std::vector<protocol::SetDeviceTransform> enables;   // sent AND acknowledged
+	std::vector<uint32_t> attemptedEnables;              // includes the lost ones
+	std::vector<uint32_t> disables;
+	bool referenceMask[vr::k_unMaxTrackedDeviceCount] = {};
+	bool targetMask[vr::k_unMaxTrackedDeviceCount] = {};
+	uint32_t continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+	bool profileEnabled = false;
+};
+
+// Mirrors SynchronizeDriverState's send loop over a scripted transport.
+// `loseResponsesFrom` is the first slot whose request never gets a response
+// back: the driver may well have applied it, and production stops issuing the
+// rest of the batch once a request fails, so this does too.
+//
+// The ordering this exists to expose is the one a fake cannot fake: the ledger
+// mark happens inside DecideSlot, so it is already done by the time this
+// function reaches its send.
+SyncPassResult RunDriverSyncPass(questcal::DriverSlotPolicy &policy,
+	const questcal::DriverSyncDesired &desired, bool profileEnabled,
+	const SyncDeviceTable &table,
+	uint32_t loseResponsesFrom = vr::k_unTrackedDeviceIndexInvalid)
+{
+	SyncPassResult out;
+	out.profileEnabled = profileEnabled;
+	bool synchronized = true;
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		if (!synchronized)
+			continue;
+		const bool acknowledged = id < loseResponsesFrom;
+
+		if (!out.profileEnabled)
+		{
+			if (policy.DecideNeutralSlot(id).action == questcal::SlotAction::Disable)
+			{
+				out.disables.push_back(id);
+				if (acknowledged)
+					policy.NoteSlotDisabled(id);
+				else
+					synchronized = false;
+			}
+			continue;
+		}
+
+		questcal::SlotDecision decision = policy.DecideSlot(desired, table.devices[id]);
+		out.referenceMask[id] = decision.referenceDevice;
+		out.targetMask[id] = decision.targetDevice;
+		if (decision.continuousTracker)
+			out.continuousTrackerId = id;
+		if (decision.disableProfile)
+			out.profileEnabled = false;
+
+		if (decision.action == questcal::SlotAction::Disable)
+		{
+			out.disables.push_back(id);
+			if (acknowledged)
+				policy.NoteSlotDisabled(id);
+			else
+				synchronized = false;
+		}
+		else if (decision.action == questcal::SlotAction::ApplyTransform)
+		{
+			out.attemptedEnables.push_back(id);
+			if (acknowledged)
+				out.enables.push_back(decision.transform);
+			else
+				synchronized = false;
+		}
+	}
+	return out;
+}
+
+questcal::DriverSyncDesired MakeDriverSyncDesired()
+{
+	questcal::DriverSyncDesired desired;
+	desired.referenceTrackingSystem = "lighthouse";
+	desired.targetTrackingSystem = "oculus";
+	desired.rotation =
+		Eigen::Quaterniond(Eigen::AngleAxisd(0.35, Eigen::Vector3d::UnitY()));
+	desired.translationMeters = Eigen::Vector3d(0.4, -0.1, 1.2);
+	desired.scale = 1.02;
+	desired.timeShift = -0.012;
+	// Non-zero and not a round default, so both "hardcoded a constant" and
+	// "dropped the assignment and kept the struct default" are visible.
+	desired.baseGeneration = 9;
+	return desired;
+}
+
+void RunDriverSyncScenarios()
+{
+	// 1. The snap/slew discriminator on the wire. baseGeneration is what makes
+	// the driver snap to an intentional change; drop or hardcode this and every
+	// recalibration, universe-jump compensation and profile edit routes through
+	// the driver's slew path, smearing a whole recalibration delta over seconds
+	// of visibly drifting world. Three sends pin it: steady state, a continuous
+	// correction (transform moves, generation must NOT), and a recalibration
+	// (generation must follow the bump).
+	{
+		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
+		SyncDeviceTable table;
+		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		table.Place(4, questcal::SyncDeviceClass::Other, "oculus");
+
+		questcal::DriverSlotPolicy policy;
+		SyncPassResult steady = RunDriverSyncPass(policy, desired, true, table);
+
+		questcal::DriverSyncDesired slewed = desired;
+		slewed.translationMeters += Eigen::Vector3d(0.001, 0.0, -0.002);
+		SyncPassResult slew = RunDriverSyncPass(policy, slewed, true, table);
+
+		questcal::DriverSyncDesired snapped = slewed;
+		snapped.baseGeneration = desired.baseGeneration + 1;
+		SyncPassResult snap = RunDriverSyncPass(policy, snapped, true, table);
+
+		bool shapes = steady.enables.size() == 1 && slew.enables.size() == 1 &&
+			snap.enables.size() == 1;
+		bool generations = shapes &&
+			steady.enables[0].generation == desired.baseGeneration &&
+			slew.enables[0].generation == desired.baseGeneration &&
+			snap.enables[0].generation == desired.baseGeneration + 1;
+		// The rest of the message is the live calibration, so a generation that
+		// survives a gutted payload still fails here.
+		bool payload = shapes &&
+			steady.enables[0].openVRID == 4 && steady.enables[0].enabled == 1 &&
+			std::abs(steady.enables[0].scale - desired.scale) < 1e-12 &&
+			std::abs(steady.enables[0].timeOffset - desired.timeShift) < 1e-12 &&
+			std::abs(steady.enables[0].translation.v[0] - desired.translationMeters(0)) < 1e-12 &&
+			std::abs(steady.enables[0].translation.v[2] - desired.translationMeters(2)) < 1e-12 &&
+			std::abs(steady.enables[0].rotation.w - desired.rotation.w()) < 1e-12 &&
+			std::abs(steady.enables[0].rotation.y - desired.rotation.y()) < 1e-12 &&
+			std::abs(slew.enables[0].translation.v[2] - slewed.translationMeters(2)) < 1e-12;
+		Check("driver sync: base generation", generations && payload,
+			"9 / 9 on a continuous correction / 10 on a recalibration");
+	}
+
+	// 2. The conservative slot ledger under response loss. Marking on success
+	// instead of before the send is the obvious-looking cleanup, and it leaves
+	// an enabled transform on a slot the overlay believes is neutral: when the
+	// id is later reassigned to a reference-side device, the target transform is
+	// applied to it and the device flies to a wrong position with no error
+	// anywhere.
+	{
+		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
+		SyncDeviceTable table;
+		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		table.Place(5, questcal::SyncDeviceClass::Other, "oculus");
+
+		questcal::DriverSlotPolicy policy;
+		SyncPassResult lost = RunDriverSyncPass(policy, desired, true, table, 5);
+		bool attempted = lost.attemptedEnables.size() == 1 &&
+			lost.attemptedEnables[0] == 5 && lost.enables.empty();
+		bool ledgerHeld = policy.SlotMayBeEnabled(5);
+
+		// The id disappears from OpenVR; the driver slot does not.
+		SyncDeviceTable gone = table;
+		gone.Remove(5);
+		questcal::DriverSlotPolicy afterGone = policy;
+		SyncPassResult retire = RunDriverSyncPass(afterGone, desired, true, gone);
+		bool retired = retire.disables.size() == 1 && retire.disables[0] == 5 &&
+			retire.enables.empty() && !afterGone.SlotMayBeEnabled(5);
+
+		// The dangerous case: the id comes back as a reference-side device.
+		SyncDeviceTable reassigned = table;
+		reassigned.Place(5, questcal::SyncDeviceClass::Other, "lighthouse");
+		questcal::DriverSlotPolicy afterReassign = policy;
+		SyncPassResult reassign =
+			RunDriverSyncPass(afterReassign, desired, true, reassigned);
+		bool reassignedRetired = reassign.disables.size() == 1 &&
+			reassign.disables[0] == 5 && reassign.enables.empty() &&
+			reassign.referenceMask[5] && !reassign.targetMask[5];
+
+		// A confirmed disable is the one per-slot way out: the next pass is silent.
+		SyncPassResult settled = RunDriverSyncPass(afterGone, desired, true, gone);
+		bool quiet = settled.disables.empty() && settled.enables.empty();
+
+		Check("driver sync: response-loss ledger",
+			attempted && ledgerHeld && retired && reassignedRetired && quiet,
+			"a lost enable stays marked; disappearance and reassignment both retire it");
+	}
+
+	// 3. Converging to neutral takes no OpenVR scan at all -- the ledger names
+	// every slot that may still be live. The empty table below is the scan that
+	// production deliberately never performs on this path; a neutral pass that
+	// read devices instead of the ledger would retire nothing.
+	{
+		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
+		SyncDeviceTable table;
+		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		table.Place(2, questcal::SyncDeviceClass::Other, "oculus");
+		table.Place(7, questcal::SyncDeviceClass::Other, "oculus");
+
+		questcal::DriverSlotPolicy policy;
+		SyncPassResult on = RunDriverSyncPass(policy, desired, true, table);
+		bool enabledBoth = on.enables.size() == 2 &&
+			on.enables[0].openVRID == 2 && on.enables[1].openVRID == 7;
+
+		SyncDeviceTable unscanned;
+		SyncPassResult off = RunDriverSyncPass(policy, desired, false, unscanned);
+		bool retiredBoth = off.disables.size() == 2 &&
+			off.disables[0] == 2 && off.disables[1] == 7;
+
+		// ... and then stops. A pass that kept re-disabling would spend 64
+		// blocking pipe round-trips on the UI thread every scan, forever.
+		SyncPassResult again = RunDriverSyncPass(policy, desired, false, unscanned);
+		bool settled = again.disables.empty();
+
+		Check("driver sync: neutral path", enabledBoth && retiredBoth && settled,
+			"ledger alone retires 2 slots with no device scan, then goes quiet");
+	}
+
+	// 4. Only target-system devices that are not the headset may carry the
+	// transform. The headset defines the reference universe, so slot 0 is never
+	// a target whatever it reports -- and a headset on a foreign tracking system
+	// is a different rig, which must stop the profile rather than be calibrated.
+	{
+		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
+		SyncDeviceTable table;
+		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		table.Place(1, questcal::SyncDeviceClass::Other, "lighthouse");
+		table.Place(2, questcal::SyncDeviceClass::Other, "oculus");
+		table.Place(3, questcal::SyncDeviceClass::Other, "wmr");
+		table.Place(6, questcal::SyncDeviceClass::Other, nullptr);
+
+		questcal::DriverSlotPolicy policy;
+		SyncPassResult live = RunDriverSyncPass(policy, desired, true, table);
+		bool onlyTargetEnabled = live.enables.size() == 1 &&
+			live.enables[0].openVRID == 2 && live.profileEnabled;
+		bool masks =
+			live.referenceMask[0] && live.referenceMask[1] &&
+			!live.referenceMask[2] && !live.referenceMask[3] && !live.referenceMask[6] &&
+			live.targetMask[2] &&
+			!live.targetMask[0] && !live.targetMask[1] &&
+			!live.targetMask[3] && !live.targetMask[6];
+
+		SyncDeviceTable foreignHmd = table;
+		foreignHmd.Place(0, questcal::SyncDeviceClass::Hmd, "oculus");
+		questcal::DriverSlotPolicy fresh;
+		SyncPassResult disowned =
+			RunDriverSyncPass(fresh, desired, true, foreignHmd);
+		bool profileDropped = !disowned.profileEnabled && disowned.enables.empty();
+
+		Check("driver sync: reference-side slots",
+			onlyTargetEnabled && masks && profileDropped,
+			"HMD/reference/third-system/unreadable carry nothing; foreign HMD disables");
+	}
+
+	// 5. Which device gets displaced out of games' reach. The mounted tracker is
+	// resolved by serial because ids are not stable across sessions, and the
+	// hide is gated on the feature being ARMED (pick plus learned extrinsic):
+	// gating it on the weaker half displaced the tracker out of every game while
+	// nothing maintained the alignment.
+	{
+		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
+		desired.continuousTrackerSerial = "T-MOUNT";
+		desired.continuousArmed = true;
+		desired.hideMountedTracker = true;
+
+		SyncDeviceTable table;
+		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		table.Place(1, questcal::SyncDeviceClass::Other, "lighthouse", "LHR-9");
+		table.Place(3, questcal::SyncDeviceClass::Other, "oculus", "T-MOUNT");
+		table.Place(4, questcal::SyncDeviceClass::Other, "oculus", "T-FOOT");
+
+		questcal::DriverSlotPolicy armedSlots;
+		SyncPassResult armedPass = RunDriverSyncPass(armedSlots, desired, true, table);
+		bool hidesOne = armedPass.enables.size() == 2 &&
+			armedPass.enables[0].openVRID == 3 && armedPass.enables[0].hidden == 1 &&
+			armedPass.enables[1].openVRID == 4 && armedPass.enables[1].hidden == 0 &&
+			armedPass.continuousTrackerId == 3;
+
+		questcal::DriverSyncDesired unarmed = desired;
+		unarmed.continuousArmed = false;
+		questcal::DriverSlotPolicy unarmedSlots;
+		SyncPassResult shown = RunDriverSyncPass(unarmedSlots, unarmed, true, table);
+		// Still resolved (the drift monitor and the UI need the id), just not hidden.
+		bool shownWhenUnarmed = shown.enables.size() == 2 &&
+			shown.enables[0].hidden == 0 && shown.enables[1].hidden == 0 &&
+			shown.continuousTrackerId == 3;
+
+		questcal::DriverSyncDesired noHide = desired;
+		noHide.hideMountedTracker = false;
+		questcal::DriverSlotPolicy noHideSlots;
+		SyncPassResult visible = RunDriverSyncPass(noHideSlots, noHide, true, table);
+		bool shownWhenPreferenceOff = visible.enables.size() == 2 &&
+			visible.enables[0].hidden == 0 && visible.enables[1].hidden == 0;
+
+		// Reading a serial is an OpenVR string property read per device, so the
+		// enumerator pays it only where a decision can use the answer.
+		questcal::DriverSyncDesired noTracker = desired;
+		noTracker.continuousTrackerSerial.clear();
+		bool serialWhereItCounts =
+			questcal::SlotNeedsSerial(desired, table.devices[3]) &&
+			questcal::SlotNeedsSerial(desired, table.devices[4]) &&
+			!questcal::SlotNeedsSerial(desired, table.devices[0]) &&
+			!questcal::SlotNeedsSerial(desired, table.devices[1]) &&
+			!questcal::SlotNeedsSerial(desired, table.devices[9]) &&
+			!questcal::SlotNeedsSerial(noTracker, table.devices[3]);
+
+		Check("driver sync: mounted tracker",
+			hidesOne && shownWhenUnarmed && shownWhenPreferenceOff && serialWhereItCounts,
+			"hidden only for the armed pick; serial read only where it decides");
+	}
+
+	// 6. Device ids are untrusted input everywhere they index a 64-entry table.
+	{
+		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
+		questcal::DriverSlotPolicy policy;
+
+		questcal::SyncDevice pastEnd;
+		pastEnd.id = vr::k_unMaxTrackedDeviceCount;
+		pastEnd.deviceClass = questcal::SyncDeviceClass::Other;
+		pastEnd.trackingSystemKnown = true;
+		pastEnd.trackingSystem = "oculus";
+		bool ignoresPastEnd =
+			policy.DecideSlot(desired, pastEnd).action == questcal::SlotAction::None &&
+			!questcal::SlotNeedsSerial(desired, pastEnd);
+
+		questcal::SyncDevice invalidId = pastEnd;
+		invalidId.id = vr::k_unTrackedDeviceIndexInvalid;
+		bool ignoresInvalid =
+			policy.DecideSlot(desired, invalidId).action == questcal::SlotAction::None;
+
+		bool quietQueries =
+			!policy.SlotMayBeEnabled(vr::k_unMaxTrackedDeviceCount) &&
+			!policy.SlotMayBeEnabled(vr::k_unTrackedDeviceIndexInvalid) &&
+			policy.DecideNeutralSlot(vr::k_unMaxTrackedDeviceCount).action ==
+				questcal::SlotAction::None;
+		policy.NoteSlotDisabled(vr::k_unMaxTrackedDeviceCount);
+		policy.NoteSlotDisabled(vr::k_unTrackedDeviceIndexInvalid);
+
+		// The last legal slot still reconciles, so the bound is not off by one.
+		const uint32_t lastId = vr::k_unMaxTrackedDeviceCount - 1;
+		SyncDeviceTable table;
+		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		table.Place(lastId, questcal::SyncDeviceClass::Other, "oculus");
+		SyncPassResult last = RunDriverSyncPass(policy, desired, true, table);
+		bool lastSlotUsable = last.enables.size() == 1 &&
+			last.enables[0].openVRID == lastId && policy.SlotMayBeEnabled(lastId);
+
+		Check("driver sync: slot bounds",
+			ignoresPastEnd && ignoresInvalid && quietQueries && lastSlotUsable,
+			"out-of-range ids decide nothing; slot 63 still reconciles");
+	}
+
+	// 7. A pipe reconnect neutralizes the whole connection before desired state
+	// is rebuilt. That acknowledged bulk reset is the only thing besides a
+	// confirmed per-slot disable that may clear the ledger.
+	{
+		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
+		SyncDeviceTable table;
+		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		for (uint32_t id = 1; id < 5; ++id)
+			table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
+
+		questcal::DriverSlotPolicy policy;
+		SyncPassResult live = RunDriverSyncPass(policy, desired, true, table);
+		bool marked = live.enables.size() == 4 && policy.SlotMayBeEnabled(1) &&
+			policy.SlotMayBeEnabled(4);
+
+		policy.ForgetEverySlot();
+		bool forgotEverything = true;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+			forgotEverything = forgotEverything && !policy.SlotMayBeEnabled(id);
+
+		SyncDeviceTable unscanned;
+		SyncPassResult afterReset =
+			RunDriverSyncPass(policy, desired, false, unscanned);
+		bool nothingToRetire = afterReset.disables.empty();
+
+		Check("driver sync: connection neutralize",
+			marked && forgotEverything && nothingToRetire,
+			"an acknowledged connection-wide reset is the only bulk way out");
+	}
 }
 
 void RunPoseSampleScenarios()
@@ -5548,6 +5968,7 @@ int main(int argc, char **argv)
 	// Production-shared driver algebra and broad solver edge/property passes.
 	RunDriverPoseTransformScenarios();
 	RunDriverProtocolValidationScenarios();
+	RunDriverSyncScenarios();
 	RunPoseChannelScenarios();
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();

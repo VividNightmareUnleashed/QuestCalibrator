@@ -120,6 +120,30 @@ namespace protocol
 	static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
 		"the shared pose queue requires lock-free 64-bit atomics");
 
+	// One spelling of "this mapping is the layout we compiled against". It was
+	// written character-identically at three sites, so a deliberate layout bump
+	// had to be honoured by three separately maintained predicates and an
+	// accidental one by none. Short-circuit order is preserved: magic first, so
+	// a foreign or zeroed section is rejected before its other fields are read.
+	inline bool RingHasExpectedLayout(const PoseRing *ring)
+	{
+		return ring != nullptr &&
+			ring->initialized.load(std::memory_order_acquire) == 1 &&
+			ring->magic == PoseRing::Magic &&
+			ring->layoutVersion == PoseRing::LayoutVersion &&
+			ring->layoutBytes == sizeof(PoseRing);
+	}
+
+	// QUESTCALIBRATOR_SHMEM_NAME ends in ".layout3" and nothing connected the
+	// literal to the value it claims. A named mapping outlives the process that
+	// made it, so growing PoseRing without renaming strands an upgraded driver
+	// behind a smaller section an old overlay still holds: the map-at-new-size
+	// fails, Create returns false, and RunFrame retries once a second forever
+	// with one line inside vrserver as the only evidence. Bump this and the name
+	// together, or not at all.
+	static_assert(PoseRing::LayoutVersion == 3,
+		"PoseRing::LayoutVersion changed - QUESTCALIBRATOR_SHMEM_NAME must change with it");
+
 	class PoseRingWriter
 	{
 	private:
@@ -329,10 +353,7 @@ namespace protocol
 				return nullptr;
 			}
 
-			bool valid = shared->initialized.load(std::memory_order_acquire) == 1 &&
-				shared->magic == PoseRing::Magic &&
-				shared->layoutVersion == PoseRing::LayoutVersion &&
-				shared->layoutBytes == sizeof(PoseRing);
+			bool valid = RingHasExpectedLayout(shared);
 			if (valid)
 			{
 				shared->resetting.store(1, std::memory_order_seq_cst);
@@ -456,13 +477,7 @@ namespace protocol
 				(waitResult == WAIT_TIMEOUT || waitResult == WAIT_FAILED);
 		}
 
-		bool HasExpectedLayout() const
-		{
-			return ring->initialized.load(std::memory_order_acquire) == 1 &&
-				ring->magic == PoseRing::Magic &&
-				ring->layoutVersion == PoseRing::LayoutVersion &&
-				ring->layoutBytes == sizeof(PoseRing);
-		}
+		bool HasExpectedLayout() const { return RingHasExpectedLayout(ring); }
 
 		bool ResetForNewWriterSession(DWORD drainWaitMs)
 		{
@@ -798,10 +813,7 @@ namespace protocol
 				hMap = nullptr;
 				return false;
 			}
-			if (ring->initialized.load(std::memory_order_acquire) != 1 ||
-				ring->magic != PoseRing::Magic ||
-				ring->layoutVersion != PoseRing::LayoutVersion ||
-				ring->layoutBytes != sizeof(PoseRing))
+			if (!RingHasExpectedLayout(ring))
 			{
 				Close();
 				return false;

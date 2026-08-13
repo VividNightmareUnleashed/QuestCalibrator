@@ -99,6 +99,7 @@
     <ClInclude Include="..\Overlay\FieldMath.h" />
     <ClInclude Include="..\Overlay\ContinuousAlignment.h" />
     <ClInclude Include="..\Overlay\DriftMonitor.h" />
+    <ClInclude Include="..\Overlay\DriverSyncPolicy.h" />
     <ClInclude Include="..\Overlay\JumpDetector.h" />
     <ClInclude Include="..\Overlay\ProfileValidation.h" />
     <ClInclude Include="..\Overlay\RingPoseMath.h" />
