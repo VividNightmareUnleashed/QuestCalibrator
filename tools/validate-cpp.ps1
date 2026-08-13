@@ -204,7 +204,12 @@ function Invoke-SolverTests {
     ) | ForEach-Object { $_.Include } |
         Where-Object { $_ } |
         ForEach-Object { Join-Path $projectDir $_ }
-    $newestSource = @($projectInputs + $testProject) |
+    # The project file itself is deliberately NOT compared: editing its
+    # ClInclude list changes nothing about compilation, so MSBuild correctly
+    # relinks nothing and the executable is legitimately older than it. A
+    # project change that DOES matter - adding or removing a ClCompile - changes
+    # which objects link and so produces a newer executable anyway.
+    $newestSource = @($projectInputs) |
         Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
         Get-Item |
         Sort-Object LastWriteTime -Descending |
