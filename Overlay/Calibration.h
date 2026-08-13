@@ -2,6 +2,7 @@
 
 #include "CalibrationEngine.h"
 #include "ContinuousAlignment.h"
+#include "PersistenceState.h"
 #include "ProfileValidation.h"
 
 #include <Eigen/Core>
@@ -176,28 +177,10 @@ struct CalibrationContext
 	enum class AlignmentHealth { Fresh, Aging, Stale };
 	AlignmentHealth alignment = AlignmentHealth::Fresh;
 
-	// Debounced profile persistence for runtime compensation updates: dirty
-	// profiles save after a quiet period and always on shutdown.
-	bool profileSaveDirty = false;
-	// Universe rebases update both the calibration and the protected standing
-	// center.  Keep the two registry records on one revision and retry the
-	// Settings half if a partial write occurs.
-	bool settingsSaveDirty = false;
-	// Both records share one quiet-period clock: any persistent mutation restarts
-	// the debounce, while the independent dirty bits retain partial-write state.
-	double persistenceDirtyTime = 0.0;
-	// When the current dirty streak began. A session that keeps correcting
-	// never reaches a quiet period, so the debounce alone would defer both
-	// records until shutdown and lose everything to a crash or a SteamVR kill.
-	double persistenceFirstDirtyTime = 0.0;
-	uint32_t persistenceRevision = 0;
-	// A universe rebase writes the calibration and the protected standing
-	// center as one revision: the Settings half must not land without the
-	// Config half. Independent dirty bits carry no such ordering requirement.
-	bool persistenceCoupled = false;
-	// Older releases embedded global settings in Config.  Until their first
-	// Settings write succeeds, SaveProfile must not replace that only copy.
-	bool legacySettingsMigrationPending = false;
+	// Debounced persistence for runtime compensation updates: dirty records save
+	// after a quiet period and always on shutdown. See PersistenceState.h — the
+	// rules live with the data rather than as loose fields here.
+	questcal::PersistenceState persistence;
 	// Missing, successfully loaded, and unreadable are deliberately closed
 	// states. In particular, unreadable is not absence: automatic migration must
 	// preserve that record for diagnosis instead of overwriting it with defaults.
@@ -294,65 +277,7 @@ struct CalibrationContext
 		double lastRestoreTime = 0.0;  // last auto-restore attempt (runtime cooldown)
 	} chaperone;
 
-	// "A persisted revision is never zero" lives here and nowhere else. The
-	// reader rejects anything below 1, so 0 means "absent" on the way in; a
-	// record written with 0 would read back revisionless, which is exactly the
-	// partial-write mismatch the shared revision exists to detect. Both record
-	// writers re-apply this rule to the live value immediately before
-	// serializing, and the wrap case below goes through it too.
-	void SetPersistenceRevision(uint32_t revision)
-	{
-		persistenceRevision = revision == 0 ? 1u : revision;
-	}
-
-	void AdvancePersistenceRevision()
-	{
-		SetPersistenceRevision(persistenceRevision + 1);
-		persistenceCoupled = true;
-	}
-
-	bool HasDirtyPersistence() const
-	{
-		return profileSaveDirty || settingsSaveDirty;
-	}
-
-	// Starts the maximum-age clock only on the clean -> dirty transition, so a
-	// stream of corrections cannot push the forced flush out indefinitely.
-	void StartPersistenceDebounce(double now)
-	{
-		if (!HasDirtyPersistence())
-			persistenceFirstDirtyTime = now;
-		persistenceDirtyTime = now;
-	}
-
-	void MarkProfileDirty(double now)
-	{
-		StartPersistenceDebounce(now);
-		profileSaveDirty = true;
-	}
-
-	void MarkSettingsDirty(double now)
-	{
-		StartPersistenceDebounce(now);
-		settingsSaveDirty = true;
-	}
-
-	void MarkProfileAndSettingsDirty(double now)
-	{
-		StartPersistenceDebounce(now);
-		profileSaveDirty = true;
-		settingsSaveDirty = true;
-	}
-
-	void DelayPersistenceRetry(double now)
-	{
-		if (!HasDirtyPersistence())
-			return;
-		// Restart both clocks: a record that keeps refusing the write must retry
-		// on the 5 s cadence, not once per tick because the ceiling has passed.
-		persistenceDirtyTime = now;
-		persistenceFirstDirtyTime = now;
-	}
+	// See PersistenceState.h for the revision rule, the debounce and the retry.
 
 	void DisarmChaperone()
 	{
@@ -482,7 +407,7 @@ struct CalibrationContext
 		profileHmdSerial.clear();
 		profileWorldFromDriverRotation = Eigen::Quaterniond(1, 0, 0, 0);
 		profileWorldFromDriverTranslation = Eigen::Vector3d::Zero();
-		profileSaveDirty = false;
+		persistence.OnProfileDiscarded();
 		timeLastScan = -1e9;
 		ClearSampleBuffers();
 	}

@@ -208,9 +208,9 @@ static bool SaveDirtyPersistence(CalibrationContext &ctx)
 	// a coupled revision bump lets a Config failure hold the Settings half back.
 	// A crash (or a failure) after that first write is detected by the shared
 	// revision at the next launch.
-	if (ctx.settingsSaveDirty)
+	if (ctx.persistence.settingsDirty)
 		return SaveSettings(ctx);
-	if (ctx.profileSaveDirty)
+	if (ctx.persistence.profileDirty)
 	{
 		if (!ctx.validProfile)
 		{
@@ -221,24 +221,18 @@ static bool SaveDirtyPersistence(CalibrationContext &ctx)
 		if (!SaveProfile(ctx))
 			return false;
 	}
-	ctx.persistenceCoupled = false;
+	ctx.persistence.coupled = false;
 	return true;
 }
 
 static void PersistenceTick(CalibrationContext &ctx, double now)
 {
-	if (!ctx.HasDirtyPersistence())
-		return;
-
-	// The quiet period avoids a registry write per continuous correction, but a
-	// steadily drifting universe never goes quiet: force the write once the
-	// dirty streak passes the ceiling so a crash cannot discard a whole session.
-	if (now - ctx.persistenceDirtyTime <= 5.0 &&
-		now - ctx.persistenceFirstDirtyTime <= 60.0)
+	// Quiet period vs. maximum dirty age: see PersistenceState::Due.
+	if (!ctx.persistence.Due(now))
 		return;
 
 	if (!SaveDirtyPersistence(ctx))
-		ctx.DelayPersistenceRetry(now);
+		ctx.persistence.Retry(now);
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +338,7 @@ void ShutdownCalibrator(bool cleanExit)
 {
 	// A quit inside the save-debounce window must not lose a runtime
 	// compensation update.
-	if (CalCtx.HasDirtyPersistence())
+	if (CalCtx.persistence.HasDirty())
 		SaveDirtyPersistence(CalCtx);
 	PoseHub.Stop();
 	if (cleanExit)
@@ -961,7 +955,7 @@ static void DisarmChaperoneAndPersist(CalibrationContext &ctx, double now,
 	const char *reason)
 {
 	ctx.DisarmChaperone();
-	ctx.MarkSettingsDirty(now);
+	ctx.persistence.MarkSettings(now);
 	ctx.ReportError(reason, CalibrationContext::ErrorSource::Chaperone);
 	SaveSettings(ctx);
 }
@@ -1002,19 +996,19 @@ static void ApplyAlignmentDelta(CalibrationContext &ctx, const Eigen::Quaternion
 		// Only a field that exists has smoothing to snap.
 		if (!ctx.fieldAnchors.empty())
 			ctx.fieldGeneration++;
-		ctx.AdvancePersistenceRevision();
+		ctx.persistence.AdvanceRevision();
 		// The chaperone snapshot's standing center maps the standing frame into
 		// the (just re-based) raw frame, so it re-anchors by D like everything
 		// else raw-frame; the wall quads are standing-frame and stay put.
 		if (ctx.chaperone.valid)
 			ctx.chaperone.standingCenter =
 				questcal::DeltaTimesPose(dR, dT, ctx.chaperone.standingCenter);
-		ctx.MarkSettingsDirty(now);
+		ctx.persistence.MarkSettings(now);
 	}
 	else
 		ctx.SetCalibrationContinuous(newRot, newTrans, ctx.calibratedScale);
 
-	ctx.MarkProfileDirty(now);
+	ctx.persistence.MarkProfile(now);
 	SynchronizeDriverState(ctx);
 }
 
@@ -1059,14 +1053,14 @@ static bool AdoptObservedUniverseAfterJump(CalibrationContext &ctx, double now)
 	ctx.profileWorldFromDriverRotation = CurrentHmdObservation.rotation;
 	ctx.profileWorldFromDriverTranslation = CurrentHmdObservation.translation;
 	ctx.profileUniverseValid = true;
-	ctx.MarkProfileDirty(now);
+	ctx.persistence.MarkProfile(now);
 	if (ctx.chaperone.valid)
 	{
 		ctx.chaperone.worldFromDriverRotation = CurrentHmdObservation.rotation;
 		ctx.chaperone.worldFromDriverTranslation = CurrentHmdObservation.translation;
 		ctx.chaperone.worldFromDriverValid = true;
 		ctx.chaperone.baselineVerifiedThisSession = true;
-		ctx.MarkSettingsDirty(now);
+		ctx.persistence.MarkSettings(now);
 	}
 	return true;
 }
@@ -1171,7 +1165,7 @@ static void ProfileUniverseTick(CalibrationContext &ctx, double now)
 		ctx.profileWorldFromDriverTranslation = fromSnapshot
 			? ctx.chaperone.worldFromDriverTranslation : CurrentHmdObservation.translation;
 		ctx.profileUniverseValid = true;
-		ctx.MarkProfileDirty(now);
+		ctx.persistence.MarkProfile(now);
 		UniverseMismatchSince = -1e9;
 		if (!fromSnapshot)
 			return;
@@ -1214,12 +1208,12 @@ static void ProfileUniverseTick(CalibrationContext &ctx, double now)
 	// calibration establishes the relation.
 	ctx.profileUniverseUnsafe = true;
 	ctx.enabled = false;
-	ctx.MarkProfileDirty(now);
+	ctx.persistence.MarkProfile(now);
 	bool autoApplyChanged = ctx.chaperone.autoApply;
 	ctx.chaperone.autoApply = false;
 	ctx.chaperone.baselineVerifiedThisSession = false;
 	if (autoApplyChanged)
-		ctx.MarkSettingsDirty(now);
+		ctx.persistence.MarkSettings(now);
 	ctx.ReportError(autoApplyChanged
 		? "The headset raw universe changed while calibration monitoring had no continuity. "
 			"The profile and protected chaperone are disabled until you run a new base calibration.\n"
@@ -1373,7 +1367,7 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 		ctx.chaperone.baselineVerifiedThisSession = false;
 		if (autoApplyChanged)
 		{
-			ctx.MarkSettingsDirty(now);
+			ctx.persistence.MarkSettings(now);
 			ctx.ReportError(
 				"The protected chaperone no longer matches the headset raw universe and was disarmed. "
 				"Capture it again before restoring it.\n",
@@ -1443,8 +1437,8 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 	if (!reanchored)
 		return;
 
-	ctx.AdvancePersistenceRevision();
-	ctx.MarkSettingsDirty(now);
+	ctx.persistence.AdvanceRevision();
+	ctx.persistence.MarkSettings(now);
 
 	char buf[192];
 	snprintf(buf, sizeof buf,
@@ -1457,7 +1451,7 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 	{
 		ctx.chaperone.autoApply = false;
 		ctx.chaperone.baselineVerifiedThisSession = false;
-		ctx.MarkSettingsDirty(now);
+		ctx.persistence.MarkSettings(now);
 	}
 }
 
@@ -1901,7 +1895,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		double appliedBefore = questcal::ComputeAppliedTimeOffset(ctx.calibratedTimeOffset);
 		double appliedAfter = questcal::ComputeAppliedTimeOffset(updated);
 		ctx.calibratedTimeOffset = updated;
-		ctx.MarkProfileDirty(now);
+		ctx.persistence.MarkProfile(now);
 		if (std::abs(appliedAfter - appliedBefore) > 0.0005)
 			SynchronizeDriverState(ctx);
 	}
@@ -2167,7 +2161,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		ctx.profileUniverseValid = true;
 	}
 
-	ctx.AdvancePersistenceRevision();
+	ctx.persistence.AdvanceRevision();
 	if (ctx.chaperone.valid &&
 		(ctx.chaperone.ownerTrackingSystem != ctx.referenceTrackingSystem ||
 			priorUniverseUnsafe ||
@@ -2179,7 +2173,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 			"It has been disarmed; capture it again for this profile.\n",
 			CalibrationContext::ErrorSource::Chaperone);
 	}
-	ctx.MarkProfileAndSettingsDirty(ctx.timeLastTick);
+	ctx.persistence.MarkProfileAndSettings(ctx.timeLastTick);
 	bool saved = SaveDirtyPersistence(ctx);
 	SynchronizeDriverState(ctx);
 	ctx.Log(saved ? "Finished calibration, profile and settings saved\n"
@@ -2463,14 +2457,14 @@ static bool FailClosedChaperoneCapture(const std::string &message)
 	{
 		CalCtx.chaperone.autoApply = false;
 		CalCtx.chaperone.baselineVerifiedThisSession = false;
-		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+		CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 	}
 	CalCtx.ReportError(message, CalibrationContext::ErrorSource::Chaperone);
 	if (persistDisarm && !SaveSettings(CalCtx))
 	{
 		// SaveSettings preserves dirty on a failed record write; restate it for
 		// failures that occurred before the low-level Settings write as well.
-		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+		CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 	}
 	return false;
 }
@@ -2549,10 +2543,10 @@ bool LoadChaperoneBounds()
 	{
 		CalCtx.chaperone.autoApply = false;
 		CalCtx.chaperone.baselineVerifiedThisSession = false;
-		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+		CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 		if (!SaveSettings(CalCtx))
 		{
-			CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+			CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 			CalCtx.ReportError(
 				"Could not protect the chaperone: the existing snapshot could not be "
 				"safely disarmed before replacement; no new snapshot was installed\n",
@@ -2569,7 +2563,7 @@ bool LoadChaperoneBounds()
 		// centralized retry can persist it without ever auto-restoring it first.
 		CalCtx.chaperone.autoApply = false;
 		CalCtx.chaperone.baselineVerifiedThisSession = false;
-		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+		CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 		CalCtx.Log("The new chaperone snapshot was kept disarmed because it could not be persisted\n");
 		return false;
 	}

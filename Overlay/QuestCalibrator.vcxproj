@@ -98,6 +98,7 @@
     <ClInclude Include="CalibrationEngine.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
+    <ClInclude Include="PersistenceState.h" />
     <ClInclude Include="ProfileValidation.h" />
     <ClInclude Include="RingPoseMath.h" />
     <ClInclude Include="ContinuousAlignment.h" />

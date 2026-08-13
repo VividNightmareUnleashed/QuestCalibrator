@@ -747,11 +747,12 @@ void LoadProfile(CalibrationContext &ctx)
 	settingsRewriteNeeded = plan.settingsRewriteNeeded;
 	// Through the setter like every other write to this field: the reader already
 	// rejects a parsed revision below 1, so the plan can only produce non-zero
-	// values today, but the "never zero" rule has exactly one home (Calibration.h)
-	// and a load path that assigns around it is how a fourth variant starts.
-	ctx.SetPersistenceRevision(plan.persistenceRevision);
+	// values today, but the "never zero" rule has exactly one home
+	// (PersistenceState.h) and a load path that assigns around it is how a
+	// fourth variant starts.
+	ctx.persistence.SetRevision(plan.persistenceRevision);
 	if (plan.legacySettingsMigrationPending)
-		ctx.legacySettingsMigrationPending = true;
+		ctx.persistence.legacySettingsMigrationPending = true;
 	if (plan.disarmChaperone)
 		ctx.DisarmChaperone();
 	if (plan.reportRevisionMismatch)
@@ -795,9 +796,9 @@ void LoadProfile(CalibrationContext &ctx)
 
 	if (settingsRewriteNeeded)
 	{
-		ctx.MarkSettingsDirty(ctx.timeLastTick);
+		ctx.persistence.MarkSettings(ctx.timeLastTick);
 		if (!SaveSettings(ctx))
-			ctx.legacySettingsMigrationPending =
+			ctx.persistence.legacySettingsMigrationPending =
 				plan.legacySettingsMigrationPendingIfRewriteFails;
 	}
 
@@ -832,7 +833,7 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 {
 	questcal::PersistenceWriteGate gate = questcal::GateProfileWrite(
 		g_uiPreviewMode, ctx.profileLoadState, ctx.settingsLoadState,
-		ctx.legacySettingsMigrationPending);
+		ctx.persistence.legacySettingsMigrationPending);
 	switch (gate)
 	{
 	case questcal::PersistenceWriteGate::Allowed:
@@ -860,7 +861,7 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
-	if (ctx.legacySettingsMigrationPending && !WriteSettingsRecord(ctx))
+	if (ctx.persistence.legacySettingsMigrationPending && !WriteSettingsRecord(ctx))
 	{
 		ctx.ReportError(
 			"Could not save the calibration profile because the legacy settings copy "
@@ -868,7 +869,7 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
-	ctx.SetPersistenceRevision(ctx.persistenceRevision);
+	ctx.persistence.SetRevision(ctx.persistence.revision);
 	// The same definition the parser enforces, so a record that saves is a
 	// record that will load again.
 	std::string why;
@@ -883,7 +884,7 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream profile;
-	questcal::WriteProfile(record, ctx.persistenceRevision, profile);
+	questcal::WriteProfile(record, ctx.persistence.revision, profile);
 	std::string error;
 	if (!WriteRegistryValue("Config", profile.str(), error))
 	{
@@ -891,7 +892,7 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
-	ctx.profileSaveDirty = false;
+	ctx.persistence.profileDirty = false;
 	ctx.profileLoadState = record.valid
 		? questcal::RecordLoadState::Loaded
 		: questcal::RecordLoadState::Missing;
@@ -910,7 +911,7 @@ bool ClearSavedProfile(CalibrationContext &ctx)
 	// crash after clearing Config cannot hide a coupled-write mismatch and make
 	// the previous chaperone snapshot look authoritative on the next launch.
 	// SaveSettings also commits a dirty Config first when both halves are pending.
-	if (ctx.settingsSaveDirty && !SaveSettings(ctx))
+	if (ctx.persistence.settingsDirty && !SaveSettings(ctx))
 		return false;
 
 	ProfileRecord cleared;
@@ -1011,7 +1012,7 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
-	ctx.SetPersistenceRevision(ctx.persistenceRevision);
+	ctx.persistence.SetRevision(ctx.persistence.revision);
 	SettingsRecord record = CaptureSettingsRecord(ctx);
 	// A snapshot with no owner is refused rather than written: an unowned room
 	// cannot be safely restored, so persisting one only produces a record the
@@ -1026,7 +1027,7 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 	}
 
 	std::stringstream settings;
-	WriteSettings(record, ctx.persistenceRevision, settings);
+	WriteSettings(record, ctx.persistence.revision, settings);
 	std::string error;
 	if (!WriteRegistryValue("Settings", settings.str(), error))
 	{
@@ -1034,9 +1035,9 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
-	ctx.legacySettingsMigrationPending = false;
+	ctx.persistence.legacySettingsMigrationPending = false;
 	ctx.settingsLoadState = questcal::RecordLoadState::Loaded;
-	ctx.settingsSaveDirty = false;
+	ctx.persistence.settingsDirty = false;
 	ctx.ClearError(CalibrationContext::ErrorSource::SettingsPersistence);
 	return true;
 }
@@ -1047,7 +1048,7 @@ bool SaveSettings(CalibrationContext &ctx)
 	// persisted (including after a universe-revision bump). Never let Settings
 	// overtake it: commit Config first, then leave only unfinished stages dirty.
 	bool profileSaved = true;
-	if (ctx.profileSaveDirty)
+	if (ctx.persistence.profileDirty)
 	{
 		if (!ctx.validProfile)
 		{
@@ -1063,10 +1064,10 @@ bool SaveSettings(CalibrationContext &ctx)
 	// failure would also swallow the fail-closed chaperone disarms, which live
 	// in Settings, and the next launch would auto-restore a stale armed
 	// snapshot. An uncoupled mismatch is detected and failed closed at load.
-	if (!profileSaved && ctx.persistenceCoupled)
+	if (!profileSaved && ctx.persistence.coupled)
 		return false;
 	bool settingsSaved = WriteSettingsRecord(ctx);
-	if (!ctx.HasDirtyPersistence())
-		ctx.persistenceCoupled = false;
+	if (!ctx.persistence.HasDirty())
+		ctx.persistence.coupled = false;
 	return profileSaved && settingsSaved;
 }

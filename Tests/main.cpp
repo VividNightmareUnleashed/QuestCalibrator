@@ -27,6 +27,7 @@
 #include "../Overlay/DriverSession.h"
 #include "../Overlay/DriverSyncPolicy.h"
 #include "../Overlay/JumpDetector.h"
+#include "../Overlay/PersistenceState.h"
 #include "../Overlay/ProfileValidation.h"
 #include "../Overlay/ProfileRecordJson.h"
 #include "../Overlay/RingPoseMath.h"
@@ -7581,6 +7582,114 @@ void RunPersistenceLoadPlanScenario()
 	Check("persistence H: load plan", why.empty(), detail);
 }
 
+// The save-scheduling machine that used to be eight loose fields on
+// CalibrationContext, in a header the harness could not compile. Each check is
+// one line from the finding's "Preserve" list: two independent dirty bits over
+// one shared clock, a partial write that retries only the record that failed,
+// a correction stream that cannot defer the flush forever, and Clear()'s
+// survivor rule.
+void RunPersistenceScheduleScenario()
+{
+	using questcal::PersistenceState;
+	std::string why;
+	auto want = [&why](const char *cell, bool ok)
+	{
+		if (!ok)
+			why += std::string(" ") + cell;
+	};
+
+	// A: one shared clock, two independent bits. The quiet-period clock follows
+	// the latest mark; the max-age clock stays on the clean -> dirty edge.
+	{
+		PersistenceState p;
+		want("A1-clean", !p.HasDirty() && !p.Due(0.0));
+		p.MarkProfile(0.0);
+		p.MarkSettings(3.0);
+		want("A2-bits", p.profileDirty && p.settingsDirty);
+		want("A3-quiet-clock", p.dirtyTime == 3.0);
+		want("A4-age-clock", p.firstDirtyTime == 0.0);
+		want("A5-not-due", !p.Due(7.0));    // 4 s quiet, 7 s old
+		want("A6-due", p.Due(9.0));         // 6 s quiet -> past the 5 s period
+	}
+
+	// B: the anti-starvation ceiling. A correction every second never lets the
+	// stream go quiet, so only the max-age clock can force the write.
+	{
+		PersistenceState p;
+		p.MarkProfile(0.0);
+		bool dueEarly = false;
+		for (int t = 1; t <= 60; ++t)
+		{
+			p.MarkProfile(static_cast<double>(t));
+			if (p.Due(static_cast<double>(t)))
+				dueEarly = true;
+		}
+		want("B1-never-quiet", !dueEarly);
+		want("B2-age-clock-held", p.firstDirtyTime == 0.0);
+		want("B3-ceiling-fires", p.Due(61.0));
+	}
+
+	// C: a partial write. The profile half landed, Settings did not; only the
+	// failed record stays dirty, and Retry puts it on the quiet-period cadence
+	// rather than re-attempting once per tick.
+	{
+		PersistenceState p;
+		p.MarkProfileAndSettings(0.0);
+		p.profileDirty = false;          // the half that succeeded
+		want("C1-settings-alone", !p.profileDirty && p.settingsDirty && p.HasDirty());
+		want("C2-due-at-failure", p.Due(61.0));
+		p.Retry(61.0);
+		want("C3-both-clocks-reset", p.dirtyTime == 61.0 && p.firstDirtyTime == 61.0);
+		want("C4-not-every-tick", !p.Due(61.1) && !p.Due(65.0));
+		want("C5-retry-cadence", p.Due(67.0));
+		// Retry on a clean machine must not arm the clocks.
+		PersistenceState clean;
+		clean.Retry(5.0);
+		want("C6-retry-clean-noop", clean.dirtyTime == 0.0 && !clean.Due(1e6));
+	}
+
+	// D: Clear()'s survivor list. Discarding a calibration drops the profile's
+	// pending write and nothing else -- the Settings record is not part of the
+	// calibration, and revision/migration state outlives any one of them.
+	{
+		PersistenceState p;
+		p.MarkProfileAndSettings(2.0);
+		p.SetRevision(9);
+		p.coupled = true;
+		p.legacySettingsMigrationPending = true;
+		p.OnProfileDiscarded();
+		want("D1-profile-dropped", !p.profileDirty);
+		want("D2-settings-survives", p.settingsDirty);
+		want("D3-revision-survives", p.revision == 9);
+		want("D4-coupled-survives", p.coupled);
+		want("D5-migration-survives", p.legacySettingsMigrationPending);
+		want("D6-clocks-survive", p.dirtyTime == 2.0 && p.firstDirtyTime == 2.0);
+	}
+
+	// E: a persisted revision is never zero, on every path that sets one.
+	{
+		PersistenceState p;
+		p.SetRevision(0);
+		want("E1-zero-becomes-one", p.revision == 1);
+		p.SetRevision(7);
+		want("E2-passthrough", p.revision == 7);
+		PersistenceState fresh;
+		fresh.AdvanceRevision();
+		want("E3-advance", fresh.revision == 1 && fresh.coupled);
+		PersistenceState wrap;
+		wrap.SetRevision(0xFFFFFFFFu);
+		wrap.AdvanceRevision();
+		want("E4-wrap-skips-zero", wrap.revision == 1);
+	}
+
+	char detail[320];
+	snprintf(detail, sizeof detail,
+		"quiet %.0f s / ceiling %.0f s; bits independent, retry restarts both clocks%s%s",
+		PersistenceState::QuietPeriodSeconds, PersistenceState::MaxDirtyAgeSeconds,
+		why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence I: save schedule", why.empty(), detail);
+}
+
 void RunPersistenceScenarios()
 {
 	RunPersistenceRoundTripScenario();
@@ -7591,6 +7700,7 @@ void RunPersistenceScenarios()
 	RunPersistenceContractScenario();
 	RunPersistenceWriteGateScenario();
 	RunPersistenceLoadPlanScenario();
+	RunPersistenceScheduleScenario();
 }
 
 } // namespace

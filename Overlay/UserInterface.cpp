@@ -2035,7 +2035,7 @@ static void BuildSettingsScreen(const VRState &state)
 				if (!SaveSettings(CalCtx))
 				{
 					CalCtx.chaperone.autoApply = false;
-					CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+					CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 				}
 			}
 			if (ImGui::IsItemHovered())
@@ -2275,7 +2275,7 @@ static void BuildMenu(const VRState &state, bool runningInOverlay)
 				// state immediately; keep the acknowledgement rollback consistent.
 				if (!SaveSettings(CalCtx))
 				{
-					CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
+					CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 				}
 			}
 		}

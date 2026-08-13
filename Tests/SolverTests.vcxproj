@@ -35,11 +35,18 @@
   <ImportGroup Label="Shared">
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <!-- Pinned relative to the project, not the solution: building this .vcxproj
+       directly leaves $(SolutionDir) undefined, so the default output landed in
+       Tests\x64\ for a standalone build and in x64\ for a solution build. The
+       test runner only ever looked at the second, so a project-only build ran a
+       stale binary and reported it green. One location for both modes. -->
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutDir>$(ProjectDir)..\x64\$(Configuration)\</OutDir>
     <LinkIncremental>true</LinkIncremental>
     <TargetName>SolverTests</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutDir>$(ProjectDir)..\x64\$(Configuration)\</OutDir>
     <LinkIncremental>false</LinkIncremental>
     <TargetName>SolverTests</TargetName>
   </PropertyGroup>
@@ -106,6 +113,7 @@
     <ClInclude Include="..\Overlay\DriverSyncPolicy.h" />
     <ClInclude Include="..\Overlay\JumpDetector.h" />
     <ClInclude Include="..\Overlay\ProfileRecordJson.h" />
+    <ClInclude Include="..\Overlay\PersistenceState.h" />
     <ClInclude Include="..\Overlay\ProfileValidation.h" />
     <ClInclude Include="..\Overlay\RingPoseMath.h" />
     <ClInclude Include="..\Overlay\PoseStreamHub.h" />
