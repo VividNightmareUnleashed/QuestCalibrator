@@ -17,6 +17,8 @@
 #include "../Driver/PoseTransform.h"
 #include "../Driver/ProtocolValidation.h"
 #include "../Driver/IPCProtocolGate.h"
+#include "../Driver/IPCServer.h"
+#include "../Driver/Logging.h"
 #include "../Overlay/CalibrationEngine.h"
 #include "../Overlay/ChaperoneMath.h"
 #include "../Overlay/ContinuousAlignment.h"
@@ -796,6 +798,70 @@ void RunDriverProtocolValidationScenarios()
 	Check("driver: alignment-field dispatch gate",
 		!fieldPreHandshake && fieldConnection.handshakeComplete && fieldAccepted,
 		"SetAlignmentField refused before the handshake, dispatched after it");
+
+	// Everything above exercises the gate in isolation. This is the first
+	// coverage of anything in IPCServer.cpp itself: which sink a request
+	// reaches, and what a setter's refusal becomes on the wire. The transport
+	// half - overlapped pipe, per-connection state, listener backoff, teardown
+	// drain - still needs a real named pipe and stays uncovered.
+	if (!LogFile)
+		LogFile = stderr;   // the LOG macro writes unconditionally
+
+	IPCServer server;
+	int transformCalls = 0, fieldCalls = 0;
+	bool setterAccepts = true;
+	IPCServer::RequestSink sink;
+	sink.setDeviceTransform = [&](const protocol::SetDeviceTransform &)
+	{
+		++transformCalls;
+		return setterAccepts;
+	};
+	sink.setAlignmentField = [&](const protocol::SetAlignmentField &)
+	{
+		++fieldCalls;
+		return setterAccepts;
+	};
+	server.SetSinkForTest(sink);
+
+	questcal::ipc::ConnectionState dispatchConn;
+	protocol::Response dispatched(protocol::ResponseInvalid);
+	protocol::Request transformReq(protocol::RequestSetDeviceTransform);
+	protocol::Request fieldReq(protocol::RequestSetAlignmentField);
+
+	// A gate refusal must not reach a setter at all: the driver never sees
+	// values from a connection that has not proven its version.
+	server.DispatchForTest(transformReq, dispatched, dispatchConn);
+	bool noSetterBeforeHandshake =
+		transformCalls == 0 && dispatched.type == protocol::ResponseInvalid;
+
+	protocol::Request dispatchHandshake(protocol::RequestHandshake);
+	server.DispatchForTest(dispatchHandshake, dispatched, dispatchConn);
+	bool dispatchHandshakeOk = dispatched.type == protocol::ResponseHandshake;
+
+	// Each mutation reaches its own setter and only its own.
+	server.DispatchForTest(transformReq, dispatched, dispatchConn);
+	bool transformRouted = transformCalls == 1 && fieldCalls == 0 &&
+		dispatched.type == protocol::ResponseSuccess;
+	server.DispatchForTest(fieldReq, dispatched, dispatchConn);
+	bool fieldRouted = transformCalls == 1 && fieldCalls == 1 &&
+		dispatched.type == protocol::ResponseSuccess;
+
+	// A setter that refuses its values reports failure rather than reporting
+	// success and dropping them.
+	setterAccepts = false;
+	server.DispatchForTest(transformReq, dispatched, dispatchConn);
+	bool refusalReported =
+		transformCalls == 2 && dispatched.type == protocol::ResponseInvalid;
+
+	char dispatchDetail[128];
+	snprintf(dispatchDetail, sizeof dispatchDetail,
+		"transform %d field %d; pre-handshake/handshake/route/refusal %d%d%d%d",
+		transformCalls, fieldCalls, noSetterBeforeHandshake, dispatchHandshakeOk,
+		transformRouted && fieldRouted, refusalReported);
+	Check("driver: request dispatch routing",
+		noSetterBeforeHandshake && dispatchHandshakeOk && transformRouted &&
+			fieldRouted && refusalReported,
+		dispatchDetail);
 }
 
 // ---------------------------------------------------------------------------

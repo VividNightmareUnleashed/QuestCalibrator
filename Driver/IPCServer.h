@@ -37,6 +37,19 @@ public:
 	bool Run(RequestSink newSink);
 	void Stop();
 
+#ifdef QUESTCAL_IPC_SERVER_TEST_SEAM
+	// Request dispatch is pure given a sink and a connection state, but it sat
+	// behind the named-pipe transport, so nothing could reach it. The seam
+	// exposes only that - the transport still needs a real pipe and stays
+	// uncovered. Same pattern as the pose-channel seam.
+	void SetSinkForTest(RequestSink newSink) { sink = std::move(newSink); }
+	void DispatchForTest(const protocol::Request &request, protocol::Response &response,
+		questcal::ipc::ConnectionState &connection)
+	{
+		HandleRequest(request, response, connection);
+	}
+#endif
+
 private:
 	void HandleRequest(const protocol::Request &request, protocol::Response &response,
 		questcal::ipc::ConnectionState &connection);
