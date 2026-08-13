@@ -154,4 +154,27 @@ namespace protocol
 		Response() = default;
 		explicit Response(ResponseType type) : type(type) { }
 	};
+
+	// The pipe carries a version number but no layout identity, and the two ends
+	// do not compile these structs against the same header: the driver gets
+	// vr::HmdQuaternion_t and friends from openvr_driver.h, the overlay from
+	// openvr.h (see the _OPENVR_API guard at the top). Equal versions are
+	// therefore not proof of equal bytes. Pinning the sizes here — in the one
+	// header both ends include — turns a field added on one side, a reordering,
+	// or a vendored-header change that moves a member into a build failure on
+	// whichever side diverged, instead of a garbled decode at runtime.
+	//
+	// When one of these fires: if the layout change is intentional, bump
+	// protocol::Version (the handshake requires exact equality, so old and new
+	// binaries refuse each other) and update the expected size. If it is not
+	// intentional, the two ends have drifted and shipping them together would
+	// corrupt every message. x64 is the only build target, so these are exact.
+	static_assert(sizeof(SetDeviceTransform) == 88, "SetDeviceTransform wire layout changed");
+	static_assert(sizeof(FieldAnchor) == 80, "FieldAnchor wire layout changed");
+	static_assert(sizeof(SetAlignmentField) == 664, "SetAlignmentField wire layout changed");
+	static_assert(sizeof(Request) == 760, "Request wire layout changed");
+	static_assert(sizeof(Response) == 8, "Response wire layout changed");
+	// Crosses the shared-memory ring rather than the pipe; the mapping name
+	// carries its own layout version (QUESTCALIBRATOR_SHMEM_NAME) to bump.
+	static_assert(sizeof(DevicePoseSample) == 192, "DevicePoseSample layout changed");
 }
