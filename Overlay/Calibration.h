@@ -10,6 +10,7 @@
 
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 enum class CalibrationState
@@ -38,11 +39,24 @@ struct CalibrationContext
 	uint32_t calibrationReferenceID = 0xFFFFFFFF;
 	uint32_t calibrationTargetID = 0xFFFFFFFF;
 
-	// The quaternion is the source of truth for the calibrated rotation.
+	// The quaternion is the source of truth for the calibrated rotation, and
 	// calibratedRotation (Euler, degrees, [roll, yaw, pitch] to match the
-	// (2,1,0) decomposition) and calibratedTranslation (centimeters) are
-	// display/editing copies — never round-trip state through them except at
-	// the explicit editor rebuild below.
+	// (2,1,0) decomposition) is a genuine display/editing copy: nothing reads
+	// it back into state. The profile editor seeds its own draft from it and
+	// converts that draft with RebuildRotationFromEuler, which is the single
+	// sanctioned Euler -> quaternion path.
+	//
+	// calibratedTranslation is NOT the same kind of member despite sitting next
+	// to it. There is no meters-valued field, so the centimeter vector is the
+	// actual storage and every meters value in the app round-trips
+	// m -> cm -> m through TranslationMeters(): driver sends, continuous
+	// corrections, field anchoring and persistence all do. The numeric cost is
+	// ~1e-16 relative, but the structural cost is real — the profile editor's
+	// translation-only branch writes this member directly and must, so treating
+	// it as genuinely derived (recomputing it, or skipping it on a fast path)
+	// would zero the live translation. Storing meters and deriving the
+	// centimeter copy for display is what would make "quaternion plus meters
+	// are the truth" checkable.
 	Eigen::Quaterniond calibratedRotationQ{ 1, 0, 0, 0 };
 	Eigen::Vector3d calibratedRotation{ 0, 0, 0 };
 	Eigen::Vector3d calibratedTranslation{ 0, 0, 0 };
@@ -109,7 +123,11 @@ struct CalibrationContext
 	double lastAutoCorrectionUnixTime = 0.0;     // runtime; feeds the drift age
 	uint32_t autoCorrectionsApplied = 0;         // runtime
 	// UI status mirror, refreshed every continuous tick.
-	int continuousState = 0;                     // questcal::ContinuousAlignment::State
+	// The enum itself, not an int mirror of it: this header already depends on
+	// ContinuousAlignment.h, so the only thing the int bought was a cast at
+	// every one of the nine read sites.
+	questcal::ContinuousAlignment::State continuousState =
+		questcal::ContinuousAlignment::State::Inactive;
 	questcal::ContinuousAlignment::Deviation continuousDeviation;
 	double continuousScatterRotDeg = 0.0;
 	double continuousScatterPosM = 0.0;
@@ -353,6 +371,30 @@ struct CalibrationContext
 		return calibratedTranslation * 0.01;
 	}
 
+	// One transaction for every spatial-field mutation that has to persist: the
+	// driver-visible generation bump and the profile write land together, or
+	// neither does. `mutate` changes only what it means to change; the bump and
+	// the rollback of all three field members are owned here, because the three
+	// hand-written save/bump/restore blocks this replaces each had to get their
+	// own rollback right and each restored a different subset.
+	template <class Mutation, class Save>
+	bool WithProfileSave(Mutation &&mutate, Save &&save)
+	{
+		std::vector<FieldAnchor> previousAnchors = fieldAnchors;
+		bool previousEnabled = fieldEnabled;
+		uint32_t previousGeneration = fieldGeneration;
+
+		mutate();
+		fieldGeneration++;
+		if (save())
+			return true;
+
+		fieldAnchors = std::move(previousAnchors);
+		fieldEnabled = previousEnabled;
+		fieldGeneration = previousGeneration;
+		return false;
+	}
+
 	void ClearSampleBuffers()
 	{
 		refSamples.clear();
@@ -365,6 +407,23 @@ struct CalibrationContext
 	{
 		// Chaperone protection and global preferences are independent settings;
 		// clearing a calibration must not silently disarm the room boundary.
+		//
+		// This is a hand-maintained partial reset, so the survivor list is
+		// stated rather than implied by omission. Deliberately kept:
+		//   - the chaperone snapshot and its autoApply/warning ack;
+		//   - global preferences (uiAdvanced, notifyPoorCalibration,
+		//     calibrationSpeed, solveScale, applyTimeOffset and the manual
+		//     override, hideMountedTracker);
+		//   - the continuous-calibration pick (continuousEnabled,
+		//     continuousTrackerSerial, continuousLatencyReestimation) — only
+		//     the derived extrinsic goes, below;
+		//   - baseGeneration, which is a monotonic snap/slew discriminator the
+		//     driver compares across sends; resetting it could let the next
+		//     calibration reuse a generation the driver already applied and
+		//     therefore slew a full recalibration.
+		// Everything else that describes the calibration being discarded is
+		// reset here; anything added to this struct that describes one has to
+		// be added below too.
 		calibratedRotationQ = Eigen::Quaterniond(1, 0, 0, 0);
 		calibratedRotation = Eigen::Vector3d();
 		calibratedTranslation = Eigen::Vector3d();
@@ -378,7 +437,7 @@ struct CalibrationContext
 		mountExtrinsic = questcal::MountExtrinsic();
 		lastAutoCorrectionUnixTime = 0.0;
 		autoCorrectionsApplied = 0;
-		continuousState = 0;
+		continuousState = questcal::ContinuousAlignment::State::Inactive;
 		continuousDeviation = questcal::ContinuousAlignment::Deviation();
 		continuousScatterRotDeg = 0.0;
 		continuousScatterPosM = 0.0;
@@ -388,6 +447,12 @@ struct CalibrationContext
 		discontinuousLossEvents = 0;
 		driftScore = 0.0;
 		alignment = AlignmentHealth::Fresh;
+		// Both counters are evidence gathered against the universe of the
+		// calibration being discarded, and the settings screen renders them as
+		// advice to recalibrate. Surviving Clear() made a fresh profile inherit
+		// the previous one's jump/gap history.
+		jumpsCompensated = 0;
+		referenceGapEvents = 0;
 		lastResult = questcal::EngineResult();
 		referenceTrackingSystem = "";
 		targetTrackingSystem = "";

@@ -679,7 +679,7 @@ static void SetupPreviewState()
 	CalCtx.mountExtrinsic.pos = Eigen::Vector3d(0.05, -0.08, 0.03);
 	CalCtx.mountExtrinsic.rotRmsDeg = 0.21;
 	CalCtx.mountExtrinsic.posRmsM = 0.004;
-	CalCtx.continuousState = static_cast<int>(questcal::ContinuousAlignment::State::Tracking);
+	CalCtx.continuousState = questcal::ContinuousAlignment::State::Tracking;
 	CalCtx.continuousDeviation.valid = true;
 	CalCtx.continuousDeviation.yawDeg = 0.08;
 	CalCtx.continuousDeviation.tiltDeg = 0.11;

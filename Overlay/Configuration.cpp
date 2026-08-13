@@ -2,6 +2,7 @@
 #include "Configuration.h"
 #include "ChaperoneMath.h"
 #include "ProfileValidation.h"
+#include "ProfileRecordJson.h"
 #include "UserInterface.h"
 #include "../common/Protocol.h"
 
@@ -16,16 +17,31 @@
 
 static constexpr DWORD MaxRegistryValueBytes = 16u * 1024u * 1024u;
 
-struct PersistedRevision
-{
-	bool present = false;
-	uint32_t value = 0;
-};
+// The persisted speed range is spelled in ProfileValidation.h because the
+// record layer cannot include Calibration.h (openvr.h vs the test harness's
+// openvr_driver.h). Pin the two spellings together here, where both are
+// visible, so a reordered enum cannot silently widen what a record may carry.
+static_assert(static_cast<int>(CalibrationContext::FAST) ==
+	static_cast<int>(questcal::PersistedCalibrationSpeed::Fast) &&
+	static_cast<int>(CalibrationContext::SLOW) ==
+	static_cast<int>(questcal::PersistedCalibrationSpeed::Slow) &&
+	static_cast<int>(CalibrationContext::VERY_SLOW) ==
+	static_cast<int>(questcal::PersistedCalibrationSpeed::VerySlow),
+	"CalibrationContext::Speed and PersistedCalibrationSpeed must agree");
+
+using questcal::MountExtrinsicRecord;
+using questcal::PersistedFieldAnchor;
+using questcal::PersistedRevision;
+using questcal::ProfileParseResult;
+using questcal::ProfileRecord;
 
 // Serialization owns narrow records rather than cloning CalibrationContext.
 // These contain exactly the values represented in Config/Settings; live poses,
 // solver buffers, monitor state, UI messages and retry metadata never cross the
-// persistence boundary.
+// persistence boundary. The profile half lives in ProfileValidation.h /
+// ProfileRecordJson.h so its write -> read identity and its validation are
+// reachable from a test; the chaperone half stays here because it needs the
+// OpenVR geometry types and ChaperoneMath.h.
 struct ChaperoneRecord
 {
 	bool valid = false;
@@ -50,49 +66,6 @@ struct SettingsRecord
 	bool solveScale = false;
 	bool applyTimeOffset = true;
 	ChaperoneRecord chaperone;
-};
-
-struct MountExtrinsicRecord
-{
-	bool valid = false;
-	Eigen::Quaterniond rotation{ 1, 0, 0, 0 };
-	Eigen::Vector3d translationMeters{ 0, 0, 0 };
-	double rotationRmsDeg = 0.0;
-	double translationRmsM = 0.0;
-};
-
-struct ProfileRecord
-{
-	bool valid = false;
-	std::string referenceTrackingSystem;
-	std::string targetTrackingSystem;
-	Eigen::Quaterniond rotation{ 1, 0, 0, 0 };
-	Eigen::Vector3d translationMeters{ 0, 0, 0 };
-	double scale = 1.0;
-	double timeOffset = 0.0;
-	double calibrationUnixTime = 0.0;
-	// Reference-universe identity and the fail-closed latch keyed to it. All
-	// optional on read, so a profile written before they existed loads
-	// unchanged and adopts a baseline from the first fresh observation.
-	bool universeUnsafe = false;
-	bool universeValid = false;
-	std::string universeHmdSerial;
-	Eigen::Quaterniond universeRotation{ 1, 0, 0, 0 };
-	Eigen::Vector3d universeTranslation{ 0, 0, 0 };
-	bool fieldEnabled = true;
-	std::vector<CalibrationContext::FieldAnchor> fieldAnchors;
-	bool continuousEnabled = false;
-	std::string continuousTrackerSerial;
-	bool continuousLatencyReestimation = false;
-	bool hideMountedTracker = true;
-	MountExtrinsicRecord mountExtrinsic;
-};
-
-struct ProfileParseResult
-{
-	PersistedRevision revision;
-	bool migratedScaleSetting = false;
-	bool suspiciousLegacyScale = false;
 };
 
 static ChaperoneRecord CaptureChaperoneRecord(
@@ -145,7 +118,18 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.universeRotation = ctx.profileWorldFromDriverRotation;
 	record.universeTranslation = ctx.profileWorldFromDriverTranslation;
 	record.fieldEnabled = ctx.fieldEnabled;
-	record.fieldAnchors = ctx.fieldAnchors;
+	// The record's anchor type is deliberately not CalibrationContext's — see
+	// ProfileValidation.h. The two are field-identical; this is the only place
+	// that has to know that.
+	record.fieldAnchors.reserve(ctx.fieldAnchors.size());
+	for (const auto &anchor : ctx.fieldAnchors)
+	{
+		PersistedFieldAnchor persisted;
+		persisted.position = anchor.position;
+		persisted.rotation = anchor.rotation;
+		persisted.translationMeters = anchor.translationMeters;
+		record.fieldAnchors.push_back(persisted);
+	}
 	record.continuousEnabled = ctx.continuousEnabled;
 	record.continuousTrackerSerial = ctx.continuousTrackerSerial;
 	record.continuousLatencyReestimation = ctx.continuousLatencyReestimation;
@@ -202,7 +186,16 @@ static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
 	ctx.profileWorldFromDriverRotation = record.universeRotation;
 	ctx.profileWorldFromDriverTranslation = record.universeTranslation;
 	ctx.fieldEnabled = record.fieldEnabled;
-	ctx.fieldAnchors = std::move(record.fieldAnchors);
+	ctx.fieldAnchors.clear();
+	ctx.fieldAnchors.reserve(record.fieldAnchors.size());
+	for (const auto &persisted : record.fieldAnchors)
+	{
+		CalibrationContext::FieldAnchor anchor;
+		anchor.position = persisted.position;
+		anchor.rotation = persisted.rotation;
+		anchor.translationMeters = persisted.translationMeters;
+		ctx.fieldAnchors.push_back(anchor);
+	}
 	ctx.continuousEnabled = record.continuousEnabled;
 	ctx.continuousTrackerSerial = std::move(record.continuousTrackerSerial);
 	ctx.continuousLatencyReestimation = record.continuousLatencyReestimation;
@@ -216,73 +209,51 @@ static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
 	ctx.validProfile = record.valid;
 }
 
-static picojson::array FloatArray(const float *buf, size_t numFloats)
+using questcal::FloatArray;
+using questcal::GetDouble;
+using questcal::HasTypedValue;
+using questcal::LoadFloatArray;
+using questcal::ReadPersistenceRevision;
+using questcal::RejectExcessiveJsonNesting;
+
+// One definition of a well-formed chaperone snapshot. The parser and the
+// writer used to hold separate copies of these bounds, and had already
+// drifted: the writer additionally demanded a complete owner baseline, so a
+// legacy Config-embedded room could parse and arm but could never be written
+// back. That asymmetry is preserved deliberately — the load path disarms an
+// ownerless snapshot rather than rejecting the whole record, so the parser must
+// not reject it — but it is now one flag on one function instead of two
+// unrelated expressions seven hundred lines apart.
+static bool ValidateChaperoneRecord(const ChaperoneRecord &record,
+	bool requireCompleteOwner, std::string &why)
 {
-	picojson::array arr;
-	arr.reserve(numFloats);
-
-	for (size_t i = 0; i < numFloats; i++)
-		arr.push_back(picojson::value(double(buf[i])));
-
-	return arr;
-}
-
-// picojson's get<T>() is guarded only by assert() (compiled out in Release), so
-// every read of untrusted profile JSON must type-check first to reach the
-// intended runtime_error path instead of reading the wrong union member.
-static double GetDouble(const picojson::value &v)
-{
-	if (!v.is<double>())
-		throw std::runtime_error("expected number, got " + v.to_str());
-	double value = v.get<double>();
-	if (!std::isfinite(value))
-		throw std::runtime_error("expected finite number");
-	return value;
-}
-
-template<typename T>
-static bool HasTypedValue(const picojson::object &obj, const char *name)
-{
-	auto it = obj.find(name);
-	if (it == obj.end())
-		return false;
-	if (!it->second.is<T>())
-		throw std::runtime_error(std::string("invalid type for ") + name);
-	return true;
-}
-
-static PersistedRevision ReadPersistenceRevision(const picojson::object &obj)
-{
-	PersistedRevision revision;
-	if (!HasTypedValue<double>(obj, "persistence_revision"))
-		return revision;
-
-	double value = GetDouble(obj.at("persistence_revision"));
-	if (value < 1.0 || value > std::numeric_limits<uint32_t>::max() ||
-		std::floor(value) != value)
-		throw std::runtime_error("invalid persistence_revision");
-	revision.present = true;
-	revision.value = static_cast<uint32_t>(value);
-	return revision;
-}
-
-static void LoadFloatArray(const picojson::value &obj, float *buf, size_t numFloats)
-{
-	if (!obj.is<picojson::array>())
-		throw std::runtime_error("expected array, got " + obj.to_str());
-
-	auto &arr = obj.get<picojson::array>();
-	if (arr.size() != numFloats)
-		throw std::runtime_error("wrong buffer size");
-
-	for (size_t i = 0; i < numFloats; i++)
+	if (!record.valid)
+		return true;
+	if (requireCompleteOwner && !questcal::IsCompleteChaperoneOwner(
+		record.ownerTrackingSystem, record.ownerHmdSerial,
+		record.worldFromDriverValid))
 	{
-		double value = GetDouble(arr[i]);
-		if (value < -std::numeric_limits<float>::max() ||
-			value > std::numeric_limits<float>::max())
-			throw std::runtime_error("number is outside float range");
-		buf[i] = static_cast<float>(value);
+		why = "the protected chaperone has no complete headset/universe baseline";
+		return false;
 	}
+	if (record.worldFromDriverValid && !questcal::IsValidUniverseBaseline(
+		record.worldFromDriverRotation, record.worldFromDriverTranslation))
+	{
+		why = "the chaperone worldFromDriver baseline is invalid";
+		return false;
+	}
+	if (!questcal::IsValidRecordUnixTime(record.copyUnixTime))
+	{
+		why = "the chaperone copy_time is invalid";
+		return false;
+	}
+	if (!questcal::IsPlausibleChaperone(record.geometry, record.standingCenter,
+		record.playSpaceSize))
+	{
+		why = "the chaperone geometry or standing transform is invalid";
+		return false;
+	}
+	return true;
 }
 
 static void ParseChaperone(SettingsRecord &settings, const picojson::object &obj)
@@ -320,9 +291,10 @@ static void ParseChaperone(SettingsRecord &settings, const picojson::object &obj
 		Eigen::Vector3d baselineTranslation(
 			GetDouble(translation[0]), GetDouble(translation[1]),
 			GetDouble(translation[2]));
-		if (!questcal::IsValidRotation(baselineRotation) ||
-			!questcal::IsBoundedVector(baselineTranslation,
-				protocol::limits::MaxAbsTranslationMeters))
+		// Checked here as well as in ValidateChaperoneRecord below: normalized()
+		// on a degenerate quaternion produces NaNs, so the guard has to precede
+		// the normalize rather than only judge the finished record.
+		if (!questcal::IsValidUniverseBaseline(baselineRotation, baselineTranslation))
 			throw std::runtime_error("invalid chaperone worldFromDriver baseline");
 
 		parsed.worldFromDriverRotation = baselineRotation.normalized();
@@ -360,17 +332,16 @@ static void ParseChaperone(SettingsRecord &settings, const picojson::object &obj
 			reinterpret_cast<float *>(parsed.geometry.data()), geometry.size());
 
 	if (HasTypedValue<double>(chaperone, "copy_time"))
-	{
 		parsed.copyUnixTime = GetDouble(chaperone.at("copy_time"));
-		if (!std::isfinite(parsed.copyUnixTime) || parsed.copyUnixTime < 0.0 ||
-			parsed.copyUnixTime > protocol::limits::MaxPlausibleUnixTimeSeconds)
-			throw std::runtime_error("invalid chaperone copy_time");
-	}
-	if (!questcal::IsPlausibleChaperone(parsed.geometry, parsed.standingCenter,
-		parsed.playSpaceSize))
-		throw std::runtime_error("invalid chaperone geometry or standing transform");
 
 	parsed.valid = true;
+	// The parser deliberately does not require a complete owner baseline: the
+	// load path disarms such a snapshot with its own message rather than
+	// failing the whole record, which on the Config path would discard a good
+	// calibration over a damaged room.
+	std::string why;
+	if (!ValidateChaperoneRecord(parsed, false, why))
+		throw std::runtime_error(why);
 	settings.chaperone = std::move(parsed);
 }
 
@@ -412,437 +383,36 @@ static void WriteChaperone(const SettingsRecord &settings, picojson::object &obj
 	obj["chaperone"].set<picojson::object>(std::move(chaperone));
 }
 
-// picojson parses by recursive descent with no depth limit, and the registry
-// admits values far larger than any real record. A stack overflow on Windows
-// is an SEH exception, so neither the runtime_error catch around the parse nor
-// wWinMain's catch (...) can see it: a deeply nested value crashes at startup
-// with no window, no dialog and no session log, and the only recovery is
-// deleting the registry value by hand. Reject that shape before parsing so it
-// lands in Unreadable like any other malformed record. Both persisted schemas
-// nest at most three levels; this bound is far above them and far below what
-// exhausts the stack. Nesting inside strings does not count, so a value whose
-// text merely contains brackets still round-trips.
-static void RejectExcessiveJsonNesting(const std::string &text)
-{
-	constexpr int maxDepth = 16;
-	int depth = 0;
-	bool inString = false;
-	bool escaped = false;
-	for (char c : text)
-	{
-		if (inString)
-		{
-			if (escaped)
-				escaped = false;
-			else if (c == '\\')
-				escaped = true;
-			else if (c == '"')
-				inString = false;
-			continue;
-		}
-
-		if (c == '"')
-			inString = true;
-		else if (c == '[' || c == '{')
-		{
-			if (++depth > maxDepth)
-				throw std::runtime_error("record nesting is too deep");
-		}
-		else if (c == ']' || c == '}')
-			--depth;
-	}
-}
-
+// Reads the profile-owned fields through the shared codec, then layers on the
+// two things this record carries that the codec cannot see: the global
+// settings Config-only releases embedded alongside the profile, and the
+// chaperone snapshot (whose record needs the OpenVR geometry types).
 static ProfileParseResult ParseProfile(ProfileRecord &profile,
 	SettingsRecord &legacySettings, std::istream &stream)
 {
-	picojson::value v;
-	std::string err = picojson::parse(v, stream);
-	if (!err.empty())
-		throw std::runtime_error(err);
+	picojson::value profileValue = questcal::ParseProfileEnvelope(stream);
+	const auto &obj = profileValue.get<picojson::object>();
 
-	if (!v.is<picojson::array>())
-		throw std::runtime_error("profile file is not an array");
-	const auto &arr = v.get<picojson::array>();
-	if (arr.size() < 1)
-		throw std::runtime_error("no profiles in file");
+	questcal::LegacyProfileSettings legacy;
+	ProfileParseResult result = questcal::ParseProfileObject(
+		profile, legacy, obj, protocol::SetAlignmentField::MaxAnchors);
 
-	if (!arr[0].is<picojson::object>())
-		throw std::runtime_error("profile entry is not an object");
-	const auto &obj = arr[0].get<picojson::object>();
-	ProfileParseResult result;
-	result.revision = ReadPersistenceRevision(obj);
-
-	if (!HasTypedValue<std::string>(obj, "reference_tracking_system") ||
-		!HasTypedValue<std::string>(obj, "target_tracking_system"))
-		throw std::runtime_error("profile is missing the tracking system names");
-	profile.referenceTrackingSystem = obj.at("reference_tracking_system").get<std::string>();
-	profile.targetTrackingSystem = obj.at("target_tracking_system").get<std::string>();
-	if (!questcal::IsValidTrackingSystemPair(
-		profile.referenceTrackingSystem, profile.targetTrackingSystem))
-		throw std::runtime_error("tracking system names must be non-empty and different");
-
-	// The quaternion is the stored truth; Euler display values are derived
-	// from it by SetCalibration below.
-	if (!HasTypedValue<picojson::array>(obj, "rotation_quat") ||
-		!HasTypedValue<picojson::array>(obj, "translation_meters"))
-		throw std::runtime_error("profile is missing rotation_quat/translation_meters");
-
-	const auto &quatArr = obj.at("rotation_quat").get<picojson::array>();
-	const auto &transArr = obj.at("translation_meters").get<picojson::array>();
-	if (quatArr.size() != 4 || transArr.size() != 3)
-		throw std::runtime_error("malformed rotation_quat/translation_meters");
-
-	Eigen::Quaterniond rotation(
-		GetDouble(quatArr[0]),   // w
-		GetDouble(quatArr[1]),   // x
-		GetDouble(quatArr[2]),   // y
-		GetDouble(quatArr[3]));  // z
-	Eigen::Vector3d translationMeters(
-		GetDouble(transArr[0]),
-		GetDouble(transArr[1]),
-		GetDouble(transArr[2]));
-
-	double scale = HasTypedValue<double>(obj, "scale") ? GetDouble(obj.at("scale")) : 1.0;
-	if (!questcal::IsValidCalibrationTransform(rotation, translationMeters, scale))
-		throw std::runtime_error("invalid calibration transform");
-	profile.rotation = rotation.normalized();
-	profile.translationMeters = translationMeters;
-	profile.scale = scale;
-
-	if (HasTypedValue<double>(obj, "time_offset"))
-	{
-		profile.timeOffset = GetDouble(obj.at("time_offset"));
-		if (std::abs(profile.timeOffset) >
-				protocol::limits::MaxAbsTimeOffsetSeconds)
-			throw std::runtime_error("invalid time_offset");
-	}
-
-	// Unix seconds of the last successful solve; 0 = unknown (older profile).
-	if (HasTypedValue<double>(obj, "calibration_time"))
-	{
-		profile.calibrationUnixTime = GetDouble(obj.at("calibration_time"));
-		if (profile.calibrationUnixTime < 0.0 ||
-			profile.calibrationUnixTime >
-				protocol::limits::MaxPlausibleUnixTimeSeconds)
-			throw std::runtime_error("invalid calibration_time");
-	}
-
-	// Reference-universe identity: which headset owned the universe this
-	// calibration was solved in, and that headset's raw worldFromDriver. All
-	// optional — a profile written before these existed is not evidence that
-	// the universe moved — but a partial record is malformed, not permissive:
-	// half a baseline can neither detect a rebase nor prove there was none.
-	profile.universeUnsafe = false;
-	profile.universeValid = false;
-	profile.universeHmdSerial.clear();
-	if (HasTypedValue<bool>(obj, "universe_unsafe"))
-		profile.universeUnsafe = obj.at("universe_unsafe").get<bool>();
-
-	bool hasUniverseSerial = HasTypedValue<std::string>(obj, "universe_hmd_serial");
-	bool hasUniverseRotation = HasTypedValue<picojson::array>(
-		obj, "universe_world_from_driver_rotation_quat");
-	bool hasUniverseTranslation = HasTypedValue<picojson::array>(
-		obj, "universe_world_from_driver_translation_meters");
-	if (hasUniverseSerial != hasUniverseRotation ||
-		hasUniverseSerial != hasUniverseTranslation)
-		throw std::runtime_error("incomplete profile reference-universe baseline");
-	if (hasUniverseSerial)
-	{
-		profile.universeHmdSerial = obj.at("universe_hmd_serial").get<std::string>();
-		const auto &universeRotation = obj.at(
-			"universe_world_from_driver_rotation_quat").get<picojson::array>();
-		const auto &universeTranslation = obj.at(
-			"universe_world_from_driver_translation_meters").get<picojson::array>();
-		if (profile.universeHmdSerial.empty() || universeRotation.size() != 4 ||
-			universeTranslation.size() != 3)
-			throw std::runtime_error("malformed profile reference-universe baseline");
-
-		Eigen::Quaterniond baselineRotation(
-			GetDouble(universeRotation[0]), GetDouble(universeRotation[1]),
-			GetDouble(universeRotation[2]), GetDouble(universeRotation[3]));
-		Eigen::Vector3d baselineTranslation(
-			GetDouble(universeTranslation[0]), GetDouble(universeTranslation[1]),
-			GetDouble(universeTranslation[2]));
-		if (!questcal::IsValidRotation(baselineRotation) ||
-			!questcal::IsBoundedVector(baselineTranslation,
-				protocol::limits::MaxAbsTranslationMeters))
-			throw std::runtime_error("invalid profile reference-universe baseline");
-
-		profile.universeRotation = baselineRotation.normalized();
-		profile.universeTranslation = baselineTranslation;
-		profile.universeValid = true;
-	}
-
-	if (HasTypedValue<bool>(obj, "apply_time_offset"))
-		legacySettings.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
-
-	// One-time migration (settings_version < 2): scale solving used to default
-	// on, but streamed reference poses are motion-smoothed and the solved
-	// scale absorbs the attenuation (several percent, varying with motion
-	// speed) — so it is opt-in now, including for profiles saved before the
-	// change. The already-applied scale is deliberately kept: it was solved
-	// jointly with the translation, and clearing it without re-solving would
-	// visibly misalign the space. The next recalibration replaces it.
-	double settingsVersionValue = HasTypedValue<double>(obj, "settings_version")
-		? GetDouble(obj.at("settings_version")) : 1.0;
-	if (settingsVersionValue < 1.0 || settingsVersionValue > 100.0 ||
-		std::floor(settingsVersionValue) != settingsVersionValue)
-		throw std::runtime_error("invalid settings_version");
-	int settingsVersion = static_cast<int>(settingsVersionValue);
-	bool hasSolveScale = HasTypedValue<bool>(obj, "solve_scale");
-	if (settingsVersion >= 2 && hasSolveScale)
-		legacySettings.solveScale = obj.at("solve_scale").get<bool>();
-
-	if (HasTypedValue<bool>(obj, "ui_advanced"))
-		legacySettings.uiAdvanced = obj.at("ui_advanced").get<bool>();
-
-	if (HasTypedValue<bool>(obj, "chaperone_warning_ack"))
-		legacySettings.chaperoneWarningAck = obj.at("chaperone_warning_ack").get<bool>();
-
-	if (HasTypedValue<double>(obj, "calibration_speed"))
-	{
-		double speed = GetDouble(obj.at("calibration_speed"));
-		if (speed < CalibrationContext::FAST || speed > CalibrationContext::VERY_SLOW ||
-			std::floor(speed) != speed)
-			throw std::runtime_error("invalid calibration_speed");
+	// Only what the record actually carried: an absent legacy key must leave
+	// the caller's already-loaded value alone rather than reset it to a default.
+	if (legacy.hasApplyTimeOffset)
+		legacySettings.applyTimeOffset = legacy.applyTimeOffset;
+	if (legacy.hasSolveScale)
+		legacySettings.solveScale = legacy.solveScale;
+	if (legacy.hasUiAdvanced)
+		legacySettings.uiAdvanced = legacy.uiAdvanced;
+	if (legacy.hasChaperoneWarningAck)
+		legacySettings.chaperoneWarningAck = legacy.chaperoneWarningAck;
+	if (legacy.hasCalibrationSpeed)
 		legacySettings.calibrationSpeed =
-			static_cast<CalibrationContext::Speed>(static_cast<int>(speed));
-	}
-
-	if (HasTypedValue<bool>(obj, "field_enabled"))
-		profile.fieldEnabled = obj.at("field_enabled").get<bool>();
-
-	// Continuous calibration (all optional: older profiles load unchanged).
-	if (HasTypedValue<bool>(obj, "continuous_enabled"))
-		profile.continuousEnabled = obj.at("continuous_enabled").get<bool>();
-
-	if (HasTypedValue<std::string>(obj, "continuous_tracker_serial"))
-		profile.continuousTrackerSerial =
-			obj.at("continuous_tracker_serial").get<std::string>();
-
-	if (HasTypedValue<bool>(obj, "continuous_latency_reestimation"))
-		profile.continuousLatencyReestimation =
-			obj.at("continuous_latency_reestimation").get<bool>();
-
-	if (HasTypedValue<bool>(obj, "hide_mounted_tracker"))
-		profile.hideMountedTracker = obj.at("hide_mounted_tracker").get<bool>();
-
-	// Presence makes the mount extrinsic part of the profile contract. Reject
-	// malformed data instead of normalizing a degenerate quaternion and
-	// silently arming continuous calibration with NaNs.
-	profile.mountExtrinsic = MountExtrinsicRecord();
-	if (HasTypedValue<picojson::object>(obj, "mount_extrinsic"))
-	{
-		const auto &extrinsic = obj.at("mount_extrinsic").get<picojson::object>();
-		if (!HasTypedValue<picojson::array>(extrinsic, "rotation_quat") ||
-			!HasTypedValue<picojson::array>(extrinsic, "translation_meters"))
-			throw std::runtime_error("malformed mount_extrinsic");
-		const auto &rotArr = extrinsic.at("rotation_quat").get<picojson::array>();
-		const auto &traArr = extrinsic.at("translation_meters").get<picojson::array>();
-		if (rotArr.size() != 4 || traArr.size() != 3)
-			throw std::runtime_error("malformed mount_extrinsic");
-
-		Eigen::Quaterniond mountRotation(
-			GetDouble(rotArr[0]), GetDouble(rotArr[1]),
-			GetDouble(rotArr[2]), GetDouble(rotArr[3]));
-		Eigen::Vector3d mountPosition(
-			GetDouble(traArr[0]), GetDouble(traArr[1]), GetDouble(traArr[2]));
-		if (!questcal::IsValidRotation(mountRotation) ||
-			!questcal::IsBoundedVector(mountPosition,
-				protocol::limits::MaxAbsAnchorDeltaMeters))
-			throw std::runtime_error("invalid mount_extrinsic");
-
-		profile.mountExtrinsic.rotation = mountRotation.normalized();
-		profile.mountExtrinsic.translationMeters = mountPosition;
-		if (HasTypedValue<double>(extrinsic, "rot_rms_deg"))
-			profile.mountExtrinsic.rotationRmsDeg = GetDouble(extrinsic.at("rot_rms_deg"));
-		if (HasTypedValue<double>(extrinsic, "pos_rms_m"))
-			profile.mountExtrinsic.translationRmsM = GetDouble(extrinsic.at("pos_rms_m"));
-		if (!questcal::IsValidResidual(profile.mountExtrinsic.rotationRmsDeg) ||
-			!questcal::IsValidResidual(profile.mountExtrinsic.translationRmsM))
-			throw std::runtime_error("invalid mount_extrinsic residual");
-		profile.mountExtrinsic.valid = true;
-	}
-
-	profile.fieldAnchors.clear();
-	if (HasTypedValue<picojson::array>(obj, "field_anchors"))
-	{
-		const auto &fieldAnchors = obj.at("field_anchors").get<picojson::array>();
-		if (fieldAnchors.size() > protocol::SetAlignmentField::MaxAnchors)
-			throw std::runtime_error("too many field anchors");
-		profile.fieldAnchors.reserve(fieldAnchors.size());
-		for (const auto &anchorV : fieldAnchors)
-		{
-			if (!anchorV.is<picojson::object>())
-				throw std::runtime_error("malformed field anchor");
-			const auto &anchorObj = anchorV.get<picojson::object>();
-
-			if (!HasTypedValue<picojson::array>(anchorObj, "position") ||
-				!HasTypedValue<picojson::array>(anchorObj, "rotation_quat") ||
-				!HasTypedValue<picojson::array>(anchorObj, "translation_meters"))
-				throw std::runtime_error("malformed field anchor");
-
-			const auto &posArr = anchorObj.at("position").get<picojson::array>();
-			const auto &rotArr = anchorObj.at("rotation_quat").get<picojson::array>();
-			const auto &traArr = anchorObj.at("translation_meters").get<picojson::array>();
-			if (posArr.size() != 3 || rotArr.size() != 4 || traArr.size() != 3)
-				throw std::runtime_error("malformed field anchor");
-
-			CalibrationContext::FieldAnchor anchor;
-			anchor.position = Eigen::Vector3d(GetDouble(posArr[0]), GetDouble(posArr[1]), GetDouble(posArr[2]));
-			Eigen::Quaterniond anchorRotation(GetDouble(rotArr[0]), GetDouble(rotArr[1]),
-				GetDouble(rotArr[2]), GetDouble(rotArr[3]));
-			anchor.translationMeters = Eigen::Vector3d(GetDouble(traArr[0]), GetDouble(traArr[1]), GetDouble(traArr[2]));
-			if (!questcal::IsValidFieldAnchor(anchor.position, anchorRotation,
-				anchor.translationMeters, profile.rotation, profile.translationMeters))
-				throw std::runtime_error("invalid field anchor");
-			anchor.rotation = anchorRotation.normalized();
-
-			profile.fieldAnchors.push_back(anchor);
-		}
-	}
+			static_cast<CalibrationContext::Speed>(legacy.calibrationSpeed);
 
 	ParseChaperone(legacySettings, obj);
-
-	if (settingsVersion < 2)
-	{
-		legacySettings.solveScale = false;
-		result.migratedScaleSetting = true;
-		result.suspiciousLegacyScale = profile.scale < 0.98 || profile.scale > 1.02;
-	}
-
-	profile.valid = true;
 	return result;
-}
-
-static void WriteProfile(const ProfileRecord &record,
-	uint32_t persistenceRevisionValue, std::ostream &out)
-{
-	if (!record.valid)
-		return;
-
-	picojson::object profile;
-	double persistenceRevision = static_cast<double>(persistenceRevisionValue);
-	profile["persistence_revision"].set<double>(persistenceRevision);
-	profile["reference_tracking_system"].set<std::string>(record.referenceTrackingSystem);
-	profile["target_tracking_system"].set<std::string>(record.targetTrackingSystem);
-
-	picojson::array quat;
-	quat.reserve(4);
-	quat.push_back(picojson::value(record.rotation.w()));
-	quat.push_back(picojson::value(record.rotation.x()));
-	quat.push_back(picojson::value(record.rotation.y()));
-	quat.push_back(picojson::value(record.rotation.z()));
-	profile["rotation_quat"].set<picojson::array>(std::move(quat));
-
-	picojson::array trans;
-	trans.reserve(3);
-	trans.push_back(picojson::value(record.translationMeters(0)));
-	trans.push_back(picojson::value(record.translationMeters(1)));
-	trans.push_back(picojson::value(record.translationMeters(2)));
-	profile["translation_meters"].set<picojson::array>(std::move(trans));
-
-	profile["scale"].set<double>(record.scale);
-	profile["time_offset"].set<double>(record.timeOffset);
-	profile["calibration_time"].set<double>(record.calibrationUnixTime);
-	profile["universe_unsafe"].set<bool>(record.universeUnsafe);
-	if (record.universeValid)
-	{
-		profile["universe_hmd_serial"].set<std::string>(record.universeHmdSerial);
-
-		picojson::array universeRotation;
-		universeRotation.reserve(4);
-		universeRotation.push_back(picojson::value(record.universeRotation.w()));
-		universeRotation.push_back(picojson::value(record.universeRotation.x()));
-		universeRotation.push_back(picojson::value(record.universeRotation.y()));
-		universeRotation.push_back(picojson::value(record.universeRotation.z()));
-		profile["universe_world_from_driver_rotation_quat"].set<picojson::array>(
-			std::move(universeRotation));
-
-		picojson::array universeTranslation;
-		universeTranslation.reserve(3);
-		for (int axis = 0; axis < 3; ++axis)
-			universeTranslation.push_back(picojson::value(record.universeTranslation(axis)));
-		profile["universe_world_from_driver_translation_meters"].set<picojson::array>(
-			std::move(universeTranslation));
-	}
-	// Bumped when a load-time migration must not re-run (see ParseProfile).
-	double settingsVersion = 2.0;
-	profile["settings_version"].set<double>(settingsVersion);
-	profile["continuous_enabled"].set<bool>(record.continuousEnabled);
-	if (!record.continuousTrackerSerial.empty())
-		profile["continuous_tracker_serial"].set<std::string>(record.continuousTrackerSerial);
-	profile["continuous_latency_reestimation"].set<bool>(record.continuousLatencyReestimation);
-	profile["hide_mounted_tracker"].set<bool>(record.hideMountedTracker);
-
-	if (record.mountExtrinsic.valid)
-	{
-		picojson::object extrinsic;
-
-		picojson::array rot, tra;
-		rot.reserve(4);
-		tra.reserve(3);
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.w()));
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.x()));
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.y()));
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.z()));
-		for (int k = 0; k < 3; ++k)
-			tra.push_back(picojson::value(record.mountExtrinsic.translationMeters(k)));
-
-		extrinsic["rotation_quat"].set<picojson::array>(std::move(rot));
-		extrinsic["translation_meters"].set<picojson::array>(std::move(tra));
-		extrinsic["rot_rms_deg"].set<double>(record.mountExtrinsic.rotationRmsDeg);
-		extrinsic["pos_rms_m"].set<double>(record.mountExtrinsic.translationRmsM);
-
-		profile["mount_extrinsic"].set<picojson::object>(std::move(extrinsic));
-	}
-
-	profile["field_enabled"].set<bool>(record.fieldEnabled);
-	if (!record.fieldAnchors.empty())
-	{
-		picojson::array anchors;
-		anchors.reserve(record.fieldAnchors.size());
-		for (const auto &a : record.fieldAnchors)
-		{
-			picojson::object anchorObj;
-
-			picojson::array pos, rot, tra;
-			pos.reserve(3);
-			rot.reserve(4);
-			tra.reserve(3);
-			for (int k = 0; k < 3; ++k)
-			{
-				pos.push_back(picojson::value(a.position(k)));
-				tra.push_back(picojson::value(a.translationMeters(k)));
-			}
-			rot.push_back(picojson::value(a.rotation.w()));
-			rot.push_back(picojson::value(a.rotation.x()));
-			rot.push_back(picojson::value(a.rotation.y()));
-			rot.push_back(picojson::value(a.rotation.z()));
-
-			anchorObj["position"].set<picojson::array>(std::move(pos));
-			anchorObj["rotation_quat"].set<picojson::array>(std::move(rot));
-			anchorObj["translation_meters"].set<picojson::array>(std::move(tra));
-
-			picojson::value anchorV;
-			anchorV.set<picojson::object>(std::move(anchorObj));
-			anchors.push_back(std::move(anchorV));
-		}
-		profile["field_anchors"].set<picojson::array>(std::move(anchors));
-	}
-
-	picojson::value profileV;
-	profileV.set<picojson::object>(std::move(profile));
-
-	picojson::array profiles;
-	profiles.reserve(1);
-	profiles.push_back(std::move(profileV));
-
-	picojson::value profilesV;
-	profilesV.set<picojson::array>(std::move(profiles));
-
-	out << profilesV.serialize(true);
 }
 
 static void WriteSettings(const SettingsRecord &record,
@@ -897,8 +467,7 @@ static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &s
 	if (HasTypedValue<double>(obj, "calibration_speed"))
 	{
 		double speed = GetDouble(obj.at("calibration_speed"));
-		if (speed < CalibrationContext::FAST || speed > CalibrationContext::VERY_SLOW ||
-			std::floor(speed) != speed)
+		if (!questcal::IsValidCalibrationSpeed(speed))
 			throw std::runtime_error("invalid calibration_speed");
 		settings.calibrationSpeed =
 			static_cast<CalibrationContext::Speed>(static_cast<int>(speed));
@@ -1115,105 +684,76 @@ void LoadProfile(CalibrationContext &ctx)
 				CalibrationContext::ErrorSource::SettingsPersistence);
 		}
 	}
-	bool profileLoaded = ctx.profileLoadState == questcal::RecordLoadState::Loaded;
-	bool settingsLoaded = ctx.settingsLoadState == questcal::RecordLoadState::Loaded;
-	bool settingsMissing = ctx.settingsLoadState == questcal::RecordLoadState::Missing;
-	bool settingsRecoveryAllowed = questcal::CanUseRecoveredSettings(
-		ctx.settingsLoadState, ctx.profileLoadState);
-	bool settingsMaterializationAllowed = questcal::CanMaterializeSettings(
-		ctx.profileLoadState);
-	bool settingsCanRewrite = (settingsMissing || settingsLoaded) &&
-		settingsMaterializationAllowed;
+	// The whole load-time state machine - which record wins, which revision is
+	// adopted, what gets disarmed and whether a rewrite is even permitted - is
+	// one pure function over the facts gathered above. Keeping it out of here is
+	// what makes every cell of that matrix reachable from a test; this block only
+	// collects facts and applies the verdict.
+	questcal::PersistenceLoadFacts facts;
+	facts.profile = ctx.profileLoadState;
+	facts.settings = ctx.settingsLoadState;
+	facts.profileRevision = profileRevision;
+	facts.settingsRevision = settingsRevision;
+	facts.chaperoneArmed = ctx.chaperone.valid;
+	facts.chaperoneOwnerComplete = questcal::IsCompleteChaperoneOwner(
+		ctx.chaperone.ownerTrackingSystem, ctx.chaperone.ownerHmdSerial,
+		ctx.chaperone.worldFromDriverValid);
+	facts.chaperoneOwnerMatchesReference =
+		ctx.chaperone.ownerTrackingSystem == ctx.referenceTrackingSystem;
+	facts.profileValid = ctx.validProfile;
 
-	// Config is written before Settings for a coupled universe rebase.  If the
-	// process dies between those writes, their revisions differ (or Settings
-	// is absent).  Never restore a raw-space boundary from that mixed state.
-	if (profileLoaded && profileRevision.present)
+	questcal::PersistenceLoadPlan plan = questcal::PlanPersistenceLoad(facts);
+	settingsRewriteNeeded = plan.settingsRewriteNeeded;
+	ctx.persistenceRevision = plan.persistenceRevision;
+	if (plan.legacySettingsMigrationPending)
+		ctx.legacySettingsMigrationPending = true;
+	if (plan.disarmChaperone)
+		ctx.DisarmChaperone();
+	if (plan.reportRevisionMismatch)
 	{
-		ctx.persistenceRevision = profileRevision.value;
-		if (!settingsLoaded || !settingsRevision.present ||
-			settingsRevision.value != profileRevision.value)
-		{
-			bool hadSnapshot = ctx.chaperone.valid;
-			if (hadSnapshot)
-				ctx.DisarmChaperone();
-			settingsRewriteNeeded = settingsCanRewrite;
-			if (hadSnapshot)
-			{
-				ctx.ReportError(
-					"The calibration profile and protected chaperone were saved at different revisions. "
-					"Chaperone auto-restore is disabled until you capture it again.\n",
-					CalibrationContext::ErrorSource::Chaperone);
-			}
-		}
-	}
-	else if (profileLoaded)
-	{
-		// Config-only releases kept the sole copy of global settings and the
-		// chaperone inside Config.  Materialize Settings before any new-format
-		// profile save is allowed to strip those embedded fields.
-		ctx.persistenceRevision = settingsRevision.present ? settingsRevision.value : 1;
-		if (!settingsLoaded || !settingsRevision.present)
-		{
-			ctx.legacySettingsMigrationPending = true;
-			settingsRewriteNeeded = settingsCanRewrite;
-		}
-	}
-	else
-	{
-		ctx.persistenceRevision = settingsRevision.present ? settingsRevision.value : 1;
-		if (settingsMissing || (settingsLoaded && !settingsRevision.present))
-		{
-			settingsRewriteNeeded = settingsCanRewrite;
-		}
+		ctx.ReportError(
+			"The calibration profile and protected chaperone were saved at different revisions. "
+			"Chaperone auto-restore is disabled until you capture it again.\n",
+			CalibrationContext::ErrorSource::Chaperone);
 	}
 
-	if (!settingsRecoveryAllowed)
+	switch (plan.gate)
 	{
+	case questcal::ChaperoneLoadGate::Armed:
+		break;
+	case questcal::ChaperoneLoadGate::ProfileUnreadable:
 		// Config may be a legacy Config-only record containing the sole copy of
 		// the protected room and global preferences. With no separately parsed
 		// Settings record, do not persist this conservative in-memory disarm over
 		// recoverable data.
-		if (ctx.chaperone.valid)
-			ctx.DisarmChaperone();
 		ctx.Log("Protected chaperone left disarmed because the calibration profile could not be read\n");
-	}
-	else if (ctx.settingsLoadState == questcal::RecordLoadState::Unreadable &&
-		ctx.chaperone.valid)
-	{
+		break;
+	case questcal::ChaperoneLoadGate::SettingsUnreadable:
 		// A successfully parsed Config may contain a legacy fallback snapshot,
 		// but a present-yet-unreadable Settings record is authoritative.  Keep
 		// the parse error visible and never arm the fallback implicitly.
-		ctx.DisarmChaperone();
 		ctx.Log("Protected chaperone left disarmed because application settings could not be read\n");
-	}
-	else if (ctx.chaperone.valid &&
-		(ctx.chaperone.ownerTrackingSystem.empty() || ctx.chaperone.ownerHmdSerial.empty() ||
-			!ctx.chaperone.worldFromDriverValid))
-	{
-		ctx.DisarmChaperone();
-		settingsRewriteNeeded = settingsCanRewrite;
+		break;
+	case questcal::ChaperoneLoadGate::IncompleteOwner:
 		ctx.ReportError(
 			"The protected chaperone has no complete headset/universe baseline. "
 			"It has been disarmed; capture it again before enabling auto-restore.\n",
 			CalibrationContext::ErrorSource::Chaperone);
-	}
-	else if (ctx.chaperone.valid && ctx.validProfile &&
-		ctx.chaperone.ownerTrackingSystem != ctx.referenceTrackingSystem)
-	{
-		ctx.DisarmChaperone();
-		settingsRewriteNeeded = settingsCanRewrite;
+		break;
+	case questcal::ChaperoneLoadGate::ForeignTrackingSystem:
 		ctx.ReportError(
 			"The protected chaperone belongs to a different reference tracking system. "
 			"It has been disarmed; capture it again for this profile.\n",
 			CalibrationContext::ErrorSource::Chaperone);
+		break;
 	}
 
 	if (settingsRewriteNeeded)
 	{
 		ctx.MarkSettingsDirty(ctx.timeLastTick);
 		if (!SaveSettings(ctx))
-			ctx.legacySettingsMigrationPending = profileLoaded && !profileRevision.present;
+			ctx.legacySettingsMigrationPending =
+				plan.legacySettingsMigrationPendingIfRewriteFails;
 	}
 
 	ctx.pendingReferenceTrackingSystem = ctx.referenceTrackingSystem;
@@ -1222,22 +762,46 @@ void LoadProfile(CalibrationContext &ctx)
 
 static bool SaveSettingsRecord(CalibrationContext &ctx);
 
+// The preview no-op is the only write outcome that reports success without
+// writing, so it gets a line in the session log. Once per record per session:
+// this is a "the mode you are in is not persisting" notice, not a per-write
+// event, and preview sessions save often.
+static void NotePreviewWriteSkipped(CalibrationContext &ctx, const char *what,
+	bool &announced)
+{
+	if (announced)
+		return;
+	announced = true;
+	ctx.Log(std::string("UI preview mode: ") + what +
+		" was not written to the registry\n");
+}
+
 static bool SaveProfileRecord(CalibrationContext &ctx, const ProfileRecord &record)
 {
-	// UI preview runs on fake state; never let it clobber the real profile.
-	if (g_uiPreviewMode)
-		return true;
-	if (!questcal::CanPersistConfig(ctx.profileLoadState))
+	questcal::PersistenceWriteGate gate = questcal::GateProfileWrite(
+		g_uiPreviewMode, ctx.profileLoadState, ctx.settingsLoadState,
+		ctx.legacySettingsMigrationPending);
+	switch (gate)
 	{
+	case questcal::PersistenceWriteGate::Allowed:
+		break;
+	case questcal::PersistenceWriteGate::SkippedPreview:
+		// UI preview runs on fake state; never let it clobber the real profile.
+		// It still reports success so every caller path stays exercised by the
+		// -frames smoke run, which is precisely why the skip has to be audible:
+		// this is the one place the overlay says "saved" without saving.
+		{
+			static bool announced = false;
+			NotePreviewWriteSkipped(ctx, "the calibration profile", announced);
+		}
+		return true;
+	case questcal::PersistenceWriteGate::RefusedConfigUnreadable:
 		ctx.ReportError(
 			"Could not save the calibration profile because the existing Config record "
 			"could not be read. It was left untouched for recovery.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
-	}
-	if (ctx.legacySettingsMigrationPending &&
-		ctx.settingsLoadState == questcal::RecordLoadState::Unreadable)
-	{
+	case questcal::PersistenceWriteGate::RefusedSettingsUnreadable:
 		ctx.ReportError(
 			"Could not save the calibration profile because the existing Settings record "
 			"could not be read. It was left untouched for recovery.\n",
@@ -1254,81 +818,21 @@ static bool SaveProfileRecord(CalibrationContext &ctx, const ProfileRecord &reco
 	}
 	if (ctx.persistenceRevision == 0)
 		ctx.persistenceRevision = 1;
-	if (record.valid && !questcal::IsValidTrackingSystemPair(
-		record.referenceTrackingSystem, record.targetTrackingSystem))
+	// The same definition the parser enforces, so a record that saves is a
+	// record that will load again.
+	std::string why;
+	if (!questcal::ValidateProfileRecord(
+		record, protocol::SetAlignmentField::MaxAnchors, why))
 	{
-		ctx.ReportError(
-			"Could not save the calibration profile: tracking systems must be non-empty and different\n",
+		ctx.ReportError("Could not save the calibration profile: " + why + "\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
-	}
-	if (record.valid && !questcal::IsValidCalibrationTransform(
-		record.rotation, record.translationMeters, record.scale))
-	{
-		ctx.ReportError("Could not save the calibration profile: the live transform is invalid\n",
-			CalibrationContext::ErrorSource::ProfilePersistence);
-		return false;
-	}
-	if (record.valid &&
-		(!std::isfinite(record.timeOffset) ||
-			std::abs(record.timeOffset) >
-				protocol::limits::MaxAbsTimeOffsetSeconds ||
-			!std::isfinite(record.calibrationUnixTime) ||
-			record.calibrationUnixTime < 0.0 ||
-			record.calibrationUnixTime >
-				protocol::limits::MaxPlausibleUnixTimeSeconds))
-	{
-		ctx.ReportError(
-			"Could not save the calibration profile: calibration timing values are invalid\n",
-			CalibrationContext::ErrorSource::ProfilePersistence);
-		return false;
-	}
-	if (record.valid && record.universeValid &&
-		(record.universeHmdSerial.empty() ||
-			!questcal::IsValidRotation(record.universeRotation) ||
-			!questcal::IsBoundedVector(record.universeTranslation,
-				protocol::limits::MaxAbsTranslationMeters)))
-	{
-		ctx.ReportError(
-			"Could not save the calibration profile: the reference-universe baseline is invalid\n",
-			CalibrationContext::ErrorSource::ProfilePersistence);
-		return false;
-	}
-	if (record.valid && record.mountExtrinsic.valid &&
-		(!questcal::IsValidRotation(record.mountExtrinsic.rotation) ||
-			!questcal::IsBoundedVector(record.mountExtrinsic.translationMeters,
-				protocol::limits::MaxAbsAnchorDeltaMeters) ||
-			!questcal::IsValidResidual(record.mountExtrinsic.rotationRmsDeg) ||
-			!questcal::IsValidResidual(record.mountExtrinsic.translationRmsM)))
-	{
-		ctx.ReportError(
-			"Could not save the calibration profile: the mount extrinsic is invalid\n",
-			CalibrationContext::ErrorSource::ProfilePersistence);
-		return false;
-	}
-	if (record.valid &&
-		record.fieldAnchors.size() > protocol::SetAlignmentField::MaxAnchors)
-	{
-		ctx.ReportError(
-			"Could not save the calibration profile: there are too many field anchors\n",
-			CalibrationContext::ErrorSource::ProfilePersistence);
-		return false;
-	}
-	for (const auto &anchor : record.fieldAnchors)
-	{
-		if (!questcal::IsValidFieldAnchor(anchor.position, anchor.rotation,
-			anchor.translationMeters, record.rotation, record.translationMeters))
-		{
-			ctx.ReportError("Could not save the calibration profile: a field anchor is invalid\n",
-				CalibrationContext::ErrorSource::ProfilePersistence);
-			return false;
-		}
 	}
 
 	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream profile;
-	WriteProfile(record, ctx.persistenceRevision, profile);
+	questcal::WriteProfile(record, ctx.persistenceRevision, profile);
 	std::string error;
 	if (!WriteRegistryValue("Config", profile.str(), error))
 	{
@@ -1406,19 +910,25 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 
 static bool SaveSettingsRecord(CalibrationContext &ctx)
 {
-	if (g_uiPreviewMode)
-		return true;
-	if (!questcal::CanPersistSettings(
-		ctx.profileLoadState, ctx.settingsLoadState))
+	questcal::PersistenceWriteGate gate = questcal::GateSettingsWrite(
+		g_uiPreviewMode, ctx.profileLoadState, ctx.settingsLoadState);
+	switch (gate)
 	{
+	case questcal::PersistenceWriteGate::Allowed:
+		break;
+	case questcal::PersistenceWriteGate::SkippedPreview:
+		{
+			static bool announced = false;
+			NotePreviewWriteSkipped(ctx, "the application settings", announced);
+		}
+		return true;
+	case questcal::PersistenceWriteGate::RefusedConfigUnreadable:
 		ctx.ReportError(
 			"Could not save QuestCalibrator settings because the existing Config record "
 			"could not be read. Neither record was changed so legacy settings remain recoverable.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
-	}
-	if (ctx.settingsLoadState == questcal::RecordLoadState::Unreadable)
-	{
+	case questcal::PersistenceWriteGate::RefusedSettingsUnreadable:
 		ctx.ReportError(
 			"Could not save QuestCalibrator settings because the existing Settings record "
 			"could not be read. It was left untouched for recovery.\n",
@@ -1428,22 +938,14 @@ static bool SaveSettingsRecord(CalibrationContext &ctx)
 	if (ctx.persistenceRevision == 0)
 		ctx.persistenceRevision = 1;
 	SettingsRecord record = CaptureSettingsRecord(ctx);
-	if (record.chaperone.valid &&
-		(record.chaperone.ownerTrackingSystem.empty() ||
-			record.chaperone.ownerHmdSerial.empty() ||
-			!std::isfinite(record.chaperone.copyUnixTime) ||
-			record.chaperone.copyUnixTime < 0.0 ||
-			record.chaperone.copyUnixTime >
-				protocol::limits::MaxPlausibleUnixTimeSeconds ||
-			!record.chaperone.worldFromDriverValid ||
-			!questcal::IsValidRotation(record.chaperone.worldFromDriverRotation) ||
-			!questcal::IsBoundedVector(record.chaperone.worldFromDriverTranslation,
-				protocol::limits::MaxAbsTranslationMeters) ||
-			!questcal::IsPlausibleChaperone(record.chaperone.geometry,
-				record.chaperone.standingCenter, record.chaperone.playSpaceSize)))
+	// A snapshot with no owner is refused rather than written: an unowned room
+	// cannot be safely restored, so persisting one only produces a record the
+	// restore path will reject later, with nothing said at the time.
+	std::string why;
+	if (!ValidateChaperoneRecord(record.chaperone, true, why))
 	{
 		ctx.ReportError(
-			"Could not save QuestCalibrator settings because the protected chaperone snapshot is invalid\n",
+			"Could not save QuestCalibrator settings because " + why + "\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}

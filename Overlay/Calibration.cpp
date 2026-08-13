@@ -4,6 +4,7 @@
 #include "ChaperoneMath.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
+#include "DriverSyncPolicy.h"
 #include "FieldMath.h"
 #include "IPCClient.h"
 #include "JumpDetector.h"
@@ -35,11 +36,9 @@ static bool MonitorActive = false;
 static bool MonitorHasComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
 static double MonitorLastComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
 
-// Conservative knowledge of driver slot state across scans. A failed batch
-// does not erase it: a request may have reached the driver immediately before
-// a pipe failure, so only a confirmed disable (or a complete connection-wide
-// neutralization) proves a slot is no longer live.
-static bool DriverSlotMayBeEnabled[vr::k_unMaxTrackedDeviceCount] = {};
+// The slot ledger plus every decision that reads it (DriverSyncPolicy.h). This
+// file owns only the OpenVR enumeration and the pipe transport around it.
+static questcal::DriverSlotPolicy DriverSlots;
 static uint64_t SynchronizedDriverConnectionGeneration = 0;
 
 // Dedicated consumer/cache for the HMD's raw-universe transform. It drains
@@ -279,25 +278,6 @@ void ShutdownCalibrator(bool cleanExit)
 		AppendSessionLog("session ended cleanly");
 }
 
-static vr::HmdQuaternion_t VRQuat(const Eigen::Quaterniond &q)
-{
-	vr::HmdQuaternion_t out;
-	out.w = q.w();
-	out.x = q.x();
-	out.y = q.y();
-	out.z = q.z();
-	return out;
-}
-
-static vr::HmdVector3d_t VRVec(const Eigen::Vector3d &meters)
-{
-	vr::HmdVector3d_t out;
-	out.v[0] = meters(0);
-	out.v[1] = meters(1);
-	out.v[2] = meters(2);
-	return out;
-}
-
 static bool SendDriverRequest(CalibrationContext &ctx, const protocol::Request &request,
 	const char *operation, uint64_t *batchConnectionGeneration = nullptr)
 {
@@ -493,9 +473,7 @@ static bool CacheHmdWorldFromDriver(
 {
 	transition = HmdWorldTransition();
 	if (sample.deviceId != vr::k_unTrackedDeviceIndex_Hmd ||
-		!sample.poseIsValid ||
-		sample.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK) ||
-		!IsUsableRingSample(sample, QpcToSeconds))
+		!IsTrustedRingSample(sample, QpcToSeconds))
 		return false;
 
 	double sampleTime = RingSampleTime(sample, QpcToSeconds);
@@ -912,37 +890,6 @@ static void CheckProtectedChaperone(CalibrationContext &ctx)
 // ---------------------------------------------------------------------------
 // Sample collection
 
-// Compose the raw-world pose (worldFromDriver * driver pose) from a shmem
-// sample and convert its capture timestamp to seconds on the QPC clock.
-static questcal::PoseSample EngineSampleFromRing(const protocol::DevicePoseSample &s)
-{
-	RingSampleParts p = UnpackRingSample(s);
-
-	questcal::PoseSample out;
-	// poseTimeOffset is the driver's own estimate of how far the pose's validity
-	// time differs from the submit time; folding it in tightens the alignment.
-	out.time = static_cast<double>(s.sampleTimeQpc) * QpcToSeconds + s.poseTimeOffset;
-	out.rot = (p.wfdRot * p.drvRot).normalized();
-	out.pos = p.wfdRot * p.drvPos + p.wfdTrans;
-	out.vel = p.wfdRot * Eigen::Vector3d(s.velocity[0], s.velocity[1], s.velocity[2]);
-	out.angVel = p.wfdRot * Eigen::Vector3d(s.angularVelocity[0], s.angularVelocity[1], s.angularVelocity[2]);
-	return out;
-}
-
-// A misbehaving driver can publish poseIsValid=true with non-finite fields;
-// gate them out at ingestion so no consumer (solver, continuous alignment)
-// ever sees one.
-static bool IsUsableEngineSample(const questcal::PoseSample &s)
-{
-	return std::isfinite(s.time) && questcal::IsValidRotation(s.rot) &&
-		questcal::IsBoundedVector(s.pos,
-			protocol::limits::MaxAbsPosePositionMeters) &&
-		questcal::IsBoundedVector(s.vel,
-			protocol::limits::MaxAbsLinearVelocityMetersPerSecond) &&
-		questcal::IsBoundedVector(s.angVel,
-			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond);
-}
-
 // Drop the collector's backlog so a new collection starts fresh.
 static void DiscardPoseRingBacklog()
 {
@@ -960,21 +907,16 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 	}
 	for (const auto &s : CollectorScratch)
 	{
-		// Strict validity: a pose the driver flagged invalid never enters the
-		// solve, even if the tracking result still claims "running OK".
-		if (!s.poseIsValid ||
-			s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK) ||
-			!IsUsableRingSample(s, QpcToSeconds))
-			continue;
-
 		// The composed time folds in the driver's jittery poseTimeOffset, so
 		// the odd inversion occurs in healthy data; drop it here rather than
 		// let the solver fail the whole collection (same policy as
-		// ContinuousAlignment::PushReference).
+		// ContinuousAlignment::PushReference). This guard is buffer-relative on
+		// purpose: it compares against this collection's own tail, not any
+		// device-global watermark the monitors keep.
+		questcal::PoseSample sample;
 		if (s.deviceId == ctx.calibrationReferenceID)
 		{
-			questcal::PoseSample sample = EngineSampleFromRing(s);
-			if (!IsUsableEngineSample(sample))
+			if (!TryComposeRingSample(s, QpcToSeconds, sample))
 				continue;
 			if (!ctx.refSamples.empty() && sample.time <= ctx.refSamples.back().time)
 				continue;
@@ -983,8 +925,7 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 		}
 		else if (s.deviceId == ctx.calibrationTargetID)
 		{
-			questcal::PoseSample sample = EngineSampleFromRing(s);
-			if (!IsUsableEngineSample(sample))
+			if (!TryComposeRingSample(s, QpcToSeconds, sample))
 				continue;
 			if (!ctx.targetSamples.empty() && sample.time <= ctx.targetSamples.back().time)
 				continue;
@@ -1020,7 +961,7 @@ static void CollectFromRuntimePoses(CalibrationContext &ctx, double now)
 		s.pos = Eigen::Vector3d(m[0][3], m[1][3], m[2][3]);
 		s.vel = Eigen::Vector3d(p.vVelocity.v[0], p.vVelocity.v[1], p.vVelocity.v[2]);
 		s.angVel = Eigen::Vector3d(p.vAngularVelocity.v[0], p.vAngularVelocity.v[1], p.vAngularVelocity.v[2]);
-		if (!IsUsableEngineSample(s) || (!into.empty() && s.time <= into.back().time))
+		if (!IsUsableComposedSample(s) || (!into.empty() && s.time <= into.back().time))
 			return;
 		into.push_back(s);
 		lastTime = now;
@@ -1638,8 +1579,7 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 	// rating already skips staleness for it, and toasting "quality looks poor"
 	// while it is visibly being maintained is pure noise.
 	bool maintained = ctx.ContinuousArmed() &&
-		ctx.continuousState ==
-			static_cast<int>(questcal::ContinuousAlignment::State::Tracking);
+		ctx.continuousState == questcal::ContinuousAlignment::State::Tracking;
 	if (ctx.alignment == CalibrationContext::AlignmentHealth::Stale && !maintained)
 		NotifyStaleAlignment(ctx);
 }
@@ -1700,60 +1640,45 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		if (ctx.referenceDeviceMask[s.deviceId])
 			Jumps->Push(s);
 
-		bool sampleValid = s.poseIsValid &&
-			s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK) &&
-			IsUsableRingSample(s, QpcToSeconds);
-		double composedTime = 0.0;
 		questcal::PoseSample sample;
-		if (sampleValid)
-		{
-			composedTime = RingSampleTime(s, QpcToSeconds);
-			if (MonitorHasComposedTime[s.deviceId] &&
-				composedTime <= MonitorLastComposedTime[s.deviceId])
-				sampleValid = false;
-			else
-			{
-				sample = EngineSampleFromRing(s);
-				sampleValid = IsUsableEngineSample(sample);
-			}
-		}
-		if (!sampleValid)
+		if (!TryComposeRingSample(s, QpcToSeconds, sample))
+			continue;
+		// Device-relative monotonicity: this monitor keeps a per-device
+		// watermark across drains, unlike the collector's buffer-relative guard
+		// and the HMD observation's single-endpoint one. Same shape, three
+		// different domain rules — deliberately not one shared guard.
+		double composedTime = sample.time;
+		if (MonitorHasComposedTime[s.deviceId] &&
+			composedTime <= MonitorLastComposedTime[s.deviceId])
 			continue;
 		MonitorHasComposedTime[s.deviceId] = true;
 		MonitorLastComposedTime[s.deviceId] = composedTime;
 
-		if (sampleValid && s.deviceId == vr::k_unTrackedDeviceIndex_Hmd &&
+		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd &&
 			ctx.referenceDeviceMask[s.deviceId])
 		{
 			lastHmdRawPos = sample.pos;
 			lastHmdRawTime = composedTime;
 		}
 
-		// Drift evidence must come from devices that anchor a universe. On the
-		// reference side that is the HMD alone: its SLAM map IS the reference
-		// universe, while reference-side peripherals (e.g. set-down Touch
-		// controllers) IMU-coast with slowly sliding poses that still report
-		// Running_OK -- centimeters of "slide" that say nothing about
-		// alignment. Every lighthouse device is rigid to the target universe,
-		// so target-system devices stay eligible -- except the HMD-mounted
-		// tracker (rides a human head), and any lighthouse device within
-		// arm's reach of the headset: that is a worn tracker (hips, feet) or a
-		// device the user is right next to, and a supported resting body
-		// passes the stationarity gates then "slides" with slow posture creep.
-		bool anchorsUniverse =
-			(s.deviceId == vr::k_unTrackedDeviceIndex_Hmd && ctx.referenceDeviceMask[s.deviceId]) ||
-			(ctx.targetDeviceMask[s.deviceId] && s.deviceId != ctx.continuousTrackerId);
+		// Feed-selection policy (HMD-only on the reference side, mounted-tracker
+		// exclusion, worn-device proximity) lives in ringpose::AnchorsUniverse
+		// so it is one pure predicate a test can drive; see its comment for why
+		// all three rules are load-bearing.
+		ringpose::DriftFeedCandidate candidate;
+		candidate.deviceId = s.deviceId;
+		candidate.referenceSide = ctx.referenceDeviceMask[s.deviceId];
+		candidate.targetSide = ctx.targetDeviceMask[s.deviceId];
+		candidate.mountedTrackerId = ctx.continuousTrackerId;
+		candidate.rawPosition = sample.pos;
+		candidate.composedTime = composedTime;
+		candidate.hmdRawPosition = lastHmdRawPos;
+		candidate.hmdRawTime = lastHmdRawTime;
+		candidate.calibratedRotation = ctx.calibratedRotationQ;
+		candidate.calibratedTranslationMeters = ctx.TranslationMeters();
+		candidate.calibratedScale = ctx.calibratedScale;
 
-		if (anchorsUniverse && s.deviceId != vr::k_unTrackedDeviceIndex_Hmd &&
-			composedTime - lastHmdRawTime < 3.0)
-		{
-			Eigen::Vector3d refPos = ctx.calibratedRotationQ
-				* (ctx.calibratedScale * sample.pos) + ctx.TranslationMeters();
-			if ((refPos - lastHmdRawPos).norm() < 1.2)
-				anchorsUniverse = false;
-		}
-
-		if (anchorsUniverse)
+		if (ringpose::AnchorsUniverse(candidate))
 			Drift->Push(s,
 				ctx.targetDeviceMask[s.deviceId] ? ctx.calibratedScale : 1.0);
 	}
@@ -1837,7 +1762,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			ContinuousActive = false;
 		}
 		PoseHub.DiscardBacklog(ContinuousConsumer);
-		ctx.continuousState = static_cast<int>(Continuous->GetState());
+		ctx.continuousState = Continuous->GetState();
 		return;
 	}
 
@@ -1863,22 +1788,17 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	{
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
 			continue;
-		if (!s.poseIsValid ||
-			s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK) ||
-			!IsUsableRingSample(s, QpcToSeconds))
-			continue;
 
+		questcal::PoseSample sample;
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
 		{
-			questcal::PoseSample sample = EngineSampleFromRing(s);
-			if (!IsUsableEngineSample(sample))
+			if (!TryComposeRingSample(s, QpcToSeconds, sample))
 				continue;
 			Continuous->PushReference(sample);
 		}
 		else if (s.deviceId == ctx.continuousTrackerId)
 		{
-			questcal::PoseSample sample = EngineSampleFromRing(s);
-			if (!IsUsableEngineSample(sample))
+			if (!TryComposeRingSample(s, QpcToSeconds, sample))
 				continue;
 			Continuous->PushTarget(sample);
 		}
@@ -1898,8 +1818,13 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
 		Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
 	{
-		Eigen::Vector3d basePos = ctx.calibratedRotationQ
-			* (ctx.calibratedScale * targetRawPos) + ctx.TranslationMeters();
+		// The field is looked up at the tracker's BASE-CALIBRATED world
+		// position, so the calibrated scale multiplies the raw position first -
+		// shared with the drift feed's proximity test so there is one spelling
+		// of where that factor goes.
+		Eigen::Vector3d basePos = ringpose::BaseCalibratedPosition(
+			ctx.calibratedRotationQ, ctx.TranslationMeters(), ctx.calibratedScale,
+			targetRawPos);
 		// Same width SendAlignmentField put on the wire - the expectation has to
 		// be the field the driver is actually applying, not a similar one.
 		questcal::BlendedFieldCalibration(ActiveFieldAnchors(ctx), ctx.calibratedRotationQ,
@@ -1995,7 +1920,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			SynchronizeDriverState(ctx);
 	}
 
-	ctx.continuousState = static_cast<int>(Continuous->GetState());
+	ctx.continuousState = Continuous->GetState();
 	ctx.continuousDeviation = Continuous->CurrentDeviation();
 	ctx.continuousScatterRotDeg = Continuous->ScatterRotRmsDeg();
 	ctx.continuousScatterPosM = Continuous->ScatterPosRmsM();
@@ -2039,8 +1964,6 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	// Replace an anchor measured near this spot (horizontal distance, matching
 	// the driver's XZ blend metric); otherwise append.
 	CalibrationContext::FieldAnchor anchor{ centroidRef, result.rotation, result.translation };
-	auto previousAnchors = ctx.fieldAnchors;
-	uint32_t previousGeneration = ctx.fieldGeneration;
 	size_t slot = ctx.fieldAnchors.size();
 	for (size_t i = 0; i < ctx.fieldAnchors.size(); ++i)
 	{
@@ -2052,25 +1975,24 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 		}
 	}
 
-	if (slot == ctx.fieldAnchors.size())
+	// Decided before the transaction opens: a refused anchor is not a failed
+	// save, so it must not bump the generation or roll anything back.
+	bool append = slot == ctx.fieldAnchors.size();
+	if (append && ctx.fieldAnchors.size() >= protocol::SetAlignmentField::MaxAnchors)
 	{
-		if (ctx.fieldAnchors.size() >= protocol::SetAlignmentField::MaxAnchors)
-		{
-			ctx.Log("Anchor limit reached (8): collect within 1 m of an existing anchor to replace it, or clear the field\n");
-			return;
-		}
-		ctx.fieldAnchors.push_back(anchor);
-	}
-	else
-	{
-		ctx.fieldAnchors[slot] = anchor;
+		ctx.Log("Anchor limit reached (8): collect within 1 m of an existing anchor to replace it, or clear the field\n");
+		return;
 	}
 
-	ctx.fieldGeneration++;
-	if (!SaveProfile(ctx))
+	if (!ctx.WithProfileSave(
+		[&] {
+			if (append)
+				ctx.fieldAnchors.push_back(anchor);
+			else
+				ctx.fieldAnchors[slot] = anchor;
+		},
+		[&] { return SaveProfile(ctx); }))
 	{
-		ctx.fieldAnchors = std::move(previousAnchors);
-		ctx.fieldGeneration = previousGeneration;
 		ctx.Log("Field anchor was not applied because the updated profile could not be saved\n");
 		return;
 	}

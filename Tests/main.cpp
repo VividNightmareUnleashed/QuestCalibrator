@@ -24,6 +24,7 @@
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/ProfileValidation.h"
+#include "../Overlay/RingPoseMath.h"
 #include "../Overlay/PoseStreamHub.h"
 #include "../common/PoseChannel.h"
 
@@ -771,6 +772,182 @@ void RunPoseSampleScenarios()
 			RingCaptureTime(predictedSample, TestQpcToSeconds), 100.0, 2.0) &&
 		RingSampleTime(predictedSample, TestQpcToSeconds) > 100.0,
 		"fresh capture accepted even when the pose validity time is predicted ahead");
+
+	char detail[256];
+
+	// The composition every solver input goes through: worldFromDriver o driver
+	// pose, velocities rotated into the world frame, and the driver's own
+	// prediction offset folded into the timestamp. Expectations are literals
+	// rather than the same expression re-evaluated, so a rewritten composition
+	// (dropped rotation on the velocities, inverted worldFromDriver, reversed
+	// rotation product, dropped poseTimeOffset) shows up here.
+	{
+		const Eigen::Quaterniond wfdRot(
+			Eigen::AngleAxisd(EIGEN_PI / 2.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond drvRot(
+			Eigen::AngleAxisd(EIGEN_PI / 2.0, Eigen::Vector3d::UnitX()));
+		protocol::DevicePoseSample s = RingSample(4, 2.0,
+			wfdRot, Eigen::Vector3d(1.0, 2.0, 3.0),
+			drvRot, Eigen::Vector3d(1.0, 0.0, 0.0),
+			Eigen::Vector3d(0.0, 0.0, 2.0), Eigen::Vector3d(0.0, 1.0, 0.0));
+		s.poseTimeOffset = 0.05;
+
+		PoseSample composed;
+		bool accepted = TryComposeRingSample(s, TestQpcToSeconds, composed);
+		// +90 deg about Y sends +x to -z and +z to +x; the composed rotation is
+		// checked by its action on +z, which distinguishes wfd o drv from
+		// drv o wfd (the reversed product leaves +z at +x).
+		bool ok = accepted &&
+			std::abs(composed.time - 2.05) < 1e-9 &&
+			(composed.pos - Eigen::Vector3d(1.0, 2.0, 2.0)).norm() < 1e-9 &&
+			(composed.vel - Eigen::Vector3d(2.0, 0.0, 0.0)).norm() < 1e-9 &&
+			(composed.angVel - Eigen::Vector3d(0.0, 1.0, 0.0)).norm() < 1e-9 &&
+			(composed.rot * Eigen::Vector3d(0.0, 0.0, 1.0) -
+				Eigen::Vector3d(0.0, -1.0, 0.0)).norm() < 1e-9 &&
+			std::abs(composed.rot.norm() - 1.0) < 1e-12;
+		snprintf(detail, sizeof detail,
+			"t %.4f  pos (%.3f, %.3f, %.3f)  vel (%.3f, %.3f, %.3f)",
+			composed.time, composed.pos.x(), composed.pos.y(), composed.pos.z(),
+			composed.vel.x(), composed.vel.y(), composed.vel.z());
+		Check("pose ring: composed world sample", ok, detail);
+	}
+
+	// The trust boundary: a driver may mark a pose Running_OK while supplying
+	// malformed numerics, and it may supply clean numerics while reporting the
+	// device as not tracking. Both are tracking ABSENCE, so the composed output
+	// must be left exactly as the caller had it -- softening a rejection into a
+	// defaulted (identity, origin) pose would feed the solver a fabricated
+	// sample that passes every downstream check.
+	{
+		const Eigen::Quaterniond wfdRot(
+			Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
+		protocol::DevicePoseSample good = RingSample(4, 3.0,
+			wfdRot, Eigen::Vector3d(0.5, 0.0, -0.5),
+			Eigen::Quaterniond::Identity(), Eigen::Vector3d(0.2, 1.1, -0.3),
+			Eigen::Vector3d(0.4, 0.0, 0.0), Eigen::Vector3d(0.0, 0.3, 0.0));
+
+		PoseSample sentinel;
+		sentinel.time = -77.0;
+		sentinel.pos = Eigen::Vector3d(9.0, 9.0, 9.0);
+
+		auto rejectsAndPreserves = [&](const protocol::DevicePoseSample &bad)
+		{
+			PoseSample out = sentinel;
+			return !TryComposeRingSample(bad, TestQpcToSeconds, out) &&
+				out.time == sentinel.time && out.pos == sentinel.pos;
+		};
+
+		protocol::DevicePoseSample notValid = good;
+		notValid.poseIsValid = false;
+		protocol::DevicePoseSample notTracking = good;
+		notTracking.trackingResult =
+			static_cast<uint32_t>(vr::TrackingResult_Running_OutOfRange);
+		protocol::DevicePoseSample malformedNumeric = good;
+		malformedNumeric.position[1] = 1e300;
+		protocol::DevicePoseSample degenerateRotation = good;
+		degenerateRotation.rotation = { 0.0, 0.0, 0.0, 0.0 };
+		// Every field is individually inside the ring bounds, yet the sum is not:
+		// the driver offset and the device position are each 9 km, so the
+		// composed world position lands at 18 km. This is the case only the
+		// second (composed) gate can catch, so it fails if that gate is dropped
+		// as redundant with the per-field one.
+		protocol::DevicePoseSample overflowingComposition = good;
+		overflowingComposition.worldFromDriverRotation = { 1.0, 0.0, 0.0, 0.0 };
+		overflowingComposition.worldFromDriverTranslation[0] = 9000.0;
+		overflowingComposition.position[0] = 9000.0;
+
+		PoseSample accepted;
+		bool ok = TryComposeRingSample(good, TestQpcToSeconds, accepted) &&
+			IsTrustedRingSample(good, TestQpcToSeconds) &&
+			rejectsAndPreserves(notValid) &&
+			rejectsAndPreserves(notTracking) &&
+			rejectsAndPreserves(malformedNumeric) &&
+			rejectsAndPreserves(degenerateRotation) &&
+			IsTrustedRingSample(overflowingComposition, TestQpcToSeconds) &&
+			rejectsAndPreserves(overflowingComposition) &&
+			!IsTrustedRingSample(notTracking, TestQpcToSeconds);
+		Check("pose ring: ingestion trust boundary", ok,
+			"healthy accepted; invalid/not-tracking/unbounded/degenerate/overflowing rejected without writing out");
+	}
+
+	// Drift-feed eligibility. The reference side contributes the HMD only (its
+	// SLAM map IS the universe); the target side contributes everything rigid to
+	// it EXCEPT the HMD-mounted tracker, which rides a human head. Losing that
+	// one clause is what puts a resting head into the drift feed and toasts the
+	// user about a calibration that is being actively maintained.
+	{
+		ringpose::DriftFeedCandidate c;
+		// Stale HMD observation so the proximity heuristic cannot mask the
+		// identity rules being checked here.
+		c.composedTime = 100.0;
+		c.hmdRawTime = 90.0;
+		c.mountedTrackerId = 9;
+
+		auto eligible = [&](uint32_t id, bool referenceSide, bool targetSide)
+		{
+			ringpose::DriftFeedCandidate q = c;
+			q.deviceId = id;
+			q.referenceSide = referenceSide;
+			q.targetSide = targetSide;
+			return ringpose::AnchorsUniverse(q);
+		};
+
+		ringpose::DriftFeedCandidate unresolvedTracker = c;
+		unresolvedTracker.deviceId = 9;
+		unresolvedTracker.targetSide = true;
+		unresolvedTracker.mountedTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+
+		bool ok =
+			eligible(vr::k_unTrackedDeviceIndex_Hmd, true, false) &&
+			!eligible(3, true, false) &&          // set-down reference controller
+			eligible(5, false, true) &&           // lighthouse device, target side
+			!eligible(9, false, true) &&          // the HMD-mounted tracker
+			!eligible(4, false, false) &&         // neither system
+			ringpose::AnchorsUniverse(unresolvedTracker);
+		Check("drift feed: universe anchors", ok,
+			"HMD-only on the reference side; target side minus the mounted tracker");
+	}
+
+	// The worn-device proximity heuristic, and the placement of the calibrated
+	// scale inside it: a target-raw position has to be scaled BEFORE the base
+	// rotation and translation, exactly as the driver applies it. At scale 1.5 a
+	// tracker 3 m out sits at 4.5 m in reference space -- dropping the factor
+	// puts it 1.5 m away from the headset it is actually strapped to, back over
+	// the arm's-reach threshold and into the drift feed.
+	{
+		ringpose::DriftFeedCandidate c;
+		c.deviceId = 5;
+		c.targetSide = true;
+		c.mountedTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+		c.rawPosition = Eigen::Vector3d(3.0, 0.0, 0.0);
+		c.calibratedScale = 1.5;
+		c.composedTime = 100.0;
+		c.hmdRawTime = 99.0;
+
+		ringpose::DriftFeedCandidate wornOnUser = c;
+		wornOnUser.hmdRawPosition = Eigen::Vector3d(4.5, 0.0, 0.0);
+
+		// Where the unscaled (wrong) spelling would place the device.
+		ringpose::DriftFeedCandidate acrossTheRoom = c;
+		acrossTheRoom.hmdRawPosition = Eigen::Vector3d(3.0, 0.0, 0.0);
+
+		// Same worn device, but the HMD has not been seen for longer than the
+		// proximity window, so the heuristic must not keep excluding it.
+		ringpose::DriftFeedCandidate staleHmd = wornOnUser;
+		staleHmd.hmdRawTime = 96.0;
+
+		bool ok =
+			!ringpose::AnchorsUniverse(wornOnUser) &&
+			ringpose::AnchorsUniverse(acrossTheRoom) &&
+			ringpose::AnchorsUniverse(staleHmd);
+		snprintf(detail, sizeof detail,
+			"scale %.2f raw %.1f m -> reference %.1f m; window %.1f s",
+			c.calibratedScale, c.rawPosition.x(),
+			ringpose::BaseCalibratedPosition(c.calibratedRotation,
+				c.calibratedTranslationMeters, c.calibratedScale, c.rawPosition).x(),
+			ringpose::DriftHmdProximityWindowSeconds);
+		Check("drift feed: worn-device proximity", ok, detail);
+	}
 }
 
 void RunPoseRingConcurrentScenario()

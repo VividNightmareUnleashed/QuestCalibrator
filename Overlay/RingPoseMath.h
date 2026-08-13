@@ -1,5 +1,8 @@
 #pragma once
 
+#include "CalibrationEngine.h"
+#include "ProfileValidation.h"
+
 #include "../common/Protocol.h"
 #include "../common/TransformLimits.h"
 
@@ -7,9 +10,15 @@
 #include <Eigen/Geometry>
 
 #include <cmath>
+#include <cstdint>
 
 // Eigen views of a ring sample's transform fields, shared by everything that
-// composes world poses from the shared-memory stream.
+// composes world poses from the shared-memory stream, plus the pure ingestion
+// policy that governs them: the trust boundary a sample must clear, the
+// composition itself, and which composed samples may feed the drift monitor.
+// The overlay used to spell those policies out at each consumer inside
+// Calibration.cpp, which no test compiles; they live here so there is one copy
+// and the harness can drive it.
 struct RingSampleParts
 {
 	Eigen::Quaterniond wfdRot;
@@ -161,3 +170,143 @@ inline RingSampleParts UnpackRingSample(const protocol::DevicePoseSample &s)
 		Eigen::Vector3d(s.position[0], s.position[1], s.position[2])
 	};
 }
+
+// The complete overlay-side trust boundary for one ring sample: the driver must
+// claim the pose is valid AND that the device is actually tracking, and the
+// numeric fields must survive validation. Spelled once because every consumer
+// (chaperone baseline, collector, runtime monitor, continuous loop) must ask the
+// same question — a bound added to the numeric half has to reach all four, and
+// they used to carry four hand-written copies of this conjunction.
+inline bool IsTrustedRingSample(
+	const protocol::DevicePoseSample &s, double qpcToSeconds)
+{
+	return s.poseIsValid &&
+		s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK) &&
+		IsUsableRingSample(s, qpcToSeconds);
+}
+
+// A misbehaving driver can publish poseIsValid=true with field values that pass
+// the per-field ring checks yet compose into something unusable; gate the
+// composed pose too so no consumer (solver, continuous alignment, drift
+// monitor) ever sees one. Also used by the runtime-pose fallback, whose samples
+// never come off the ring at all.
+inline bool IsUsableComposedSample(const questcal::PoseSample &s)
+{
+	return std::isfinite(s.time) && questcal::IsValidRotation(s.rot) &&
+		questcal::IsBoundedVector(s.pos,
+			protocol::limits::MaxAbsPosePositionMeters) &&
+		questcal::IsBoundedVector(s.vel,
+			protocol::limits::MaxAbsLinearVelocityMetersPerSecond) &&
+		questcal::IsBoundedVector(s.angVel,
+			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond);
+}
+
+// Compose the raw-world pose (worldFromDriver * driver pose) from a ring sample
+// and convert its capture timestamp to seconds on the QPC clock — the single
+// ingestion path from the shared-memory stream into solver/monitor space.
+//
+// Returns false for anything the trust boundary rejects, and leaves `out`
+// untouched so a rejection can never be mistaken for data: an invalid sample is
+// tracking absence, never a defaulted pose. `qpcToSeconds` is a parameter rather
+// than a file-static so this stays pure and the harness can drive it.
+inline bool TryComposeRingSample(const protocol::DevicePoseSample &s,
+	double qpcToSeconds, questcal::PoseSample &out)
+{
+	if (!IsTrustedRingSample(s, qpcToSeconds))
+		return false;
+
+	RingSampleParts p = UnpackRingSample(s);
+	questcal::PoseSample composed;
+	// poseTimeOffset is the driver's own estimate of how far the pose's validity
+	// time differs from the submit time; folding it in tightens the alignment.
+	composed.time = RingSampleTime(s, qpcToSeconds);
+	composed.rot = (p.wfdRot * p.drvRot).normalized();
+	composed.pos = p.wfdRot * p.drvPos + p.wfdTrans;
+	composed.vel = p.wfdRot * Eigen::Vector3d(s.velocity[0], s.velocity[1], s.velocity[2]);
+	composed.angVel = p.wfdRot * Eigen::Vector3d(
+		s.angularVelocity[0], s.angularVelocity[1], s.angularVelocity[2]);
+
+	if (!IsUsableComposedSample(composed))
+		return false;
+	out = composed;
+	return true;
+}
+
+namespace ringpose
+{
+
+// Apply the base calibration to a target-universe raw position. The scale
+// multiplies the RAW position, before the rotation and translation — the order
+// the driver applies (PoseScale then PoseTransform). Everything that has to
+// predict where the driver puts a target device reads it from here: at scale
+// 1.0 a misplaced factor is invisible, and at 1.03 it shifts the answer by 9 cm
+// three metres from the origin.
+inline Eigen::Vector3d BaseCalibratedPosition(
+	const Eigen::Quaterniond &rotation,
+	const Eigen::Vector3d &translationMeters, double scale,
+	const Eigen::Vector3d &targetRawPos)
+{
+	return rotation * (scale * targetRawPos) + translationMeters;
+}
+
+// Drift evidence must come from devices that anchor a universe. On the
+// reference side that is the HMD alone: its SLAM map IS the reference universe,
+// while reference-side peripherals (e.g. set-down Touch controllers) IMU-coast
+// with slowly sliding poses that still report Running_OK -- centimeters of
+// "slide" that say nothing about alignment. Every lighthouse device is rigid to
+// the target universe, so target-system devices stay eligible -- except the
+// HMD-mounted tracker (rides a human head), and any lighthouse device within
+// arm's reach of the headset: that is a worn tracker (hips, feet) or a device
+// the user is right next to, and a supported resting body passes the
+// stationarity gates then "slides" with slow posture creep.
+//
+// All three rules are load-bearing and are one predicate on purpose. The
+// mounted-tracker exclusion in particular is the only thing keeping a resting
+// head out of the drift feed: without it the monitor logs StationarySlide,
+// UpdateDriftScore crosses the stale threshold, and the user is told a
+// calibration that is being actively maintained looks poor.
+struct DriftFeedCandidate
+{
+	uint32_t deviceId = vr::k_unTrackedDeviceIndexInvalid;
+	bool referenceSide = false;   // device is in the reference tracking system
+	bool targetSide = false;      // ... the target tracking system
+	// The HMD-mounted continuous-calibration tracker, or invalid when the
+	// feature is off / the id has not been resolved this scan.
+	uint32_t mountedTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+
+	Eigen::Vector3d rawPosition{ 0, 0, 0 };   // this sample's composed raw pose
+	double composedTime = 0.0;
+	// Latest HMD raw observation, for the proximity heuristic.
+	Eigen::Vector3d hmdRawPosition{ 0, 0, 0 };
+	double hmdRawTime = -1e9;
+
+	// Live base calibration: a target-raw position has to be brought into
+	// reference space before it can be compared with the HMD's.
+	Eigen::Quaterniond calibratedRotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d calibratedTranslationMeters{ 0, 0, 0 };
+	double calibratedScale = 1.0;
+};
+
+// How stale the HMD observation may be for the proximity test to apply, and
+// what counts as "within arm's reach".
+constexpr double DriftHmdProximityWindowSeconds = 3.0;
+constexpr double DriftHmdProximityMeters = 1.2;
+
+inline bool AnchorsUniverse(const DriftFeedCandidate &c)
+{
+	bool anchors =
+		(c.deviceId == vr::k_unTrackedDeviceIndex_Hmd && c.referenceSide) ||
+		(c.targetSide && c.deviceId != c.mountedTrackerId);
+
+	if (anchors && c.deviceId != vr::k_unTrackedDeviceIndex_Hmd &&
+		c.composedTime - c.hmdRawTime < DriftHmdProximityWindowSeconds)
+	{
+		Eigen::Vector3d refPos = BaseCalibratedPosition(c.calibratedRotation,
+			c.calibratedTranslationMeters, c.calibratedScale, c.rawPosition);
+		if ((refPos - c.hmdRawPosition).norm() < DriftHmdProximityMeters)
+			anchors = false;
+	}
+	return anchors;
+}
+
+} // namespace ringpose

@@ -755,8 +755,7 @@ static CalRating ComputeCalibrationRating()
 	// alignment; a healthy continuous loop re-measures it constantly. A frozen
 	// loop (bumped mount) is itself a Poor signal.
 	bool continuouslyMaintained = CalCtx.ContinuousArmed() &&
-		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
-			questcal::ContinuousAlignment::State::Tracking;
+		CalCtx.continuousState == questcal::ContinuousAlignment::State::Tracking;
 	if (!continuouslyMaintained)
 	{
 		if (CalCtx.alignment == CalibrationContext::AlignmentHealth::Aging && r < Rating_Decent)
@@ -767,8 +766,8 @@ static CalRating ComputeCalibrationRating()
 			r = Rating_VeryPoor;
 	}
 	if (CalCtx.ContinuousArmed() &&
-		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
-			questcal::ContinuousAlignment::State::Frozen && r < Rating_Poor)
+		CalCtx.continuousState == questcal::ContinuousAlignment::State::Frozen &&
+		r < Rating_Poor)
 		r = Rating_Poor;
 
 	return (CalRating)r;
@@ -780,15 +779,13 @@ static const char *RatingLabels[] = { "Good", "Decent", "Poor", "Very Poor" };
 static bool ContinuousHealthy()
 {
 	return CalCtx.ContinuousArmed() &&
-		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
-			questcal::ContinuousAlignment::State::Tracking;
+		CalCtx.continuousState == questcal::ContinuousAlignment::State::Tracking;
 }
 
 static bool ContinuousFrozen()
 {
 	return CalCtx.ContinuousArmed() &&
-		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
-			questcal::ContinuousAlignment::State::Frozen;
+		CalCtx.continuousState == questcal::ContinuousAlignment::State::Frozen;
 }
 
 static const char *ContinuousStatusText()
@@ -798,7 +795,7 @@ static const char *ContinuousStatusText()
 		return "no tracker selected";
 	if (!CalCtx.ContinuousArmed())
 		return "needs one calibration with the tracker mounted";
-	switch ((CA::State)CalCtx.continuousState)
+	switch (CalCtx.continuousState)
 	{
 	case CA::State::Tracking: return "maintaining";
 	case CA::State::Coasting: return "paused -- tracker not tracking";
@@ -1514,7 +1511,7 @@ static void BuildMainScreen()
 				if (CalCtx.continuousEnabled)
 				{
 					using CAState = questcal::ContinuousAlignment::State;
-					CAState cs = (CAState)CalCtx.continuousState;
+					CAState cs = CalCtx.continuousState;
 					ImVec4 col = ContinuousHealthy() ? Pal::Good :
 						cs == CAState::Frozen ? Pal::Bad : Pal::Warn;
 					std::string line;
@@ -1592,17 +1589,14 @@ static void BuildSettingsScreen(const VRState &state)
 			ImVec2 p = BeginRowCard(rowH);
 
 			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
-			if (QCCheckbox("##fieldEnabled", &CalCtx.fieldEnabled))
+			// Toggled through a local so the live member changes only inside the
+			// transaction, which owns the generation bump and the rollback.
+			bool fieldEnabled = CalCtx.fieldEnabled;
+			if (QCCheckbox("##fieldEnabled", &fieldEnabled))
 			{
-				bool enabled = !CalCtx.fieldEnabled;
-				uint32_t generation = CalCtx.fieldGeneration;
-				CalCtx.fieldGeneration++;
-				if (!SaveProfile(CalCtx))
-				{
-					CalCtx.fieldEnabled = enabled;
-					CalCtx.fieldGeneration = generation;
-				}
-				else
+				if (CalCtx.WithProfileSave(
+					[&] { CalCtx.fieldEnabled = fieldEnabled; },
+					[] { return SaveProfile(CalCtx); }))
 					ResyncDriverState();
 			}
 			if (ImGui::IsItemHovered())
@@ -1620,16 +1614,9 @@ static void BuildSettingsScreen(const VRState &state)
 				ImGui::SetCursorScreenPos(ImVec2(p.x + cw - 16.0f - btnW, p.y + 9.0f));
 				if (IconButton("clearanchors", "Clear anchors", IconTrash, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 				{
-					auto anchors = CalCtx.fieldAnchors;
-					uint32_t generation = CalCtx.fieldGeneration;
-					CalCtx.fieldAnchors.clear();
-					CalCtx.fieldGeneration++;
-					if (!SaveProfile(CalCtx))
-					{
-						CalCtx.fieldAnchors = std::move(anchors);
-						CalCtx.fieldGeneration = generation;
-					}
-					else
+					if (CalCtx.WithProfileSave(
+						[] { CalCtx.fieldAnchors.clear(); },
+						[] { return SaveProfile(CalCtx); }))
 						ResyncDriverState();
 				}
 
