@@ -12,6 +12,7 @@
 #include <ctime>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 #include <imgui/imgui.h>
@@ -56,7 +57,7 @@ VRState LoadVRState();
 static void BuildSpacesSection(const VRState &state);
 static bool BuildProfileEditor();
 static bool SaveProfileEditorDraft();
-static void ResetTransformEditorDraft();
+static void SeedTransformEditorDraft();
 static void BuildMenu(const VRState &state, bool runningInOverlay);
 
 template<typename T>
@@ -423,62 +424,76 @@ static void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 // SteamVR device icon textures
 // ---------------------------------------------------------------------------
 
+// Owns one COM interface for the rest of its scope. Each acquisition below is
+// then one line plus one guard: a new step cannot land its Release in the
+// wrong place, because there is no unwinding ladder to place it in.
+template<typename T>
+struct ComScoped
+{
+	ComScoped() = default;
+	ComScoped(const ComScoped &) = delete;
+	ComScoped &operator=(const ComScoped &) = delete;
+	~ComScoped() { if (ptr) ptr->Release(); }
+
+	T **Put() { return &ptr; }
+	T *Get() const { return ptr; }
+	T *operator->() const { return ptr; }
+
+	T *ptr = nullptr;
+};
+
 static bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
 {
-	static bool comInit = false;
-	if (!comInit)
-	{
-		CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-		comInit = true;
-	}
+	// One apartment init per process. The original hand-rolled flag ignored the
+	// result and so does this: a failure surfaces as the CoCreateInstance below.
+	static const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	(void)comInit;
 
-	IWICImagingFactory *factory = nullptr;
-	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))))
+	ComScoped<IWICImagingFactory> factory;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(factory.Put()))))
 		return false;
 
 	wchar_t wpath[MAX_PATH];
 	MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH);
 
-	bool ok = false;
-	IWICBitmapDecoder *dec = nullptr;
-	if (SUCCEEDED(factory->CreateDecoderFromFilename(wpath, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)))
-	{
-		IWICBitmapFrameDecode *frame = nullptr;
-		if (SUCCEEDED(dec->GetFrame(0, &frame)))
-		{
-			IWICFormatConverter *conv = nullptr;
-			if (SUCCEEDED(factory->CreateFormatConverter(&conv)))
-			{
-				if (SUCCEEDED(conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
-				{
-					UINT w = 0, h = 0;
-					conv->GetSize(&w, &h);
-					if (w > 0 && h > 0 && w <= 1024 && h <= 1024)
-					{
-						std::vector<unsigned char> pixels((size_t)w * h * 4);
-						if (SUCCEEDED(conv->CopyPixels(nullptr, w * 4, (UINT)pixels.size(), pixels.data())))
-						{
-							GLuint tex = 0;
-							glGenTextures(1, &tex);
-							glBindTexture(GL_TEXTURE_2D, tex);
-							glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-							glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-							glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-							*outTex = tex;
-							*outW = (int)w;
-							*outH = (int)h;
-							ok = true;
-						}
-					}
-				}
-				conv->Release();
-			}
-			frame->Release();
-		}
-		dec->Release();
-	}
-	factory->Release();
-	return ok;
+	ComScoped<IWICBitmapDecoder> dec;
+	if (FAILED(factory->CreateDecoderFromFilename(wpath, nullptr, GENERIC_READ,
+		WICDecodeMetadataCacheOnDemand, dec.Put())))
+		return false;
+
+	ComScoped<IWICBitmapFrameDecode> frame;
+	if (FAILED(dec->GetFrame(0, frame.Put())))
+		return false;
+
+	ComScoped<IWICFormatConverter> conv;
+	if (FAILED(factory->CreateFormatConverter(conv.Put())))
+		return false;
+	if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
+		WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+		return false;
+
+	// Device icons are small art; the bound keeps a malformed or hostile file
+	// from allocating unbounded pixel memory on the render thread.
+	UINT w = 0, h = 0;
+	conv->GetSize(&w, &h);
+	if (w == 0 || h == 0 || w > 1024 || h > 1024)
+		return false;
+
+	std::vector<unsigned char> pixels((size_t)w * h * 4);
+	if (FAILED(conv->CopyPixels(nullptr, w * 4, (UINT)pixels.size(), pixels.data())))
+		return false;
+
+	GLuint tex = 0;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	*outTex = tex;
+	*outW = (int)w;
+	*outH = (int)h;
+	return true;
 }
 
 struct DeviceIconTex
@@ -639,6 +654,42 @@ static void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
 	dl->AddText(g_fontBody, g_fontBody->FontSize,
 		ImVec2(rowPos.x + 92.0f, rowPos.y + 26.0f - g_fontBody->FontSize * 0.5f),
 		Pal::U32(Pal::Text), label);
+}
+
+// Settings-row geometry, stated once: every row is this tall and puts its
+// control at this inset. Taller composite rows add their extra body to the
+// same base instead of restating it.
+static const float kRowHeight = 52.0f;
+static const float kRowInsetX = 16.0f;
+static const float kRowControlY = 14.0f;
+
+// Remembers the height it opened with, so the end call cannot disagree with
+// the begin call and silently overlap the next row.
+struct RowCard
+{
+	explicit RowCard(float rowHeight) : pos(BeginRowCard(rowHeight)), height(rowHeight) {}
+	RowCard(const RowCard &) = delete;
+	RowCard &operator=(const RowCard &) = delete;
+	~RowCard() { EndRowCard(pos, height); }
+
+	ImVec2 pos;
+	float height;
+};
+
+// A plain settings toggle, whole: card, checkbox at the shared inset, optional
+// tooltip on it, icon + label. Returns whether the value changed this frame --
+// persisting it stays with the caller, since the settings and profile
+// save-or-restore paths are different templates.
+static bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value,
+	const char *tooltip = nullptr)
+{
+	RowCard row(kRowHeight);
+	ImGui::SetCursorScreenPos(ImVec2(row.pos.x + kRowInsetX, row.pos.y + kRowControlY));
+	bool changed = QCCheckbox(id, &value);
+	if (tooltip && ImGui::IsItemHovered())
+		ImGui::SetTooltip("%s", tooltip);
+	RowIconLabel(row.pos, icon, label);
+	return changed;
 }
 
 static int Segmented(const char *id, int value, const char *const items[], int count, float itemW, float h)
@@ -909,32 +960,45 @@ static const char *RecalibrationNudge(CalRating rating, ContinuousStatus continu
 		: "Recalibrating is recommended.";
 }
 
-static void FormatUnixAge(char *buf, size_t len, double unixTime)
+// Empty when the timestamp is unusable. "Unknown" is a property of the data,
+// not a rendered phrase: returning it as an empty optional lets every caller
+// word its own fallback, instead of the wording being baked into a buffer and
+// recovered downstream by comparing against the literal.
+static std::optional<std::string> FormatUnixAge(double unixTime)
 {
 	double now = static_cast<double>(std::time(nullptr));
-	if (std::isfinite(unixTime) && unixTime > 0.0 && now > 0.0)
-	{
-		double seconds = now - unixTime;
-		if (seconds < -300.0)
-		{
-			snprintf(buf, len, "time is in the future");
-			return;
-		}
-		double hours = std::max(0.0, seconds) / 3600.0;
-		if (hours < 1.0)
-			snprintf(buf, len, "%d min ago", static_cast<int>(hours * 60.0));
-		else if (hours < 48.0)
-			snprintf(buf, len, "%.1f h ago", hours);
-		else
-			snprintf(buf, len, "%.0f days ago", hours / 24.0);
-	}
-	else
-		snprintf(buf, len, "age unknown");
+	if (!std::isfinite(unixTime) || unixTime <= 0.0 || now <= 0.0)
+		return std::nullopt;
+
+	double seconds = now - unixTime;
+	// Small clock corrections must not read as a future timestamp.
+	if (seconds < -300.0)
+		return std::string("time is in the future");
+
+	double hours = std::max(0.0, seconds) / 3600.0;
+	if (hours < 1.0)
+		return FormatString("%d min ago", static_cast<int>(hours * 60.0));
+	if (hours < 48.0)
+		return FormatString("%.1f h ago", hours);
+	return FormatString("%.0f days ago", hours / 24.0);
 }
 
-static void FormatCalibrationAge(char *buf, size_t len)
+// The age of the alignment, from the same base UpdateDriftScore ages from:
+// the later of the manual solve and the last auto-correction, because a
+// continuously maintained calibration is not aging. Anything rendered next to
+// a score-derived verdict must use that base and say which one it is --
+// showing the solve time alone put "calibrated 3.5 days ago" beside
+// "Alignment fresh" whenever the loop had just corrected it.
+static std::optional<std::string> FormatAlignmentAge()
 {
-	FormatUnixAge(buf, len, CalCtx.calibrationUnixTime);
+	if (CalCtx.lastAutoCorrectionUnixTime > CalCtx.calibrationUnixTime)
+	{
+		if (auto adjusted = FormatUnixAge(CalCtx.lastAutoCorrectionUnixTime))
+			return "adjusted " + *adjusted;
+	}
+	if (auto calibrated = FormatUnixAge(CalCtx.calibrationUnixTime))
+		return "calibrated " + *calibrated;
+	return std::nullopt;
 }
 
 // Snapshot the live chaperone and arm auto-restore (the "protect" action).
@@ -1530,22 +1594,17 @@ static void BuildMainScreen()
 				std::string ageLine;
 				if (continuous == ContinuousStatus::Tracking)
 				{
-					if (CalCtx.autoCorrectionsApplied > 0 && CalCtx.lastAutoCorrectionUnixTime > 0.0)
-					{
-						char adj[64];
-						FormatUnixAge(adj, sizeof adj, CalCtx.lastAutoCorrectionUnixTime);
-						ageLine = FormatString("maintained continuously -- last adjusted %s", adj);
-					}
-					else
-						ageLine = "maintained continuously";
+					std::optional<std::string> adjusted;
+					if (CalCtx.autoCorrectionsApplied > 0)
+						adjusted = FormatUnixAge(CalCtx.lastAutoCorrectionUnixTime);
+					ageLine = adjusted
+						? FormatString("maintained continuously -- last adjusted %s", adjusted->c_str())
+						: std::string("maintained continuously");
 				}
 				else
 				{
-					char age[64];
-					FormatCalibrationAge(age, sizeof age);
-					ageLine = (strcmp(age, "age unknown") == 0)
-						? std::string("calibration time unknown")
-						: FormatString("calibrated %s", age);
+					auto age = FormatAlignmentAge();
+					ageLine = age ? *age : std::string("calibration time unknown");
 				}
 				dl->AddText(g_fontSmall, g_fontSmall->FontSize,
 					ImVec2(x + 18.0f, cy - g_fontSmall->FontSize * 0.5f + 2.0f),
@@ -1597,8 +1656,9 @@ static void BuildMainScreen()
 					CalCtx.alignment == CalibrationContext::AlignmentHealth::Stale ? "stale" :
 					CalCtx.alignment == CalibrationContext::AlignmentHealth::Aging ? "aging" : "fresh";
 
-				char age[64];
-				FormatCalibrationAge(age, sizeof age);
+				// Same base as the health label beside it (see FormatAlignmentAge).
+				auto alignmentAge = FormatAlignmentAge();
+				const char *age = alignmentAge ? alignmentAge->c_str() : "age unknown";
 
 				if (CalCtx.driftSlideEvents > 0 || CalCtx.discontinuousLossEvents > 0)
 				{
@@ -1655,40 +1715,30 @@ static void BuildSettingsScreen(const VRState &state)
 
 		// Advanced mode
 		{
-			ImVec2 p = BeginRowCard(52.0f);
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
 			bool previous = CalCtx.uiAdvanced;
-			if (QCCheckbox("##uiAdvanced", &CalCtx.uiAdvanced))
+			if (ToggleRow("##uiAdvanced", IconGauge,
+				"Advanced mode (show raw calibration and drift stats)", CalCtx.uiAdvanced))
 				SaveSettingOrRestore(CalCtx.uiAdvanced, previous);
-			RowIconLabel(p, IconGauge, "Advanced mode (show raw calibration and drift stats)");
-			EndRowCard(p, 52.0f);
 		}
 
 		// Poor calibration notification
 		{
-			ImVec2 p = BeginRowCard(52.0f);
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
 			bool previous = CalCtx.notifyPoorCalibration;
-			if (QCCheckbox("##notifyPoorCalibration", &CalCtx.notifyPoorCalibration))
+			if (ToggleRow("##notifyPoorCalibration", IconInfo,
+				"Poor calibration notification", CalCtx.notifyPoorCalibration,
+				"Show a SteamVR notification when alignment monitoring recommends\n"
+				"recalibration. The status and session log still update when disabled."))
 				SaveSettingOrRestore(CalCtx.notifyPoorCalibration, previous);
-			if (ImGui::IsItemHovered())
-			{
-				ImGui::SetTooltip(
-					"Show a SteamVR notification when alignment monitoring recommends\n"
-					"recalibration. The status and session log still update when disabled.");
-			}
-			RowIconLabel(p, IconInfo, "Poor calibration notification");
-			EndRowCard(p, 52.0f);
 		}
 
 		// Spatial correction field
 		if (CalCtx.validProfile)
 		{
 			size_t anchorCount = CalCtx.fieldAnchors.size();
-			float rowH = 52.0f + (anchorCount > 0 ? anchorCount * 24.0f + 6.0f : 0.0f);
-			ImVec2 p = BeginRowCard(rowH);
+			RowCard row(kRowHeight + (anchorCount > 0 ? anchorCount * 24.0f + 6.0f : 0.0f));
+			const ImVec2 p = row.pos;
 
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
 			// Toggled through a local so the live member changes only inside the
 			// transaction, which owns the generation bump and the rollback.
 			bool fieldEnabled = CalCtx.fieldEnabled;
@@ -1711,7 +1761,7 @@ static void BuildSettingsScreen(const VRState &state)
 			if (anchorCount > 0)
 			{
 				float btnW = 150.0f;
-				ImGui::SetCursorScreenPos(ImVec2(p.x + cw - 16.0f - btnW, p.y + 9.0f));
+				ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
 				if (IconButton("clearanchors", "Clear anchors", IconTrash, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 				{
 					if (CalCtx.WithProfileSave(
@@ -1732,31 +1782,26 @@ static void BuildSettingsScreen(const VRState &state)
 					std::string line = FormatString("Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base",
 						i + 1, a.position.x(), a.position.z(), posDeltaCm, rotDeltaDeg);
 					dl->AddText(g_fontSmall, g_fontSmall->FontSize,
-						ImVec2(p.x + 92.0f, p.y + 52.0f + i * 24.0f), Pal::U32(Pal::Dim), line.c_str());
+						ImVec2(p.x + 92.0f, p.y + kRowHeight + i * 24.0f), Pal::U32(Pal::Dim), line.c_str());
 				}
 			}
-
-			EndRowCard(p, rowH);
 		}
 
 		// Solve playspace scale
 		{
-			ImVec2 p = BeginRowCard(52.0f);
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
 			bool previous = CalCtx.solveScale;
-			if (QCCheckbox("##solveScale", &CalCtx.solveScale))
+			if (ToggleRow("##solveScale", IconScale,
+				"Solve playspace scale (experimental)", CalCtx.solveScale))
 				SaveSettingOrRestore(CalCtx.solveScale, previous);
-			RowIconLabel(p, IconScale, "Solve playspace scale (experimental)");
-			EndRowCard(p, 52.0f);
 		}
 
 		// Time offset + nested manual override
 		{
-			const float rowH = 104.0f;
-			ImVec2 p = BeginRowCard(rowH);
+			RowCard row(104.0f);
+			const ImVec2 p = row.pos;
 			ImDrawList *dl = ImGui::GetWindowDrawList();
 
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
 			bool previous = CalCtx.applyTimeOffset;
 			if (QCCheckbox("##applyTimeOffset", &CalCtx.applyTimeOffset))
 				SaveSettingOrRestore(CalCtx.applyTimeOffset, previous);
@@ -1774,14 +1819,14 @@ static void BuildSettingsScreen(const VRState &state)
 				std::string applied = FormatString("applied %+.1f ms", CalCtx.appliedTimeOffset * 1000.0);
 				ImVec2 ts = ImGui::CalcTextSize(applied.c_str());
 				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(p.x + cw - 16.0f - ts.x, p.y + 26.0f - g_fontBody->FontSize * 0.5f),
+					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->FontSize * 0.5f),
 					Pal::U32(Pal::Faint), applied.c_str());
 			}
 
 			// Nested inset: manual override spike tool (verifies the poseTimeOffset
 			// sign convention against a live session; bypasses the solved value).
-			ImVec2 np = ImVec2(p.x + 12.0f, p.y + 52.0f);
-			ImVec2 nb = ImVec2(p.x + cw - 12.0f, p.y + rowH - 10.0f);
+			ImVec2 np = ImVec2(p.x + 12.0f, p.y + kRowHeight);
+			ImVec2 nb = ImVec2(p.x + cw - 12.0f, p.y + row.height - 10.0f);
 			dl->AddRectFilled(np, nb, Pal::U32(Pal::Inset), 9.0f);
 
 			ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 9.0f));
@@ -1808,8 +1853,6 @@ static void BuildSettingsScreen(const VRState &state)
 			}
 			ImGui::PopStyleVar();
 			ImGui::PopItemWidth();
-
-			EndRowCard(p, rowH);
 		}
 
 		// Continuous calibration: enable + nested tracker pick / hide / latency
@@ -1820,11 +1863,11 @@ static void BuildSettingsScreen(const VRState &state)
 				continuous == ContinuousStatus::NeedsMount;
 			const float nestedH = CalCtx.continuousEnabled ? 116.0f : 0.0f;
 			const float advisoryH = advisory ? 26.0f : 0.0f;
-			float rowH = 52.0f + nestedH + advisoryH;
-			ImVec2 p = BeginRowCard(rowH);
+			RowCard row(kRowHeight + nestedH + advisoryH);
+			const ImVec2 p = row.pos;
 			ImDrawList *dl = ImGui::GetWindowDrawList();
 
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
 			bool previousContinuousEnabled = CalCtx.continuousEnabled;
 			if (QCCheckbox("##continuousEnabled", &CalCtx.continuousEnabled))
 				SaveProfileOrRestore(CalCtx.continuousEnabled, previousContinuousEnabled);
@@ -1846,12 +1889,12 @@ static void BuildSettingsScreen(const VRState &state)
 				std::string status = ContinuousStatusText(continuous);
 				ImVec2 ts = ImGui::CalcTextSize(status.c_str());
 				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(p.x + cw - 16.0f - ts.x, p.y + 26.0f - g_fontBody->FontSize * 0.5f),
+					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->FontSize * 0.5f),
 					Pal::U32(Pal::Faint), status.c_str());
 
 				// Nested inset: tracker pick, game visibility, opt-in latency.
-				ImVec2 np = ImVec2(p.x + 12.0f, p.y + 52.0f);
-				ImVec2 nb = ImVec2(p.x + cw - 12.0f, p.y + 52.0f + nestedH - 8.0f);
+				ImVec2 np = ImVec2(p.x + 12.0f, p.y + kRowHeight);
+				ImVec2 nb = ImVec2(p.x + cw - 12.0f, p.y + kRowHeight + nestedH - 8.0f);
 				dl->AddRectFilled(np, nb, Pal::U32(Pal::Inset), 9.0f);
 
 				dl->AddText(g_fontBody, g_fontBody->FontSize,
@@ -1947,20 +1990,18 @@ static void BuildSettingsScreen(const VRState &state)
 			if (advisory)
 			{
 				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(p.x + 16.0f, p.y + 52.0f + nestedH + 2.0f),
+					ImVec2(p.x + kRowInsetX, p.y + kRowHeight + nestedH + 2.0f),
 					Pal::U32(Pal::Violet),
 					"Mount a spare tracker firmly on the headset, then calibrate using the headset as the reference device.");
 			}
-
-			EndRowCard(p, rowH);
 		}
 
 		// Chaperone: auto-restore arm/disarm + manual restore + snapshot info
 		if (CalCtx.chaperone.valid)
 		{
-			const float rowH = 76.0f;
-			ImVec2 p = BeginRowCard(rowH);
-			ImGui::SetCursorScreenPos(ImVec2(p.x + 16.0f, p.y + 14.0f));
+			RowCard row(76.0f);
+			const ImVec2 p = row.pos;
+			ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
 			if (QCCheckbox("##chapAuto", &CalCtx.chaperone.autoApply))
 			{
 				// Disarming is fail-closed: a failed write must never roll the
@@ -1987,20 +2028,19 @@ static void BuildSettingsScreen(const VRState &state)
 			}
 			else
 			{
-				char age[64];
-				FormatUnixAge(age, sizeof age, CalCtx.chaperone.copyUnixTime);
+				auto copied = FormatUnixAge(CalCtx.chaperone.copyUnixTime);
 				info = FormatString("Snapshot: %zu wall segment(s), %.1f x %.1f m play area, saved %s",
 					CalCtx.chaperone.geometry.size(),
-					CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1], age);
+					CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1],
+					copied ? copied->c_str() : "age unknown");
 			}
 			ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->FontSize,
 				ImVec2(p.x + 92.0f, p.y + 46.0f), Pal::U32(Pal::Dim), info.c_str());
 
 			float btnW = 224.0f;
-			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - 16.0f - btnW, p.y + 9.0f));
+			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
 			if (IconButton("pastechap", "Restore chaperone now", IconCopy, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 				ApplyChaperoneBounds();
-			EndRowCard(p, rowH);
 		}
 
 		// Raw transform editor -- power users only.
@@ -2009,7 +2049,7 @@ static void BuildSettingsScreen(const VRState &state)
 			ImGui::Spacing();
 			if (IconButton("edit", "Edit calibration (advanced)", IconPencil, ImVec2(cw, 46.0f), BtnKind::Ghost))
 			{
-				ResetTransformEditorDraft();
+				SeedTransformEditorDraft();
 				CalCtx.state = CalibrationState::Editing;
 			}
 		}
@@ -2040,16 +2080,18 @@ static void BuildMenu(const VRState &state, bool runningInOverlay)
 			ImVec2(cw - cancelWidth - gap, 52.0f),
 			transformValid ? BtnKind::Primary : BtnKind::Ghost) && transformValid)
 		{
+			// Saving keeps the editor open, so re-seed from the context the save
+			// just wrote: the fields then show the stored values (persistence may
+			// have normalized them) and the sticky rotation-edited flag clears.
 			if (SaveProfileEditorDraft())
-			{
-				ResetTransformEditorDraft();
-			}
+				SeedTransformEditorDraft();
 		}
 		ImGui::SameLine(0.0f, gap);
 		if (IconButton("cancelprofile", "Cancel", nullptr,
 			ImVec2(cancelWidth, 52.0f), BtnKind::Ghost))
 		{
-			ResetTransformEditorDraft();
+			// Nothing to discard: leaving Editing is enough, because re-entering
+			// it seeds the draft again.
 			CalCtx.state = CalibrationState::None;
 			CalCtx.timeLastScan = -1e9;
 		}
@@ -2226,7 +2268,6 @@ static void BuildMenu(const VRState &state, bool runningInOverlay)
 
 struct TransformEditorDraft
 {
-	bool active = false;
 	bool valid = true;
 	bool rotationEdited = false;
 	Eigen::Quaterniond rotationQ{ 1, 0, 0, 0 };
@@ -2237,24 +2278,22 @@ struct TransformEditorDraft
 
 static TransformEditorDraft g_transformDraft;
 
-static void ResetTransformEditorDraft()
+// Seeding belongs with the state transition that puts the editor on screen:
+// every path into CalibrationState::Editing calls this immediately before
+// setting the state, which is why the draft needs no "is it seeded" flag of
+// its own -- the two used to be separate pieces of state that three call sites
+// had to change together.
+static void SeedTransformEditorDraft()
 {
-	g_transformDraft.active = false;
+	g_transformDraft = TransformEditorDraft();
+	g_transformDraft.rotationQ = CalCtx.calibratedRotationQ;
+	g_transformDraft.rotationEuler = CalCtx.calibratedRotation;
+	g_transformDraft.translationCm = CalCtx.calibratedTranslation;
+	g_transformDraft.scale = CalCtx.calibratedScale;
 }
 
 static bool BuildProfileEditor()
 {
-	if (!g_transformDraft.active)
-	{
-		g_transformDraft.active = true;
-		g_transformDraft.rotationQ = CalCtx.calibratedRotationQ;
-		g_transformDraft.rotationEuler = CalCtx.calibratedRotation;
-		g_transformDraft.translationCm = CalCtx.calibratedTranslation;
-		g_transformDraft.scale = CalCtx.calibratedScale;
-		g_transformDraft.rotationEdited = false;
-		g_transformDraft.valid = true;
-	}
-
 	ImGuiStyle &style = ImGui::GetStyle();
 	float cw = ImGui::GetWindowContentRegionWidth();
 	float width = cw / 3.0f - style.FramePadding.x;
@@ -2327,22 +2366,25 @@ static bool BuildProfileEditor()
 
 static bool SaveProfileEditorDraft()
 {
-	if (!g_transformDraft.active || !g_transformDraft.valid)
+	if (!g_transformDraft.valid)
 		return false;
 
 	// Persistence validates and writes a narrow profile candidate before
 	// touching the live transform. Translation/scale-only edits keep the exact
 	// quaternion bits; Euler conversion occurs only after a rotation edit.
-	if (!SaveProfileTransformEdit(CalCtx, g_transformDraft.rotationQ,
+	return SaveProfileTransformEdit(CalCtx, g_transformDraft.rotationQ,
 		g_transformDraft.translationCm * 0.01, g_transformDraft.scale,
-		g_transformDraft.rotationEdited))
-		return false;
-	return true;
+		g_transformDraft.rotationEdited);
 }
 
 // ---------------------------------------------------------------------------
 // VR state
 // ---------------------------------------------------------------------------
+
+// How many trackers -uipreview-many fabricates. The only statement of the
+// count: enough to push a tracking system's device list past BuildDeviceList's
+// four-row scroll threshold, with room to fan out across battery levels.
+static const int kPreviewManyTrackerCount = 6;
 
 // Preview only: point fake devices at real SteamVR icon files when the local
 // install has them (vector fallbacks otherwise).
@@ -2403,7 +2445,7 @@ VRState LoadVRState()
 		left.iconPath = PreviewIconPath("indexcontroller\\resources\\icons\\left_controller_status_ready_low_2x.png");
 		state.devices.push_back(left);
 
-		int trackerCount = g_uiPreviewMany ? 6 : 1;
+		int trackerCount = g_uiPreviewMany ? kPreviewManyTrackerCount : 1;
 		for (int i = 0; i < trackerCount; ++i)
 		{
 			VRDevice tracker;
@@ -2415,8 +2457,9 @@ VRState LoadVRState()
 			tracker.serial = serial;
 			tracker.trackingSystem = "lighthouse";
 			// Demo the row states: the lone tracker sits disconnected; with
-			// -uipreviewmany they fan out across battery levels instead.
-			tracker.connected = g_uiPreviewMany ? (i != 5) : false;
+			// -uipreview-many they fan out across battery levels instead, the
+			// last one staying disconnected to keep that row state on screen.
+			tracker.connected = g_uiPreviewMany ? (i != kPreviewManyTrackerCount - 1) : false;
 			if (tracker.connected)
 				tracker.battery = 0.95f - 0.12f * (float)i;
 			const char *art =
@@ -2526,7 +2569,17 @@ VRState LoadVRState()
 			}
 			else
 			{
-				printf("failed to get tracking system name for id %d\n", id);
+				// The Release build is a GUI binary, so stdout goes nowhere --
+				// the session log is the only channel a user or a bug report can
+				// read. This loader runs once a second, so report each device
+				// once: the latch records what has been said, not device state.
+				static bool reportedMissingSystem[vr::k_unMaxTrackedDeviceCount] = {};
+				if (!reportedMissingSystem[id])
+				{
+					reportedMissingSystem[id] = true;
+					AppendSessionLog(FormatString(
+						"Device %u has no tracking system name and is not shown in the device panes", id));
+				}
 			}
 		}
 	}

@@ -4,7 +4,8 @@ struct ImFont;
 
 // UI preview mode (-uipreview): run the window with fake devices and no
 // SteamVR, for iterating on the interface. Profile saves are disabled.
-// -uipreview-many additionally fakes 8 trackers to stress the device list.
+// -uipreview-many additionally fakes a batch of trackers to stress the device
+// list past its scroll threshold (count: kPreviewManyTrackerCount).
 extern bool g_uiPreviewMode;
 extern bool g_uiPreviewMany;
 
