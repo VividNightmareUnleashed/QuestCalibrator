@@ -506,6 +506,7 @@ void RunDriverPoseTransformScenarios()
 	double worstVelocity = 0.0;
 	double worstRotation = 0.0;
 	double worstTime = 0.0;
+	double worstGeometry = 0.0;
 	bool untouched = true;
 
 	for (int trial = 0; trial < 256; ++trial)
@@ -523,6 +524,11 @@ void RunDriverPoseTransformScenarios()
 		double timeShift = timeDist(rng);
 		double initialTime = timeDist(rng);
 
+		// A real device's tracked-origin-to-head offset. It must be non-zero
+		// here: leaving it at zero makes the deliberate decision below
+		// unfalsifiable in either direction.
+		Eigen::Vector3d driverFromHead = RandomVector(rng, 0.4);
+
 		vr::DriverPose_t pose{};
 		pose.qWorldFromDriverRotation = { wfdR.w(), wfdR.x(), wfdR.y(), wfdR.z() };
 		pose.qRotation = { localR.w(), localR.x(), localR.y(), localR.z() };
@@ -534,6 +540,7 @@ void RunDriverPoseTransformScenarios()
 			pose.vecVelocity[i] = velocity(i);
 			pose.vecAcceleration[i] = acceleration(i);
 			pose.vecAngularVelocity[i] = angularVelocity(i);
+			pose.vecDriverFromHeadTranslation[i] = driverFromHead(i);
 		}
 
 		const Eigen::Vector3d expectedWorld =
@@ -574,6 +581,18 @@ void RunDriverPoseTransformScenarios()
 			actualWorldRotation.angularDistance(expectedWorldRotation));
 		worstTime = std::max(worstTime,
 			std::abs(pose.poseTimeOffset - (initialTime + timeShift)));
+		// Deliberately NOT scaled: `scale` reconciles two tracking systems'
+		// universe scales, while this offset is the device's real physical
+		// geometry and stays real-size. Asserted exactly, because the decision
+		// is only safe while the solver's model makes the same assumption -
+		// scaling it here without changing the model is a silent bias.
+		Eigen::Vector3d actualDriverFromHead(
+			pose.vecDriverFromHeadTranslation[0],
+			pose.vecDriverFromHeadTranslation[1],
+			pose.vecDriverFromHeadTranslation[2]);
+		worstGeometry = std::max(worstGeometry,
+			(actualDriverFromHead - driverFromHead).norm());
+
 		untouched = untouched &&
 			actualLocal.angularDistance(localR) < 1e-12 &&
 			(actualAngularVelocity - angularVelocity).norm() < 1e-12;
@@ -581,11 +600,12 @@ void RunDriverPoseTransformScenarios()
 
 	char detail[256];
 	snprintf(detail, sizeof detail,
-		"world %.2e  deriv %.2e  rot %.2e rad  time %.2e  angular/local %d",
-		worstWorld, worstVelocity, worstRotation, worstTime, untouched);
+		"world %.2e  deriv %.2e  rot %.2e rad  time %.2e  geometry %.2e  angular/local %d",
+		worstWorld, worstVelocity, worstRotation, worstTime, worstGeometry, untouched);
 	Check("driver: randomized transform oracle",
 		worstWorld < 1e-11 && worstVelocity < 1e-11 &&
-		worstRotation < 1e-11 && worstTime < 1e-12 && untouched, detail);
+		worstRotation < 1e-11 && worstTime < 1e-12 &&
+		worstGeometry == 0.0 && untouched, detail);
 }
 
 void RunDriverProtocolValidationScenarios()

@@ -8,6 +8,7 @@
 #include <functional>
 #include <thread>
 #include <set>
+#include <type_traits>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -52,8 +53,14 @@ private:
 	};
 
 	// Both completion callbacks reinterpret_cast the LPOVERLAPPED the API hands
-	// back straight to PipeInstance*. Inserting any member above `overlap` would
-	// silently corrupt every callback, with no diagnostic; this is the check.
+	// back straight to PipeInstance*. Inserting any member above `overlap`, or
+	// giving the struct a base class or a virtual, would silently corrupt every
+	// callback with no diagnostic; these are the checks. Standard layout is what
+	// makes an object pointer-interconvertible with its first member, and the
+	// offset is what pins which member that is.
+	static_assert(std::is_standard_layout<PipeInstance>::value,
+		"PipeInstance must stay standard-layout: the IO completion callbacks cast "
+		"LPOVERLAPPED back to PipeInstance*");
 	static_assert(offsetof(PipeInstance, overlap) == 0,
 		"PipeInstance::overlap must stay the first member: the IO completion callbacks "
 		"cast LPOVERLAPPED back to PipeInstance*");
