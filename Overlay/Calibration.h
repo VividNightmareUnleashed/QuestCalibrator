@@ -8,6 +8,7 @@
 #include <Eigen/Geometry>
 #include <openvr.h>
 
+#include <functional>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -405,29 +406,13 @@ struct CalibrationContext
 		return calibratedTranslation * 0.01;
 	}
 
-	// One transaction for every spatial-field mutation that has to persist: the
-	// driver-visible generation bump and the profile write land together, or
-	// neither does. `mutate` changes only what it means to change; the bump and
-	// the rollback of all three field members are owned here, because the three
-	// hand-written save/bump/restore blocks this replaces each had to get their
-	// own rollback right and each restored a different subset.
-	template <class Mutation, class Save>
-	bool WithProfileSave(Mutation &&mutate, Save &&save)
-	{
-		std::vector<FieldAnchor> previousAnchors = fieldAnchors;
-		bool previousEnabled = fieldEnabled;
-		uint32_t previousGeneration = fieldGeneration;
-
-		mutate();
-		fieldGeneration++;
-		if (save())
-			return true;
-
-		fieldAnchors = std::move(previousAnchors);
-		fieldEnabled = previousEnabled;
-		fieldGeneration = previousGeneration;
-		return false;
-	}
+	// Persisted profile mutations are transactions owned by Configuration.cpp
+	// (SaveProfileFieldEdit / SaveProfileTransformEdit), never by this struct:
+	// they persist a candidate record and only then apply it, so a refused write
+	// leaves live state untouched. A mutate-then-save helper here would have to
+	// roll back on failure, and no rollback held by a caller can undo what a
+	// failed write leaves behind in the persistence layer — which is why there
+	// is deliberately no such helper to add the next toggle to.
 
 	void ClearSampleBuffers()
 	{
@@ -627,5 +612,10 @@ bool ApplyChaperoneBounds(bool logSuccess = true);
 // is not applying yet.
 void ResyncDriverState();
 
-// Dashboard overlay handle (0 until created); owned by QuestCalibrator.cpp.
-vr::VROverlayHandle_t GetMainOverlayHandle();
+// How this layer raises a VR toast. The shell installs it at startup: the
+// notification target is a presentation-layer resource (the dashboard overlay)
+// created and owned by QuestCalibrator.cpp, and reaching up for its handle was
+// the calibration domain's only dependency on the app shell. A sink that was
+// never installed degrades to log-only, exactly as a not-yet-created overlay
+// handle did — the log line runs first and unconditionally either way.
+void SetToastSink(std::function<void(const char *)> sink);

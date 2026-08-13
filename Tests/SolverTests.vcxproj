@@ -92,6 +92,7 @@
     <ClInclude Include="..\Driver\PoseTransform.h" />
     <ClInclude Include="..\Driver\ProtocolValidation.h" />
     <ClInclude Include="..\Driver\IPCProtocolGate.h" />
+    <ClInclude Include="..\common\NumericValidation.h" />
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\Overlay\CalibrationEngine.h" />

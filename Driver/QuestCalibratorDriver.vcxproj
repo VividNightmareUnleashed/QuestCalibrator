@@ -91,6 +91,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\common\NumericValidation.h" />
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\Protocol.h" />
     <ClInclude Include="..\common\TransformLimits.h" />

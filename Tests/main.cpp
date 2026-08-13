@@ -32,10 +32,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -762,6 +765,37 @@ void RunDriverProtocolValidationScenarios()
 		preHandshakeRejected &&
 		wrongRejected && handshakeAccepted && mutationAccepted && !staleMutation,
 		"pre-handshake/wrong-handshake/current/stale mutation matrix");
+
+	// A late wrong-version handshake REVOKES the connection: handshakeComplete is
+	// assigned from the version comparison, never or-ed into. Without this, a
+	// "once handshaken, always handshaken" relaxation would let a peer that
+	// downgrades mid-connection (or a second local process reusing the pipe after
+	// a good handshake) keep mutating at a version this driver no longer speaks,
+	// and no existing assertion would notice.
+	bool revokeDispatched = questcal::ipc::PrepareRequest(wrongHandshake, connection, response);
+	protocol::Request currentMutation(protocol::RequestSetDeviceTransform);
+	bool afterRevoke = questcal::ipc::PrepareRequest(currentMutation, connection, response);
+	Check("driver: late downgrade revokes handshake",
+		!revokeDispatched && !connection.handshakeComplete && !afterRevoke &&
+			response.type == protocol::ResponseInvalid,
+		"a wrong-version handshake after a good one un-authorizes the connection");
+
+	// The gate's `mutation` clause names BOTH mutating request types, and only
+	// SetDeviceTransform was ever driven through it. Dropping the
+	// RequestSetAlignmentField term would make every spatial-field send fall
+	// through to ResponseInvalid -- indistinguishable, on the wire, from a broken
+	// handshake -- while the driver's own field validation kept passing.
+	questcal::ipc::ConnectionState fieldConnection;
+	protocol::Request fieldMutation(protocol::RequestSetAlignmentField);
+	bool fieldPreHandshake =
+		questcal::ipc::PrepareRequest(fieldMutation, fieldConnection, response);
+	protocol::Request fieldHandshake(protocol::RequestHandshake);
+	questcal::ipc::PrepareRequest(fieldHandshake, fieldConnection, response);
+	bool fieldAccepted =
+		questcal::ipc::PrepareRequest(fieldMutation, fieldConnection, response);
+	Check("driver: alignment-field dispatch gate",
+		!fieldPreHandshake && fieldConnection.handshakeComplete && fieldAccepted,
+		"SetAlignmentField refused before the handshake, dispatched after it");
 }
 
 // ---------------------------------------------------------------------------
@@ -2384,7 +2418,7 @@ void RunPoseHubMidDrainOverflowScenario()
 	// copied prefix alone and leave the hole unacknowledged. The next call must
 	// then report that hole immediately before the surviving suffix.
 	PoseStreamHub midDrainHub;
-	char detail[192];
+	char detail[256];
 	std::vector<protocol::DevicePoseSample> hubOut;
 	int midDrainConsumer = midDrainHub.CreateConsumer();
 	protocol::DevicePoseSample midDrainSample{};
@@ -2396,40 +2430,98 @@ void RunPoseHubMidDrainOverflowScenario()
 		midDrainSample.sampleTimeQpc = midDrainBase + static_cast<int64_t>(i);
 		midDrainHub.AppendSampleForTest(midDrainSample);
 	}
+	// Nothing below names the hub's chunk size. The overwrite is sized from what
+	// the first chunk actually copied (twice it, so the consumer's cursor is
+	// certain to fall behind the retained window), and every position is asserted
+	// relative to that observed prefix -- so this scenario tracks any chunk size
+	// instead of failing when a private tuning constant moves. `overflowInjected`
+	// stays asserted: if the chunk size ever exceeded the whole backlog the hook
+	// would never fire, and that must fail loudly rather than pass vacuously.
+	//
+	// The overwrite also runs on a SEPARATE thread, parked before the drain and
+	// released from inside the chunk hook. Driving it from the draining thread
+	// demonstrated nothing about concurrency and could not observe the property
+	// the chunking exists for: that Drain RELEASES the producer mutex between
+	// chunks so a producer can publish. Held across the chunk boundary, the
+	// injector blocks, the bounded wait expires, and the second Check fails --
+	// rather than hanging the suite.
+	std::mutex injectMutex;
+	std::condition_variable injectSignal;
+	uint64_t injectedSamples = 0;
+	bool injectRequested = false;
+	bool injectFinished = false;
+	std::thread injector([&]()
+	{
+		std::unique_lock<std::mutex> lock(injectMutex);
+		injectSignal.wait(lock, [&] { return injectRequested; });
+		uint64_t count = injectedSamples;
+		lock.unlock();
+
+		protocol::DevicePoseSample overwrite = midDrainSample;
+		for (uint64_t i = 0; i < count; ++i)
+		{
+			overwrite.sampleTimeQpc = midDrainBase +
+				static_cast<int64_t>(PoseStreamHub::HistoryCapacity + i);
+			midDrainHub.AppendSampleForTest(overwrite);
+		}
+
+		lock.lock();
+		injectFinished = true;
+		lock.unlock();
+		injectSignal.notify_all();
+	});
+
 	bool overflowInjected = false;
-	const uint64_t injectedSamples = 1024;
+	bool producerRanBetweenChunks = false;
 	midDrainHub.SetDrainChunkHookForTest([&]()
 	{
 		if (overflowInjected)
 			return;
 		overflowInjected = true;
-		for (uint64_t i = 0; i < injectedSamples; ++i)
-		{
-			midDrainSample.sampleTimeQpc = midDrainBase +
-				static_cast<int64_t>(PoseStreamHub::HistoryCapacity + i);
-			midDrainHub.AppendSampleForTest(midDrainSample);
-		}
+		std::unique_lock<std::mutex> lock(injectMutex);
+		injectedSamples = static_cast<uint64_t>(hubOut.size()) * 2;
+		injectRequested = true;
+		injectSignal.notify_all();
+		producerRanBetweenChunks = injectSignal.wait_for(lock,
+			std::chrono::seconds(5), [&] { return injectFinished; });
 	});
 	uint64_t prefixDrops = midDrainHub.Drain(midDrainConsumer, hubOut);
-	size_t prefixCount = hubOut.size();
-	bool prefixExact = prefixCount == 512 &&
-		hubOut.front().sampleTimeQpc == midDrainBase &&
-		hubOut.back().sampleTimeQpc == midDrainBase + 511;
+	{
+		// If the hook never fired the injector is still parked. Release it with
+		// nothing to inject, so this fails on `overflowInjected` below instead of
+		// hanging the suite on the join. Redundant when the hook did fire.
+		std::lock_guard<std::mutex> lock(injectMutex);
+		injectRequested = true;
+	}
+	injectSignal.notify_all();
+	injector.join();
 	midDrainHub.SetDrainChunkHookForTest({});
+
+	size_t prefixCount = hubOut.size();
+	bool prefixExact = prefixCount > 0 &&
+		hubOut.front().sampleTimeQpc == midDrainBase &&
+		hubOut.back().sampleTimeQpc ==
+			midDrainBase + static_cast<int64_t>(prefixCount) - 1;
 	uint64_t suffixDrops = midDrainHub.Drain(midDrainConsumer, hubOut);
 	bool suffixExact = hubOut.size() == PoseStreamHub::HistoryCapacity &&
 		hubOut.front().sampleTimeQpc == midDrainBase + static_cast<int64_t>(injectedSamples) &&
 		hubOut.back().sampleTimeQpc == midDrainBase +
 			static_cast<int64_t>(PoseStreamHub::HistoryCapacity + injectedSamples - 1);
 	snprintf(detail, sizeof detail,
-		"injected %d prefix %d/%zu drops %llu suffix %d/%zu drops %llu",
-		overflowInjected, prefixExact, prefixCount,
+		"injected %d/%llu prefix %d/%zu drops %llu suffix %d/%zu drops %llu",
+		overflowInjected, static_cast<unsigned long long>(injectedSamples),
+		prefixExact, prefixCount,
 		static_cast<unsigned long long>(prefixDrops), suffixExact, hubOut.size(),
 		static_cast<unsigned long long>(suffixDrops));
 	Check("pose hub: mid-drain overflow position",
 		overflowInjected && prefixExact && prefixDrops == 0 && suffixExact &&
-		suffixDrops == injectedSamples - 512,
+		suffixDrops == injectedSamples - prefixCount,
 		detail);
+	Check("pose hub: producer runs between chunks",
+		producerRanBetweenChunks,
+		producerRanBetweenChunks
+			? "another thread appended while a drain was mid-backlog"
+			: "the producer mutex was not released between copy chunks");
 }
 
 void RunPoseHubWriterLivenessScenario()

@@ -3,6 +3,7 @@
 #include "CalibrationEngine.h"
 #include "ProfileValidation.h"
 
+#include "../common/NumericValidation.h"
 #include "../common/Protocol.h"
 #include "../common/TransformLimits.h"
 
@@ -104,26 +105,15 @@ inline bool IsFreshCaptureTime(
 
 } // namespace ringpose
 
-inline bool IsFiniteRingVector(const double (&v)[3])
-{
-	return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
-}
-
-inline bool IsBoundedRingVector(const double (&v)[3], double maxAbs)
-{
-	return IsFiniteRingVector(v) &&
-		std::abs(v[0]) <= maxAbs && std::abs(v[1]) <= maxAbs &&
-		std::abs(v[2]) <= maxAbs;
-}
-
-inline bool IsUsableRingQuaternion(const vr::HmdQuaternion_t &q)
-{
-	if (!std::isfinite(q.w) || !std::isfinite(q.x) ||
-		!std::isfinite(q.y) || !std::isfinite(q.z))
-		return false;
-	double normSq = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
-	return std::isfinite(normSq) && normSq > 1e-12;
-}
+// The per-field numeric checks are the shared wire vocabulary
+// (common/NumericValidation.h), not a ring-private one: the driver's inbound
+// gate asks the same questions of the same two C-array types, and a bound added
+// to TransformLimits.h has to reach both. IsAcceptableQuaternion in particular
+// is the ACCEPT-OR-DROP half of the shared quaternion pair - deliberately not
+// the driver's sanitizing NormalizeQuaternion, which would turn a huge finite
+// quaternion into accepted data here instead of tracking absence.
+using questcal::numeric::IsAcceptableQuaternion;
+using questcal::numeric::IsBoundedVector3;
 
 // A driver can mark a pose Running_OK while still supplying malformed numeric
 // fields. Validate the complete raw sample before any solver or runtime monitor
@@ -133,14 +123,14 @@ inline bool IsUsableRingSample(const protocol::DevicePoseSample &s, double qpcTo
 	if (!std::isfinite(qpcToSeconds) || qpcToSeconds <= 0.0 ||
 		!std::isfinite(s.poseTimeOffset) ||
 		std::abs(s.poseTimeOffset) > protocol::limits::MaxAbsTimeOffsetSeconds ||
-		!IsUsableRingQuaternion(s.worldFromDriverRotation) ||
-		!IsUsableRingQuaternion(s.rotation) ||
-		!IsBoundedRingVector(s.worldFromDriverTranslation,
+		!IsAcceptableQuaternion(s.worldFromDriverRotation) ||
+		!IsAcceptableQuaternion(s.rotation) ||
+		!IsBoundedVector3(s.worldFromDriverTranslation,
 			protocol::limits::MaxAbsTranslationMeters) ||
-		!IsBoundedRingVector(s.position, protocol::limits::MaxAbsPosePositionMeters) ||
-		!IsBoundedRingVector(s.velocity,
+		!IsBoundedVector3(s.position, protocol::limits::MaxAbsPosePositionMeters) ||
+		!IsBoundedVector3(s.velocity,
 			protocol::limits::MaxAbsLinearVelocityMetersPerSecond) ||
-		!IsBoundedRingVector(s.angularVelocity,
+		!IsBoundedVector3(s.angularVelocity,
 			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond))
 		return false;
 

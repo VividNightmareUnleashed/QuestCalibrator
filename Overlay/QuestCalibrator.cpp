@@ -49,9 +49,21 @@ static bool imguiContextInitialized = false;
 static bool imguiGlfwInitialized = false;
 static bool imguiOpenGLInitialized = false;
 
-vr::VROverlayHandle_t GetMainOverlayHandle()
+// The shell's half of the calibration layer's toast policy. The handle is read
+// at call time, not captured: TryCreateVROverlay runs before InitCalibrator on
+// the normal path but the overlay can also fail to create, and either way a
+// zero handle has always meant "log only". Installed by InitCalibrator's caller
+// below, which is why the calibration layer no longer declares an accessor for
+// a resource this file owns.
+static void ShowVRToast(const char *message)
 {
-	return overlayMainHandle;
+	if (overlayMainHandle && vr::VRNotifications())
+	{
+		vr::VRNotificationId notifId = 0;
+		vr::VRNotifications()->CreateNotification(
+			overlayMainHandle, 0, vr::EVRNotificationType_Transient,
+			message, vr::EVRNotificationStyle_Application, nullptr, &notifId);
+	}
 }
 static GLuint fboHandle = 0, fboTextureHandle = 0;
 static int fboTextureWidth = 0, fboTextureHeight = 0;
@@ -578,6 +590,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		}
 		else
 		{
+			SetToastSink(ShowVRToast);
 			InitCalibrator();
 			calibratorInitialized = true;
 			LoadProfile(CalCtx);

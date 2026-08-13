@@ -67,18 +67,10 @@ static void SaveSettingOrRestore(T &value, const T &previous)
 		value = previous;
 }
 
-// Profile-backed counterpart, for the toggles that are not spatial-field edits
-// and so cannot go through CalibrationContext::WithProfileSave (that owns the
-// driver-visible field generation bump and snapshots only the field members).
-// One spelling for all of them: a refused write leaves no live member the
-// registry disagrees with. Every call site sits inside an `if (validProfile)`
-// block, which is the precondition SaveDirtyPersistence checks for itself.
-template<typename T>
-static void SaveProfileOrRestore(T &value, const T &previous)
-{
-	if (!SaveProfile(CalCtx))
-		value = previous;
-}
+// The profile-backed toggles do not have a counterpart here: they all go
+// through Configuration.cpp's SaveProfileFieldEdit, which persists a candidate
+// record before touching live state, so the UI expresses the edit and never a
+// rollback. Every such call site sits inside an `if (validProfile)` block.
 
 struct IdentifyPulseState
 {
@@ -1760,14 +1752,16 @@ static void BuildSettingsScreen(const VRState &state)
 			const ImVec2 p = row.pos;
 
 			ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
-			// Toggled through a local so the live member changes only inside the
-			// transaction, which owns the generation bump and the rollback.
+			// Toggled through a local: the live member changes only after the
+			// transaction has persisted the candidate that carries this value.
 			bool fieldEnabled = CalCtx.fieldEnabled;
 			if (QCCheckbox("##fieldEnabled", &fieldEnabled))
 			{
-				if (CalCtx.WithProfileSave(
-					[&] { CalCtx.fieldEnabled = fieldEnabled; },
-					[] { return SaveProfile(CalCtx); }))
+				if (SaveProfileFieldEdit(CalCtx,
+					[&](questcal::ProfileRecord &candidate) {
+						candidate.fieldEnabled = fieldEnabled;
+					},
+					true))
 					ResyncDriverState();
 			}
 			if (ImGui::IsItemHovered())
@@ -1785,9 +1779,11 @@ static void BuildSettingsScreen(const VRState &state)
 				ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
 				if (IconButton("clearanchors", "Clear anchors", IconTrash, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 				{
-					if (CalCtx.WithProfileSave(
-						[] { CalCtx.fieldAnchors.clear(); },
-						[] { return SaveProfile(CalCtx); }))
+					if (SaveProfileFieldEdit(CalCtx,
+						[](questcal::ProfileRecord &candidate) {
+							candidate.fieldAnchors.clear();
+						},
+						true))
 						ResyncDriverState();
 				}
 
@@ -1889,9 +1885,12 @@ static void BuildSettingsScreen(const VRState &state)
 			ImDrawList *dl = ImGui::GetWindowDrawList();
 
 			ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
-			bool previousContinuousEnabled = CalCtx.continuousEnabled;
-			if (QCCheckbox("##continuousEnabled", &CalCtx.continuousEnabled))
-				SaveProfileOrRestore(CalCtx.continuousEnabled, previousContinuousEnabled);
+			bool continuousEnabled = CalCtx.continuousEnabled;
+			if (QCCheckbox("##continuousEnabled", &continuousEnabled))
+				SaveProfileFieldEdit(CalCtx,
+					[&](questcal::ProfileRecord &candidate) {
+						candidate.continuousEnabled = continuousEnabled;
+					});
 			if (ImGui::IsItemHovered())
 			{
 				ImGui::SetTooltip(
@@ -1961,26 +1960,28 @@ static void BuildSettingsScreen(const VRState &state)
 						// The serial and the extrinsic are one edit -- the learned
 						// mount offset described the previous tracker, and a
 						// different physical device needs a fresh calibration --
-						// so they roll back together or not at all. Two members
-						// is the one case SaveProfileOrRestore cannot express.
-						std::string previousSerial = CalCtx.continuousTrackerSerial;
-						auto previousExtrinsic = CalCtx.mountExtrinsic;
-						CalCtx.continuousTrackerSerial = candidates[sel]->serial;
-						CalCtx.mountExtrinsic = questcal::MountExtrinsic();
-						if (!SaveProfile(CalCtx))
-						{
-							CalCtx.continuousTrackerSerial = std::move(previousSerial);
-							CalCtx.mountExtrinsic = previousExtrinsic;
-						}
+						// so they land together or not at all. Stating both on the
+						// candidate is what makes that atomic; there is no
+						// two-member rollback left to get wrong.
+						std::string serial = candidates[sel]->serial;
+						SaveProfileFieldEdit(CalCtx,
+							[&](questcal::ProfileRecord &candidate) {
+								candidate.continuousTrackerSerial = serial;
+								candidate.mountExtrinsic =
+									questcal::MountExtrinsicRecord();
+							});
 					}
 				}
 				ImGui::PopStyleVar();
 				ImGui::PopItemWidth();
 
 				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 40.0f));
-				bool previousHide = CalCtx.hideMountedTracker;
-				if (QCCheckbox("##hideTracker", &CalCtx.hideMountedTracker))
-					SaveProfileOrRestore(CalCtx.hideMountedTracker, previousHide);
+				bool hideMountedTracker = CalCtx.hideMountedTracker;
+				if (QCCheckbox("##hideTracker", &hideMountedTracker))
+					SaveProfileFieldEdit(CalCtx,
+						[&](questcal::ProfileRecord &candidate) {
+							candidate.hideMountedTracker = hideMountedTracker;
+						});
 				if (ImGui::IsItemHovered())
 				{
 					ImGui::SetTooltip(
@@ -1993,9 +1994,12 @@ static void BuildSettingsScreen(const VRState &state)
 					"Hide the mounted tracker from games");
 
 				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 74.0f));
-				bool previousLatency = CalCtx.continuousLatencyReestimation;
-				if (QCCheckbox("##contLatency", &CalCtx.continuousLatencyReestimation))
-					SaveProfileOrRestore(CalCtx.continuousLatencyReestimation, previousLatency);
+				bool latencyReestimation = CalCtx.continuousLatencyReestimation;
+				if (QCCheckbox("##contLatency", &latencyReestimation))
+					SaveProfileFieldEdit(CalCtx,
+						[&](questcal::ProfileRecord &candidate) {
+							candidate.continuousLatencyReestimation = latencyReestimation;
+						});
 				if (ImGui::IsItemHovered())
 				{
 					ImGui::SetTooltip(

@@ -17,6 +17,7 @@
 
 #include <ctime>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -1635,6 +1636,16 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 // ---------------------------------------------------------------------------
 // Runtime monitoring: drift staleness (detect + notify only, never corrects)
 
+// Supplied by the app shell (see Calibration.h). An absent sink is a normal
+// state, not an error: -uipreview never installs one, and it degrades to
+// log-only exactly as a not-yet-created overlay handle did.
+static std::function<void(const char *)> ToastSink;
+
+void SetToastSink(std::function<void(const char *)> sink)
+{
+	ToastSink = std::move(sink);
+}
+
 // One-shot log + optional VR toast; each caller owns its re-arm flag.
 static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logLine,
 	const char *toast, bool showToast = true)
@@ -1643,16 +1654,13 @@ static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logL
 		return;
 	notified = true;
 
+	// Unconditional and first: "the user turned toasts off" and "there is
+	// nowhere to toast" must both still leave the episode in the session log,
+	// which is the bug-report surface for a GUI binary.
 	ctx.Log(std::string(logLine) + "\n");
 
-	vr::VROverlayHandle_t overlay = showToast ? GetMainOverlayHandle() : 0;
-	if (overlay && vr::VRNotifications())
-	{
-		vr::VRNotificationId notifId = 0;
-		vr::VRNotifications()->CreateNotification(
-			overlay, 0, vr::EVRNotificationType_Transient,
-			toast, vr::EVRNotificationStyle_Application, nullptr, &notifId);
-	}
+	if (showToast && ToastSink)
+		ToastSink(toast);
 }
 
 // The three one-shot flags live on MonitorState with the rest of the monitors'
@@ -2134,14 +2142,14 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 		return;
 	}
 
-	if (!ctx.WithProfileSave(
-		[&] {
+	if (!SaveProfileFieldEdit(ctx,
+		[&](questcal::ProfileRecord &candidate) {
 			if (append)
-				ctx.fieldAnchors.push_back(anchor);
+				candidate.fieldAnchors.push_back(PersistedAnchor(anchor));
 			else
-				ctx.fieldAnchors[slot] = anchor;
+				candidate.fieldAnchors[slot] = PersistedAnchor(anchor);
 		},
-		[&] { return SaveProfile(ctx); }))
+		true))
 	{
 		ctx.Log("Field anchor was not applied because the updated profile could not be saved\n");
 		return;

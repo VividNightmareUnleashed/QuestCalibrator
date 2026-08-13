@@ -101,6 +101,21 @@ static SettingsRecord CaptureSettingsRecord(const CalibrationContext &ctx)
 	return record;
 }
 
+// The record's anchor type is deliberately not CalibrationContext's — see
+// ProfileValidation.h. The two are field-identical; this function is the only
+// place that has to know that, which is why a caller assembling a candidate
+// anchor set (Calibration.cpp's anchor store) converts through it rather than
+// copying the three members itself.
+questcal::PersistedFieldAnchor PersistedAnchor(
+	const CalibrationContext::FieldAnchor &anchor)
+{
+	PersistedFieldAnchor persisted;
+	persisted.position = anchor.position;
+	persisted.rotation = anchor.rotation;
+	persisted.translationMeters = anchor.translationMeters;
+	return persisted;
+}
+
 static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 {
 	ProfileRecord record;
@@ -118,18 +133,9 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.universeRotation = ctx.profileWorldFromDriverRotation;
 	record.universeTranslation = ctx.profileWorldFromDriverTranslation;
 	record.fieldEnabled = ctx.fieldEnabled;
-	// The record's anchor type is deliberately not CalibrationContext's — see
-	// ProfileValidation.h. The two are field-identical; this is the only place
-	// that has to know that.
 	record.fieldAnchors.reserve(ctx.fieldAnchors.size());
 	for (const auto &anchor : ctx.fieldAnchors)
-	{
-		PersistedFieldAnchor persisted;
-		persisted.position = anchor.position;
-		persisted.rotation = anchor.rotation;
-		persisted.translationMeters = anchor.translationMeters;
-		record.fieldAnchors.push_back(persisted);
-	}
+		record.fieldAnchors.push_back(PersistedAnchor(anchor));
 	record.continuousEnabled = ctx.continuousEnabled;
 	record.continuousTrackerSerial = ctx.continuousTrackerSerial;
 	record.continuousLatencyReestimation = ctx.continuousLatencyReestimation;
@@ -173,18 +179,16 @@ static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 	ApplyChaperoneRecord(ctx, std::move(record.chaperone));
 }
 
-static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
+// The half of a profile record that describes preferences rather than the
+// calibration itself: the spatial field, the continuous-calibration pick and
+// its learned mount. Shared by the load path below and by SaveProfileFieldEdit,
+// so a member added to ProfileRecord cannot reach one and miss the other — and
+// so the edit path can adopt a persisted candidate without also re-applying the
+// base transform (which would bump baseGeneration on every toggle) or the
+// profile identity.
+static void ApplyProfilePreferences(
+	CalibrationContext &ctx, const ProfileRecord &record)
 {
-	ctx.referenceTrackingSystem = std::move(record.referenceTrackingSystem);
-	ctx.targetTrackingSystem = std::move(record.targetTrackingSystem);
-	ctx.SetCalibration(record.rotation, record.translationMeters, record.scale);
-	ctx.calibratedTimeOffset = record.timeOffset;
-	ctx.calibrationUnixTime = record.calibrationUnixTime;
-	ctx.profileUniverseUnsafe = record.universeUnsafe;
-	ctx.profileUniverseValid = record.universeValid;
-	ctx.profileHmdSerial = std::move(record.universeHmdSerial);
-	ctx.profileWorldFromDriverRotation = record.universeRotation;
-	ctx.profileWorldFromDriverTranslation = record.universeTranslation;
 	ctx.fieldEnabled = record.fieldEnabled;
 	ctx.fieldAnchors.clear();
 	ctx.fieldAnchors.reserve(record.fieldAnchors.size());
@@ -197,15 +201,36 @@ static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
 		ctx.fieldAnchors.push_back(anchor);
 	}
 	ctx.continuousEnabled = record.continuousEnabled;
-	ctx.continuousTrackerSerial = std::move(record.continuousTrackerSerial);
+	ctx.continuousTrackerSerial = record.continuousTrackerSerial;
 	ctx.continuousLatencyReestimation = record.continuousLatencyReestimation;
 	ctx.hideMountedTracker = record.hideMountedTracker;
-	ctx.mountExtrinsic = questcal::MountExtrinsic();
+	// Only the members the record carries. MountExtrinsic::pairs is a runtime
+	// derivation statistic with no persisted counterpart, so it is not this
+	// function's to clear — the load path below resets the whole extrinsic first,
+	// while a preference edit must leave everything it did not state alone.
 	ctx.mountExtrinsic.valid = record.mountExtrinsic.valid;
 	ctx.mountExtrinsic.rot = record.mountExtrinsic.rotation;
 	ctx.mountExtrinsic.pos = record.mountExtrinsic.translationMeters;
 	ctx.mountExtrinsic.rotRmsDeg = record.mountExtrinsic.rotationRmsDeg;
 	ctx.mountExtrinsic.posRmsM = record.mountExtrinsic.translationRmsM;
+}
+
+static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
+{
+	ctx.referenceTrackingSystem = std::move(record.referenceTrackingSystem);
+	ctx.targetTrackingSystem = std::move(record.targetTrackingSystem);
+	ctx.SetCalibration(record.rotation, record.translationMeters, record.scale);
+	ctx.calibratedTimeOffset = record.timeOffset;
+	ctx.calibrationUnixTime = record.calibrationUnixTime;
+	ctx.profileUniverseUnsafe = record.universeUnsafe;
+	ctx.profileUniverseValid = record.universeValid;
+	ctx.profileHmdSerial = std::move(record.universeHmdSerial);
+	ctx.profileWorldFromDriverRotation = record.universeRotation;
+	ctx.profileWorldFromDriverTranslation = record.universeTranslation;
+	// Adopting a record replaces the extrinsic wholesale, runtime statistics
+	// included; a preference edit does not (see ApplyProfilePreferences).
+	ctx.mountExtrinsic = questcal::MountExtrinsic();
+	ApplyProfilePreferences(ctx, record);
 	ctx.validProfile = record.valid;
 }
 
@@ -720,7 +745,11 @@ void LoadProfile(CalibrationContext &ctx)
 
 	questcal::PersistenceLoadPlan plan = questcal::PlanPersistenceLoad(facts);
 	settingsRewriteNeeded = plan.settingsRewriteNeeded;
-	ctx.persistenceRevision = plan.persistenceRevision;
+	// Through the setter like every other write to this field: the reader already
+	// rejects a parsed revision below 1, so the plan can only produce non-zero
+	// values today, but the "never zero" rule has exactly one home (Calibration.h)
+	// and a load path that assigns around it is how a fourth variant starts.
+	ctx.SetPersistenceRevision(plan.persistenceRevision);
 	if (plan.legacySettingsMigrationPending)
 		ctx.legacySettingsMigrationPending = true;
 	if (plan.disarmChaperone)
@@ -927,6 +956,31 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 		ctx.fieldGeneration++;
 	ctx.state = CalibrationState::None;
 	ctx.timeLastScan = -1e9;
+	return true;
+}
+
+bool SaveProfileFieldEdit(CalibrationContext &ctx,
+	const std::function<void(questcal::ProfileRecord &)> &mutate,
+	bool bumpFieldGeneration)
+{
+	// Candidate first, exactly as SaveProfileTransformEdit does: the write gates
+	// (preview short-circuit, CanPersistConfig, the legacy-migration
+	// precondition), the record validation and the registry write all run before
+	// a single live member moves. A refused write therefore has nothing to roll
+	// back — which is the whole point, because WriteConfigRecord's own state
+	// changes (the load state it rewrites, the migration latch a nested Settings
+	// write clears) are not restorable by a caller holding a copy of one bool.
+	ProfileRecord candidate = CaptureProfileRecord(ctx);
+	mutate(candidate);
+	if (!WriteConfigRecord(ctx, candidate))
+		return false;
+
+	ApplyProfilePreferences(ctx, candidate);
+	// Only for an edit the driver's spatial-field blend can actually see: the
+	// generation is the snap discriminator, so bumping it for a tracker-pick or a
+	// hide-in-games toggle would make the driver snap for an edit it never sees.
+	if (bumpFieldGeneration)
+		ctx.fieldGeneration++;
 	return true;
 }
 

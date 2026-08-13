@@ -1,55 +1,30 @@
 #pragma once
 
+#include "../common/NumericValidation.h"
 #include "../common/Protocol.h"
 #include "../common/TransformLimits.h"
 
-#include <algorithm>
 #include <cmath>
 
 // Pure validation/sanitization for messages crossing from the overlay process
 // into vrserver. Setters publish only the returned copy, so a malformed request
 // cannot partially replace a previously good transform.
+//
+// The finite/bounded/normalize predicates themselves live in
+// common/NumericValidation.h alongside the bounds they read, because the ring
+// gate in the other direction (Overlay/RingPoseMath.h) asks the same questions
+// of the same two wire types. What stays here is the message shape: which field
+// is checked against which bound, and the transactional copy-out.
 namespace questcal
 {
 namespace driverinput
 {
 
-inline bool IsFiniteBounded(double value, double maxAbs)
-{
-	return std::isfinite(value) && std::abs(value) <= maxAbs;
-}
-
-inline bool IsFiniteVector(const double (&value)[3], double maxAbs)
-{
-	return IsFiniteBounded(value[0], maxAbs)
-		&& IsFiniteBounded(value[1], maxAbs)
-		&& IsFiniteBounded(value[2], maxAbs);
-}
-
-inline bool NormalizeQuaternion(vr::HmdQuaternion_t &value)
-{
-	if (!std::isfinite(value.w) || !std::isfinite(value.x)
-		|| !std::isfinite(value.y) || !std::isfinite(value.z))
-		return false;
-
-	double maxComponent = std::max(std::max(std::abs(value.w), std::abs(value.x)),
-		std::max(std::abs(value.y), std::abs(value.z)));
-	if (maxComponent < protocol::limits::MinQuaternionComponentNorm)
-		return false;
-
-	// Scale before taking the norm so even very large finite wire values cannot
-	// overflow the check. The stored quaternion is always unit length.
-	double w = value.w / maxComponent;
-	double x = value.x / maxComponent;
-	double y = value.y / maxComponent;
-	double z = value.z / maxComponent;
-	double norm = std::sqrt(w * w + x * x + y * y + z * z);
-	if (!std::isfinite(norm) || norm <= 0.0)
-		return false;
-
-	value = { w / norm, x / norm, y / norm, z / norm };
-	return true;
-}
+using questcal::numeric::IsBoundedVector3;
+using questcal::numeric::IsFiniteBounded;
+// The sanitize-and-publish half of the shared quaternion pair; see
+// NumericValidation.h for why the ring's accept-or-drop half is not this one.
+using questcal::numeric::NormalizeQuaternion;
 
 inline bool ValidateAndSanitize(const protocol::SetDeviceTransform &input,
 	protocol::SetDeviceTransform &output)
@@ -58,7 +33,7 @@ inline bool ValidateAndSanitize(const protocol::SetDeviceTransform &input,
 		return false;
 	if (input.enabled > 1 || input.hidden > 1)
 		return false;
-	if (!IsFiniteVector(input.translation.v, protocol::limits::MaxAbsTranslationMeters))
+	if (!IsBoundedVector3(input.translation.v, protocol::limits::MaxAbsTranslationMeters))
 		return false;
 	if (!std::isfinite(input.scale) || input.scale < protocol::limits::MinScale ||
 		input.scale > protocol::limits::MaxScale)
@@ -94,8 +69,8 @@ inline bool ValidateAndSanitize(const protocol::SetAlignmentField &input,
 	{
 		const protocol::FieldAnchor &source = input.anchors[i];
 		protocol::FieldAnchor &destination = output.anchors[i];
-		if (!IsFiniteVector(source.position, protocol::limits::MaxAbsAnchorPositionMeters)
-			|| !IsFiniteVector(source.translationDelta, protocol::limits::MaxAbsAnchorDeltaMeters))
+		if (!IsBoundedVector3(source.position, protocol::limits::MaxAbsAnchorPositionMeters)
+			|| !IsBoundedVector3(source.translationDelta, protocol::limits::MaxAbsAnchorDeltaMeters))
 			return false;
 
 		destination = source;
