@@ -28,13 +28,86 @@ static int CollectorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> CollectorScratch;
 static double QpcToSeconds = 0.0;
 
+// The sample source pinned at the Begin transition. The ring stamps ring/QPC
+// seconds and the runtime-pose fallback stamps the UI clock into the same
+// buffers, so a channel that opens or closes mid-run would concatenate two
+// timelines behind a monotonicity guard that cannot tell them apart.
+static bool CollectionUsesPoseRing = false;
+// UI-clock time of the last frozen-pair identity re-check during Collecting.
+static double LastCollectionIdentityCheck = -1e9;
+
 static std::unique_ptr<JumpDetector> Jumps;
 static std::unique_ptr<DriftMonitor> Drift;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
-static bool MonitorHasComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
-static double MonitorLastComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
+
+enum class ChaperoneOwnerStatus
+{
+	Match,
+	Mismatch,
+	// The snapshot records no owner at all. Distinct from Mismatch: it is an
+	// incomplete record, not another headset's room, and saying "belongs to a
+	// different headset" for it contradicts what the load path reports.
+	Unowned,
+	Unavailable
+};
+
+// Everything the per-tick runtime monitors keep between ticks that does not
+// live inside a detector object. Collected here so "what is the monitor's
+// state" has one answer and the half that is inferred from an unbroken pose
+// stream is cleared wherever the detectors themselves are reset.
+struct MonitorState
+{
+	// Per-device composed-time watermarks (see RuntimeMonitorTick).
+	bool hasComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
+	double lastComposedTime[vr::k_unMaxTrackedDeviceCount] = {};
+
+	// The HMD's latest raw position, for the worn-device heuristic. Only rough
+	// currency is needed, but a stale one suppresses drift evidence, so it must
+	// not survive a hole the detectors were reset across.
+	Eigen::Vector3d hmdRawPosition{ 0, 0, 0 };
+	double hmdRawTime = -1e9;
+
+	// Chaperone owner check: device properties are stable for a session but
+	// comparatively expensive, so the verdict is cached and rechecked at 1 Hz
+	// or whenever the snapshot's recorded ownership changes.
+	double lastOwnerCheck = -1e9;
+	std::string checkedTrackingSystem;
+	std::string checkedHmdSerial;
+	ChaperoneOwnerStatus owner = ChaperoneOwnerStatus::Unavailable;
+
+	// 30 s rate limits on the protected-chaperone reader's two failure banners.
+	double lastSetupFailure = -1e9;
+	double lastReadFailure = -1e9;
+
+	// One notification per calibration: re-armed only by a successful solve
+	// (the freeze one also by a resume event).
+	bool staleNotified = false;
+	bool freezeNotified = false;
+	bool unstableNotified = false;
+
+	// Only the stream-derived half. The owner cache invalidates on its own key,
+	// the failure cooldowns are session-rate policy, and the one-shot flags are
+	// per-calibration policy -- none of them describe the observation window, so
+	// a drain hole must not clear them.
+	void ResetObservations()
+	{
+		for (bool &hasTime : hasComposedTime)
+			hasTime = false;
+		hmdRawPosition = Eigen::Vector3d::Zero();
+		hmdRawTime = -1e9;
+	}
+
+	void ReArmNotifications()
+	{
+		staleNotified = false;
+		freezeNotified = false;
+		unstableNotified = false;
+	}
+};
+
+static MonitorState Monitors;
 
 // The slot ledger plus every decision that reads it (DriverSyncPolicy.h). This
 // file owns only the OpenVR enumeration and the pipe transport around it.
@@ -160,12 +233,6 @@ static void PersistenceTick(CalibrationContext &ctx, double now)
 
 	if (!SaveDirtyPersistence(ctx))
 		ctx.DelayPersistenceRetry(now);
-}
-
-static void ResetMonitorIngestionTimes()
-{
-	for (bool &hasTime : MonitorHasComposedTime)
-		hasTime = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -426,9 +493,9 @@ static bool NeutralizeDriverConnection(CalibrationContext &ctx,
 				Driver.ConnectionGeneration() != passConnectionGeneration;
 		}
 
-		if (generationChanged)
-			continue;
-		if (!complete)
+		// One decision, not two: a reconnect and a refused request are the same
+		// verdict here -- this pass did not converge, so retry it.
+		if (generationChanged || !complete)
 			continue;
 
 		DriverSlots.ForgetEverySlot();
@@ -447,7 +514,15 @@ static bool ReadTrackedDeviceString(uint32_t id,
 	if (!system || id >= vr::k_unMaxTrackedDeviceCount)
 		return false;
 
-	char buffer[vr::k_unMaxPropertyStringSize] = {};
+	// Sized for what this function is actually used to read -- tracking-system
+	// names, serials and icon paths, all tens of bytes -- rather than for
+	// k_unMaxPropertyStringSize, which value-initialises a 32 KB stack frame on
+	// every one of the ~70 property reads each 1 Hz scan makes. An oversized
+	// property degrades into the buffer-too-small error the check below already
+	// fails closed on. The zero-initialisation stays: the NUL check reads
+	// buffer[size - 1], which a misbehaving runtime could point at a byte it
+	// never wrote.
+	char buffer[256] = {};
 	vr::ETrackedPropertyError error = vr::TrackedProp_Success;
 	uint32_t size = system->GetStringTrackedDeviceProperty(id, property, buffer,
 		static_cast<uint32_t>(sizeof buffer), &error);
@@ -818,6 +893,52 @@ void ResyncDriverState()
 	SynchronizeDriverState(CalCtx);
 }
 
+// One tolerance for every live-vs-snapshot chaperone comparison. The monitor
+// that triggers a restore and the verification that judges one must loosen or
+// tighten together: contest with a tighter bound than the verifier accepts and
+// the app restores in a loop; the reverse verifies a restore it will contest on
+// the next scan.
+static constexpr float ChaperoneCompareTolerance = 0.002f;
+
+// Does the live wall geometry still match the snapshot? Both call sites used to
+// spell this out and both got the same detail wrong: the sizing call reports
+// capacity, the filling call writes back what it actually produced, and a count
+// that shrank in between means the bounds changed under the read. That is "could
+// not read consistently", not "differs" -- reporting it as a difference restores
+// a stale snapshot over the edit the user just made in Room Setup.
+static bool LiveGeometryMatches(vr::IVRChaperoneSetup *setup,
+	const std::vector<vr::HmdQuad_t> &snapshot, uint32_t &liveQuadCount,
+	bool &readOk)
+{
+	readOk = false;
+	liveQuadCount = 0;
+
+	uint32_t quadCount = 0;
+	if (!setup->GetLiveCollisionBoundsInfo(nullptr, &quadCount))
+		return false;
+	liveQuadCount = quadCount;
+	if (quadCount != snapshot.size())
+	{
+		readOk = true;
+		return false;
+	}
+
+	std::vector<vr::HmdQuad_t> live(quadCount);
+	uint32_t returnedCount = quadCount;
+	if (!setup->GetLiveCollisionBoundsInfo(live.data(), &returnedCount))
+		return false;
+	// Only compare what the second call actually wrote. Any disagreement with
+	// the sized count leaves the tail zero-initialised (or the buffer overrun),
+	// so there is no consistent live geometry to judge this snapshot against.
+	if (returnedCount != quadCount)
+	{
+		liveQuadCount = returnedCount;
+		return false;
+	}
+	readOk = true;
+	return questcal::QuadsMatch(live, snapshot, ChaperoneCompareTolerance);
+}
+
 static void CheckProtectedChaperone(CalibrationContext &ctx)
 {
 	// Auto-restore of the protected chaperone snapshot. The trigger compares
@@ -832,66 +953,57 @@ static void CheckProtectedChaperone(CalibrationContext &ctx)
 		ctx.chaperone.autoApply && !ctx.chaperone.geometry.empty() &&
 		ChaperoneBaselineIsCurrent(ctx.chaperone);
 	if (!shouldCheckChaperone)
-		ctx.ClearError(CalibrationContext::ErrorSource::ChaperoneMonitor);
-	else
 	{
-		static double lastSetupFailure = -1e9;
-		static double lastReadFailure = -1e9;
-		auto setup = vr::VRChaperoneSetup();
-		if (!setup)
-		{
-			if (ctx.timeLastTick - lastSetupFailure >= 30.0)
-			{
-				ctx.ReportError(
-					"Protected chaperone could not be checked because OpenVR chaperone setup is unavailable\n",
-					CalibrationContext::ErrorSource::ChaperoneMonitor);
-				lastSetupFailure = ctx.timeLastTick;
-			}
-			return;
-		}
-		lastSetupFailure = -1e9;
-
-		uint32_t quadCount = 0;
-		bool liveRead = setup->GetLiveCollisionBoundsInfo(nullptr, &quadCount);
-
-		bool differs = liveRead && quadCount != ctx.chaperone.geometry.size();
-		if (liveRead && !differs)
-		{
-			std::vector<vr::HmdQuad_t> live(quadCount);
-			if (setup->GetLiveCollisionBoundsInfo(live.data(), &quadCount))
-				differs = !questcal::QuadsMatch(live, ctx.chaperone.geometry, 0.002f);
-			else
-				liveRead = false;
-		}
-		if (!liveRead)
-		{
-			if (ctx.timeLastTick - lastReadFailure >= 30.0)
-			{
-				ctx.ReportError(
-					"Could not read the live chaperone; protected bounds were not changed\n",
-					CalibrationContext::ErrorSource::ChaperoneMonitor);
-				lastReadFailure = ctx.timeLastTick;
-			}
-			return;
-		}
-		lastReadFailure = -1e9;
 		ctx.ClearError(CalibrationContext::ErrorSource::ChaperoneMonitor);
+		return;
+	}
 
-		// Cooldown so a runtime that keeps reasserting its own bounds is
-		// contested every few seconds at worst, not at the 1 Hz scan rate.
-		if (differs && ctx.timeLastTick - ctx.chaperone.lastRestoreTime >= 5.0)
+	auto setup = vr::VRChaperoneSetup();
+	if (!setup)
+	{
+		if (ctx.timeLastTick - Monitors.lastSetupFailure >= 30.0)
 		{
-			// Advance the cooldown for failures too. A runtime that rejects or
-			// rewrites bounds must not be hammered once per profile scan.
-			ctx.chaperone.lastRestoreTime = ctx.timeLastTick;
-			if (ApplyChaperoneBounds(false))
-			{
-				char buf[128];
-				snprintf(buf, sizeof buf,
-					"Chaperone changed outside the app (%u live / %zu saved walls); restored the protected bounds\n",
-					quadCount, ctx.chaperone.geometry.size());
-				ctx.Log(buf);
-			}
+			ctx.ReportError(
+				"Protected chaperone could not be checked because OpenVR chaperone setup is unavailable\n",
+				CalibrationContext::ErrorSource::ChaperoneMonitor);
+			Monitors.lastSetupFailure = ctx.timeLastTick;
+		}
+		return;
+	}
+	Monitors.lastSetupFailure = -1e9;
+
+	uint32_t quadCount = 0;
+	bool liveRead = false;
+	bool differs = !LiveGeometryMatches(setup, ctx.chaperone.geometry, quadCount,
+		liveRead);
+	if (!liveRead)
+	{
+		if (ctx.timeLastTick - Monitors.lastReadFailure >= 30.0)
+		{
+			ctx.ReportError(
+				"Could not read the live chaperone; protected bounds were not changed\n",
+				CalibrationContext::ErrorSource::ChaperoneMonitor);
+			Monitors.lastReadFailure = ctx.timeLastTick;
+		}
+		return;
+	}
+	Monitors.lastReadFailure = -1e9;
+	ctx.ClearError(CalibrationContext::ErrorSource::ChaperoneMonitor);
+
+	// Cooldown so a runtime that keeps reasserting its own bounds is
+	// contested every few seconds at worst, not at the 1 Hz scan rate.
+	if (differs && ctx.timeLastTick - ctx.chaperone.lastRestoreTime >= 5.0)
+	{
+		// Advance the cooldown for failures too. A runtime that rejects or
+		// rewrites bounds must not be hammered once per profile scan.
+		ctx.chaperone.lastRestoreTime = ctx.timeLastTick;
+		if (ApplyChaperoneBounds(false))
+		{
+			char buf[128];
+			snprintf(buf, sizeof buf,
+				"Chaperone changed outside the app (%u live / %zu saved walls); restored the protected bounds\n",
+				quadCount, ctx.chaperone.geometry.size());
+			ctx.Log(buf);
 		}
 	}
 }
@@ -980,18 +1092,15 @@ static void CollectFromRuntimePoses(CalibrationContext &ctx, double now)
 	push(ctx.calibrationTargetID, ctx.targetSamples, ctx.lastTargetSampleTime);
 }
 
-enum class ChaperoneOwnerStatus
-{
-	Match,
-	Mismatch,
-	Unavailable
-};
-
 static ChaperoneOwnerStatus CurrentChaperoneOwner(
 	const CalibrationContext::Chaperone &snapshot)
 {
+	// A snapshot that predates owner recording (or whose write never filled it)
+	// is an incomplete record, not another headset's room. Folding it into
+	// Mismatch told the user their room belonged to a different headset while
+	// the load path described the same state accurately.
 	if (snapshot.ownerTrackingSystem.empty() || snapshot.ownerHmdSerial.empty())
-		return ChaperoneOwnerStatus::Mismatch;
+		return ChaperoneOwnerStatus::Unowned;
 
 	std::string trackingSystem;
 	std::string serial;
@@ -1000,6 +1109,24 @@ static ChaperoneOwnerStatus CurrentChaperoneOwner(
 	return trackingSystem == snapshot.ownerTrackingSystem && serial == snapshot.ownerHmdSerial
 		? ChaperoneOwnerStatus::Match
 		: ChaperoneOwnerStatus::Mismatch;
+}
+
+// The one recovery policy for "this snapshot can no longer be trusted": disarm
+// it, restate the settings dirty bit, tell the user why, and commit immediately
+// so a crash before the debounce elapses cannot hand back an armed record. The
+// error source is Chaperone at every site, so it is not a parameter.
+//
+// Deliberately not shared with FailClosedChaperoneCapture: that path keeps the
+// snapshot's data for diagnosis and only clears autoApply, and with the load
+// path's conservative in-memory disarm, which must NOT persist over a
+// recoverable legacy Config.
+static void DisarmChaperoneAndPersist(CalibrationContext &ctx, double now,
+	const char *reason)
+{
+	ctx.DisarmChaperone();
+	ctx.MarkSettingsDirty(now);
+	ctx.ReportError(reason, CalibrationContext::ErrorSource::Chaperone);
+	SaveSettings(ctx);
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,13 +1143,10 @@ static void ApplyAlignmentDelta(CalibrationContext &ctx, const Eigen::Quaternion
 {
 	Eigen::Quaterniond newRot = (dR * ctx.calibratedRotationQ).normalized();
 	Eigen::Vector3d newTrans = dR * ctx.TranslationMeters() + dT;
-	if (snap)
-		ctx.SetCalibration(newRot, newTrans, ctx.calibratedScale);
-	else
-		ctx.SetCalibrationContinuous(newRot, newTrans, ctx.calibratedScale);
 
-	// The field anchors live in reference space: shift them by D so the field
-	// moves with the universe. The per-anchor deltas conjugate automatically
+	// Snap-independent, so it sits above the one branch below: the field anchors
+	// live in reference space and shift by D either way, and the loop reads only
+	// D, never the calibration. The per-anchor deltas conjugate automatically
 	// (delta' = D delta D^-1) because SendAlignmentField re-derives them from
 	// the absolute transforms.
 	for (auto &a : ctx.fieldAnchors)
@@ -1031,11 +1155,16 @@ static void ApplyAlignmentDelta(CalibrationContext &ctx, const Eigen::Quaternion
 		a.rotation = (dR * a.rotation).normalized();
 		a.translationMeters = dR * a.translationMeters + dT;
 	}
-	if (snap && !ctx.fieldAnchors.empty())
-		ctx.fieldGeneration++;
 
+	// Every consequence of the intentional-discontinuity/continuous-correction
+	// distinction, in one place: a fourth one added later cannot land under the
+	// wrong conditional because there is only one.
 	if (snap)
 	{
+		ctx.SetCalibration(newRot, newTrans, ctx.calibratedScale);
+		// Only a field that exists has smoothing to snap.
+		if (!ctx.fieldAnchors.empty())
+			ctx.fieldGeneration++;
 		ctx.AdvancePersistenceRevision();
 		// The chaperone snapshot's standing center maps the standing frame into
 		// the (just re-based) raw frame, so it re-anchors by D like everything
@@ -1045,6 +1174,8 @@ static void ApplyAlignmentDelta(CalibrationContext &ctx, const Eigen::Quaternion
 				questcal::DeltaTimesPose(dR, dT, ctx.chaperone.standingCenter);
 		ctx.MarkSettingsDirty(now);
 	}
+	else
+		ctx.SetCalibrationContinuous(newRot, newTrans, ctx.calibratedScale);
 
 	ctx.MarkProfileDirty(now);
 	SynchronizeDriverState(ctx);
@@ -1328,51 +1459,48 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 	// Device properties are stable for a session but comparatively expensive
 	// OpenVR calls; the tick runs at up to 50 Hz. Recheck once per second, or
 	// immediately when a newly captured/loaded snapshot changes ownership.
-	static double lastOwnerCheck = -1e9;
-	static std::string checkedTrackingSystem;
-	static std::string checkedHmdSerial;
-	static ChaperoneOwnerStatus owner = ChaperoneOwnerStatus::Unavailable;
 	if (!ctx.chaperone.valid)
 	{
-		owner = ChaperoneOwnerStatus::Unavailable;
-		checkedTrackingSystem.clear();
-		checkedHmdSerial.clear();
-		lastOwnerCheck = -1e9;
+		Monitors.owner = ChaperoneOwnerStatus::Unavailable;
+		Monitors.checkedTrackingSystem.clear();
+		Monitors.checkedHmdSerial.clear();
+		Monitors.lastOwnerCheck = -1e9;
 	}
-	else if (ctx.chaperone.ownerTrackingSystem != checkedTrackingSystem ||
-		ctx.chaperone.ownerHmdSerial != checkedHmdSerial ||
-		now - lastOwnerCheck >= 1.0)
+	else if (ctx.chaperone.ownerTrackingSystem != Monitors.checkedTrackingSystem ||
+		ctx.chaperone.ownerHmdSerial != Monitors.checkedHmdSerial ||
+		now - Monitors.lastOwnerCheck >= 1.0)
 	{
-		checkedTrackingSystem = ctx.chaperone.ownerTrackingSystem;
-		checkedHmdSerial = ctx.chaperone.ownerHmdSerial;
-		owner = CurrentChaperoneOwner(ctx.chaperone);
-		lastOwnerCheck = now;
+		Monitors.checkedTrackingSystem = ctx.chaperone.ownerTrackingSystem;
+		Monitors.checkedHmdSerial = ctx.chaperone.ownerHmdSerial;
+		Monitors.owner = CurrentChaperoneOwner(ctx.chaperone);
+		Monitors.lastOwnerCheck = now;
 	}
-	if (ctx.chaperone.valid && owner == ChaperoneOwnerStatus::Mismatch)
+	if (ctx.chaperone.valid && Monitors.owner == ChaperoneOwnerStatus::Mismatch)
 	{
-		ctx.DisarmChaperone();
-		ctx.MarkSettingsDirty(now);
-		ctx.ReportError(
+		DisarmChaperoneAndPersist(ctx, now,
 			"The protected chaperone belongs to a different headset/runtime and has been disarmed. "
-			"Capture it again for the current headset.\n",
-			CalibrationContext::ErrorSource::Chaperone);
-		SaveSettings(ctx);
+			"Capture it again for the current headset.\n");
+		return;
+	}
+	if (ctx.chaperone.valid && Monitors.owner == ChaperoneOwnerStatus::Unowned)
+	{
+		// Same disarm, but the record is incomplete rather than foreign; this is
+		// the wording the load path uses for the identical state.
+		DisarmChaperoneAndPersist(ctx, now,
+			"The protected chaperone has no complete headset/universe baseline. "
+			"It has been disarmed; capture it again before enabling auto-restore.\n");
 		return;
 	}
 
-	if (!ctx.chaperone.valid || owner != ChaperoneOwnerStatus::Match ||
+	if (!ctx.chaperone.valid || Monitors.owner != ChaperoneOwnerStatus::Match ||
 		!HasFreshHmdWorldFromDriver())
 		return;
 
 	if (!ctx.chaperone.worldFromDriverValid)
 	{
-		ctx.DisarmChaperone();
-		ctx.MarkSettingsDirty(now);
-		ctx.ReportError(
+		DisarmChaperoneAndPersist(ctx, now,
 			"The protected chaperone has no raw-universe baseline and was disarmed. "
-			"Capture it again before restoring it.\n",
-			CalibrationContext::ErrorSource::Chaperone);
-		SaveSettings(ctx);
+			"Capture it again before restoring it.\n");
 		return;
 	}
 
@@ -1469,13 +1597,9 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 		CurrentHmdObservation.rotation,
 		CurrentHmdObservation.translation))
 	{
-		ctx.DisarmChaperone();
-		ctx.MarkSettingsDirty(now);
-		ctx.ReportError(
+		DisarmChaperoneAndPersist(ctx, now,
 			"The headset raw universe changed without an adjacent continuous HMD pose pair. "
-			"The protected chaperone was disarmed; capture it again before restoring it.\n",
-			CalibrationContext::ErrorSource::Chaperone);
-		SaveSettings(ctx);
+			"The protected chaperone was disarmed; capture it again before restoring it.\n");
 		return;
 	}
 
@@ -1523,20 +1647,15 @@ static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logL
 	}
 }
 
-// One notification per calibration: re-armed only by a successful solve.
-static bool StaleNotified = false;
-
-// One notification per freeze episode: re-armed by resume or a new solve.
-static bool FreezeNotified = false;
-
-// One "observations unstable" notification per calibration: the condition is
-// benign and self-healing (bad lighthouse geometry while lying down), so the
-// log records every episode but the toast never repeats.
-static bool UnstableNotified = false;
+// The three one-shot flags live on MonitorState with the rest of the monitors'
+// between-tick state: one notification per calibration (freeze also re-arms on
+// a resume event), and "observations unstable" is benign and self-healing (bad
+// lighthouse geometry while lying down), so the log records every episode but
+// the toast never repeats.
 
 static void NotifyStaleAlignment(CalibrationContext &ctx)
 {
-	NotifyOnce(ctx, StaleNotified,
+	NotifyOnce(ctx, Monitors.staleNotified,
 		"Calibration quality looks poor -- recalibrating is recommended",
 		"QuestCalibrator: calibration quality looks poor. Recalibrating is recommended.",
 		ctx.notifyPoorCalibration);
@@ -1593,6 +1712,30 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 		NotifyStaleAlignment(ctx);
 }
 
+// Notes and gaps the detector has already queued describe observations it made
+// before the reset, so they must reach the log first: Reset() drops the deque
+// and re-seeds every lastValidTime, and a drain hole or a deactivated profile is
+// exactly when "the universe may have moved" is both most likely and least
+// observable. Resetting the baselines across the hole is still correct -- only
+// the observation already made survives it.
+static void DrainJumpObservations(CalibrationContext &ctx)
+{
+	std::string note;
+	while (Jumps->PollNote(note))
+		ctx.Log(note + "\n");
+
+	JumpDetector::GapEvent gap;
+	while (Jumps->PollGap(gap))
+	{
+		ctx.referenceGapEvents++;
+		char buf[256];
+		snprintf(buf, sizeof buf,
+			"Reference tracking gap (%.1f s) on device %u -- the universe may have moved; recalibrate if alignment looks off\n",
+			gap.duration, gap.deviceId);
+		ctx.Log(buf);
+	}
+}
+
 static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 {
 	// Score even while the monitors are parked so the UI's health readout
@@ -1608,9 +1751,10 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		if (MonitorActive)
 		{
+			DrainJumpObservations(ctx);
 			Jumps->Reset();
 			Drift->Reset();
-			ResetMonitorIngestionTimes();
+			Monitors.ResetObservations();
 			MonitorActive = false;
 		}
 		PoseHub.DiscardBacklog(MonitorConsumer);
@@ -1620,7 +1764,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	if (!MonitorActive)
 	{
 		PoseHub.DiscardBacklog(MonitorConsumer);
-		ResetMonitorIngestionTimes();
+		Monitors.ResetObservations();
 		MonitorActive = true;
 	}
 
@@ -1630,15 +1774,11 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		// We lost part of our own observation window; baselines across the
 		// hole are unsafe. For the drift monitor a drain hole would read as a
 		// tracking loss and could fake a discontinuity event.
+		DrainJumpObservations(ctx);
 		Jumps->Reset();
 		Drift->Reset();
-		ResetMonitorIngestionTimes();
+		Monitors.ResetObservations();
 	}
-
-	// The HMD's latest raw position, for the worn-device heuristic below.
-	// Persisted across ticks; only rough currency is needed.
-	static Eigen::Vector3d lastHmdRawPos;
-	static double lastHmdRawTime = -1e9;
 
 	for (const auto &s : MonitorScratch)
 	{
@@ -1657,17 +1797,17 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		// and the HMD observation's single-endpoint one. Same shape, three
 		// different domain rules — deliberately not one shared guard.
 		double composedTime = sample.time;
-		if (MonitorHasComposedTime[s.deviceId] &&
-			composedTime <= MonitorLastComposedTime[s.deviceId])
+		if (Monitors.hasComposedTime[s.deviceId] &&
+			composedTime <= Monitors.lastComposedTime[s.deviceId])
 			continue;
-		MonitorHasComposedTime[s.deviceId] = true;
-		MonitorLastComposedTime[s.deviceId] = composedTime;
+		Monitors.hasComposedTime[s.deviceId] = true;
+		Monitors.lastComposedTime[s.deviceId] = composedTime;
 
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd &&
 			ctx.referenceDeviceMask[s.deviceId])
 		{
-			lastHmdRawPos = sample.pos;
-			lastHmdRawTime = composedTime;
+			Monitors.hmdRawPosition = sample.pos;
+			Monitors.hmdRawTime = composedTime;
 		}
 
 		// Feed-selection policy (HMD-only on the reference side, mounted-tracker
@@ -1681,8 +1821,8 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		candidate.mountedTrackerId = ctx.continuousTrackerId;
 		candidate.rawPosition = sample.pos;
 		candidate.composedTime = composedTime;
-		candidate.hmdRawPosition = lastHmdRawPos;
-		candidate.hmdRawTime = lastHmdRawTime;
+		candidate.hmdRawPosition = Monitors.hmdRawPosition;
+		candidate.hmdRawTime = Monitors.hmdRawTime;
 		candidate.calibratedRotation = ctx.calibratedRotationQ;
 		candidate.calibratedTranslationMeters = ctx.TranslationMeters();
 		candidate.calibratedScale = ctx.calibratedScale;
@@ -1692,20 +1832,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 				ctx.targetDeviceMask[s.deviceId] ? ctx.calibratedScale : 1.0);
 	}
 
-	std::string note;
-	while (Jumps->PollNote(note))
-		ctx.Log(note + "\n");
-
-	JumpDetector::GapEvent gap;
-	while (Jumps->PollGap(gap))
-	{
-		ctx.referenceGapEvents++;
-		char buf[256];
-		snprintf(buf, sizeof buf,
-			"Reference tracking gap (%.1f s) on device %u -- the universe may have moved; recalibrate if alignment looks off\n",
-			gap.duration, gap.deviceId);
-		ctx.Log(buf);
-	}
+	DrainJumpObservations(ctx);
 
 	JumpDetector::UniverseDelta delta;
 	bool jumped = false;
@@ -1813,9 +1940,15 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		}
 	}
 
-	// The engine's clock is the ring's (QPC seconds), not the UI clock.
+	// The engine's clock is the ring's (QPC seconds), not the UI clock. Checked
+	// like every other QueryPerformanceCounter call in this file: the documented
+	// failure return leaves the value indeterminate, and it feeds the window trim
+	// cutoff, the coast-gap freshness test and every confirm timer in Decide.
+	// Drained samples are already in the engine; skipping this tick's update
+	// only defers the decision.
 	LARGE_INTEGER qnow;
-	QueryPerformanceCounter(&qnow);
+	if (!QueryPerformanceCounter(&qnow))
+		return;
 	double ringNow = static_cast<double>(qnow.QuadPart) * QpcToSeconds;
 
 	// Re-evaluate the current field for each retained observation. Comparing a
@@ -1869,7 +2002,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm\n",
 				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
 			ctx.Log(buf);
-			NotifyOnce(ctx, FreezeNotified,
+			NotifyOnce(ctx, Monitors.freezeNotified,
 				"The headset-mounted tracker moved or lost tracking -- alignment updates are on hold",
 				"QuestCalibrator: the headset-mounted tracker moved or lost tracking. Alignment updates are on hold -- recalibrate to re-learn the mount.");
 			break;
@@ -1880,7 +2013,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				"Continuous calibration frozen: observation scatter %.2f deg / %.1f cm stays far above the tracking noise -- mount fault signature\n",
 				ev.scatterRotDeg, ev.scatterPosM * 100.0);
 			ctx.Log(buf);
-			NotifyOnce(ctx, FreezeNotified,
+			NotifyOnce(ctx, Monitors.freezeNotified,
 				"The headset-mounted tracker moved or lost tracking -- alignment updates are on hold",
 				"QuestCalibrator: the headset-mounted tracker moved or lost tracking. Alignment updates are on hold -- recalibrate to re-learn the mount.");
 			break;
@@ -1889,13 +2022,13 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				"Mounted tracker observations unstable (scatter %.2f deg / %.1f cm) -- alignment updates paused until tracking settles\n",
 				Continuous->ScatterRotRmsDeg(), Continuous->ScatterPosRmsM() * 100.0);
 			ctx.Log(buf);
-			NotifyOnce(ctx, UnstableNotified,
+			NotifyOnce(ctx, Monitors.unstableNotified,
 				"Mounted tracker tracking is unstable -- alignment updates paused until it settles",
 				"QuestCalibrator: the headset-mounted tracker's tracking looks unstable here. Alignment updates are paused and will resume on their own.");
 			break;
 		case questcal::ContinuousAlignment::Event::Resumed:
 			ctx.Log("Continuous calibration resumed\n");
-			FreezeNotified = false;
+			Monitors.freezeNotified = false;
 			break;
 		case questcal::ContinuousAlignment::Event::TrackerLost:
 			ctx.Log("Mounted tracker not tracking -- continuous calibration holding\n");
@@ -2158,16 +2291,14 @@ static void FinishCalibration(CalibrationContext &ctx)
 	ctx.fieldGeneration++;
 
 	// A fresh solve resets the staleness clock and all accumulated drift
-	// evidence, and re-arms the one-shot stale notification.
+	// evidence, and re-arms the one-shot notifications.
 	ctx.calibrationUnixTime = static_cast<double>(std::time(nullptr));
 	ctx.driftSlideEvents = 0;
 	ctx.driftMaxSlideM = 0.0;
 	ctx.discontinuousLossEvents = 0;
 	ctx.driftScore = 0.0;
 	ctx.alignment = CalibrationContext::AlignmentHealth::Fresh;
-	StaleNotified = false;
-	FreezeNotified = false;
-	UnstableNotified = false;
+	Monitors.ReArmNotifications();
 	ctx.lastAutoCorrectionUnixTime = 0.0;
 	ctx.autoCorrectionsApplied = 0;
 	Drift->Reset();
@@ -2358,19 +2489,22 @@ void CalibrationTick(double time)
 			return;
 		}
 
-		std::string referenceSerial;
-		std::string targetSerial;
+		// Frozen alongside the ids: the id is a slot, and the collection window
+		// is long enough for SteamVR to free one and hand it to a different
+		// physical device. Read once here (properties are expensive) and
+		// re-checked at 1 Hz while collecting.
 		ReadTrackedDeviceString(ctx.calibrationReferenceID,
-			vr::Prop_SerialNumber_String, referenceSerial);
+			vr::Prop_SerialNumber_String, ctx.calibrationReferenceSerial);
 		ReadTrackedDeviceString(ctx.calibrationTargetID,
-			vr::Prop_SerialNumber_String, targetSerial);
+			vr::Prop_SerialNumber_String, ctx.calibrationTargetSerial);
+		LastCollectionIdentityCheck = time;
 
 		char buf[256];
 		snprintf(buf, sizeof buf, "Reference device ID: %u, serial: %s\n",
-			ctx.calibrationReferenceID, referenceSerial.c_str());
+			ctx.calibrationReferenceID, ctx.calibrationReferenceSerial.c_str());
 		ctx.Log(buf);
 		snprintf(buf, sizeof buf, "Target device ID: %u, serial: %s\n",
-			ctx.calibrationTargetID, targetSerial.c_str());
+			ctx.calibrationTargetID, ctx.calibrationTargetSerial.c_str());
 		ctx.Log(buf);
 
 		if (!ResetAndDisableOffsets(ctx, ctx.calibrationTargetID))
@@ -2381,7 +2515,14 @@ void CalibrationTick(double time)
 		}
 
 		ctx.ClearSampleBuffers();
-		if (PoseHub.RingOpen())
+		// Pin the sample source for the whole run. The ring stamps ring/QPC
+		// seconds and the runtime-pose fallback stamps the UI clock into the
+		// same buffers, and the only guard is monotonicity against the buffer's
+		// own tail, which cannot tell two origins apart: a channel that appears
+		// or disappears mid-run would leave the solver a window it silently
+		// rejects, losing the latency correction the run existed to measure.
+		CollectionUsesPoseRing = PoseHub.RingOpen();
+		if (CollectionUsesPoseRing)
 		{
 			DiscardPoseRingBacklog();
 			ctx.Log("Sampling raw driver poses (timestamped)\n");
@@ -2403,7 +2544,41 @@ void CalibrationTick(double time)
 	}
 
 	// ---- Collecting ----
-	if (PoseHub.RingOpen())
+	// Channel-specific, because the generic abort reads as a device fault: the
+	// reverse transition used to surface as "Reference device stopped tracking".
+	if (PoseHub.RingOpen() != CollectionUsesPoseRing)
+	{
+		AbortCalibration(ctx, CollectionUsesPoseRing
+			? "The driver pose channel closed mid-collection; the remaining samples would carry a different clock"
+			: "The driver pose channel opened mid-collection; the remaining samples would carry a different clock");
+		return;
+	}
+
+	// The frozen pair is an OpenVR index. Re-read the two serials at 1 Hz --
+	// never per sample, these are expensive property reads -- so a device that
+	// power-cycled into another device's slot cannot have its poses concatenated
+	// into one buffer and fitted as a single rigid body. A serial that cannot be
+	// read proves nothing; the no-sample timeouts below stay the liveness check.
+	if (time - LastCollectionIdentityCheck >= 1.0)
+	{
+		LastCollectionIdentityCheck = time;
+		std::string serial;
+		auto deviceReplaced = [&](uint32_t id, const std::string &frozen)
+		{
+			return !frozen.empty() &&
+				ReadTrackedDeviceString(id, vr::Prop_SerialNumber_String, serial) &&
+				serial != frozen;
+		};
+		if (deviceReplaced(ctx.calibrationReferenceID, ctx.calibrationReferenceSerial) ||
+			deviceReplaced(ctx.calibrationTargetID, ctx.calibrationTargetSerial))
+		{
+			AbortCalibration(ctx,
+				"A selected device was replaced in its slot mid-collection");
+			return;
+		}
+	}
+
+	if (CollectionUsesPoseRing)
 	{
 		if (!CollectFromPoseRing(ctx, time))
 			return;
@@ -2428,12 +2603,6 @@ void CalibrationTick(double time)
 
 	if (elapsed >= duration)
 		FinishCalibration(ctx);
-}
-
-static bool FiniteChaperone(const CalibrationContext::Chaperone &snapshot)
-{
-	return questcal::IsPlausibleChaperone(snapshot.geometry,
-		snapshot.standingCenter, snapshot.playSpaceSize);
 }
 
 static bool FailClosedChaperoneCapture(const std::string &message)
@@ -2502,9 +2671,13 @@ bool LoadChaperoneBounds()
 		quadCount = returnedCount;
 	}
 
+	// IsPlausibleChaperone by its own name at the call site: this is the named
+	// trust boundary for room geometry, not the finiteness check a local
+	// forwarder's name suggested.
 	if (!setup->GetWorkingStandingZeroPoseToRawTrackingPose(&snapshot.standingCenter) ||
 		!setup->GetWorkingPlayAreaSize(&snapshot.playSpaceSize.v[0], &snapshot.playSpaceSize.v[1]) ||
-		!FiniteChaperone(snapshot))
+		!questcal::IsPlausibleChaperone(snapshot.geometry, snapshot.standingCenter,
+			snapshot.playSpaceSize))
 		return FailClosedChaperoneCapture(
 			"Could not protect the chaperone: play-area data is missing or invalid\n");
 
@@ -2568,7 +2741,9 @@ bool LoadChaperoneBounds()
 
 bool ApplyChaperoneBounds(bool logSuccess)
 {
-	if (!CalCtx.chaperone.valid || !FiniteChaperone(CalCtx.chaperone))
+	if (!CalCtx.chaperone.valid || !questcal::IsPlausibleChaperone(
+		CalCtx.chaperone.geometry, CalCtx.chaperone.standingCenter,
+		CalCtx.chaperone.playSpaceSize))
 	{
 		CalCtx.ReportError("Could not restore the chaperone: the protected snapshot is invalid\n",
 			CalibrationContext::ErrorSource::Chaperone);
@@ -2584,13 +2759,18 @@ bool ApplyChaperoneBounds(bool logSuccess)
 	}
 	if (owner == ChaperoneOwnerStatus::Mismatch)
 	{
-		CalCtx.DisarmChaperone();
-		CalCtx.MarkSettingsDirty(CalCtx.timeLastTick);
-		CalCtx.ReportError(
+		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick,
 			"Could not restore the chaperone: the snapshot belongs to a different headset/runtime. "
-			"It has been disarmed; capture it again for this headset.\n",
-			CalibrationContext::ErrorSource::Chaperone);
-		SaveSettings(CalCtx);
+			"It has been disarmed; capture it again for this headset.\n");
+		return false;
+	}
+	if (owner == ChaperoneOwnerStatus::Unowned)
+	{
+		// Same disarm as a foreign snapshot, but the honest reason: the record
+		// never carried an owner, which is what the load path reports too.
+		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick,
+			"Could not restore the chaperone: the snapshot has no complete headset/universe baseline. "
+			"It has been disarmed; capture it again before enabling auto-restore.\n");
 		return false;
 	}
 	if (!ChaperoneBaselineIsCurrent(CalCtx.chaperone))
@@ -2627,15 +2807,12 @@ bool ApplyChaperoneBounds(bool logSuccess)
 	bool verified = true;
 	if (!CalCtx.chaperone.geometry.empty())
 	{
-		uint32_t count = 0;
-		verified = setup->GetLiveCollisionBoundsInfo(nullptr, &count) &&
-			count == CalCtx.chaperone.geometry.size();
-		if (verified)
-		{
-			std::vector<vr::HmdQuad_t> live(count);
-			verified = setup->GetLiveCollisionBoundsInfo(live.data(), &count) &&
-				questcal::QuadsMatch(live, CalCtx.chaperone.geometry, 0.002f);
-		}
+		// A geometry read that could not be made consistently is not a verified
+		// restore, so both outcomes of the shared reader fail the same way here.
+		uint32_t liveQuadCount = 0;
+		bool readOk = false;
+		verified = LiveGeometryMatches(setup, CalCtx.chaperone.geometry,
+			liveQuadCount, readOk);
 	}
 	setup->RevertWorkingCopy();
 	vr::HmdMatrix34_t standing = {};
@@ -2645,9 +2822,10 @@ bool ApplyChaperoneBounds(bool logSuccess)
 	for (int row = 0; verified && row < 3; ++row)
 		for (int column = 0; verified && column < 4; ++column)
 			verified = std::abs(standing.m[row][column] -
-				CalCtx.chaperone.standingCenter.m[row][column]) <= 0.002f;
-	verified = verified && std::abs(size.v[0] - CalCtx.chaperone.playSpaceSize.v[0]) <= 0.002f &&
-		std::abs(size.v[1] - CalCtx.chaperone.playSpaceSize.v[1]) <= 0.002f;
+				CalCtx.chaperone.standingCenter.m[row][column]) <= ChaperoneCompareTolerance;
+	verified = verified &&
+		std::abs(size.v[0] - CalCtx.chaperone.playSpaceSize.v[0]) <= ChaperoneCompareTolerance &&
+		std::abs(size.v[1] - CalCtx.chaperone.playSpaceSize.v[1]) <= ChaperoneCompareTolerance;
 	if (!verified)
 	{
 		CalCtx.ReportError("Could not verify the restored chaperone; check SteamVR Room Setup before relying on it\n",

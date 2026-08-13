@@ -34,6 +34,7 @@
 
 #include <deque>
 #include <functional>
+#include <optional>
 #include <vector>
 
 namespace questcal
@@ -316,18 +317,22 @@ private:
 	std::deque<char> scatterStructuredVotes;
 	bool unstableNotified = false;
 
+	// The three one-shot handoffs this class produces, each an optional rather
+	// than a has-X flag beside its payload. Same polled-out convention the
+	// monitors share — the flag is just folded into the value, so an empty
+	// slot cannot hold a stale payload for a reader that forgot to test it,
+	// Reset clears each in one assignment, and a new pending output adds one
+	// member instead of two plus a reset line.
+
 	// Jump-guard candidate: a discontinuous observation awaiting confirmation
 	// by a second one before the window is dropped (vs a one-off glitch).
-	bool pendingDiscontinuity = false;
-	Observation pendingObs;
+	std::optional<Observation> pendingObs;
 
-	bool hasPendingCorrection = false;
-	Correction pendingCorrection;
+	std::optional<Correction> pendingCorrection;
 	std::deque<Event> events;
 
 	double lastLatencyEstimateTime = 0.0;
-	bool hasPendingTimeOffset = false;
-	double pendingTimeOffset = 0.0;
+	std::optional<double> pendingTimeOffset;
 };
 
 } // namespace questcal

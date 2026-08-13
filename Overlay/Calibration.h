@@ -36,8 +36,15 @@ struct CalibrationContext
 	// Frozen with the tracking-system names when a collection starts. The UI's
 	// live device panes may refresh/reselect while the modal is open, but an
 	// in-flight solve must continue consuming the exact pair the user started.
+	// The ids alone cannot promise that: SteamVR may free an index and hand it
+	// to a different physical device inside the collection window, so the
+	// serials are frozen with them and re-checked at 1 Hz during Collecting.
+	// Empty means the serial could not be read at Begin, which proves nothing
+	// and therefore never aborts.
 	uint32_t calibrationReferenceID = 0xFFFFFFFF;
 	uint32_t calibrationTargetID = 0xFFFFFFFF;
+	std::string calibrationReferenceSerial;
+	std::string calibrationTargetSerial;
 
 	// The quaternion is the source of truth for the calibrated rotation, and
 	// calibratedRotation (Euler, degrees, [roll, yaw, pitch] to match the
@@ -269,10 +276,20 @@ struct CalibrationContext
 		double lastRestoreTime = 0.0;  // last auto-restore attempt (runtime cooldown)
 	} chaperone;
 
+	// "A persisted revision is never zero" lives here and nowhere else. The
+	// reader rejects anything below 1, so 0 means "absent" on the way in; a
+	// record written with 0 would read back revisionless, which is exactly the
+	// partial-write mismatch the shared revision exists to detect. Both record
+	// writers re-apply this rule to the live value immediately before
+	// serializing, and the wrap case below goes through it too.
+	void SetPersistenceRevision(uint32_t revision)
+	{
+		persistenceRevision = revision == 0 ? 1u : revision;
+	}
+
 	void AdvancePersistenceRevision()
 	{
-		if (++persistenceRevision == 0)
-			persistenceRevision = 1;
+		SetPersistenceRevision(persistenceRevision + 1);
 		persistenceCoupled = true;
 	}
 

@@ -193,16 +193,17 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 		// discontinuous observation is held as a candidate and only a second
 		// one agreeing with it drops the window; otherwise the candidate is
 		// discarded as an outlier.
-		if (pendingDiscontinuity)
+		if (pendingObs)
 		{
 			// Wait for an observation from an independent reference bracket: a
 			// glitched ref sample corrupts every obs interpolated across it
 			// with correlated errors, which would otherwise self-confirm.
-			if (obs.time - pendingObs.time < config.jumpConfirmSpacing)
+			if (obs.time - pendingObs->time < config.jumpConfirmSpacing)
 				continue;
-			pendingDiscontinuity = false;
-			double dRot = qObs.angularDistance(pendingObs.rot) * RadToDeg;
-			double dPos = (tObs - pendingObs.trans).norm();
+			double dRot = qObs.angularDistance(pendingObs->rot) * RadToDeg;
+			double dPos = (tObs - pendingObs->trans).norm();
+			// Consumed either way: confirmed below, or discarded as a glitch.
+			pendingObs.reset();
 			if (dRot <= config.jumpGuardRotDeg && dPos <= config.jumpGuardPosM)
 			{
 				observations.clear();
@@ -227,7 +228,6 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 				double dPos = (tObs - prev.trans).norm();
 				if (dRot > config.jumpGuardRotDeg || dPos > config.jumpGuardPosM)
 				{
-					pendingDiscontinuity = true;
 					pendingObs = obs;
 					continue;
 				}
@@ -577,10 +577,11 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	if (dEffYaw > config.maxStepPosM)
 		f = std::min(f, config.maxStepPosM / dEffYaw);
 
-	pendingCorrection.rotation = Eigen::Quaterniond(
+	Correction correction;
+	correction.rotation = Eigen::Quaterniond(
 		Eigen::AngleAxisd(f * yawAngle, Eigen::Vector3d::UnitY()));
-	pendingCorrection.translation = f * tPrime;
-	hasPendingCorrection = true;
+	correction.translation = f * tPrime;
+	pendingCorrection = correction;
 }
 
 // One owner for the freeze hysteresis' paired sentinels: entering either end
@@ -686,28 +687,25 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 		// ~20 s of both streams here costs a frame on the render thread.
 		if (CalibrationEngine::EstimateTimeOffset(refWindow, targetWindow, engineCfg,
 			measured, false))
-		{
 			pendingTimeOffset = measured;
-			hasPendingTimeOffset = true;
-		}
 	}
 }
 
 bool ContinuousAlignment::PollTimeOffset(double &out)
 {
-	if (!hasPendingTimeOffset)
+	if (!pendingTimeOffset)
 		return false;
-	out = pendingTimeOffset;
-	hasPendingTimeOffset = false;
+	out = *pendingTimeOffset;
+	pendingTimeOffset.reset();
 	return true;
 }
 
 bool ContinuousAlignment::PollCorrection(Correction &out)
 {
-	if (!hasPendingCorrection)
+	if (!pendingCorrection)
 		return false;
-	out = pendingCorrection;
-	hasPendingCorrection = false;
+	out = *pendingCorrection;
+	pendingCorrection.reset();
 	return true;
 }
 
@@ -738,9 +736,9 @@ void ContinuousAlignment::Reset()
 	ClearConfirmMarks();
 	scatterEpisodeSince = -1.0;
 	unstableNotified = false;
-	pendingDiscontinuity = false;
-	hasPendingCorrection = false;
-	hasPendingTimeOffset = false;
+	pendingObs.reset();
+	pendingCorrection.reset();
+	pendingTimeOffset.reset();
 	events.clear();
 	EnterState(State::Inactive);
 }

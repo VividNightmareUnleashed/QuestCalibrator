@@ -383,6 +383,33 @@ static void WriteChaperone(const SettingsRecord &settings, picojson::object &obj
 	obj["chaperone"].set<picojson::object>(std::move(chaperone));
 }
 
+// The whole Settings-owned half of a Config record, in one pass with a name.
+// Older releases embedded the global settings alongside the profile, and this
+// is the one-time migration `legacySettingsMigrationPending` and
+// CanMaterializeSettings exist to protect — so which keys are Settings-owned
+// rather than Config-owned is stated here instead of being seven statements
+// interleaved among the profile fields.
+//
+// Only what the record actually carried: an absent legacy key must leave the
+// caller's already-loaded value alone rather than reset it to a default.
+static void ParseLegacyEmbeddedSettings(const questcal::LegacyProfileSettings &legacy,
+	const picojson::object &obj, SettingsRecord &settings)
+{
+	if (legacy.hasApplyTimeOffset)
+		settings.applyTimeOffset = legacy.applyTimeOffset;
+	if (legacy.hasSolveScale)
+		settings.solveScale = legacy.solveScale;
+	if (legacy.hasUiAdvanced)
+		settings.uiAdvanced = legacy.uiAdvanced;
+	if (legacy.hasChaperoneWarningAck)
+		settings.chaperoneWarningAck = legacy.chaperoneWarningAck;
+	if (legacy.hasCalibrationSpeed)
+		settings.calibrationSpeed =
+			static_cast<CalibrationContext::Speed>(legacy.calibrationSpeed);
+
+	ParseChaperone(settings, obj);
+}
+
 // Reads the profile-owned fields through the shared codec, then layers on the
 // two things this record carries that the codec cannot see: the global
 // settings Config-only releases embedded alongside the profile, and the
@@ -397,21 +424,9 @@ static ProfileParseResult ParseProfile(ProfileRecord &profile,
 	ProfileParseResult result = questcal::ParseProfileObject(
 		profile, legacy, obj, protocol::SetAlignmentField::MaxAnchors);
 
-	// Only what the record actually carried: an absent legacy key must leave
-	// the caller's already-loaded value alone rather than reset it to a default.
-	if (legacy.hasApplyTimeOffset)
-		legacySettings.applyTimeOffset = legacy.applyTimeOffset;
-	if (legacy.hasSolveScale)
-		legacySettings.solveScale = legacy.solveScale;
-	if (legacy.hasUiAdvanced)
-		legacySettings.uiAdvanced = legacy.uiAdvanced;
-	if (legacy.hasChaperoneWarningAck)
-		legacySettings.chaperoneWarningAck = legacy.chaperoneWarningAck;
-	if (legacy.hasCalibrationSpeed)
-		legacySettings.calibrationSpeed =
-			static_cast<CalibrationContext::Speed>(legacy.calibrationSpeed);
-
-	ParseChaperone(legacySettings, obj);
+	// Stays after the transform parse: the suspicious-legacy-scale verdict in
+	// `result` is about the scale the codec just read.
+	ParseLegacyEmbeddedSettings(legacy, obj, legacySettings);
 	return result;
 }
 
@@ -658,9 +673,10 @@ void LoadProfile(CalibrationContext &ctx)
 		ctx.ReportError("Could not read application settings: " + settingsRead.error + "\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 	}
-	else if (settingsRead.status == RegistryReadStatus::Missing || settingsRead.value.empty())
-	{
-	}
+	// Missing or empty deliberately takes no branch: it keeps whatever the
+	// (possibly legacy Config-embedded) load above produced. Materializing a
+	// Settings record from those defaults is a migration, and CanMaterializeSettings
+	// is what decides whether it is allowed — never this branch.
 	else if (settingsRead.status == RegistryReadStatus::Present && !settingsRead.value.empty())
 	{
 		try
@@ -760,7 +776,14 @@ void LoadProfile(CalibrationContext &ctx)
 	ctx.pendingTargetTrackingSystem = ctx.targetTrackingSystem;
 }
 
-static bool SaveSettingsRecord(CalibrationContext &ctx);
+// Two layers, and the names now say which is which. SaveProfile/SaveSettings
+// COORDINATE the two registry records: either may commit the other half first
+// to keep the Config-before-Settings ordering and the shared revision. The
+// Write*Record pair below writes exactly ONE record and never calls a
+// coordinator — that is what terminates the graph
+// (SaveSettings -> SaveProfile -> WriteConfigRecord -> WriteSettingsRecord),
+// which previously rested on picking the right one of two names a token apart.
+static bool WriteSettingsRecord(CalibrationContext &ctx);
 
 // The preview no-op is the only write outcome that reports success without
 // writing, so it gets a line in the session log. Once per record per session:
@@ -776,7 +799,7 @@ static void NotePreviewWriteSkipped(CalibrationContext &ctx, const char *what,
 		" was not written to the registry\n");
 }
 
-static bool SaveProfileRecord(CalibrationContext &ctx, const ProfileRecord &record)
+static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &record)
 {
 	questcal::PersistenceWriteGate gate = questcal::GateProfileWrite(
 		g_uiPreviewMode, ctx.profileLoadState, ctx.settingsLoadState,
@@ -808,7 +831,7 @@ static bool SaveProfileRecord(CalibrationContext &ctx, const ProfileRecord &reco
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
-	if (ctx.legacySettingsMigrationPending && !SaveSettingsRecord(ctx))
+	if (ctx.legacySettingsMigrationPending && !WriteSettingsRecord(ctx))
 	{
 		ctx.ReportError(
 			"Could not save the calibration profile because the legacy settings copy "
@@ -816,8 +839,7 @@ static bool SaveProfileRecord(CalibrationContext &ctx, const ProfileRecord &reco
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
-	if (ctx.persistenceRevision == 0)
-		ctx.persistenceRevision = 1;
+	ctx.SetPersistenceRevision(ctx.persistenceRevision);
 	// The same definition the parser enforces, so a record that saves is a
 	// record that will load again.
 	std::string why;
@@ -850,7 +872,7 @@ static bool SaveProfileRecord(CalibrationContext &ctx, const ProfileRecord &reco
 
 bool SaveProfile(CalibrationContext &ctx)
 {
-	return SaveProfileRecord(ctx, CaptureProfileRecord(ctx));
+	return WriteConfigRecord(ctx, CaptureProfileRecord(ctx));
 }
 
 bool ClearSavedProfile(CalibrationContext &ctx)
@@ -863,7 +885,7 @@ bool ClearSavedProfile(CalibrationContext &ctx)
 		return false;
 
 	ProfileRecord cleared;
-	if (!SaveProfileRecord(ctx, cleared))
+	if (!WriteConfigRecord(ctx, cleared))
 		return false;
 	ctx.Clear();
 	return true;
@@ -888,7 +910,7 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 	candidate.translationMeters = translationMeters;
 	candidate.scale = scale;
 
-	if (!SaveProfileRecord(ctx, candidate))
+	if (!WriteConfigRecord(ctx, candidate))
 		return false;
 
 	if (rotationEdited)
@@ -908,7 +930,7 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 	return true;
 }
 
-static bool SaveSettingsRecord(CalibrationContext &ctx)
+static bool WriteSettingsRecord(CalibrationContext &ctx)
 {
 	questcal::PersistenceWriteGate gate = questcal::GateSettingsWrite(
 		g_uiPreviewMode, ctx.profileLoadState, ctx.settingsLoadState);
@@ -935,8 +957,7 @@ static bool SaveSettingsRecord(CalibrationContext &ctx)
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
-	if (ctx.persistenceRevision == 0)
-		ctx.persistenceRevision = 1;
+	ctx.SetPersistenceRevision(ctx.persistenceRevision);
 	SettingsRecord record = CaptureSettingsRecord(ctx);
 	// A snapshot with no owner is refused rather than written: an unowned room
 	// cannot be safely restored, so persisting one only produces a record the
@@ -990,7 +1011,7 @@ bool SaveSettings(CalibrationContext &ctx)
 	// snapshot. An uncoupled mismatch is detected and failed closed at load.
 	if (!profileSaved && ctx.persistenceCoupled)
 		return false;
-	bool settingsSaved = SaveSettingsRecord(ctx);
+	bool settingsSaved = WriteSettingsRecord(ctx);
 	if (!ctx.HasDirtyPersistence())
 		ctx.persistenceCoupled = false;
 	return profileSaved && settingsSaved;

@@ -6,22 +6,60 @@
 #include <new>
 #include <utility>
 
+namespace
+{
+
+// ResponseInvalid is the only rejection the wire can carry, so one response type
+// covers both "the gate refused this connection" (never handshaken, or a version
+// mismatch) and "your values were rejected" - and the overlay, seeing one type,
+// drives the same recovery for both: mark unsynchronized, disable the profile,
+// neutralize. A persistently unacceptable value therefore looks exactly like a
+// broken handshake from the other process.
+//
+// The reason code that actually separates them belongs on protocol::Response and
+// has to wait for the next protocol bump (the handshake enforces exact version
+// equality, so it costs a driver reinstall). Until then these two log lines are
+// the half of the diagnosis this side owns: which of the two causes fired is now
+// a fact in the driver log rather than something an operator has to infer from
+// the overlay's generic banner.
+protocol::ResponseType SetterResult(bool accepted, const char *operation)
+{
+	if (accepted)
+		return protocol::ResponseSuccess;
+
+	LOG("IPC %s rejected: the request cleared the protocol gate, so it was its "
+		"values that failed the driver trust boundary", operation);
+	return protocol::ResponseInvalid;
+}
+
+} // namespace
+
 void IPCServer::HandleRequest(const protocol::Request &request, protocol::Response &response,
 	questcal::ipc::ConnectionState &connection)
 {
 	if (!questcal::ipc::PrepareRequest(request, connection, response))
+	{
+		// The other cause of ResponseInvalid. Handshake and unknown request
+		// types are handled below/inside the gate, so only a mutation refused
+		// for the connection's own state is worth a line here.
+		if (request.type == protocol::RequestSetDeviceTransform ||
+			request.type == protocol::RequestSetAlignmentField)
+			LOG("IPC mutation %d refused by the protocol gate: this connection has "
+				"no same-version handshake (request version %u, driver %u)",
+				request.type, request.protocol.version, protocol::Version);
 		return;
+	}
 
 	switch (request.type)
 	{
 	case protocol::RequestSetDeviceTransform:
-		response.type = sink.setDeviceTransform(request.setDeviceTransform)
-			? protocol::ResponseSuccess : protocol::ResponseInvalid;
+		response.type = SetterResult(
+			sink.setDeviceTransform(request.setDeviceTransform), "SetDeviceTransform");
 		break;
 
 	case protocol::RequestSetAlignmentField:
-		response.type = sink.setAlignmentField(request.setAlignmentField)
-			? protocol::ResponseSuccess : protocol::ResponseInvalid;
+		response.type = SetterResult(
+			sink.setAlignmentField(request.setAlignmentField), "SetAlignmentField");
 		break;
 
 	default:

@@ -1,6 +1,11 @@
 // PCH-free on purpose: SolverTests compiles this file standalone.
 #include "JumpDetector.h"
 
+// For the shared yaw projection only. Included after JumpDetector.h so the
+// OpenVR header this TU already resolved (openvr_driver.h, via Protocol.h) is
+// the one ChaperoneMath.h sees.
+#include "ChaperoneMath.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdarg>
@@ -13,16 +18,15 @@
 namespace
 {
 
-// Heading component of a rotation: the twist around +Y. Well-behaved for the
-// gravity-aligned rotations a recenter produces.
+// Heading component of a rotation: the scalar form of the shared yaw
+// projection. The heuristic path regresses an ANGLE against time (a quaternion
+// cannot be least-squares fitted), so it needs the scalar; the exact path needs
+// the quaternion. Both come off questcal::YawOnlyRotation so there is one
+// projection convention, not two — see the comment there.
 double YawOf(const Eigen::Quaterniond &q)
 {
-	Eigen::Quaterniond twist(q.w(), 0.0, q.y(), 0.0);
-	double n = twist.norm();
-	if (n < 1e-9)
-		return 0.0;
-	twist.coeffs() /= n;
-	return 2.0 * std::atan2(twist.y(), twist.w());
+	Eigen::Quaterniond yaw = questcal::YawOnlyRotation(q);
+	return 2.0 * std::atan2(yaw.y(), yaw.w());
 }
 
 double WrapAngle(double a)
@@ -228,12 +232,17 @@ void JumpDetector::DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	// Exact world delta: worlds relate by D = new_wfd ∘ old_wfd⁻¹.
 	Eigen::Quaterniond dRot = (newRot * dev.wfdRot.conjugate()).normalized();
 
-	double yaw = YawOf(dRot);
-	Eigen::Quaterniond yawRot = YawQuat(yaw);
-	double tilt = yawRot.angularDistance(dRot);
+	// Constrain to yaw + translation (a recenter preserves gravity), through
+	// the projection the chaperone re-anchor path shares: invariants 14/15
+	// require the delta applied here and the standing-center re-anchor derived
+	// in ChaperoneMath to be the same transform. The discarded swing is the
+	// non-rigid residual, reported and never applied.
+	double tilt = 0.0;
+	Eigen::Quaterniond yawRot = questcal::YawOnlyRotation(dRot, &tilt);
+	double yaw = YawOf(yawRot);
 
-	// Constrain to yaw + translation (a recenter preserves gravity); compute
-	// the translation with the projected rotation so D stays self-consistent.
+	// Compute the translation with the projected rotation so D stays
+	// self-consistent with the yaw actually applied.
 	Eigen::Vector3d dTrans = newTrans - yawRot * dev.wfdTrans;
 
 	Candidate c;

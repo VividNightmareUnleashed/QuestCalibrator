@@ -15,7 +15,11 @@
 
 // The flattened OpenVR headers both define the vr types but cannot coexist in
 // one TU; the test harness already has openvr_driver.h via Protocol.h, the
-// overlay uses openvr.h. Pull in openvr.h only if neither is present yet.
+// overlay uses openvr.h — except JumpDetector.cpp, which is PCH-free and
+// reaches openvr_driver.h through Protocol.h in both builds. So the guard is
+// load-bearing in the shipped overlay too, not only in the harness: replacing
+// it with an unconditional include breaks that TU. Only the yaw projection
+// below is shared with it, and that one names no vr type.
 #if !defined(_OPENVR_API) && !defined(_OPENVR_DRIVER_API)
 #include <openvr.h>
 #endif
@@ -29,10 +33,44 @@
 namespace questcal
 {
 
+// The single yaw projection behind every raw-universe delta in the overlay.
+// A recenter preserves gravity, so only the twist around +Y may ever be
+// applied: worldFromDriver may carry a tiny tilt residual, and applying that
+// tilt to a room-scale calibration would move gravity itself. Contract
+// invariants 14/15 require the jump path's applied delta and the chaperone
+// path's standing-center re-anchor to be the *same* transform, so both derive
+// it here — they used to be two implementations with nothing linking them, and
+// a change to the projection convention applied to one would have moved the
+// room relative to the calibration by the difference.
+//
+// `unitRotation` must be normalized: the residual is an angular distance,
+// which is defined only between unit quaternions. Only JumpDetector consumes
+// the residual (reported for diagnostics, never applied), hence an opt-in
+// out-param rather than a second return.
+//
+// The twist is normalized directly rather than round-tripped through
+// atan2/AngleAxisd: that keeps x and z exactly zero, and the degenerate case —
+// a rotation of almost exactly 180 degrees about a horizontal axis, which has
+// no recoverable heading at all — has to answer identity either way.
+inline Eigen::Quaterniond YawOnlyRotation(
+	const Eigen::Quaterniond &unitRotation, double *residualTiltRadians = nullptr)
+{
+	Eigen::Quaterniond yaw(unitRotation.w(), 0.0, unitRotation.y(), 0.0);
+	if (yaw.squaredNorm() <= 1e-12)
+		yaw = Eigen::Quaterniond::Identity();
+	else
+		yaw.normalize();
+
+	if (residualTiltRadians)
+		*residualTiltRadians = yaw.angularDistance(unitRotation);
+	return yaw;
+}
+
 // Derive the same gravity-preserving (yaw + translation) raw-universe delta
-// used by JumpDetector. worldFromDriver may contain a tiny tilt residual, but
-// applying that tilt to a room-scale calibration would move gravity; retain
-// only the twist around +Y and make translation self-consistent with it.
+// used by JumpDetector: a thin validated wrapper over the shared projection
+// above, with the trust-boundary checks that only this side needs — the
+// chaperone path fails closed on out-of-bounds input, while JumpDetector's
+// samples have already cleared the ring boundary.
 inline bool WorldFromDriverDelta(
 	const Eigen::Quaterniond &oldRotation, const Eigen::Vector3d &oldTranslation,
 	const Eigen::Quaterniond &newRotation, const Eigen::Vector3d &newTranslation,
@@ -45,11 +83,7 @@ inline bool WorldFromDriverDelta(
 
 	Eigen::Quaterniond fullDelta =
 		(newRotation.normalized() * oldRotation.normalized().conjugate()).normalized();
-	Eigen::Quaterniond yaw(fullDelta.w(), 0.0, fullDelta.y(), 0.0);
-	if (yaw.squaredNorm() <= 1e-12)
-		yaw = Eigen::Quaterniond::Identity();
-	else
-		yaw.normalize();
+	Eigen::Quaterniond yaw = YawOnlyRotation(fullDelta);
 
 	deltaRotation = yaw;
 	deltaTranslation = newTranslation - yaw * oldTranslation;
