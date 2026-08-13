@@ -33,6 +33,39 @@ void IPCClient::Close()
 		CloseHandle(pipe);
 		pipe = INVALID_HANDLE_VALUE;
 	}
+	if (transactionEvent)
+	{
+		CloseHandle(transactionEvent);
+		transactionEvent = nullptr;
+	}
+}
+
+// Waits out one overlapped transfer under TransactionTimeoutMs and returns the
+// bytes transferred. A timeout is thrown exactly like an I/O error so
+// SendDriverRequest's ConnectionGeneration bookkeeping and the
+// replay-after-reconnect path in SendBlocking both behave unchanged.
+DWORD IPCClient::AwaitOverlapped(OVERLAPPED &ov, const char *what)
+{
+	DWORD transferred = 0;
+	if (GetLastError() == ERROR_IO_PENDING)
+	{
+		DWORD wait = WaitForSingleObject(ov.hEvent, TransactionTimeoutMs);
+		if (wait != WAIT_OBJECT_0)
+		{
+			// The kernel may still write into `ov` and the caller's buffer, so
+			// cancel and let the cancellation settle before either goes away.
+			CancelIoEx(pipe, &ov);
+			GetOverlappedResult(pipe, &ov, &transferred, TRUE);
+			throw std::runtime_error(std::string("Timed out ") + what +
+				". The driver is not responding.");
+		}
+	}
+	if (!GetOverlappedResult(pipe, &ov, &transferred, FALSE))
+	{
+		throw std::runtime_error(std::string("Error ") + what + ". Error: " +
+			LastErrorString(GetLastError()));
+	}
+	return transferred;
 }
 
 void IPCClient::Connect()
@@ -41,11 +74,23 @@ void IPCClient::Connect()
 	LPTSTR pipeName = TEXT(QUESTCALIBRATOR_PIPE_NAME);
 
 	WaitNamedPipe(pipeName, 1000);
-	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
+	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING,
+		FILE_FLAG_OVERLAPPED, 0);
 
 	if (pipe == INVALID_HANDLE_VALUE)
 	{
 		throw std::runtime_error("QuestCalibrator driver unavailable. Make sure SteamVR is running, and the QuestCalibrator addon is enabled in SteamVR settings.");
+	}
+
+	// Manual reset: GetOverlappedResult is what consumes completion here, and
+	// one event is reused for every transfer on this connection.
+	transactionEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+	if (!transactionEvent)
+	{
+		DWORD error = GetLastError();
+		Close();
+		throw std::runtime_error("Couldn't create pipe wait event. Error: " +
+			LastErrorString(error));
 	}
 
 	DWORD mode = PIPE_READMODE_MESSAGE;
@@ -118,25 +163,30 @@ protocol::Response IPCClient::SendBlockingConnected(const protocol::Request &req
 
 void IPCClient::SendConnected(const protocol::Request &request)
 {
-	DWORD bytesWritten;
-	BOOL success = WriteFile(pipe, &request, sizeof request, &bytesWritten, 0);
-	if (!success || bytesWritten != sizeof request)
+	OVERLAPPED ov = {};
+	ov.hEvent = transactionEvent;
+	ResetEvent(transactionEvent);
+
+	SetLastError(ERROR_SUCCESS);
+	WriteFile(pipe, &request, sizeof request, nullptr, &ov);
+	DWORD bytesWritten = AwaitOverlapped(ov, "writing IPC request");
+	if (bytesWritten != sizeof request)
 	{
-		DWORD error = success ? ERROR_WRITE_FAULT : GetLastError();
-		throw std::runtime_error("Error writing IPC request. Error: " + LastErrorString(error));
+		throw std::runtime_error("Error writing IPC request. Error: " +
+			LastErrorString(ERROR_WRITE_FAULT));
 	}
 }
 
 protocol::Response IPCClient::ReceiveConnected()
 {
 	protocol::Response response(protocol::ResponseInvalid);
-	DWORD bytesRead;
+	OVERLAPPED ov = {};
+	ov.hEvent = transactionEvent;
+	ResetEvent(transactionEvent);
 
-	BOOL success = ReadFile(pipe, &response, sizeof response, &bytesRead, 0);
-	if (!success)
-	{
-		throw std::runtime_error("Error reading IPC response. Error: " + LastErrorString(GetLastError()));
-	}
+	SetLastError(ERROR_SUCCESS);
+	ReadFile(pipe, &response, sizeof response, nullptr, &ov);
+	DWORD bytesRead = AwaitOverlapped(ov, "reading IPC response");
 
 	if (bytesRead != sizeof response)
 	{

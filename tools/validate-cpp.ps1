@@ -23,12 +23,16 @@ $configuration = [string]$config.configuration
 $platform = [string]$config.platform
 $testExecutable = [System.IO.Path]::GetFullPath(
     (Join-Path $Root ([string]$config.testExecutable)))
+$testProject = [System.IO.Path]::GetFullPath(
+    (Join-Path $Root ([string]$config.testProject)))
 $duplicateMinLines = [int]$config.duplicateMinLines
 $duplicateMinTokens = [int]$config.duplicateMinTokens
 $minScenarios = [int]$config.minScenarios
 if (-not $solution.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not [string]$config.testExecutable -or
     -not $testExecutable.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
+    -not [string]$config.testProject -or
+    -not $testProject.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not $configuration -or -not $platform -or
     $duplicateMinLines -lt 1 -or $duplicateMinTokens -lt 1 -or $minScenarios -lt 1) {
     Write-Output "Invalid C++ validation config: $configPath"
@@ -183,13 +187,26 @@ function Invoke-SolverTests {
     # A Test-Path alone cannot tell a fresh harness from one that detached from
     # the code under test — if the Tests project ever stops building as part of
     # the solution, the build still succeeds and an old executable runs green.
-    # Compare against the sources rather than against the build start, so an
-    # incremental build that legitimately relinks nothing still passes.
+    # Compare against the project's own inputs rather than the whole tree: most
+    # of Overlay/ and Driver/ is not compiled by the harness, and editing a file
+    # it does not build must not read as staleness. Comparing against sources
+    # rather than the build start also lets a no-op incremental build pass.
     $exeWritten = (Get-Item -LiteralPath $testExecutable).LastWriteTime
-    $newestSource = @('Driver', 'Overlay', 'common', 'Tests') |
-        ForEach-Object { Join-Path $Root $_ } |
-        Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
-        Get-ChildItem -Recurse -File -Include '*.cpp', '*.h', '*.vcxproj' -ErrorAction SilentlyContinue |
+    if (-not (Test-Path -LiteralPath $testProject -PathType Leaf)) {
+        Write-Output "Test project not found: $testProject"
+        exit 2
+    }
+    $projectDir = Split-Path -Parent $testProject
+    [xml]$projectXml = Get-Content -LiteralPath $testProject
+    $projectInputs = @(
+        $projectXml.Project.ItemGroup.ClCompile
+        $projectXml.Project.ItemGroup.ClInclude
+    ) | ForEach-Object { $_.Include } |
+        Where-Object { $_ } |
+        ForEach-Object { Join-Path $projectDir $_ }
+    $newestSource = @($projectInputs + $testProject) |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Get-Item |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if ($newestSource -and $newestSource.LastWriteTime -gt $exeWritten) {
