@@ -25,6 +25,7 @@
 #include "../Overlay/DriverSyncPolicy.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/ProfileValidation.h"
+#include "../Overlay/ProfileRecordJson.h"
 #include "../Overlay/RingPoseMath.h"
 #include "../Overlay/PoseStreamHub.h"
 #include "../common/PoseChannel.h"
@@ -36,6 +37,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -5850,6 +5852,1027 @@ void RunContinuousScenarios()
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Persistence: the Config record codec, the write gates, and the load-plan
+// state machine (Overlay/ProfileRecordJson.h + Overlay/ProfileValidation.h).
+//
+// Configuration.cpp is compiled by no test. These two headers carry every
+// persistence decision that used to live inside it, so this is the only place a
+// writer/parser divergence -- the mount extrinsic or the field anchors silently
+// reverting on every launch -- can be caught before a user finds it.
+
+const size_t PersistMaxAnchors = protocol::SetAlignmentField::MaxAnchors;
+
+// Re-normalizing an already-normalized quaternion is not required to be
+// bit-exact, so quaternion components get a few ulps of slack. Everything the
+// codec stores verbatim is compared exactly: picojson emits %.17g, which
+// round-trips an IEEE double. Components are compared one at a time -- an
+// angular distance would not see a w/x transposition between writer and reader.
+bool PersistQuatEq(const Eigen::Quaterniond &a, const Eigen::Quaterniond &b)
+{
+	const double tol = 1e-15;
+	return std::abs(a.w() - b.w()) <= tol && std::abs(a.x() - b.x()) <= tol &&
+		std::abs(a.y() - b.y()) <= tol && std::abs(a.z() - b.z()) <= tol;
+}
+
+bool PersistVecEq(const Eigen::Vector3d &a, const Eigen::Vector3d &b)
+{
+	return a(0) == b(0) && a(1) == b(1) && a(2) == b(2);
+}
+
+// Fully populated: every optional block present, every boolean flipped away
+// from its default, so a field the writer emits and the parser stopped reading
+// (or the reverse) shows up as a named difference rather than as a value that
+// happens to match the default.
+ProfileRecord PersistGoodRecord()
+{
+	ProfileRecord r;
+	r.valid = true;
+	r.referenceTrackingSystem = "lighthouse";
+	r.targetTrackingSystem = "oculus";
+	r.rotation = Eigen::Quaterniond(0.7, 0.2, -0.5, 0.3).normalized();
+	r.translationMeters = Eigen::Vector3d(1.25, -0.375, 0.5);
+	r.scale = 1.02;
+	r.timeOffset = 0.012;
+	r.calibrationUnixTime = 1.7e9;
+	r.universeUnsafe = true;
+	r.universeValid = true;
+	r.universeHmdSerial = "LHR-HMD01";
+	r.universeRotation = Eigen::Quaterniond(0.6, -0.3, 0.4, 0.62).normalized();
+	r.universeTranslation = Eigen::Vector3d(-0.5, 1.75, 0.125);
+	r.fieldEnabled = false;
+	r.continuousEnabled = true;
+	r.continuousTrackerSerial = "LHR-ABC";
+	r.continuousLatencyReestimation = true;
+	r.hideMountedTracker = false;
+	r.mountExtrinsic.valid = true;
+	r.mountExtrinsic.rotation = Eigen::Quaterniond(0.9, 0.1, -0.25, 0.35).normalized();
+	r.mountExtrinsic.translationMeters = Eigen::Vector3d(0.05, -0.125, 0.25);
+	r.mountExtrinsic.rotationRmsDeg = 0.375;
+	r.mountExtrinsic.translationRmsM = 0.0125;
+
+	PersistedFieldAnchor a0;
+	a0.position = Eigen::Vector3d(1.5, 0.0, -2.0);
+	a0.rotation = Eigen::Quaterniond(0.95, 0.05, -0.15, 0.25).normalized();
+	a0.translationMeters = Eigen::Vector3d(1.3, -0.4, 0.55);
+	PersistedFieldAnchor a1;
+	a1.position = Eigen::Vector3d(-0.75, 1.0, 0.5);
+	a1.rotation = Eigen::Quaterniond(0.8, -0.2, 0.4, 0.4).normalized();
+	a1.translationMeters = Eigen::Vector3d(0.9, 0.125, -0.625);
+	r.fieldAnchors.push_back(a0);
+	r.fieldAnchors.push_back(a1);
+	return r;
+}
+
+std::string PersistWrite(const ProfileRecord &record, uint32_t revision)
+{
+	std::ostringstream out;
+	WriteProfile(record, revision, out);
+	return out.str();
+}
+
+// "" on success; otherwise the reason the envelope or the object was refused.
+std::string PersistReadBack(const std::string &text, ProfileRecord &back,
+	LegacyProfileSettings &legacy, ProfileParseResult &result)
+{
+	try
+	{
+		std::istringstream in(text);
+		picojson::value v = ParseProfileEnvelope(in);
+		result = ParseProfileObject(
+			back, legacy, v.get<picojson::object>(), PersistMaxAnchors);
+		return std::string();
+	}
+	catch (const std::exception &e)
+	{
+		return std::string("threw \"") + e.what() + "\"";
+	}
+}
+
+// Names every field that differs, so a single Check can still say which one.
+std::string PersistProfileDiff(const ProfileRecord &a, const ProfileRecord &b)
+{
+	std::string d;
+	auto note = [&d](const char *field) { d += d.empty() ? field : (std::string("/") + field); };
+	if (a.valid != b.valid) note("valid");
+	if (a.referenceTrackingSystem != b.referenceTrackingSystem) note("reference");
+	if (a.targetTrackingSystem != b.targetTrackingSystem) note("target");
+	if (!PersistQuatEq(a.rotation, b.rotation)) note("rotation");
+	if (!PersistVecEq(a.translationMeters, b.translationMeters)) note("translation");
+	if (a.scale != b.scale) note("scale");
+	if (a.timeOffset != b.timeOffset) note("timeOffset");
+	if (a.calibrationUnixTime != b.calibrationUnixTime) note("calibrationTime");
+	if (a.universeUnsafe != b.universeUnsafe) note("universeUnsafe");
+	if (a.universeValid != b.universeValid) note("universeValid");
+	if (a.universeHmdSerial != b.universeHmdSerial) note("universeSerial");
+	if (a.universeValid && b.universeValid)
+	{
+		if (!PersistQuatEq(a.universeRotation, b.universeRotation)) note("universeRotation");
+		if (!PersistVecEq(a.universeTranslation, b.universeTranslation)) note("universeTranslation");
+	}
+	if (a.fieldEnabled != b.fieldEnabled) note("fieldEnabled");
+	if (a.continuousEnabled != b.continuousEnabled) note("continuousEnabled");
+	if (a.continuousTrackerSerial != b.continuousTrackerSerial) note("continuousSerial");
+	if (a.continuousLatencyReestimation != b.continuousLatencyReestimation) note("continuousLatency");
+	if (a.hideMountedTracker != b.hideMountedTracker) note("hideMountedTracker");
+	if (a.mountExtrinsic.valid != b.mountExtrinsic.valid) note("mount.valid");
+	else if (a.mountExtrinsic.valid)
+	{
+		if (!PersistQuatEq(a.mountExtrinsic.rotation, b.mountExtrinsic.rotation)) note("mount.rotation");
+		if (!PersistVecEq(a.mountExtrinsic.translationMeters,
+			b.mountExtrinsic.translationMeters)) note("mount.translation");
+		if (a.mountExtrinsic.rotationRmsDeg != b.mountExtrinsic.rotationRmsDeg) note("mount.rotRms");
+		if (a.mountExtrinsic.translationRmsM != b.mountExtrinsic.translationRmsM) note("mount.posRms");
+	}
+	if (a.fieldAnchors.size() != b.fieldAnchors.size()) note("anchorCount");
+	else
+	{
+		for (size_t i = 0; i < a.fieldAnchors.size(); ++i)
+		{
+			if (!PersistVecEq(a.fieldAnchors[i].position, b.fieldAnchors[i].position))
+				note("anchor.position");
+			if (!PersistQuatEq(a.fieldAnchors[i].rotation, b.fieldAnchors[i].rotation))
+				note("anchor.rotation");
+			if (!PersistVecEq(a.fieldAnchors[i].translationMeters,
+				b.fieldAnchors[i].translationMeters)) note("anchor.translation");
+		}
+	}
+	return d;
+}
+
+picojson::value PersistNumbers(std::initializer_list<double> values)
+{
+	picojson::array arr;
+	arr.reserve(values.size());
+	for (double v : values)
+		arr.push_back(picojson::value(v));
+	return picojson::value(arr);
+}
+
+// Exactly the keys ParseProfileObject requires, with an identity transform and
+// settings_version 2 so nothing below trips the v1 scale migration by accident.
+picojson::object PersistMinimalProfileObject()
+{
+	picojson::object obj;
+	obj["reference_tracking_system"] = picojson::value(std::string("lighthouse"));
+	obj["target_tracking_system"] = picojson::value(std::string("oculus"));
+	obj["rotation_quat"] = PersistNumbers({ 1.0, 0.0, 0.0, 0.0 });
+	obj["translation_meters"] = PersistNumbers({ 0.0, 0.0, 0.0 });
+	obj["settings_version"] = picojson::value(2.0);
+	return obj;
+}
+
+picojson::value PersistAnchorObject(double translationX)
+{
+	picojson::object anchor;
+	anchor["position"] = PersistNumbers({ 0.0, 0.0, 0.0 });
+	anchor["rotation_quat"] = PersistNumbers({ 1.0, 0.0, 0.0, 0.0 });
+	anchor["translation_meters"] = PersistNumbers({ translationX, 0.0, 0.0 });
+	return picojson::value(anchor);
+}
+
+// 0 = accepted, 1 = std::runtime_error (the contract), 2 = some other exception.
+int PersistParseOutcome(const picojson::object &obj, std::string &message)
+{
+	ProfileRecord record;
+	LegacyProfileSettings legacy;
+	try
+	{
+		ParseProfileObject(record, legacy, obj, PersistMaxAnchors);
+		return 0;
+	}
+	catch (const std::runtime_error &e) { message = e.what(); return 1; }
+	catch (const std::exception &e) { message = e.what(); return 2; }
+}
+
+const char *PersistWriteGateName(PersistenceWriteGate gate)
+{
+	switch (gate)
+	{
+	case PersistenceWriteGate::Allowed: return "Allowed";
+	case PersistenceWriteGate::SkippedPreview: return "SkippedPreview";
+	case PersistenceWriteGate::RefusedConfigUnreadable: return "RefusedConfigUnreadable";
+	case PersistenceWriteGate::RefusedSettingsUnreadable: return "RefusedSettingsUnreadable";
+	}
+	return "?";
+}
+
+const char *PersistLoadGateName(ChaperoneLoadGate gate)
+{
+	switch (gate)
+	{
+	case ChaperoneLoadGate::Armed: return "Armed";
+	case ChaperoneLoadGate::ProfileUnreadable: return "ProfileUnreadable";
+	case ChaperoneLoadGate::SettingsUnreadable: return "SettingsUnreadable";
+	case ChaperoneLoadGate::IncompleteOwner: return "IncompleteOwner";
+	case ChaperoneLoadGate::ForeignTrackingSystem: return "ForeignTrackingSystem";
+	}
+	return "?";
+}
+
+// --- A. WriteProfile -> ParseProfileObject identity --------------------------
+void RunPersistenceRoundTripScenario()
+{
+	std::string why;
+	auto fail = [&why](const char *cell, const std::string &what)
+	{
+		why += std::string(" ") + cell + "(" + what + ")";
+	};
+
+	// A1: fully populated, both optional blocks present, two anchors in range.
+	const ProfileRecord good = PersistGoodRecord();
+	const std::string a1Text = PersistWrite(good, 7);
+	ProfileRecord back;
+	LegacyProfileSettings legacy;
+	ProfileParseResult result;
+	std::string err = PersistReadBack(a1Text, back, legacy, result);
+	size_t a1Anchors = 0;
+	if (!err.empty())
+	{
+		fail("A1", err);
+	}
+	else
+	{
+		a1Anchors = back.fieldAnchors.size();
+		std::string diff = PersistProfileDiff(good, back);
+		if (!diff.empty()) fail("A1", diff);
+		if (!back.valid) fail("A1", "valid=false");
+		if (!result.revision.present || result.revision.value != 7)
+			fail("A1", "revision");
+		// The writer stamps settings_version 2, so a round-tripped record must
+		// not re-run the one-time v1 scale migration on every launch.
+		if (result.migratedScaleSetting) fail("A1", "migration re-ran");
+	}
+
+	// A2: an empty continuous serial is written by omission and must come back
+	// empty rather than as a stray key or a parse failure.
+	{
+		ProfileRecord record = good;
+		record.continuousTrackerSerial.clear();
+		ProfileRecord r2;
+		LegacyProfileSettings l2;
+		ProfileParseResult p2;
+		std::string e2 = PersistReadBack(PersistWrite(record, 7), r2, l2, p2);
+		if (!e2.empty()) fail("A2", e2);
+		else if (!r2.continuousTrackerSerial.empty()) fail("A2", "serial survived");
+	}
+
+	// A3: universeValid=false must suppress all three baseline keys together --
+	// a partial baseline is what the parser rejects outright.
+	{
+		ProfileRecord record = good;
+		record.universeValid = false;
+		ProfileRecord r3;
+		LegacyProfileSettings l3;
+		ProfileParseResult p3;
+		std::string e3 = PersistReadBack(PersistWrite(record, 7), r3, l3, p3);
+		if (!e3.empty()) fail("A3", e3);
+		else if (r3.universeValid || !r3.universeHmdSerial.empty())
+			fail("A3", "baseline survived");
+	}
+
+	// A4: an invalid mount extrinsic must not be written at all, or continuous
+	// calibration arms on garbage after the next restart.
+	{
+		ProfileRecord record = good;
+		record.mountExtrinsic.valid = false;
+		ProfileRecord r4;
+		LegacyProfileSettings l4;
+		ProfileParseResult p4;
+		std::string e4 = PersistReadBack(PersistWrite(record, 7), r4, l4, p4);
+		MountExtrinsicRecord defaults;
+		if (!e4.empty()) fail("A4", e4);
+		else if (r4.mountExtrinsic.valid ||
+			!PersistQuatEq(r4.mountExtrinsic.rotation, defaults.rotation) ||
+			!PersistVecEq(r4.mountExtrinsic.translationMeters, defaults.translationMeters) ||
+			r4.mountExtrinsic.rotationRmsDeg != 0.0 ||
+			r4.mountExtrinsic.translationRmsM != 0.0)
+			fail("A4", "extrinsic survived");
+	}
+
+	// A5: zero anchors.
+	{
+		ProfileRecord record = good;
+		record.fieldAnchors.clear();
+		ProfileRecord r5;
+		LegacyProfileSettings l5;
+		ProfileParseResult p5;
+		std::string e5 = PersistReadBack(PersistWrite(record, 7), r5, l5, p5);
+		if (!e5.empty()) fail("A5", e5);
+		else if (!r5.fieldAnchors.empty()) fail("A5", "anchors appeared");
+	}
+
+	// A6: an invalid record writes nothing, which is how ClearSavedProfile
+	// blanks the value instead of storing a bogus one.
+	const size_t a6Bytes = PersistWrite(ProfileRecord(), 7).size();
+	if (a6Bytes != 0) fail("A6", "wrote " + std::to_string(a6Bytes) + " bytes");
+
+	// A7: the revision is a uint32 on both sides, not a float or an int32.
+	const uint32_t maxRevision = std::numeric_limits<uint32_t>::max();
+	uint32_t a7Revision = 0;
+	{
+		ProfileRecord r7;
+		LegacyProfileSettings l7;
+		ProfileParseResult p7;
+		std::string e7 = PersistReadBack(
+			PersistWrite(good, maxRevision), r7, l7, p7);
+		if (!e7.empty()) fail("A7", e7);
+		else
+		{
+			a7Revision = p7.revision.value;
+			if (!p7.revision.present || p7.revision.value != maxRevision)
+				fail("A7", "revision " + std::to_string(p7.revision.value));
+		}
+	}
+
+	char detail[512];
+	snprintf(detail, sizeof detail,
+		"A1 %zu bytes / %zu anchors, A6 %zu bytes, A7 rev %u%s%s",
+		a1Text.size(), a1Anchors, a6Bytes, a7Revision,
+		why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence A: round-trip", why.empty(), detail);
+}
+
+// --- B. ReadPersistenceRevision ---------------------------------------------
+void RunPersistenceRevisionScenario()
+{
+	std::string why;
+	auto read = [](const picojson::object &obj, PersistedRevision &out,
+		std::string &message) -> int
+	{
+		try { out = ReadPersistenceRevision(obj); return 0; }
+		catch (const std::runtime_error &e) { message = e.what(); return 1; }
+		catch (const std::exception &e) { message = e.what(); return 2; }
+	};
+
+	PersistedRevision absent;
+	std::string message;
+	picojson::object empty;
+	int outcome = read(empty, absent, message);
+	if (outcome != 0) why += " absent(threw)";
+	else if (absent.present || absent.value != 0)
+		why += " absent(present=" + std::to_string(absent.present ? 1 : 0) + ")";
+
+	PersistedRevision three;
+	picojson::object valid;
+	valid["persistence_revision"] = picojson::value(3.0);
+	outcome = read(valid, three, message);
+	if (outcome != 0) why += " three(threw)";
+	else if (!three.present || three.value != 3)
+		why += " three(" + std::to_string(three.value) + ")";
+
+	// 0 collides with the absent sentinel, so accepting it would make a
+	// revisionless record look coupled to whatever Settings carries.
+	auto rejects = [&](const char *cell, const picojson::value &v)
+	{
+		picojson::object obj;
+		obj["persistence_revision"] = v;
+		PersistedRevision ignored;
+		std::string msg;
+		int o = read(obj, ignored, msg);
+		if (o == 1) return;
+		why += std::string(" ") + cell +
+			(o == 0 ? "(accepted " + std::to_string(ignored.value) + ")"
+				: "(wrong exception)");
+	};
+	rejects("zero", picojson::value(0.0));
+	rejects("negative", picojson::value(-1.0));
+	rejects("fractional", picojson::value(1.5));
+	rejects("overflow", picojson::value(4294967296.0));
+	rejects("string", picojson::value(std::string("3")));
+
+	char detail[256];
+	snprintf(detail, sizeof detail,
+		"absent {%d,%u}, 3 -> {%d,%u}, 0/-1/1.5/2^32/\"3\" rejected%s%s",
+		absent.present ? 1 : 0, absent.value, three.present ? 1 : 0, three.value,
+		why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence B: revision", why.empty(), detail);
+}
+
+// --- C. RejectExcessiveJsonNesting ------------------------------------------
+void RunPersistenceNestingScenario()
+{
+	std::string why;
+	auto throwsOn = [](const std::string &text)
+	{
+		try { RejectExcessiveJsonNesting(text); return false; }
+		catch (const std::runtime_error &) { return true; }
+	};
+
+	const std::string realProfile = PersistWrite(PersistGoodRecord(), 7);
+	if (throwsOn("[]")) why += " empty-array";
+	if (throwsOn("{}")) why += " empty-object";
+	if (throwsOn(realProfile)) why += " real-profile";
+
+	// Test just over the cap: nesting deep enough to actually overflow the stack
+	// would prove nothing, since the whole point is that the guard fires before
+	// picojson's recursive descent runs at all.
+	if (throwsOn(std::string(16, '['))) why += " depth16-rejected";
+	if (!throwsOn(std::string(17, '['))) why += " depth17-accepted";
+
+	// Brackets inside a string value are not nesting -- a tracker serial
+	// containing them must not make the whole profile Unreadable.
+	if (throwsOn("{\"serial\":\"" + std::string(100, '[') + "\"}"))
+		why += " in-string";
+	// ... and an escaped quote does not end that string, so the brackets after
+	// it are still inside it.
+	if (throwsOn("[\"a\\\"" + std::string(100, '[') + "\"]"))
+		why += " escaped-quote";
+
+	char detail[256];
+	snprintf(detail, sizeof detail,
+		"depth 16 ok / 17 throws; %zu-byte real profile ok; 100 in-string brackets ok%s%s",
+		realProfile.size(), why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence C: json depth", why.empty(), detail);
+}
+
+// --- D. ParseProfileObject rejection matrix ---------------------------------
+void RunPersistenceRejectionScenario()
+{
+	std::string why;
+	int rejected = 0;
+	auto rejects = [&](const char *cell, const picojson::object &obj,
+		const char *mustMention)
+	{
+		std::string message;
+		int outcome = PersistParseOutcome(obj, message);
+		if (outcome == 1)
+		{
+			rejected++;
+			if (mustMention && message.find(mustMention) == std::string::npos)
+				why += std::string(" ") + cell + "(message=\"" + message + "\")";
+			return;
+		}
+		why += std::string(" ") + cell +
+			(outcome == 0 ? "(accepted)" : "(wrong exception: " + message + ")");
+	};
+
+	const picojson::object base = PersistMinimalProfileObject();
+	// Without this the whole matrix below could be passing vacuously.
+	{
+		std::string message;
+		if (PersistParseOutcome(base, message) != 0)
+			why += " fixture(rejected: " + message + ")";
+	}
+
+	picojson::object m = base;
+	m.erase("reference_tracking_system");
+	rejects("missing-reference", m, nullptr);
+
+	m = base;
+	m["target_tracking_system"] = picojson::value(std::string("lighthouse"));
+	rejects("same-systems", m, nullptr);
+
+	m = base;
+	m["rotation_quat"] = PersistNumbers({ 1.0, 0.0, 0.0 });
+	rejects("quat-3", m, nullptr);
+
+	// Catches "normalize first, validate later", which would produce NaNs.
+	m = base;
+	m["rotation_quat"] = PersistNumbers({ 0.0, 0.0, 0.0, 0.0 });
+	rejects("quat-zero", m, nullptr);
+
+	m = base; m["scale"] = picojson::value(0.1);
+	rejects("scale-low", m, nullptr);
+	m = base; m["scale"] = picojson::value(5.0);
+	rejects("scale-high", m, nullptr);
+
+	m = base; m["time_offset"] = picojson::value(2.0);
+	rejects("time-offset", m, nullptr);
+
+	m = base; m["calibration_time"] = picojson::value(-1.0);
+	rejects("time-negative", m, nullptr);
+	m = base; m["calibration_time"] = picojson::value(4e10);
+	rejects("time-implausible", m, nullptr);
+
+	m = base;
+	m["universe_hmd_serial"] = picojson::value(std::string("LHR-1"));
+	rejects("universe-partial", m, nullptr);
+
+	m = base;
+	m["universe_hmd_serial"] = picojson::value(std::string(""));
+	m["universe_world_from_driver_rotation_quat"] = PersistNumbers({ 1.0, 0.0, 0.0, 0.0 });
+	m["universe_world_from_driver_translation_meters"] = PersistNumbers({ 0.0, 0.0, 0.0 });
+	rejects("universe-empty-serial", m, nullptr);
+
+	m = base; m["settings_version"] = picojson::value(0.0);
+	rejects("settings-version-0", m, "settings_version");
+	m = base; m["settings_version"] = picojson::value(101.0);
+	rejects("settings-version-101", m, nullptr);
+	m = base; m["settings_version"] = picojson::value(1.5);
+	rejects("settings-version-frac", m, nullptr);
+
+	m = base; m["calibration_speed"] = picojson::value(3.0);
+	rejects("speed-3", m, nullptr);
+	m = base; m["calibration_speed"] = picojson::value(1.5);
+	rejects("speed-frac", m, nullptr);
+
+	auto mountObject = [](std::initializer_list<double> quat, double rotRms)
+	{
+		picojson::object extrinsic;
+		picojson::array q;
+		for (double v : quat)
+			q.push_back(picojson::value(v));
+		extrinsic["rotation_quat"] = picojson::value(q);
+		extrinsic["translation_meters"] = PersistNumbers({ 0.01, 0.0, -0.02 });
+		extrinsic["rot_rms_deg"] = picojson::value(rotRms);
+		extrinsic["pos_rms_m"] = picojson::value(0.001);
+		return picojson::value(extrinsic);
+	};
+	m = base; m["mount_extrinsic"] = mountObject({ 1.0, 0.0, 0.0 }, 0.5);
+	rejects("mount-quat-3", m, nullptr);
+	m = base; m["mount_extrinsic"] = mountObject({ 0.0, 0.0, 0.0, 0.0 }, 0.5);
+	rejects("mount-quat-zero", m, nullptr);
+	m = base; m["mount_extrinsic"] = mountObject({ 1.0, 0.0, 0.0, 0.0 }, -1.0);
+	rejects("mount-rms-negative", m, nullptr);
+
+	m = base;
+	{
+		picojson::array anchors;
+		for (size_t i = 0; i <= PersistMaxAnchors; ++i)
+			anchors.push_back(PersistAnchorObject(0.0));
+		m["field_anchors"] = picojson::value(anchors);
+	}
+	rejects("anchors-9", m, nullptr);
+
+	m = base;
+	{
+		picojson::array anchors;
+		anchors.push_back(PersistAnchorObject(200.0));
+		m["field_anchors"] = picojson::value(anchors);
+	}
+	rejects("anchor-200m", m, nullptr);
+
+	// picojson's get<T>() is guarded only by assert(), compiled out in Release,
+	// so without the type check this reads the wrong union member.
+	m = base; m["scale"] = picojson::value(std::string("1.0"));
+	rejects("scale-string", m, "scale");
+
+	m = base;
+	{
+		picojson::array quat;
+		quat.push_back(picojson::value(1.0));
+		quat.push_back(picojson::value(std::string("0")));
+		quat.push_back(picojson::value(0.0));
+		quat.push_back(picojson::value(0.0));
+		m["rotation_quat"] = picojson::value(quat);
+	}
+	rejects("quat-string-element", m, nullptr);
+
+	char detail[256];
+	snprintf(detail, sizeof detail,
+		"%d/23 mutations rejected as runtime_error%s%s", rejected,
+		why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence D: rejects", why.empty() && rejected == 23, detail);
+}
+
+// --- E. Legacy-settings extraction ------------------------------------------
+void RunPersistenceLegacyScenario()
+{
+	std::string why;
+	auto parse = [&](const char *cell, const picojson::object &obj,
+		ProfileRecord &record, LegacyProfileSettings &legacy,
+		ProfileParseResult &result) -> bool
+	{
+		try
+		{
+			result = ParseProfileObject(record, legacy, obj, PersistMaxAnchors);
+			return true;
+		}
+		catch (const std::exception &e)
+		{
+			why += std::string(" ") + cell + "(threw \"" + e.what() + "\")";
+			return false;
+		}
+	};
+
+	// E1: a v1 record's solve_scale is never honoured -- doing so would
+	// re-enable scale solving for every legacy user on every launch -- but the
+	// already-applied scale is kept, because clearing it misaligns the space.
+	{
+		picojson::object obj = PersistMinimalProfileObject();
+		obj["settings_version"] = picojson::value(1.0);
+		obj["solve_scale"] = picojson::value(true);
+		obj["scale"] = picojson::value(1.01);
+		ProfileRecord record;
+		LegacyProfileSettings legacy;
+		ProfileParseResult result;
+		if (parse("E1", obj, record, legacy, result))
+		{
+			if (!result.migratedScaleSetting) why += " E1(not migrated)";
+			if (!legacy.hasSolveScale || legacy.solveScale) why += " E1(solveScale honoured)";
+			if (record.scale != 1.01) why += " E1(scale clobbered)";
+		}
+	}
+
+	// E2: the suspicious-scale boundary, inclusive on both ends.
+	{
+		const double scales[] = { 1.05, 1.0, 0.98, 1.02, 0.979, 1.021 };
+		const bool expected[] = { true, false, false, false, true, true };
+		for (int i = 0; i < 6; ++i)
+		{
+			picojson::object obj = PersistMinimalProfileObject();
+			obj["settings_version"] = picojson::value(1.0);
+			obj["scale"] = picojson::value(scales[i]);
+			ProfileRecord record;
+			LegacyProfileSettings legacy;
+			ProfileParseResult result;
+			if (!parse("E2", obj, record, legacy, result))
+				continue;
+			if (result.suspiciousLegacyScale != expected[i])
+			{
+				char cell[64];
+				snprintf(cell, sizeof cell, " E2(scale %.3f -> %d)", scales[i],
+					result.suspiciousLegacyScale ? 1 : 0);
+				why += cell;
+			}
+		}
+	}
+
+	// E3: at v2 the migration must not re-run, and solve_scale is honoured.
+	{
+		picojson::object obj = PersistMinimalProfileObject();
+		obj["solve_scale"] = picojson::value(true);
+		ProfileRecord record;
+		LegacyProfileSettings legacy;
+		ProfileParseResult result;
+		if (parse("E3", obj, record, legacy, result))
+		{
+			if (!legacy.hasSolveScale || !legacy.solveScale) why += " E3(solveScale dropped)";
+			if (result.migratedScaleSetting) why += " E3(migration re-ran)";
+		}
+	}
+
+	// E4: absent is not a default. Configuration.cpp copies only when hasX, so
+	// this is what stops a profile resetting preferences it never carried.
+	{
+		picojson::object obj = PersistMinimalProfileObject();
+		ProfileRecord record;
+		LegacyProfileSettings legacy;
+		ProfileParseResult result;
+		if (parse("E4", obj, record, legacy, result))
+		{
+			if (legacy.hasApplyTimeOffset || legacy.hasSolveScale ||
+				legacy.hasUiAdvanced || legacy.hasChaperoneWarningAck ||
+				legacy.hasCalibrationSpeed)
+				why += " E4(absent became present)";
+		}
+	}
+
+	// E5: every key the walk still has to visit.
+	{
+		picojson::object obj = PersistMinimalProfileObject();
+		obj["apply_time_offset"] = picojson::value(false);
+		obj["ui_advanced"] = picojson::value(true);
+		obj["chaperone_warning_ack"] = picojson::value(true);
+		obj["calibration_speed"] = picojson::value(2.0);
+		ProfileRecord record;
+		LegacyProfileSettings legacy;
+		ProfileParseResult result;
+		if (parse("E5", obj, record, legacy, result))
+		{
+			if (!legacy.hasApplyTimeOffset || legacy.applyTimeOffset)
+				why += " E5(apply_time_offset)";
+			if (!legacy.hasUiAdvanced || !legacy.uiAdvanced) why += " E5(ui_advanced)";
+			if (!legacy.hasChaperoneWarningAck || !legacy.chaperoneWarningAck)
+				why += " E5(chaperone_warning_ack)";
+			if (!legacy.hasCalibrationSpeed || legacy.calibrationSpeed !=
+				static_cast<int>(PersistedCalibrationSpeed::VerySlow))
+				why += " E5(calibration_speed)";
+		}
+	}
+
+	char detail[384];
+	snprintf(detail, sizeof detail,
+		"v1 migration one-shot, suspicious scale outside [0.98,1.02], 5 legacy keys%s%s",
+		why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence E: legacy keys", why.empty(), detail);
+}
+
+// --- F. ValidateProfileRecord, the parser/writer contract -------------------
+void RunPersistenceContractScenario()
+{
+	std::string why;
+	auto accepts = [](const ProfileRecord &record, std::string &reason)
+	{
+		reason.clear();
+		return ValidateProfileRecord(record, PersistMaxAnchors, reason);
+	};
+	auto expect = [&](const char *cell, const ProfileRecord &record, bool want,
+		const char *wantWhy)
+	{
+		std::string reason;
+		bool got = accepts(record, reason);
+		if (got != want)
+		{
+			why += std::string(" ") + cell + (got ? "(accepted)" : "(rejected: " + reason + ")");
+			return;
+		}
+		if (!want && wantWhy && reason != wantWhy)
+			why += std::string(" ") + cell + "(why=\"" + reason + "\")";
+	};
+
+	const ProfileRecord good = PersistGoodRecord();
+	expect("good", good, true, nullptr);
+
+	ProfileRecord m = good;
+	m.targetTrackingSystem = m.referenceTrackingSystem;
+	expect("same-systems", m, false, "the tracking systems must be non-empty and different");
+	m = good; m.referenceTrackingSystem.clear();
+	expect("empty-reference", m, false, "the tracking systems must be non-empty and different");
+
+	m = good; m.rotation = Eigen::Quaterniond(0.0, 0.0, 0.0, 0.0);
+	expect("zero-quat", m, false, "the calibration transform is invalid");
+
+	m = good; m.scale = 0.24; expect("scale-0.24", m, false, nullptr);
+	m = good; m.scale = 4.01; expect("scale-4.01", m, false, nullptr);
+	m = good; m.scale = 0.25; expect("scale-0.25", m, true, nullptr);
+	m = good; m.scale = 4.0;  expect("scale-4.0", m, true, nullptr);
+
+	m = good; m.timeOffset = 1.0;       expect("offset-1.0", m, true, nullptr);
+	m = good; m.timeOffset = 1.0000001; expect("offset-over", m, false, nullptr);
+
+	// 0 means "unknown", which older records legitimately carry.
+	m = good; m.calibrationUnixTime = 0.0;    expect("time-0", m, true, nullptr);
+	m = good; m.calibrationUnixTime = -0.001; expect("time-negative", m, false, nullptr);
+
+	m = good; m.universeHmdSerial.clear();
+	expect("universe-no-serial", m, false, nullptr);
+	m.universeValid = false;
+	expect("universe-disarmed", m, true, nullptr);
+
+	m = good; m.mountExtrinsic.rotationRmsDeg = -1.0;
+	expect("mount-bad-rms", m, false, nullptr);
+	m.mountExtrinsic.valid = false;
+	expect("mount-disarmed", m, true, nullptr);
+
+	m = good;
+	m.fieldAnchors.assign(PersistMaxAnchors + 1, good.fieldAnchors[0]);
+	expect("anchors-9", m, false, nullptr);
+	m.fieldAnchors.assign(PersistMaxAnchors, good.fieldAnchors[0]);
+	expect("anchors-8", m, true, nullptr);
+
+	m = good;
+	m.fieldAnchors[1].translationMeters =
+		m.translationMeters + Eigen::Vector3d(200.0, 0.0, 0.0);
+	expect("anchor-200m", m, false, nullptr);
+
+	// The asymmetry pin: the anchor loop sits OUTSIDE the `valid` gate, exactly
+	// as in the writer this replaces. A tidy-up moving it inside would turn the
+	// second case below into a silent pass.
+	ProfileRecord invalid;
+	invalid.valid = false;
+	invalid.rotation = Eigen::Quaterniond(0.0, 0.0, 0.0, 0.0);
+	invalid.translationMeters = Eigen::Vector3d(1e9, -1e9, 1e9);
+	invalid.scale = 99.0;
+	invalid.timeOffset = 500.0;
+	invalid.calibrationUnixTime = -12.0;
+	expect("invalid-garbage", invalid, true, nullptr);
+
+	ProfileRecord invalidAnchor;
+	invalidAnchor.valid = false;
+	invalidAnchor.fieldAnchors.push_back(PersistedFieldAnchor());
+	invalidAnchor.fieldAnchors[0].translationMeters = Eigen::Vector3d(200.0, 0.0, 0.0);
+	expect("invalid-anchor", invalidAnchor, false, "a field anchor is invalid");
+
+	char detail[384];
+	snprintf(detail, sizeof detail,
+		"scale [%.2f,%.2f], |offset| <= %.1f, <= %zu anchors; anchor loop outside the valid gate%s%s",
+		protocol::limits::MinScale, protocol::limits::MaxScale,
+		protocol::limits::MaxAbsTimeOffsetSeconds, PersistMaxAnchors,
+		why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence F: contract", why.empty(), detail);
+}
+
+// --- G. Write gates, including the preview guard ----------------------------
+void RunPersistenceWriteGateScenario()
+{
+	std::string why;
+	const RecordLoadState states[] = { RecordLoadState::Missing,
+		RecordLoadState::Loaded, RecordLoadState::Unreadable };
+	auto expectProfile = [&](const char *cell, bool preview, RecordLoadState config,
+		RecordLoadState settings, bool pending, PersistenceWriteGate want)
+	{
+		PersistenceWriteGate got = GateProfileWrite(preview, config, settings, pending);
+		if (got != want)
+			why += std::string(" ") + cell + "(" + PersistWriteGateName(got) + ")";
+	};
+	auto expectSettings = [&](const char *cell, bool preview, RecordLoadState config,
+		RecordLoadState settings, PersistenceWriteGate want)
+	{
+		PersistenceWriteGate got = GateSettingsWrite(preview, config, settings);
+		if (got != want)
+			why += std::string(" ") + cell + "(" + PersistWriteGateName(got) + ")";
+	};
+
+	expectProfile("G1", false, RecordLoadState::Loaded, RecordLoadState::Loaded,
+		false, PersistenceWriteGate::Allowed);
+	for (RecordLoadState settings : states)
+		for (int pending = 0; pending < 2; ++pending)
+			expectProfile("G2", false, RecordLoadState::Unreadable, settings,
+				pending != 0, PersistenceWriteGate::RefusedConfigUnreadable);
+	// Dropping legacySettingsMigrationPending here lets one profile save destroy
+	// a legacy user's only copy of their global settings and protected room.
+	expectProfile("G3", false, RecordLoadState::Loaded, RecordLoadState::Unreadable,
+		true, PersistenceWriteGate::RefusedSettingsUnreadable);
+	expectProfile("G4", false, RecordLoadState::Loaded, RecordLoadState::Unreadable,
+		false, PersistenceWriteGate::Allowed);
+	expectProfile("G5", true, RecordLoadState::Unreadable, RecordLoadState::Unreadable,
+		true, PersistenceWriteGate::SkippedPreview);
+
+	expectSettings("G6", false, RecordLoadState::Unreadable, RecordLoadState::Loaded,
+		PersistenceWriteGate::Allowed);
+	expectSettings("G7a", false, RecordLoadState::Unreadable, RecordLoadState::Missing,
+		PersistenceWriteGate::RefusedConfigUnreadable);
+	expectSettings("G7b", false, RecordLoadState::Unreadable, RecordLoadState::Unreadable,
+		PersistenceWriteGate::RefusedConfigUnreadable);
+	expectSettings("G8", false, RecordLoadState::Loaded, RecordLoadState::Unreadable,
+		PersistenceWriteGate::RefusedSettingsUnreadable);
+	expectSettings("G9", true, RecordLoadState::Loaded, RecordLoadState::Loaded,
+		PersistenceWriteGate::SkippedPreview);
+
+	// G10.1: preview is reachable only via the flag, and always via the flag. A
+	// mis-set flag on a normal launch is total silent persistence loss.
+	int profileCells = 0;
+	int settingsCells = 0;
+	for (RecordLoadState config : states)
+	{
+		for (RecordLoadState settings : states)
+		{
+			settingsCells++;
+			for (int pending = 0; pending < 2; ++pending)
+			{
+				profileCells++;
+				if (GateProfileWrite(false, config, settings, pending != 0) ==
+					PersistenceWriteGate::SkippedPreview)
+					why += " G10.1(profile preview without the flag)";
+				if (GateProfileWrite(true, config, settings, pending != 0) !=
+					PersistenceWriteGate::SkippedPreview)
+					why += " G10.1(profile flag not honoured)";
+			}
+			if (GateSettingsWrite(false, config, settings) ==
+				PersistenceWriteGate::SkippedPreview)
+				why += " G10.1(settings preview without the flag)";
+			if (GateSettingsWrite(true, config, settings) !=
+				PersistenceWriteGate::SkippedPreview)
+				why += " G10.1(settings flag not honoured)";
+		}
+	}
+
+	// G10.2: the divergence asserted, not implied by a bare `return true`.
+	if (GateWritesRecord(PersistenceWriteGate::SkippedPreview) ||
+		!GateReportsSuccess(PersistenceWriteGate::SkippedPreview))
+		why += " G10.2";
+
+	// G10.3: no OTHER outcome may report success without writing. This fails the
+	// moment anyone adds a second such outcome -- the silent-loss shape itself,
+	// rather than one instance of it.
+	const PersistenceWriteGate allGates[] = { PersistenceWriteGate::Allowed,
+		PersistenceWriteGate::SkippedPreview,
+		PersistenceWriteGate::RefusedConfigUnreadable,
+		PersistenceWriteGate::RefusedSettingsUnreadable };
+	for (PersistenceWriteGate gate : allGates)
+	{
+		if (gate == PersistenceWriteGate::SkippedPreview)
+			continue;
+		if (GateWritesRecord(gate) != GateReportsSuccess(gate))
+			why += std::string(" G10.3(") + PersistWriteGateName(gate) + ")";
+	}
+
+	char detail[320];
+	snprintf(detail, sizeof detail,
+		"G1-G9 named cells; %d profile + %d settings cells preview-only-by-flag; %zu outcomes%s%s",
+		profileCells, settingsCells, sizeof allGates / sizeof allGates[0],
+		why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence G: write gates", why.empty(), detail);
+}
+
+// --- H. PlanPersistenceLoad, the load matrix --------------------------------
+void RunPersistenceLoadPlanScenario()
+{
+	struct LoadCase
+	{
+		const char *cell;
+		PersistenceLoadFacts facts;
+		uint32_t revision;
+		bool mismatch;
+		bool report;
+		bool disarm;
+		ChaperoneLoadGate gate;
+		bool rewrite;
+		bool latch;
+		bool latchIfRewriteFails;
+	};
+	const RecordLoadState Mi = RecordLoadState::Missing;
+	const RecordLoadState Lo = RecordLoadState::Loaded;
+	const RecordLoadState Un = RecordLoadState::Unreadable;
+	const ChaperoneLoadGate GArmed = ChaperoneLoadGate::Armed;
+
+	// facts: profile, settings, profileRevision, settingsRevision, armed,
+	//        ownerComplete, ownerMatchesReference, profileValid
+	const LoadCase cases[] = {
+		{ "H1",  { Mi, Mi, { false, 0 }, { false, 0 }, false, false, true,  false },
+			1, false, false, false, GArmed, true,  false, false },
+		// !=  ->  == in the revision compare would disarm every healthy launch.
+		{ "H2",  { Lo, Lo, { true,  7 }, { true,  7 }, true,  true,  true,  true  },
+			7, false, false, false, GArmed, false, false, false },
+		// The cell that stops a pre-rebase snapshot landing on a rebased playspace.
+		{ "H3",  { Lo, Lo, { true,  7 }, { true,  6 }, true,  true,  true,  true  },
+			7, true,  true,  true,  GArmed, true,  false, false },
+		// No snapshot to lose: the mismatch is not worth a banner.
+		{ "H4",  { Lo, Lo, { true,  7 }, { true,  6 }, false, true,  true,  true  },
+			7, true,  false, false, GArmed, true,  false, false },
+		// The migration latch. Dropping it lets the next profile save strip the
+		// embedded settings and room out of Config with no other copy anywhere.
+		{ "H5",  { Lo, Mi, { false, 0 }, { false, 0 }, false, false, true,  true  },
+			1, false, false, false, GArmed, true,  true,  true  },
+		{ "H6",  { Lo, Lo, { false, 0 }, { true,  5 }, false, false, true,  true  },
+			5, false, false, false, GArmed, false, false, true  },
+		{ "H7",  { Lo, Lo, { false, 0 }, { false, 0 }, false, false, true,  true  },
+			1, false, false, false, GArmed, true,  true,  true  },
+		// Rewriting here would overwrite Settings while Config -- possibly the
+		// only copy of the legacy room -- is unreadable.
+		{ "H8",  { Un, Mi, { false, 0 }, { false, 0 }, true,  true,  true,  false },
+			1, false, false, true,  ChaperoneLoadGate::ProfileUnreadable, false, false, false },
+		// CanUseRecoveredSettings is not CanMaterializeSettings.
+		{ "H9",  { Un, Lo, { false, 0 }, { true,  7 }, true,  true,  true,  false },
+			7, false, false, false, GArmed, false, false, false },
+		{ "H10", { Lo, Un, { false, 0 }, { false, 0 }, true,  true,  true,  true  },
+			1, false, false, true,  ChaperoneLoadGate::SettingsUnreadable, false, true, true },
+		// Same inputs but with a profile revision: the revision branch disarms
+		// first, so the settings-unreadable gate no longer fires. Same ordering
+		// H14 pins; recorded here because the spec left the revision unstated.
+		{ "H10b",{ Lo, Un, { true,  7 }, { false, 0 }, true,  true,  true,  true  },
+			7, true,  true,  true,  GArmed, false, false, false },
+		// Not persisting the disarm re-arms it next launch.
+		{ "H11", { Lo, Lo, { true,  7 }, { true,  7 }, true,  false, true,  true  },
+			7, false, false, true,  ChaperoneLoadGate::IncompleteOwner, true, false, false },
+		{ "H12", { Lo, Lo, { true,  7 }, { true,  7 }, true,  true,  false, true  },
+			7, false, false, true,  ChaperoneLoadGate::ForeignTrackingSystem, true, false, false },
+		// With no profile there is no reference system to disagree with.
+		{ "H13", { Lo, Lo, { true,  7 }, { true,  7 }, true,  true,  false, false },
+			7, false, false, false, GArmed, false, false, false },
+		// Reordering the chain, or judging the later gates against the PRE-disarm
+		// state, would show the user two banners for one fault.
+		{ "H14", { Lo, Lo, { true,  7 }, { true,  6 }, true,  false, true,  true  },
+			7, true,  true,  true,  GArmed, true,  false, false },
+		// `=` rather than `|=` in the gate branches: a conservative disarm must
+		// not be persisted over data that is still recoverable.
+		{ "H15", { Un, Lo, { false, 0 }, { true,  7 }, true,  false, true,  false },
+			7, false, false, true,  ChaperoneLoadGate::IncompleteOwner, false, false, false },
+	};
+
+	std::string why;
+	for (const LoadCase &c : cases)
+	{
+		PersistenceLoadPlan plan = PlanPersistenceLoad(c.facts);
+		std::string bad;
+		auto note = [&bad](const char *field, bool got, bool want)
+		{
+			if (got == want)
+				return;
+			bad += bad.empty() ? "" : ",";
+			bad += field;
+			bad += got ? "=1" : "=0";
+		};
+		if (plan.persistenceRevision != c.revision)
+		{
+			bad += "rev=" + std::to_string(plan.persistenceRevision);
+		}
+		note("mismatch", plan.revisionMismatch, c.mismatch);
+		note("report", plan.reportRevisionMismatch, c.report);
+		note("disarm", plan.disarmChaperone, c.disarm);
+		note("rewrite", plan.settingsRewriteNeeded, c.rewrite);
+		note("latch", plan.legacySettingsMigrationPending, c.latch);
+		note("latchIfFails", plan.legacySettingsMigrationPendingIfRewriteFails,
+			c.latchIfRewriteFails);
+		if (plan.gate != c.gate)
+		{
+			bad += bad.empty() ? "" : ",";
+			bad += std::string("gate=") + PersistLoadGateName(plan.gate);
+		}
+		if (!bad.empty())
+			why += std::string(" ") + c.cell + "(" + bad + ")";
+	}
+
+	char detail[320];
+	snprintf(detail, sizeof detail, "%zu rows over {profile} x {settings} x {revision}%s%s",
+		sizeof cases / sizeof cases[0], why.empty() ? "" : "  <-", why.c_str());
+	Check("persistence H: load plan", why.empty(), detail);
+}
+
+void RunPersistenceScenarios()
+{
+	RunPersistenceRoundTripScenario();
+	RunPersistenceRevisionScenario();
+	RunPersistenceNestingScenario();
+	RunPersistenceRejectionScenario();
+	RunPersistenceLegacyScenario();
+	RunPersistenceContractScenario();
+	RunPersistenceWriteGateScenario();
+	RunPersistenceLoadPlanScenario();
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -6452,6 +7475,9 @@ int main(int argc, char **argv)
 
 	// ---- Continuous calibration (HMD-mounted tracker) ----
 	RunContinuousScenarios();
+
+	// ---- Profile persistence: codec, write gates, load plan ----
+	RunPersistenceScenarios();
 
 	printf("\n%d scenario(s) ran, %d failed\n", checksRun, failures);
 	return failures;

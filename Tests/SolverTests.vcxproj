@@ -101,6 +101,7 @@
     <ClInclude Include="..\Overlay\DriftMonitor.h" />
     <ClInclude Include="..\Overlay\DriverSyncPolicy.h" />
     <ClInclude Include="..\Overlay\JumpDetector.h" />
+    <ClInclude Include="..\Overlay\ProfileRecordJson.h" />
     <ClInclude Include="..\Overlay\ProfileValidation.h" />
     <ClInclude Include="..\Overlay\RingPoseMath.h" />
     <ClInclude Include="..\Overlay\PoseStreamHub.h" />
