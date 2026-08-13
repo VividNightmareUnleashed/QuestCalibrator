@@ -2815,6 +2815,51 @@ void RunSolverPrimitiveScenarios()
 		Check("solver: offset signs + bounds", pass, detail);
 	}
 
+	// The same recovery, pinned to a TENTH of the correlation step. The 4 ms
+	// band above cannot carry that: clearing the reported angular velocity puts
+	// the correlator on its finite-difference fallback, which assigns each
+	// interval's AVERAGE speed to that interval's left endpoint and so advances
+	// each profile by half of its own sample spacing. The two systems run at
+	// deliberately different rates, so the two halves differ and the estimate
+	// inherits a systematic ~1 ms bias -- a property of the fallback, not of the
+	// search. On the reported-velocity path the profile is instantaneous and the
+	// correlation is an autocorrelation peaking on the true latency, which is
+	// what makes a sub-step band meaningful: the correlator resamples the
+	// reference profile once and slices that shared grid per lag, so a
+	// whole-slot indexing error, a grid spacing that is not an integer divisor
+	// of the step, or a tail artifact that moves with the lag all shift the peak
+	// by far more than 0.2 ms.
+	{
+		GroundTruth subStep;
+		subStep.rotation = Eigen::Quaterniond(
+			Eigen::AngleAxisd(0.8, Eigen::Vector3d(-0.3, 0.8, 0.5).normalized()));
+		subStep.translation = Eigen::Vector3d(-0.4, 0.9, 0.2);
+		SceneConfig scene;
+		scene.duration = 20.0;
+
+		EngineConfig cfg;
+		// Two of these are not multiples of the search step, so the parabolic
+		// refinement has to supply the sub-step part rather than landing on a
+		// grid lag by construction.
+		const double latencies[] = { -0.037, -0.0007, 0.0, 0.0007, 0.037 };
+		double worstSubStep = 0.0;
+		bool subStepPass = true;
+		for (size_t i = 0; i < sizeof latencies / sizeof latencies[0]; ++i)
+		{
+			subStep.latency = latencies[i];
+			std::vector<PoseSample> refS, tgtS;
+			GenerateStreams(scene, subStep, static_cast<uint32_t>(3150 + i), refS, tgtS);
+			double solved = 0.0;
+			bool ok = CalibrationEngine::EstimateTimeOffset(refS, tgtS, cfg, solved);
+			double err = std::abs(solved - subStep.latency);
+			worstSubStep = std::max(worstSubStep, err);
+			subStepPass = subStepPass && ok && err < 0.1 * cfg.timeOffsetStep;
+		}
+		snprintf(detail, sizeof detail, "worst %.3f ms of %.2f ms allowed",
+			worstSubStep * 1000.0, 100.0 * cfg.timeOffsetStep);
+		Check("solver: sub-step offset recovery", subStepPass, detail);
+	}
+
 	// Explicitly exercise both velocity gates and even thinning. The corrupted
 	// velocity metadata must be dropped without perturbing the recovered pose.
 	{

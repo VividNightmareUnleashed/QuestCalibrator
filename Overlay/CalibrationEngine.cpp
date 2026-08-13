@@ -207,28 +207,56 @@ Eigen::Matrix3d WeightedKabsch(const std::vector<AxisPair> &pairs, double gravit
 	return svd.matrixV() * d * svd.matrixU().transpose();
 }
 
-double AngularSpeedAt(const std::vector<PoseSample> &stream, size_t i)
+// Angular speed at every sample of a stream, derived once.
+//
+// The driver's reported angular velocity is used where it exists. Where it does
+// not, the speed comes from a forward finite difference — which is a property of
+// the INTERVAL [i, i+1], not of sample i — so the last sample has no interval of
+// its own and holds the previous speed instead of reading zero.
+//
+// That tail rule is a deliberate decision, not a detail. Zero at the end makes
+// the profile ramp linearly to zero across the stream's final inter-sample
+// interval, and EstimateTimeOffset slides a window over this profile once per
+// candidate lag: a fake decay sitting at a fixed absolute time lands against
+// different target content at every lag, which is a lag-dependent artifact
+// inside the one function whose entire job is to compare lags. Holding the last
+// measured speed states what the data actually supports (the device did not
+// stop; the stream did) and leaves nothing that moves with the lag.
+std::vector<double> BuildSpeedProfile(const std::vector<PoseSample> &stream)
 {
-	double reported = stream[i].angVel.norm();
-	if (reported > 1e-6)
-		return reported;
-
-	// Fallback: finite difference against the next sample.
-	if (i + 1 >= stream.size())
-		return 0.0;
-	double dt = stream[i + 1].time - stream[i].time;
-	if (dt <= 1e-6)
-		return 0.0;
-	Eigen::Quaterniond dq = stream[i + 1].rot * stream[i].rot.conjugate();
-	dq.normalize();
-	if (dq.w() < 0.0)
-		dq.coeffs() = -dq.coeffs();
-	double angle = 2.0 * std::atan2(dq.vec().norm(), dq.w());
-	return angle / dt;
+	std::vector<double> speed(stream.size(), 0.0);
+	for (size_t i = 0; i < stream.size(); ++i)
+	{
+		double reported = stream[i].angVel.norm();
+		if (reported > 1e-6)
+		{
+			speed[i] = reported;
+			continue;
+		}
+		if (i + 1 >= stream.size())
+		{
+			speed[i] = (i > 0) ? speed[i - 1] : 0.0;   // hold; see above
+			continue;
+		}
+		double dt = stream[i + 1].time - stream[i].time;
+		if (dt <= 1e-6)
+			continue;
+		Eigen::Quaterniond dq = stream[i + 1].rot * stream[i].rot.conjugate();
+		dq.normalize();
+		if (dq.w() < 0.0)
+			dq.coeffs() = -dq.coeffs();
+		speed[i] = 2.0 * std::atan2(dq.vec().norm(), dq.w()) / dt;
+	}
+	return speed;
 }
 
-// Piecewise-linear resample of an angular-speed profile onto a uniform grid.
+// Piecewise-linear resample of a per-sample speed profile onto a uniform grid.
+// `speed` is the stream's own BuildSpeedProfile output, so the two are indexed
+// together. It is passed in rather than derived here because it is a property of
+// the stream alone: the correlator below resamples one shared grid that every
+// candidate lag slices, instead of rebuilding the profile per lag.
 std::vector<double> ResampleSpeed(const std::vector<PoseSample> &stream,
+                                  const std::vector<double> &speed,
                                   double t0, double dt, size_t count)
 {
 	std::vector<double> out(count, 0.0);
@@ -246,9 +274,7 @@ std::vector<double> ResampleSpeed(const std::vector<PoseSample> &stream,
 		double ta = stream[j].time, tb = stream[j + 1].time;
 		double f = (tb - ta > 1e-9) ? (t - ta) / (tb - ta) : 0.0;
 		f = std::min(1.0, std::max(0.0, f));
-		double sa = AngularSpeedAt(stream, j);
-		double sb = AngularSpeedAt(stream, j + 1);
-		out[i] = sa + f * (sb - sa);
+		out[i] = speed[j] + f * (speed[j + 1] - speed[j]);
 	}
 	return out;
 }
@@ -597,7 +623,18 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	if (end - start < 0.5)
 		return false;   // not enough overlap to correlate
 
-	double dt = std::max(1e-3, config.timeOffsetStep * 0.5);
+	// The reference profile is resampled ONCE below, onto a grid every lag's
+	// window is a whole-slot slice of. That requires the lag step to be an exact
+	// integer multiple of the grid spacing, so the spacing is DERIVED from the
+	// step instead of being clamped independently of it: both divisions here are
+	// exact in IEEE arithmetic (a power-of-two divisor, or the identity), which
+	// makes the precondition structural rather than an assumption a config could
+	// quietly break. At or above a 2 ms step this is the previous
+	// max(1e-3, step * 0.5) exactly, so the shipped default (2 ms step, 1 ms
+	// grid) is unchanged; below it the grid follows the step itself rather than
+	// the old 1 ms clamp, and the work budgets below still bound the result.
+	const int subdiv = (config.timeOffsetStep >= 2e-3) ? 2 : 1;
+	const double dt = config.timeOffsetStep / subdiv;
 	double resampledCount = (end - start) / dt;
 	if (!std::isfinite(resampledCount) || resampledCount < 64.0 ||
 		resampledCount > MaxResampledPointCount)
@@ -607,7 +644,18 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 		return false;
 	size_t count = static_cast<size_t>(resampledCount);
 
-	std::vector<double> targetSpeed = ResampleSpeed(targetStream, start, dt, count);
+	int steps = static_cast<int>(config.timeOffsetRange / config.timeOffsetStep);
+	// The shared grid spans the union of every lag's window: `steps` whole steps
+	// of lead-in and the same of run-out. It is what actually gets allocated, so
+	// it carries the same cap the per-lag window count does.
+	double gridPointCount = static_cast<double>(count) +
+		2.0 * static_cast<double>(steps) * static_cast<double>(subdiv);
+	if (gridPointCount > MaxResampledPointCount)
+		return false;
+	size_t gridCount = static_cast<size_t>(gridPointCount);
+
+	std::vector<double> targetSpeed = ResampleSpeed(
+		targetStream, BuildSpeedProfile(targetStream), start, dt, count);
 	double targetMean = Mean(targetSpeed);
 	for (double &x : targetSpeed) x -= targetMean;
 
@@ -616,20 +664,46 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	if (targetNorm < 1e-8)
 		return false;   // no rotation happening; nothing to correlate
 
+	// The reference profile over that shared grid. Lag k's window starts at
+	// start - k*step == gridStart + (steps - k)*step, and step == subdiv*dt
+	// exactly, so the window is the slice beginning at whole slot
+	// (steps - k)*subdiv — the lag-dependent part of this is an array index.
+	//
+	// The grid also stays inside both streams: gridStart >= max(front times)
+	// because steps*step <= timeOffsetRange, and the last grid point sits at
+	// start + steps*step + dt*(count - 1) <= min(back times) - dt. So every
+	// point interpolates between two real samples, the past-the-end zeros
+	// ResampleSpeed would otherwise emit are unreachable, and the only stream
+	// boundary the grid can touch is the final inter-sample interval — which is
+	// exactly where BuildSpeedProfile's hold rule applies.
+	const double gridStart = start - static_cast<double>(steps) * config.timeOffsetStep;
+	const std::vector<double> refGrid = ResampleSpeed(
+		refStream, BuildSpeedProfile(refStream), gridStart, dt, gridCount);
+
+	// Prefix sums turn each lag's window mean into a lookup instead of a pass.
+	// The squared sum could be hoisted the same way, but then
+	// refNorm = sumSq - count*mean^2, which is the cancellation-prone form for a
+	// nonnegative profile whose mean is comparable to its spread — and the dot
+	// product needs a pass over the window regardless, so the centred
+	// accumulation below rides along for free.
+	std::vector<double> refPrefix(gridCount + 1, 0.0);
+	for (size_t i = 0; i < gridCount; ++i)
+		refPrefix[i + 1] = refPrefix[i] + refGrid[i];
+
 	// Physical event at time T shows up in the reference stream at T and in the
 	// target stream at T + offset; so targetSpeed(t) matches refSpeed(t - offset).
 	double bestOffset = 0.0, bestScore = -2.0;
 	std::vector<double> scores;
-	int steps = static_cast<int>(config.timeOffsetRange / config.timeOffsetStep);
 	for (int k = -steps; k <= steps; ++k)
 	{
 		double lag = static_cast<double>(k) * config.timeOffsetStep;
-		std::vector<double> refSpeed = ResampleSpeed(refStream, start - lag, dt, count);
-		double refMean = Mean(refSpeed);
+		const size_t base = static_cast<size_t>(steps - k) * static_cast<size_t>(subdiv);
+		double refMean = (refPrefix[base + count] - refPrefix[base]) /
+			static_cast<double>(count);
 		double dot = 0.0, refNorm = 0.0;
 		for (size_t i = 0; i < count; ++i)
 		{
-			double r = refSpeed[i] - refMean;
+			double r = refGrid[base + i] - refMean;
 			dot += r * targetSpeed[i];
 			refNorm += r * r;
 		}

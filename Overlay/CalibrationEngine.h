@@ -54,7 +54,11 @@ struct EngineConfig
 	// --- time alignment ---
 	bool   estimateTimeOffset = true;
 	double timeOffsetRange = 0.06;     // seconds searched on each side of zero
-	double timeOffsetStep = 0.002;     // coarse grid; refined parabolically
+	// Coarse lag grid, refined parabolically. It also sets the correlator's
+	// resampling spacing, which is a whole division of this step so that every
+	// lag is an exact slot shift of one shared resampling (at or above 2 ms:
+	// step/2, as before; below it: the step itself).
+	double timeOffsetStep = 0.002;
 
 	// --- sample gating ---
 	double maxLinearSpeed = 1.6;       // m/s; samples above either bound are dropped
