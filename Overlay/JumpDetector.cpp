@@ -10,8 +10,6 @@
 // (openvr.h when it is already loaded, openvr_driver.h otherwise) — both
 // define the ones used here.
 
-static_assert(vr::k_unMaxTrackedDeviceCount <= 64, "JumpDetector device array undersized");
-
 namespace
 {
 
@@ -39,6 +37,48 @@ Eigen::Quaterniond YawQuat(double yaw)
 	return Eigen::Quaterniond(Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitY()));
 }
 
+// Least-squares line fit over one side of a candidate: position per axis and
+// unwrapped heading against time, evaluated at the jump instant. A single
+// frame pair would bake one frame of noise into the profile permanently, and
+// extrapolating heading via angular velocity is biased when the device is
+// pitched (the twist rate is not the world-Y angular velocity component).
+// File scope rather than inside the candidate loop: it is the one piece of the
+// heuristic path with self-contained, checkable behaviour.
+struct WindowFit
+{
+	int n = 0;
+	double sumT = 0, sumTT = 0;
+	Eigen::Vector3d sumP = Eigen::Vector3d::Zero(), sumTP = Eigen::Vector3d::Zero();
+	double sumY = 0, sumTY = 0;
+	double prevYaw = 0;
+
+	void Add(double t, const Eigen::Vector3d &pos, double heading, double t0)
+	{
+		double dt = t - t0;
+		double yaw = n == 0 ? heading : prevYaw + WrapAngle(heading - prevYaw);   // unwrap
+		prevYaw = yaw;
+		sumT += dt; sumTT += dt * dt;
+		sumP += pos; sumTP += dt * pos;
+		sumY += yaw; sumTY += dt * yaw;
+		n++;
+	}
+
+	// Evaluate the least-squares line at dt = 0 (the jump instant).
+	bool At(Eigen::Vector3d &pos, double &yaw) const
+	{
+		if (n < 3)
+			return false;
+		double denom = n * sumTT - sumT * sumT;
+		if (std::abs(denom) < 1e-12)
+			return false;
+		Eigen::Vector3d slopeP = (n * sumTP - sumT * sumP) / denom;
+		double slopeY = (n * sumTY - sumT * sumY) / denom;
+		pos = (sumP - slopeP * sumT) / n;
+		yaw = (sumY - slopeY * sumT) / n;
+		return true;
+	}
+};
+
 std::string Format(const char *fmt, ...)
 {
 	char buf[256];
@@ -53,7 +93,7 @@ std::string Format(const char *fmt, ...)
 
 void JumpDetector::Push(const protocol::DevicePoseSample &s)
 {
-	if (s.deviceId >= 64)
+	if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
 		return;
 
 	auto &dev = devices[s.deviceId];
@@ -65,8 +105,8 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 		dev.wfdValid = false;
 		dev.hist.clear();
 		for (auto &candidate : candidates)
-			if (candidate.deviceId == s.deviceId && !candidate.ready)
-				candidate.dead = true;
+			if (candidate.deviceId == s.deviceId && candidate.life == Life::Pending)
+				candidate.life = Life::Dead;
 	};
 
 	bool valid = s.poseIsValid && s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK);
@@ -91,11 +131,11 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	if (dev.lastValidTime >= 0.0 && t - dev.lastValidTime > config.gapSeconds)
 	{
 		gaps.push_back({ s.deviceId, t - dev.lastValidTime, t });
-		dev.hist.clear();
-		dev.wfdValid = false;
-		for (auto &c : candidates)
-			if (c.deviceId == s.deviceId && !c.ready)
-				c.dead = true;
+		// Same three actions as an observed bad frame, and they must stay the
+		// same three: a gap must never be bridged by driver-local state the
+		// bad-frame path correctly refuses to bridge. Deliberately no return —
+		// this sample is still processed.
+		breakObservationContinuity();
 	}
 
 	RingSampleParts p = UnpackRingSample(s);
@@ -199,13 +239,12 @@ void JumpDetector::DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	Candidate c;
 	c.deviceId = id;
 	c.t = t;
-	c.exact = true;
-	c.ready = true;
+	c.kind = Kind::Exact;
+	c.life = Life::Ready;   // the exact path has its delta immediately
 	c.rot = yawRot;
 	c.trans = dTrans;
 	c.residualTiltRad = tilt;
-	c.worldFromDriverRotation = newRot;
-	c.worldFromDriverTranslation = newTrans;
+	c.endpoint = ExactEndpoint{ newRot, newTrans };
 	candidates.push_back(c);
 
 	notes.push_back(Format("worldFromDriver rebase on device %u: yaw %+.2f deg, shift %.3f m (tilt residual %.2f deg)",
@@ -228,18 +267,22 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 
 	// One pending candidate per device per window.
 	for (const auto &c : candidates)
-		if (c.deviceId == id && !c.dead && std::abs(c.t - incoming.t) < config.window)
+		if (c.deviceId == id && c.life != Life::Dead &&
+			std::abs(c.t - incoming.t) < config.window)
 			return;
 
 	Candidate c;
 	c.deviceId = id;
 	c.t = incoming.t;   // first post-jump sample time
-	c.exact = false;
-	c.ready = false;
-	c.preWindow.assign(dev.hist.begin(), dev.hist.end());
-	// Keep only the pre-jump window.
-	while (!c.preWindow.empty() && c.t - c.preWindow.front().t > config.window)
-		c.preWindow.erase(c.preWindow.begin());
+	c.kind = Kind::Heuristic;
+	c.life = Life::Pending;
+	// Keep only the pre-jump window, in order: find where it starts and copy
+	// the suffix once (erasing the expired head one element at a time
+	// relocated the remainder on every step).
+	size_t first = 0;
+	while (first < dev.hist.size() && c.t - dev.hist[first].t > config.window)
+		++first;
+	c.preWindow.assign(dev.hist.begin() + first, dev.hist.end());
 	candidates.push_back(c);
 }
 
@@ -247,76 +290,36 @@ void JumpDetector::EvaluatePendingCandidates(double now)
 {
 	for (auto &c : candidates)
 	{
-		if (c.ready || c.dead || c.exact)
+		if (!c.PendingHeuristic())
 			continue;
 		if (now < c.t + config.window)
 			continue;   // post window still filling
 
 		const auto &dev = devices[c.deviceId];
 
-		// Estimate the state at the jump instant from each side by regressing
-		// the window against time (position per axis, unwrapped heading), then
-		// evaluating the fit at c.t. A single frame pair would bake one frame
-		// of noise into the profile permanently, and extrapolating heading via
-		// angular velocity is biased when the device is pitched (the twist
-		// rate is not the world-Y angular velocity component).
-		struct WindowFit
-		{
-			int n = 0;
-			double sumT = 0, sumTT = 0;
-			Eigen::Vector3d sumP = Eigen::Vector3d::Zero(), sumTP = Eigen::Vector3d::Zero();
-			double sumY = 0, sumTY = 0;
-			double prevYaw = 0;
-
-			void Add(const Hist &h, double t0)
-			{
-				double dt = h.t - t0;
-				double yaw = n == 0 ? h.yaw : prevYaw + WrapAngle(h.yaw - prevYaw);   // unwrap
-				prevYaw = yaw;
-				sumT += dt; sumTT += dt * dt;
-				sumP += h.pos; sumTP += dt * h.pos;
-				sumY += yaw; sumTY += dt * yaw;
-				n++;
-			}
-
-			// Evaluate the least-squares line at dt = 0 (the jump instant).
-			bool At(Eigen::Vector3d &pos, double &yaw) const
-			{
-				if (n < 3)
-					return false;
-				double denom = n * sumTT - sumT * sumT;
-				if (std::abs(denom) < 1e-12)
-					return false;
-				Eigen::Vector3d slopeP = (n * sumTP - sumT * sumP) / denom;
-				double slopeY = (n * sumTY - sumT * sumY) / denom;
-				pos = (sumP - slopeP * sumT) / n;
-				yaw = (sumY - slopeY * sumT) / n;
-				return true;
-			}
-		};
-
+		// Estimate the state at the jump instant from each side (see WindowFit).
 		WindowFit pre, post;
 		for (const auto &h : c.preWindow)
-			pre.Add(h, c.t);
+			pre.Add(h.t, h.pos, h.yaw, c.t);
 		for (const auto &h : dev.hist)
 		{
 			if (h.t < c.t || h.t > c.t + config.window)
 				continue;
-			post.Add(h, c.t);
+			post.Add(h.t, h.pos, h.yaw, c.t);
 		}
 
 		Eigen::Vector3d prePos, postPos;
 		double preYaw, postYaw;
 		if (!pre.At(prePos, preYaw) || !post.At(postPos, postYaw))
 		{
-			c.dead = true;
+			c.life = Life::Dead;
 			continue;
 		}
 
 		double dYaw = WrapAngle(postYaw - preYaw);
 		c.rot = YawQuat(dYaw);
 		c.trans = postPos - c.rot * prePos;
-		c.ready = true;
+		c.life = Life::Ready;
 
 		notes.push_back(Format("pose discontinuity on device %u: yaw %+.2f deg, shift %.3f m",
 			c.deviceId, dYaw * 180.0 / EIGEN_PI, c.trans.norm()));
@@ -332,7 +335,7 @@ void JumpDetector::TryAccept(double now)
 	// dropping the second would leave the calibration one rebase behind.
 	for (auto &c : candidates)
 	{
-		if (!c.exact || c.dead || c.deviceId != vr::k_unTrackedDeviceIndex_Hmd)
+		if (!c.LiveExact() || c.deviceId != vr::k_unTrackedDeviceIndex_Hmd)
 			continue;
 
 		UniverseDelta d;
@@ -342,12 +345,12 @@ void JumpDetector::TryAccept(double now)
 		d.exact = true;
 		d.devicesAgreeing = 1;
 		d.residualTiltRad = c.residualTiltRad;
-		d.worldFromDriverRotation = c.worldFromDriverRotation;
-		d.worldFromDriverTranslation = c.worldFromDriverTranslation;
+		d.worldFromDriverRotation = c.endpoint.rotation;
+		d.worldFromDriverTranslation = c.endpoint.translation;
 
 		for (const auto &o : candidates)
 		{
-			if (&o == &c || !o.exact || o.dead || std::abs(o.t - c.t) > config.agreeWindow)
+			if (&o == &c || !o.LiveExact() || std::abs(o.t - c.t) > config.agreeWindow)
 				continue;
 			double spread = (o.trans - c.trans).norm();
 			d.residualSpread = std::max(d.residualSpread, spread);
@@ -372,14 +375,14 @@ void JumpDetector::TryAccept(double now)
 	// Heuristic path: windowed multi-device agreement.
 	for (auto &c0 : candidates)
 	{
-		if (!c0.ready || c0.dead || c0.exact)
+		if (!c0.ReadyHeuristic())
 			continue;
 
 		std::vector<const Candidate *> agree;
 		double spread = 0.0;
 		for (const auto &o : candidates)
 		{
-			if (!o.ready || o.dead || o.exact || std::abs(o.t - c0.t) > config.agreeWindow)
+			if (!o.ReadyHeuristic() || std::abs(o.t - c0.t) > config.agreeWindow)
 				continue;
 			double dPos = (o.trans - c0.trans).norm();
 			double dYaw = std::abs(WrapAngle(YawOf(o.rot) - YawOf(c0.rot)));
@@ -423,7 +426,7 @@ void JumpDetector::TryAccept(double now)
 
 		if (now > c0.t + config.agreeWindow && !bigSolo && agree.size() < 2)
 		{
-			c0.dead = true;
+			c0.life = Life::Dead;
 			notes.push_back(Format("unconfirmed pose discontinuity on device %u ignored", c0.deviceId));
 		}
 	}
@@ -431,7 +434,7 @@ void JumpDetector::TryAccept(double now)
 	// Prune stale entries.
 	candidates.erase(
 		std::remove_if(candidates.begin(), candidates.end(),
-			[&](const Candidate &c) { return c.dead || now - c.t > 5.0; }),
+			[&](const Candidate &c) { return c.life == Life::Dead || now - c.t > 5.0; }),
 		candidates.end());
 }
 

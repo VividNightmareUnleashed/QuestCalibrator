@@ -71,6 +71,14 @@ struct ProfileRecord
 	double scale = 1.0;
 	double timeOffset = 0.0;
 	double calibrationUnixTime = 0.0;
+	// Reference-universe identity and the fail-closed latch keyed to it. All
+	// optional on read, so a profile written before they existed loads
+	// unchanged and adopts a baseline from the first fresh observation.
+	bool universeUnsafe = false;
+	bool universeValid = false;
+	std::string universeHmdSerial;
+	Eigen::Quaterniond universeRotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d universeTranslation{ 0, 0, 0 };
 	bool fieldEnabled = true;
 	std::vector<CalibrationContext::FieldAnchor> fieldAnchors;
 	bool continuousEnabled = false;
@@ -131,6 +139,11 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.scale = ctx.calibratedScale;
 	record.timeOffset = ctx.calibratedTimeOffset;
 	record.calibrationUnixTime = ctx.calibrationUnixTime;
+	record.universeUnsafe = ctx.profileUniverseUnsafe;
+	record.universeValid = ctx.profileUniverseValid;
+	record.universeHmdSerial = ctx.profileHmdSerial;
+	record.universeRotation = ctx.profileWorldFromDriverRotation;
+	record.universeTranslation = ctx.profileWorldFromDriverTranslation;
 	record.fieldEnabled = ctx.fieldEnabled;
 	record.fieldAnchors = ctx.fieldAnchors;
 	record.continuousEnabled = ctx.continuousEnabled;
@@ -183,6 +196,11 @@ static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
 	ctx.SetCalibration(record.rotation, record.translationMeters, record.scale);
 	ctx.calibratedTimeOffset = record.timeOffset;
 	ctx.calibrationUnixTime = record.calibrationUnixTime;
+	ctx.profileUniverseUnsafe = record.universeUnsafe;
+	ctx.profileUniverseValid = record.universeValid;
+	ctx.profileHmdSerial = std::move(record.universeHmdSerial);
+	ctx.profileWorldFromDriverRotation = record.universeRotation;
+	ctx.profileWorldFromDriverTranslation = record.universeTranslation;
 	ctx.fieldEnabled = record.fieldEnabled;
 	ctx.fieldAnchors = std::move(record.fieldAnchors);
 	ctx.continuousEnabled = record.continuousEnabled;
@@ -510,6 +528,52 @@ static ProfileParseResult ParseProfile(ProfileRecord &profile,
 			throw std::runtime_error("invalid calibration_time");
 	}
 
+	// Reference-universe identity: which headset owned the universe this
+	// calibration was solved in, and that headset's raw worldFromDriver. All
+	// optional — a profile written before these existed is not evidence that
+	// the universe moved — but a partial record is malformed, not permissive:
+	// half a baseline can neither detect a rebase nor prove there was none.
+	profile.universeUnsafe = false;
+	profile.universeValid = false;
+	profile.universeHmdSerial.clear();
+	if (HasTypedValue<bool>(obj, "universe_unsafe"))
+		profile.universeUnsafe = obj.at("universe_unsafe").get<bool>();
+
+	bool hasUniverseSerial = HasTypedValue<std::string>(obj, "universe_hmd_serial");
+	bool hasUniverseRotation = HasTypedValue<picojson::array>(
+		obj, "universe_world_from_driver_rotation_quat");
+	bool hasUniverseTranslation = HasTypedValue<picojson::array>(
+		obj, "universe_world_from_driver_translation_meters");
+	if (hasUniverseSerial != hasUniverseRotation ||
+		hasUniverseSerial != hasUniverseTranslation)
+		throw std::runtime_error("incomplete profile reference-universe baseline");
+	if (hasUniverseSerial)
+	{
+		profile.universeHmdSerial = obj.at("universe_hmd_serial").get<std::string>();
+		const auto &universeRotation = obj.at(
+			"universe_world_from_driver_rotation_quat").get<picojson::array>();
+		const auto &universeTranslation = obj.at(
+			"universe_world_from_driver_translation_meters").get<picojson::array>();
+		if (profile.universeHmdSerial.empty() || universeRotation.size() != 4 ||
+			universeTranslation.size() != 3)
+			throw std::runtime_error("malformed profile reference-universe baseline");
+
+		Eigen::Quaterniond baselineRotation(
+			GetDouble(universeRotation[0]), GetDouble(universeRotation[1]),
+			GetDouble(universeRotation[2]), GetDouble(universeRotation[3]));
+		Eigen::Vector3d baselineTranslation(
+			GetDouble(universeTranslation[0]), GetDouble(universeTranslation[1]),
+			GetDouble(universeTranslation[2]));
+		if (!questcal::IsValidRotation(baselineRotation) ||
+			!questcal::IsBoundedVector(baselineTranslation,
+				protocol::limits::MaxAbsTranslationMeters))
+			throw std::runtime_error("invalid profile reference-universe baseline");
+
+		profile.universeRotation = baselineRotation.normalized();
+		profile.universeTranslation = baselineTranslation;
+		profile.universeValid = true;
+	}
+
 	if (HasTypedValue<bool>(obj, "apply_time_offset"))
 		legacySettings.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
 
@@ -682,6 +746,27 @@ static void WriteProfile(const ProfileRecord &record,
 	profile["scale"].set<double>(record.scale);
 	profile["time_offset"].set<double>(record.timeOffset);
 	profile["calibration_time"].set<double>(record.calibrationUnixTime);
+	profile["universe_unsafe"].set<bool>(record.universeUnsafe);
+	if (record.universeValid)
+	{
+		profile["universe_hmd_serial"].set<std::string>(record.universeHmdSerial);
+
+		picojson::array universeRotation;
+		universeRotation.reserve(4);
+		universeRotation.push_back(picojson::value(record.universeRotation.w()));
+		universeRotation.push_back(picojson::value(record.universeRotation.x()));
+		universeRotation.push_back(picojson::value(record.universeRotation.y()));
+		universeRotation.push_back(picojson::value(record.universeRotation.z()));
+		profile["universe_world_from_driver_rotation_quat"].set<picojson::array>(
+			std::move(universeRotation));
+
+		picojson::array universeTranslation;
+		universeTranslation.reserve(3);
+		for (int axis = 0; axis < 3; ++axis)
+			universeTranslation.push_back(picojson::value(record.universeTranslation(axis)));
+		profile["universe_world_from_driver_translation_meters"].set<picojson::array>(
+			std::move(universeTranslation));
+	}
 	// Bumped when a load-time migration must not re-run (see ParseProfile).
 	double settingsVersion = 2.0;
 	profile["settings_version"].set<double>(settingsVersion);
@@ -933,7 +1018,9 @@ static bool WriteRegistryValue(const char *valueName, const std::string &str, st
 
 void LoadProfile(CalibrationContext &ctx)
 {
-	ctx.profileUniverseUnsafe = false;
+	// profileUniverseUnsafe is deliberately not cleared here: the latch is part
+	// of the record now, so a profile that lost raw-universe continuity stays
+	// disabled across the restart instead of being handed back enabled.
 	ctx.chaperone.baselineVerifiedThisSession = false;
 	ctx.profileLoadState = questcal::RecordLoadState::Missing;
 	ctx.settingsLoadState = questcal::RecordLoadState::Missing;
@@ -1196,6 +1283,17 @@ static bool SaveProfileRecord(CalibrationContext &ctx, const ProfileRecord &reco
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
+	if (record.valid && record.universeValid &&
+		(record.universeHmdSerial.empty() ||
+			!questcal::IsValidRotation(record.universeRotation) ||
+			!questcal::IsBoundedVector(record.universeTranslation,
+				protocol::limits::MaxAbsTranslationMeters)))
+	{
+		ctx.ReportError(
+			"Could not save the calibration profile: the reference-universe baseline is invalid\n",
+			CalibrationContext::ErrorSource::ProfilePersistence);
+		return false;
+	}
 	if (record.valid && record.mountExtrinsic.valid &&
 		(!questcal::IsValidRotation(record.mountExtrinsic.rotation) ||
 			!questcal::IsBoundedVector(record.mountExtrinsic.translationMeters,
@@ -1371,18 +1469,27 @@ bool SaveSettings(CalibrationContext &ctx)
 	// A caller may directly save a setting while Config is waiting to be
 	// persisted (including after a universe-revision bump). Never let Settings
 	// overtake it: commit Config first, then leave only unfinished stages dirty.
+	bool profileSaved = true;
 	if (ctx.profileSaveDirty)
 	{
 		if (!ctx.validProfile)
 		{
-			ctx.ReportError(
-				"Could not save Settings ahead of an unfinished Config update\n",
+			ctx.ReportError(PendingProfileWithoutValidProfileMessage,
 				CalibrationContext::ErrorSource::ProfilePersistence);
-			return false;
+			profileSaved = false;
 		}
-		if (!SaveProfile(ctx))
-			return false;
-		ctx.profileSaveDirty = false;
+		else
+			profileSaved = SaveProfile(ctx);
 	}
-	return SaveSettingsRecord(ctx);
+	// Only a coupled rebase — both records carrying the same revision bump —
+	// makes the Settings half wait for the Config half. Otherwise one Config
+	// failure would also swallow the fail-closed chaperone disarms, which live
+	// in Settings, and the next launch would auto-restore a stale armed
+	// snapshot. An uncoupled mismatch is detected and failed closed at load.
+	if (!profileSaved && ctx.persistenceCoupled)
+		return false;
+	bool settingsSaved = SaveSettingsRecord(ctx);
+	if (!ctx.HasDirtyPersistence())
+		ctx.persistenceCoupled = false;
+	return profileSaved && settingsSaved;
 }

@@ -18,9 +18,12 @@
 // itself moves by exactly D (delta' = D delta D^-1, expected' = D o expected).
 //
 // Pure Eigen so the synthetic test harness compiles exactly this code and
-// checks it against alignfield::BlendAt. The constants mirror the driver's:
-// protocol::SetAlignmentField::sigmaMeters default and
-// alignfield::IdentityFloorWeight (asserted equal in the tests).
+// checks it against alignfield::BlendAt. That purity is why this stays a
+// mirror rather than a thin adapter over the driver's blend: an adapter would
+// have to build a protocol::SetAlignmentField, pulling protocol and OpenVR
+// types into a layer that is deliberately dependency-free. The cost of the
+// mirror is that the blend width must be passed in rather than assumed - see
+// BlendedFieldCalibration.
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -54,20 +57,31 @@ inline void AnchorDelta(const Eigen::Quaterniond &anchorRot,
 // .translationMeters the absolute transform); deltas against base are derived
 // here exactly as SendAlignmentField ships them. With zero anchors the result
 // is the base calibration itself.
+// sigmaMeters must be the value the driver is blending with, i.e. the one
+// SendAlignmentField put on the wire - not merely the default that happens to
+// match it. The wire field is real, per-message and range-validated, so the
+// moment sigma becomes configurable a hard-coded constant here would give the
+// driver one field shape and the continuous loop's expectation another, with
+// nothing failing: healthy anchor gradients would then read as universe
+// deviation, which is the exact failure the field-blended comparison exists to
+// prevent. Passing it in keeps the two blends coupled by construction.
 template <class AnchorVec>
 inline void BlendedFieldCalibration(const AnchorVec &anchors,
                                     const Eigen::Quaterniond &baseRot,
                                     const Eigen::Vector3d &baseTrans,
                                     const Eigen::Vector3d &queryBasePos,
                                     Eigen::Quaterniond &rotOut,
-                                    Eigen::Vector3d &transOut)
+                                    Eigen::Vector3d &transOut,
+                                    double sigmaMeters = FieldBlendSigmaMeters)
 {
 	double wSum = FieldBlendIdentityFloor;
 	Eigen::Vector4d q(0.0, 0.0, 0.0, FieldBlendIdentityFloor);   // (x, y, z, w)
 	Eigen::Vector3d t = Eigen::Vector3d::Zero();
 
-	constexpr double invTwoSigmaSq =
-		1.0 / (2.0 * FieldBlendSigmaMeters * FieldBlendSigmaMeters);
+	// Mirrors the driver's clamp (AlignmentField.cpp): a non-positive or
+	// absurd sigma must not divide by ~zero here either.
+	double sigma = sigmaMeters > 0.01 ? sigmaMeters : 1.5;
+	const double invTwoSigmaSq = 1.0 / (2.0 * sigma * sigma);
 
 	Eigen::Quaterniond baseInv = baseRot.conjugate();
 	for (const auto &a : anchors)

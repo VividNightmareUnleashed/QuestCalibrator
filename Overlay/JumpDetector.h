@@ -32,6 +32,9 @@
 class JumpDetector
 {
 public:
+	// Fixed detection policy, not a caller knob: no code outside this class
+	// ever varied it, so the values live here as a named-constant block with
+	// their rationale rather than behind a setter nobody called.
 	struct Config
 	{
 		double wfdRotEpsRad = 1e-5;        // wfd rotation change that counts as a rebase
@@ -76,8 +79,6 @@ public:
 
 	explicit JumpDetector(double qpcToSeconds) : qpcToSeconds(qpcToSeconds) { }
 
-	void SetConfig(const Config &c) { config = c; }
-
 	// Feed one reference-system sample (any device of the reference system,
 	// in ring order). Non-reference devices must not be pushed.
 	void Push(const protocol::DevicePoseSample &sample);
@@ -105,21 +106,46 @@ private:
 		double yawRate;                    // rad/s around world +Y
 	};
 
+	// Which detection path produced a candidate, and where it is in its life.
+	// Kept as two enums rather than three booleans: of the eight boolean
+	// combinations only four ever meant anything, and every consumer had to
+	// re-derive which four by writing the same three-term filter again.
+	enum class Kind { Exact, Heuristic };
+	enum class Life
+	{
+		Pending,   // heuristic: post-jump window still filling
+		Ready,     // has a usable delta (exact candidates are born Ready)
+		Dead,      // expired unconfirmed, or its observation continuity broke
+	};
+
+	// The absolute worldFromDriver endpoint the exact path captured. One
+	// sub-struct rather than two loose fields, so "these two are meaningful
+	// only for Kind::Exact" is a property of the record: the heuristic path
+	// never writes it and leaves the identity it was born with.
+	struct ExactEndpoint
+	{
+		Eigen::Quaterniond rotation{ 1, 0, 0, 0 };
+		Eigen::Vector3d translation{ 0, 0, 0 };
+	};
+
 	struct Candidate
 	{
 		uint32_t deviceId = 0;
 		double t = 0.0;
-		bool exact = false;
-		bool ready = false;
-		bool dead = false;
+		Kind kind = Kind::Heuristic;
+		Life life = Life::Pending;
 		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
 		Eigen::Vector3d trans{ 0, 0, 0 };
 		double residualTiltRad = 0.0;
-		Eigen::Quaterniond worldFromDriverRotation{ 1, 0, 0, 0 };
-		Eigen::Vector3d worldFromDriverTranslation{ 0, 0, 0 };
+		ExactEndpoint endpoint;   // Kind::Exact only
 		// Heuristic candidates: pre-jump window snapshot, evaluated once the
 		// post-jump window has filled.
 		std::vector<Hist> preWindow;
+
+		// The filters every consumer needs, once each.
+		bool LiveExact() const { return kind == Kind::Exact && life != Life::Dead; }
+		bool ReadyHeuristic() const { return kind == Kind::Heuristic && life == Life::Ready; }
+		bool PendingHeuristic() const { return kind == Kind::Heuristic && life == Life::Pending; }
 	};
 
 	struct DeviceState
@@ -145,7 +171,7 @@ private:
 	Config config;
 	double qpcToSeconds;
 
-	DeviceState devices[64];               // vr::k_unMaxTrackedDeviceCount
+	DeviceState devices[vr::k_unMaxTrackedDeviceCount];
 	std::vector<Candidate> candidates;
 	std::deque<UniverseDelta> accepted;
 	std::deque<GapEvent> gaps;

@@ -46,6 +46,12 @@ public:
 	// to history overflow since its last drain (0 = kept up); a non-zero
 	// return means there is a gap immediately before out.front(), or a terminal
 	// gap after the previously returned prefix when `out` is empty.
+	//
+	// One exception to the count: a driver session boundary (writer death or a
+	// new session epoch) discards each consumer's whole un-drained backlog and
+	// reports it as a single-count gap, not as the number of samples dropped.
+	// Consumers must treat a non-zero return as "there is a hole here", not as
+	// a loss rate.
 	uint64_t Drain(int consumer, std::vector<protocol::DevicePoseSample> &out);
 
 	// Skip this consumer to now, discarding its backlog.
@@ -79,7 +85,14 @@ private:
 	void AccountForHistoryOverflowLocked(int consumer, uint64_t &dropped);
 	void AppendSampleLocked(const protocol::DevicePoseSample &sample);
 	void AppendGapLocked(uint64_t count);
+	// Publishes an observation hole: discards every consumer's backlog (it may
+	// predate a universe rebase) and marks the position so the next drain
+	// reports a gap rather than bridging it.
+	void AppendSessionBoundaryLocked();
+	// Thread entry: catches, so an allocation failure stops the drain instead of
+	// terminating the process without unwinding.
 	void DrainLoop(const std::string &shmemName);
+	void DrainRing(const std::string &shmemName);
 
 	std::thread drainThread;
 	std::atomic<bool> stopRequested{ false };

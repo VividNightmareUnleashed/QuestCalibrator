@@ -38,6 +38,9 @@
 class DriftMonitor
 {
 public:
+	// Fixed detection policy, not a caller knob: no code outside this class
+	// ever varied it, so the values live here as a named-constant block with
+	// their rationale rather than behind a setter nobody called.
 	struct Config
 	{
 		double window = 8.0;             // seconds of rest required before judging
@@ -61,8 +64,6 @@ public:
 
 	explicit DriftMonitor(double qpcToSeconds) : qpcToSeconds(qpcToSeconds) { }
 
-	void SetConfig(const Config &c) { config = c; }
-
 	// Feed an eligible device's ring samples; each device is evaluated
 	// independently.
 	// `linearScale` converts the sample's raw tracking units into calibrated
@@ -81,20 +82,30 @@ private:
 		Eigen::Vector3d pos;
 	};
 
+	// The last accepted sample, as one record. All four values are written
+	// together and read together, with `time < 0` as the group's validity
+	// sentinel — so clearing the group is one assignment and there is no way
+	// to clear three of the four and leave a position from a previous
+	// calibration session behind for a recovery pose to be compared against.
+	struct LastValid
+	{
+		double time = -1.0;   // < 0: nothing accepted yet for this device
+		double linearScale = 0.0;
+		Eigen::Vector3d pos{ 0, 0, 0 };
+		Eigen::Vector3d vel{ 0, 0, 0 };
+	};
+
 	struct DeviceState
 	{
 		std::deque<Snap> window;
-		double lastValidTime = -1.0;
 		double lastEvalTime = -1.0;
-		double lastLinearScale = 0.0;
-		Eigen::Vector3d lastValidPos{ 0, 0, 0 };
-		Eigen::Vector3d lastValidVel{ 0, 0, 0 };
+		LastValid lastValid;
 	};
 
 	void EvaluateWindow(uint32_t id, DeviceState &dev);
 
 	Config config;
 	double qpcToSeconds;
-	DeviceState devices[64];             // vr::k_unMaxTrackedDeviceCount
+	DeviceState devices[vr::k_unMaxTrackedDeviceCount];
 	std::deque<Event> events;
 };

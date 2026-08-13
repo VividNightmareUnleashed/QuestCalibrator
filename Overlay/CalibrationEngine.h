@@ -119,6 +119,18 @@ struct EngineConfig
 	size_t minPairs = 30;
 };
 
+// What the scale guard did (see EngineConfig::gainSplitSeconds). Three
+// mutually-exclusive outcomes, so a consumer reads one value instead of
+// reconstructing them from flags that can disagree. `NotApplied` also covers
+// "attempted, but the guarded re-solve failed" - that case is already
+// distinguished by `valid == false` plus the message.
+enum class ScaleGuard
+{
+	NotApplied,
+	FromGrossMotion,          // guard replaced the solved scale with motionGainLow
+	NeutralizedForSmoothing,  // no trustworthy band; guard used unity
+};
+
 struct EngineResult
 {
 	bool valid = false;
@@ -138,9 +150,9 @@ struct EngineResult
 	bool   motionGainValid = false;
 	double motionGainLow = 0.0;        // gross-motion band; ~true scale under either hypothesis
 	double motionGainHigh = 0.0;       // fine-motion band; sits below gross under smoothing
+	// Independent of the guard below: this legitimately fires with solveScale off.
 	bool   motionSmoothingDetected = false;
-	bool   scaleFromGrossMotion = false;   // guard replaced the solved scale with motionGainLow
-	bool   scaleNeutralizedForSmoothing = false; // both bands attenuated; guard used unity
+	ScaleGuard scaleGuard = ScaleGuard::NotApplied;
 	bool   refinementApplied = false;      // joint Gauss-Newton result passed its Pareto guard
 	double tiltDeg = 0.0;              // pitch+roll magnitude of the solution (diagnostic)
 	size_t samplesUsed = 0;
@@ -160,7 +172,10 @@ public:
 	                          const EngineConfig &config);
 
 	// Exposed for tests and diagnostics. validateInputs=false skips the
-	// stream-integrity scan; internal callers pass it after validating once.
+	// stream-integrity scan ONLY; internal callers pass it after validating
+	// once. The config is revalidated on every entry point regardless of this
+	// flag - it is cheap, and a caller must never be able to skip the refusal
+	// that names a bad knob.
 	static bool EstimateTimeOffset(const std::vector<PoseSample> &refStream,
 	                               const std::vector<PoseSample> &targetStream,
 	                               const EngineConfig &config,

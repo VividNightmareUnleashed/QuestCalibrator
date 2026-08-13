@@ -21,7 +21,12 @@ constexpr double MaxTimeOffsetSearchSteps = 100000.0;
 constexpr double MaxResampledPointCount = 1000000.0;
 constexpr double MaxCorrelationWork = 100000000.0;
 
-bool IsValidConfig(const EngineConfig &config)
+// Returns nullptr when the config is usable, else the field or relation that
+// failed. The alternative on this path is a calibration that silently does not
+// run, so the refusal has to name the knob: only two of these vary in
+// production today, which means the first real failure will belong to whoever
+// adds the next one. Grouped by what each check defends.
+const char *ConfigError(const EngineConfig &config)
 {
 	auto finiteNonnegative = [](double value)
 	{
@@ -32,40 +37,76 @@ bool IsValidConfig(const EngineConfig &config)
 		return std::isfinite(value) && value > 0.0;
 	};
 
-	return finiteNonnegative(config.timeOffsetRange) &&
-		config.timeOffsetRange <= protocol::limits::MaxAbsTimeOffsetSeconds &&
-		finitePositive(config.timeOffsetStep) &&
-		config.timeOffsetRange / config.timeOffsetStep <= MaxTimeOffsetSearchSteps &&
-		finiteNonnegative(config.maxLinearSpeed) &&
-		config.maxLinearSpeed <=
-			protocol::limits::MaxAbsLinearVelocityMetersPerSecond &&
-		finiteNonnegative(config.maxAngularSpeed) &&
-		config.maxAngularSpeed <=
-			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond &&
-		finiteNonnegative(config.maxInterpolationGap) &&
-		config.maxInterpolationGap <= protocol::limits::MaxAbsTimeOffsetSeconds &&
-		config.maxAlignedSamples >= 8 &&
-		config.maxAlignedSamples <= MaxSolverSampleBudget &&
-		finiteNonnegative(config.minPairAngle) &&
-		std::isfinite(config.maxPairAngle) &&
-		config.maxPairAngle > config.minPairAngle &&
-		config.maxPairAngle <= EIGEN_PI &&
-		config.minPairs >= 3 && config.maxPairs >= config.minPairs &&
-		config.maxPairs <= MaxSolverPairBudget &&
-		finiteNonnegative(config.gravityPriorRatio) && config.gravityPriorRatio <= 1000000.0 &&
-		config.irlsIterations >= 0 && config.irlsIterations <= 100 &&
-		finitePositive(config.huberRotation) &&
-		finitePositive(config.huberTranslation) &&
-		config.refineIterations >= 0 && config.refineIterations <= 100 &&
-		finiteNonnegative(config.scaleSearchRange) &&
-		config.scaleSearchRange <= 1.0 - protocol::limits::MinScale &&
-		finitePositive(config.gainSplitSeconds) && config.gainSplitSeconds <= 3600.0 &&
-		finiteNonnegative(config.gainSmoothingMargin) &&
-		finiteNonnegative(config.maxCleanGrossDeviation) &&
-		finiteNonnegative(config.maxRotationRms) &&
-		finiteNonnegative(config.maxTranslationRms) &&
-		finiteNonnegative(config.minAxisSpread) && config.minAxisSpread <= 1.0 &&
-		finiteNonnegative(config.minTransEigRatio) && config.minTransEigRatio <= 1.0;
+	// --- per-field bounds ---
+	if (!finiteNonnegative(config.timeOffsetRange) ||
+		config.timeOffsetRange > protocol::limits::MaxAbsTimeOffsetSeconds)
+		return "timeOffsetRange";
+	if (!finitePositive(config.timeOffsetStep))
+		return "timeOffsetStep";
+	if (!finiteNonnegative(config.maxLinearSpeed) ||
+		config.maxLinearSpeed > protocol::limits::MaxAbsLinearVelocityMetersPerSecond)
+		return "maxLinearSpeed";
+	if (!finiteNonnegative(config.maxAngularSpeed) ||
+		config.maxAngularSpeed > protocol::limits::MaxAbsAngularVelocityRadiansPerSecond)
+		return "maxAngularSpeed";
+	if (!finiteNonnegative(config.maxInterpolationGap) ||
+		config.maxInterpolationGap > protocol::limits::MaxAbsTimeOffsetSeconds)
+		return "maxInterpolationGap";
+	if (config.maxAlignedSamples < 8)
+		return "maxAlignedSamples";
+	if (!finiteNonnegative(config.minPairAngle))
+		return "minPairAngle";
+	if (!std::isfinite(config.maxPairAngle) || config.maxPairAngle > EIGEN_PI)
+		return "maxPairAngle";
+	if (config.minPairs < 3)
+		return "minPairs";
+	if (!finiteNonnegative(config.gravityPriorRatio) ||
+		config.gravityPriorRatio > 1000000.0)
+		return "gravityPriorRatio";
+	if (config.irlsIterations < 0 || config.irlsIterations > 100)
+		return "irlsIterations";
+	if (!finitePositive(config.huberRotation))
+		return "huberRotation";
+	if (!finitePositive(config.huberTranslation))
+		return "huberTranslation";
+	if (config.refineIterations < 0 || config.refineIterations > 100)
+		return "refineIterations";
+	if (!finitePositive(config.gainSplitSeconds) || config.gainSplitSeconds > 3600.0)
+		return "gainSplitSeconds";
+	if (!finiteNonnegative(config.gainSmoothingMargin))
+		return "gainSmoothingMargin";
+	if (!finiteNonnegative(config.maxCleanGrossDeviation))
+		return "maxCleanGrossDeviation";
+	if (!finiteNonnegative(config.maxRotationRms))
+		return "maxRotationRms";
+	if (!finiteNonnegative(config.maxTranslationRms))
+		return "maxTranslationRms";
+	if (!finiteNonnegative(config.minAxisSpread) || config.minAxisSpread > 1.0)
+		return "minAxisSpread";
+	if (!finiteNonnegative(config.minTransEigRatio) || config.minTransEigRatio > 1.0)
+		return "minTransEigRatio";
+
+	// --- ordering relations between fields ---
+	if (!(config.maxPairAngle > config.minPairAngle))
+		return "maxPairAngle must exceed minPairAngle";
+	if (!(config.maxPairs >= config.minPairs))
+		return "maxPairs must be at least minPairs";
+	// A scale search that can reach below the protocol's own floor would solve
+	// a scale the driver is not allowed to apply.
+	if (!finiteNonnegative(config.scaleSearchRange) ||
+		config.scaleSearchRange > 1.0 - protocol::limits::MinScale)
+		return "scaleSearchRange exceeds the protocol minimum scale";
+
+	// --- work budgets (bounded above by the field checks, so divisions here
+	//     are already safe) ---
+	if (config.timeOffsetRange / config.timeOffsetStep > MaxTimeOffsetSearchSteps)
+		return "timeOffsetRange / timeOffsetStep exceeds the search-step budget";
+	if (config.maxAlignedSamples > MaxSolverSampleBudget)
+		return "maxAlignedSamples exceeds the solver sample budget";
+	if (config.maxPairs > MaxSolverPairBudget)
+		return "maxPairs exceeds the solver pair budget";
+
+	return nullptr;
 }
 
 bool IsFinitePose(const PoseSample &sample)
@@ -546,7 +587,7 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	offsetOut = 0.0;
 	if (refStream.size() < 8 || targetStream.size() < 8)
 		return false;
-	if (!IsValidConfig(config))
+	if (ConfigError(config))
 		return false;
 	if (validateInputs && (!IsValidStream(refStream) || !IsValidStream(targetStream)))
 		return false;
@@ -628,9 +669,10 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 {
 	EngineResult result;
 	result.samplesUsed = samples.size();
-	if (!IsValidConfig(config))
+	if (const char *configError = ConfigError(config))
 	{
-		result.message = "Invalid calibration engine configuration.";
+		result.message = "Invalid calibration engine configuration: " +
+			std::string(configError) + ".";
 		return result;
 	}
 
@@ -764,13 +806,6 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		}
 		return std::sqrt(rotResidualSq / std::max(1e-12, rotWeight)) * 180.0 / EIGEN_PI;
 	};
-	// Reported after the joint refinement below, on the rotation that ships.
-	auto rotationMetrics = [&axisRmsDeg, &result](const Eigen::Matrix3d &rotM)
-	{
-		result.rotationRmsDeg = axisRmsDeg(rotM);
-		result.rotation = Eigen::Quaterniond(rotM);
-		result.tiltDeg = std::acos(std::min(1.0, std::max(-1.0, (rotM * kUp).dot(kUp)))) * 180.0 / EIGEN_PI;
-	};
 
 	// ---- translation (+ optional scale): weighted linear least squares -----
 	// math.pdf eq. 8 over sample pairs, with the target universe pre-rotated by
@@ -779,6 +814,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	struct TransRow
 	{
 		Eigen::Matrix3d dQ;
+		Eigen::Matrix3d dQtdQ;     // dQ^T dQ; fixed for the row's lifetime
 		Eigen::Vector3d base;     // constant part of the RHS
 		Eigen::Vector3d scalePart; // part multiplied by scale
 		double weight = 1.0;
@@ -788,48 +824,64 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	auto buildRows = [&samples, &rows](const Eigen::Matrix3d &rotM)
 	{
 		rows.clear();
+		// Each of these is a property of ONE sample, so derive it once per
+		// sample rather than once per pair: the multi-lag pairing below visits
+		// most samples several times and would otherwise rebuild the same
+		// rotation matrices on every visit.
+		const size_t n = samples.size();
+		std::vector<Eigen::Matrix3d> qA(n), qB(n);
+		std::vector<Eigen::Vector3d> tgt(n);
+		for (size_t i = 0; i < n; ++i)
+		{
+			qA[i] = samples[i].ref.rot.toRotationMatrix().transpose();
+			qB[i] = (rotM * samples[i].target.rot.toRotationMatrix()).transpose();
+			tgt[i] = rotM * samples[i].target.pos;
+		}
+
 		static const size_t kTransLags[] = { 1, 3, 8, 21, 55, 144 };
 		for (size_t lag : kTransLags)
 		{
-			if (lag >= samples.size())
+			if (lag >= n)
 				break;
-			for (size_t i = 0; i + lag < samples.size(); ++i)
+			for (size_t i = 0; i + lag < n; ++i)
 			{
-				const AlignedSample &si = samples[i];
-				const AlignedSample &sj = samples[i + lag];
-
-				Eigen::Matrix3d QAi = si.ref.rot.toRotationMatrix().transpose();
-				Eigen::Matrix3d QAj = sj.ref.rot.toRotationMatrix().transpose();
-				Eigen::Matrix3d QBi = (rotM * si.target.rot.toRotationMatrix()).transpose();
-				Eigen::Matrix3d QBj = (rotM * sj.target.rot.toRotationMatrix()).transpose();
-
-				Eigen::Vector3d refI = si.ref.pos, refJ = sj.ref.pos;
-				Eigen::Vector3d tgtI = rotM * si.target.pos, tgtJ = rotM * sj.target.pos;
+				const size_t j = i + lag;
+				const Eigen::Vector3d &refI = samples[i].ref.pos;
+				const Eigen::Vector3d &refJ = samples[j].ref.pos;
 
 				TransRow ra;
-				ra.dQ = QAj - QAi;
-				ra.base = QAj * refJ - QAi * refI;
-				ra.scalePart = -(QAj * tgtJ - QAi * tgtI);
+				ra.dQ = qA[j] - qA[i];
+				ra.dQtdQ = ra.dQ.transpose() * ra.dQ;
+				ra.base = qA[j] * refJ - qA[i] * refI;
+				ra.scalePart = -(qA[j] * tgt[j] - qA[i] * tgt[i]);
 				rows.push_back(ra);
 
 				TransRow rb;
-				rb.dQ = QBj - QBi;
-				rb.base = QBj * refJ - QBi * refI;
-				rb.scalePart = -(QBj * tgtJ - QBi * tgtI);
+				rb.dQ = qB[j] - qB[i];
+				rb.dQtdQ = rb.dQ.transpose() * rb.dQ;
+				rb.base = qB[j] * refJ - qB[i] * refI;
+				rb.scalePart = -(qB[j] * tgt[j] - qB[i] * tgt[i]);
 				rows.push_back(rb);
 			}
 		}
 	};
 	buildRows(rot);
 
-	// Conditioning of the translation system itself: see minTransEigRatio.
+	// Conditioning of the system the translation is actually solved from: see
+	// minTransEigRatio. Measured on the IRLS-WEIGHTED normal matrix, because a
+	// row the robust pass drives toward zero weight does not constrain t - an
+	// unweighted ratio can pass this gate on the strength of glitched rows
+	// whose diverse dQ never survives the reweighting, which is exactly the
+	// silent failure the gate exists to prevent. Called after every solve or
+	// rebuild of the rows, so it always describes the transform that ships.
+	auto weightedTransEigRatio = [&rows]() -> double
 	{
 		Eigen::Matrix3d ata = Eigen::Matrix3d::Zero();
 		for (const auto &r : rows)
-			ata += r.dQ.transpose() * r.dQ;
+			ata += r.weight * r.dQtdQ;
 		Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> eig(ata);
-		result.transEigRatio = eig.eigenvalues()(0) / std::max(1e-12, eig.eigenvalues()(2));
-	}
+		return eig.eigenvalues()(0) / std::max(1e-12, eig.eigenvalues()(2));
+	};
 
 	auto solveTranslation = [&rows, &config](double scale, Eigen::Vector3d &tOut) -> double
 	{
@@ -847,7 +899,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			for (const auto &r : rows)
 			{
 				Eigen::Vector3d rhs = r.base + scale * r.scalePart;
-				ata += r.weight * (r.dQ.transpose() * r.dQ);
+				ata += r.weight * r.dQtdQ;
 				atb += r.weight * (r.dQ.transpose() * rhs);
 			}
 			tOut = ata.ldlt().solve(atb);
@@ -881,10 +933,23 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		// near-quadratic around the optimum.
 		const double phi = 0.6180339887498949;
 		double lo = 1.0 - config.scaleSearchRange, hi = 1.0 + config.scaleSearchRange;
+
+		// Each iteration costs a full IRLS translation solve, so the loop bound
+		// is derived from the scale precision that actually means something
+		// downstream rather than picked: the driver applies scale as a plain
+		// multiplier and the motion-gain guard compares it against a 3%
+		// threshold, so resolving below this is spending solves on digits no
+		// consumer can distinguish. Each iteration shrinks the interval by phi.
+		constexpr double kScaleTolerance = 3e-6;
+		int iterations = 0;
+		if (hi - lo > kScaleTolerance)
+			iterations = static_cast<int>(
+				std::ceil(std::log(kScaleTolerance / (hi - lo)) / std::log(phi)));
+
 		double x1 = hi - phi * (hi - lo), x2 = lo + phi * (hi - lo);
 		Eigen::Vector3d tTmp;
 		double f1 = solveTranslation(x1, tTmp), f2 = solveTranslation(x2, tTmp);
-		for (int it = 0; it < 24; ++it)
+		for (int it = 0; it < iterations; ++it)
 		{
 			if (f1 < f2) { hi = x2; x2 = x1; f2 = f1; x1 = hi - phi * (hi - lo); f1 = solveTranslation(x1, tTmp); }
 			else         { lo = x1; x1 = x2; f1 = f2; x2 = lo + phi * (hi - lo); f2 = solveTranslation(x2, tTmp); }
@@ -892,6 +957,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		scale = (lo + hi) * 0.5;
 		transRms = solveTranslation(scale, translation);
 	}
+	result.transEigRatio = weightedTransEigRatio();
 
 	// ---- joint refinement (see EngineConfig::refineIterations) -------------
 	// Pareto guard: the polish only optimizes position residuals, which carry
@@ -929,10 +995,15 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				wsum += r.weight;
 			}
 			transRms = std::sqrt(sq / std::max(1e-12, wsum));
+			result.transEigRatio = weightedTransEigRatio();
 		}
 	}
 
-	rotationMetrics(rot);
+	// Rotation metrics must be computed here, after the joint refinement above
+	// may have replaced `rot` - they describe the rotation that ships.
+	result.rotationRmsDeg = axisRmsDeg(rot);
+	result.rotation = Eigen::Quaterniond(rot);
+	result.tiltDeg = std::acos(std::min(1.0, std::max(-1.0, (rot * kUp).dot(kUp)))) * 180.0 / EIGEN_PI;
 
 	// The solved translation maps pre-rotated, pre-scaled target space; what the
 	// driver applies is world-from-driver, which matches this frame directly.
@@ -988,9 +1059,10 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
                                       const EngineConfig &config)
 {
 	EngineResult failure;
-	if (!IsValidConfig(config))
+	if (const char *configError = ConfigError(config))
 	{
-		failure.message = "Invalid calibration engine configuration.";
+		failure.message = "Invalid calibration engine configuration: " +
+			std::string(configError) + ".";
 		return failure;
 	}
 
@@ -1096,8 +1168,9 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 		if (r2.valid)
 		{
 			r2.scale = guardedScale;
-			r2.scaleFromGrossMotion = grossClean;
-			r2.scaleNeutralizedForSmoothing = !grossClean;
+			r2.scaleGuard = grossClean
+				? ScaleGuard::FromGrossMotion
+				: ScaleGuard::NeutralizedForSmoothing;
 			r2.message += scaleNotIdentifiable
 				? " Motion did not identify playspace scale (too little translation); scale held at neutral 1.0."
 				: grossClean

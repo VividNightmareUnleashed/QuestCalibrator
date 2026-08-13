@@ -4105,6 +4105,7 @@ struct ContinuousSim
 
 	int corrections = 0;
 	int freezes = 0, resumes = 0, losses = 0, recoveries = 0;
+	int scatterFreezes = 0;   // subset of freezes that came via the scatter path
 	int unstables = 0;
 	double maxCorrRotDeg = 0.0;   // largest single emitted correction
 	double maxCorrPosM = 0.0;     // measured as displacement at the head
@@ -4224,6 +4225,12 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 				switch (e.type)
 				{
 				case ContinuousAlignment::Event::FrozenLargeDeviation: sim.freezes++; break;
+				// Both are freezes. Counting only the first would silently miss
+				// every scatter-path freeze, and /W3 does not warn on the gap.
+				case ContinuousAlignment::Event::FrozenMountScatter:
+					sim.freezes++;
+					sim.scatterFreezes++;
+					break;
 				case ContinuousAlignment::Event::Resumed: sim.resumes++; break;
 				case ContinuousAlignment::Event::TrackerLost: sim.losses++; break;
 				case ContinuousAlignment::Event::TrackerRecovered: sim.recoveries++; break;
@@ -4304,12 +4311,12 @@ void RunContinuousScenarios()
 		cal.scale = baseTruth.scale;
 		cal.timeOffset = baseTruth.latency;
 
-		ContinuousAlignment::Config cfg;
 		MountExtrinsic e, eWobble;
-		bool ok = ContinuousAlignment::DeriveMountExtrinsic(ref, tgt, cal, cfg, e);
+		bool ok = ContinuousAlignment::DeriveMountExtrinsic(ref, tgt, cal, e);
 		double rotErr = e.rot.angularDistance(kMountRot) * 180.0 / EIGEN_PI;
 		double posErr = (e.pos - kMountPos).norm();
-		bool okWobble = ContinuousAlignment::DeriveMountExtrinsic(ref, tgtWobble, cal, cfg, eWobble);
+		// eWobble is left untouched on failure now, so its rms reads 0.
+		bool okWobble = ContinuousAlignment::DeriveMountExtrinsic(ref, tgtWobble, cal, eWobble);
 
 		snprintf(detail, sizeof detail, "rotErr %.3f deg  posErr %.1f mm  pairs %zu  wobble rms %.2f deg",
 			rotErr, posErr * 1000.0, e.pairs, eWobble.rotRmsDeg);
@@ -4712,6 +4719,11 @@ void RunContinuousScenarios()
 				overlay.push_back({ pos, a.R, a.T });
 			}
 			protocol::SetAlignmentField f = BuildField(base, anchors, positions, 1);
+			// Vary the width that goes on the wire. The driver shapes its blend
+			// from whatever arrives, so agreeing at the struct default proves
+			// only that nobody has set it yet - the mirror has to agree at the
+			// value actually shipped.
+			f.sigmaMeters = 0.8 + 0.35 * (trial % 5);
 
 			for (int k = 0; k < 8; ++k)
 			{
@@ -4719,15 +4731,17 @@ void RunContinuousScenarios()
 				FieldTransform drv = DriverEffective(f, base, q);
 				Eigen::Quaterniond eR;
 				Eigen::Vector3d eT;
-				BlendedFieldCalibration(overlay, base.R, base.T, q, eR, eT);
+				BlendedFieldCalibration(overlay, base.R, base.T, q, eR, eT, f.sigmaMeters);
 				worstRot = std::max(worstRot, eR.angularDistance(drv.R));
 				worstPos = std::max(worstPos, (eT - drv.T).norm());
 			}
 		}
 
+		// The identity floor is still a shared constant on both sides. The blend
+		// width no longer is - it travels on the wire and is exercised above at
+		// several non-default values.
 		bool constantsMatch =
-			FieldBlendIdentityFloor == alignfield::IdentityFloorWeight &&
-			FieldBlendSigmaMeters == protocol::SetAlignmentField().sigmaMeters;
+			FieldBlendIdentityFloor == alignfield::IdentityFloorWeight;
 		snprintf(detail, sizeof detail, "worst rot %.2e rad  pos %.2e m  constants %d",
 			worstRot, worstPos, constantsMatch);
 		Check("continuous: field expectation matches driver blend",
@@ -5612,22 +5626,22 @@ int main(int argc, char **argv)
 			aRaw.scale < 0.97 &&                              // raw solve collapses at speed
 			aFast.motionGainValid && aFast.motionSmoothingDetected &&
 			aFast.motionGainHigh < aFast.motionGainLow - 0.02 &&  // diagnostic sees it
-			aFast.scaleNeutralizedForSmoothing &&
+			aFast.scaleGuard == ScaleGuard::NeutralizedForSmoothing &&
 			std::abs(aFast.scale - 1.0) < 0.001 &&             // dirty gross => neutral
 			aSlow.scale > 0.97;                               // slow motion nears truth
 		bool genuine = bFast.valid && bSlow.valid &&
 			!bFast.motionSmoothingDetected && !bSlow.motionSmoothingDetected &&
-			!bFast.scaleFromGrossMotion && !bSlow.scaleFromGrossMotion &&
-			!bFast.scaleNeutralizedForSmoothing && !bSlow.scaleNeutralizedForSmoothing &&
+			bFast.scaleGuard == ScaleGuard::NotApplied &&
+			bSlow.scaleGuard == ScaleGuard::NotApplied &&
 			std::abs(bFast.scale - 0.93) < 0.01 &&            // speed-invariant either way
 			std::abs(bSlow.scale - 0.93) < 0.01;
 
 		bool pass = artifact && genuine;
-		printf("%-28s %s  smoothed raw %.3f guarded %.3f slow %.3f (gain %.3f/%.3f gross %d neutral %d)  genuine fast %.3f slow %.3f (gain %.3f/%.3f)  valid %d%d%d%d%d\n",
+		printf("%-28s %s  smoothed raw %.3f guarded %.3f slow %.3f (gain %.3f/%.3f guard %d)  genuine fast %.3f slow %.3f (gain %.3f/%.3f)  valid %d%d%d%d%d\n",
 			"scale discriminator", pass ? "PASS" : "FAIL",
 			aRaw.scale, aFast.scale, aSlow.scale,
 			aFast.motionGainLow, aFast.motionGainHigh,
-			aFast.scaleFromGrossMotion, aFast.scaleNeutralizedForSmoothing,
+			static_cast<int>(aFast.scaleGuard),
 			bFast.scale, bSlow.scale,
 			bFast.motionGainLow, bFast.motionGainHigh,
 			aRaw.valid, aFast.valid, aSlow.valid, bFast.valid, bSlow.valid);
@@ -5673,7 +5687,8 @@ int main(int argc, char **argv)
 		grossCfg.maxCleanGrossDeviation = 0.10;
 		EngineResult cleanGross = CalibrationEngine::Solve(
 			SmoothStreamZeroPhase(ref, 0.30, 0.05), tgt, grossCfg);
-		bool cleanGrossSeen = cleanGross.valid && cleanGross.scaleFromGrossMotion;
+		bool cleanGrossSeen = cleanGross.valid &&
+			cleanGross.scaleGuard == ScaleGuard::FromGrossMotion;
 
 		// The gain diagnostic abstains on this short stream. That means the
 		// scale is not identifiable from this motion, NOT that it is clean, so
@@ -5682,16 +5697,14 @@ int main(int argc, char **argv)
 		// which is exactly what made the old silent commit look harmless.)
 		bool pass = shortResult.valid && !shortResult.motionGainValid &&
 			shortResult.scale == 1.0 &&
-			shortResult.scaleNeutralizedForSmoothing &&
-			!shortResult.scaleFromGrossMotion &&
+			shortResult.scaleGuard == ScaleGuard::NeutralizedForSmoothing &&
 			cleanGrossSeen && cleanGross.motionSmoothingDetected &&
-			!cleanGross.scaleNeutralizedForSmoothing &&
 			std::abs(cleanGross.scale - cleanGross.motionGainLow) < 1e-6 &&
 			std::abs(cleanGross.scale - 1.0) <= grossCfg.maxCleanGrossDeviation + 1e-6;
-		printf("%-28s %s  short valid/gain/scale/neutralized %d/%d/%.3f/%d  clean gross %d scale %.3f gain %.3f/%.3f\n",
+		printf("%-28s %s  short valid/gain/scale/guard %d/%d/%.3f/%d  clean gross %d scale %.3f gain %.3f/%.3f\n",
 			"scale diagnostic branches", pass ? "PASS" : "FAIL",
 			shortResult.valid, shortResult.motionGainValid, shortResult.scale,
-			shortResult.scaleNeutralizedForSmoothing,
+			static_cast<int>(shortResult.scaleGuard),
 			cleanGrossSeen, cleanGross.scale, cleanGross.motionGainLow, cleanGross.motionGainHigh);
 		RecordResult(pass);
 	}

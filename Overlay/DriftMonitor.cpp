@@ -4,11 +4,9 @@
 
 #include <cmath>
 
-static_assert(vr::k_unMaxTrackedDeviceCount <= 64, "DriftMonitor device array undersized");
-
 void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 {
-	if (s.deviceId >= 64)
+	if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
 		return;
 	if (!std::isfinite(linearScale) || linearScale < protocol::limits::MinScale ||
 		linearScale > protocol::limits::MaxScale)
@@ -20,19 +18,22 @@ void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 
 	auto &dev = devices[s.deviceId];
 	double t = RingSampleTime(s, qpcToSeconds);
-	if (dev.lastValidTime >= 0.0 && t <= dev.lastValidTime)
+	bool haveLast = dev.lastValid.time >= 0.0;
+	if (haveLast && t <= dev.lastValid.time)
 		return;
 
 	// Scale is part of this device's coordinate basis. Never compare samples
 	// across an intentional profile/scale edit: the same raw pose would appear
-	// to move solely because its units changed.
-	if (dev.lastValidTime >= 0.0 &&
-		std::abs(linearScale - dev.lastLinearScale) >
-			1e-6 * (1.0 + std::abs(dev.lastLinearScale)))
+	// to move solely because its units changed. Drops the window too — the
+	// retained positions are in the old units.
+	if (haveLast &&
+		std::abs(linearScale - dev.lastValid.linearScale) >
+			1e-6 * (1.0 + std::abs(dev.lastValid.linearScale)))
 	{
 		dev.window.clear();
-		dev.lastValidTime = -1.0;
+		dev.lastValid = LastValid();
 		dev.lastEvalTime = -1.0;
+		haveLast = false;
 	}
 
 	RingSampleParts p = UnpackRingSample(s);
@@ -42,27 +43,24 @@ void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 
 	// Discontinuous-loss recovery: only short absences count, and only when
 	// the device reappears far from where it vanished.
-	if (dev.lastValidTime >= 0.0)
+	if (haveLast)
 	{
-		double gap = t - dev.lastValidTime;
+		double gap = t - dev.lastValid.time;
 		if (gap > config.lossGap)
 		{
 			dev.window.clear();
 			// Ordinary motion through a short occlusion is not a re-localization.
 			// Compare recovery against a trapezoidal velocity prediction so only
 			// unexplained displacement contributes drift evidence.
-			Eigen::Vector3d predicted = dev.lastValidPos +
-				0.5 * (dev.lastValidVel + velocity) * gap;
+			Eigen::Vector3d predicted = dev.lastValid.pos +
+				0.5 * (dev.lastValid.vel + velocity) * gap;
 			double residual = (pos - predicted).norm();
 			if (gap <= config.maxLossGap && residual > config.lossJump)
 				events.push_back({ Event::DiscontinuousLoss, s.deviceId, residual, t });
 		}
 	}
 
-	dev.lastValidTime = t;
-	dev.lastLinearScale = linearScale;
-	dev.lastValidPos = pos;
-	dev.lastValidVel = velocity;
+	dev.lastValid = LastValid{ t, linearScale, pos, velocity };   // all four, always together
 
 	dev.window.push_back({ t, pos });
 	while (!dev.window.empty() && t - dev.window.front().t > config.window)
@@ -92,51 +90,59 @@ void DriftMonitor::EvaluateWindow(uint32_t id, DeviceState &dev)
 	if (chunks > MaxChunks)
 		chunks = MaxChunks;
 
-	Eigen::Vector3d mean[MaxChunks];
-	double sqDev[MaxChunks];
-	int count[MaxChunks];
-	for (int c = 0; c < chunks; ++c)
+	// The width the gates below actually describe: the span is divided evenly
+	// among the chunks, so it is at least the configured chunkSeconds and
+	// grows past it once the MaxChunks clamp binds. chunkJitter and chunkStep
+	// are tuned against this timescale, not against config.chunkSeconds — a
+	// window long enough to bind the clamp is applying them to a longer one.
+	const double chunkWidth = span / chunks;
+
+	// One record per chunk: filled in two passes (the stable two-pass variance,
+	// not the catastrophically-cancelling sum-of-squares form on room-scale
+	// coordinates) and read as a unit.
+	struct Chunk
 	{
-		mean[c] = Eigen::Vector3d::Zero();
-		sqDev[c] = 0.0;
-		count[c] = 0;
-	}
+		Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+		double sqDev = 0.0;
+		int count = 0;
+	};
+	Chunk chunk[MaxChunks];
 
 	auto chunkOf = [&](double t)
 	{
-		int c = static_cast<int>((t - t0) / (span / chunks));
+		int c = static_cast<int>((t - t0) / chunkWidth);
 		return c < chunks ? c : chunks - 1;
 	};
 
 	for (const auto &s : dev.window)
 	{
-		int c = chunkOf(s.t);
-		mean[c] += s.pos;
-		count[c]++;
+		Chunk &k = chunk[chunkOf(s.t)];
+		k.mean += s.pos;
+		k.count++;
 	}
 	for (int c = 0; c < chunks; ++c)
 	{
-		if (count[c] < 4)
+		if (chunk[c].count < 4)
 			return;   // stream gap inside the window; refuse to judge
-		mean[c] /= static_cast<double>(count[c]);
+		chunk[c].mean /= static_cast<double>(chunk[c].count);
 	}
 	for (const auto &s : dev.window)
 	{
-		int c = chunkOf(s.t);
-		sqDev[c] += (s.pos - mean[c]).squaredNorm();
+		Chunk &k = chunk[chunkOf(s.t)];
+		k.sqDev += (s.pos - k.mean).squaredNorm();
 	}
 
 	// Rest gates: every chunk internally quiet (sensor-noise level), and no
 	// chunk-to-chunk step a human wouldn't undercut but slow drift would.
 	for (int c = 0; c < chunks; ++c)
 	{
-		if (std::sqrt(sqDev[c] / count[c]) > config.chunkJitter)
+		if (std::sqrt(chunk[c].sqDev / chunk[c].count) > config.chunkJitter)
 			return;
-		if (c > 0 && (mean[c] - mean[c - 1]).norm() > config.chunkStep)
+		if (c > 0 && (chunk[c].mean - chunk[c - 1].mean).norm() > config.chunkStep)
 			return;
 	}
 
-	double slide = (mean[chunks - 1] - mean[0]).norm();
+	double slide = (chunk[chunks - 1].mean - chunk[0].mean).norm();
 	if (slide > config.slideThreshold)
 	{
 		events.push_back({ Event::StationarySlide, id, slide, dev.window.back().t });
@@ -157,11 +163,11 @@ void DriftMonitor::Reset()
 {
 	for (auto &dev : devices)
 	{
+		// Everything: a calibration change invalidates the retained window and
+		// the last-sample record alike.
 		dev.window.clear();
-		dev.lastValidTime = -1.0;
 		dev.lastEvalTime = -1.0;
-		dev.lastLinearScale = 0.0;
-		dev.lastValidVel = Eigen::Vector3d::Zero();
+		dev.lastValid = LastValid();
 	}
 	events.clear();
 }

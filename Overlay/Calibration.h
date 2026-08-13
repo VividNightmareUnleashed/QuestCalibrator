@@ -114,14 +114,30 @@ struct CalibrationContext
 	double continuousScatterRotDeg = 0.0;
 	double continuousScatterPosM = 0.0;
 
+	// The feature is armed only when the tracker pick and the mount offset
+	// learned for that tracker are both present — picking a tracker in the
+	// combo persists a serial and deliberately clears the extrinsic, so the two
+	// halves are routinely out of step. Every consumer must ask the same
+	// question: gating the driver-side hide on the weaker half displaced the
+	// tracker out of every game while nothing maintained the alignment.
+	bool ContinuousArmed() const
+	{
+		return continuousEnabled && mountExtrinsic.valid;
+	}
+
+	// Driver pose-channel health, refreshed every tick. Losing the ring parks
+	// universe-jump compensation, drift staleness, continuous calibration and
+	// chaperone universe verification, and drops collection back to tick-rate
+	// runtime poses — all of it silently, so the UI reports it as a first-class
+	// status instead of the overlay looking healthy with its monitors off.
+	bool poseRingOpen = false;
+
 	// Runtime alignment monitoring. The device masks mark reference/target
 	// system devices (refreshed by the profile scan); the counters feed drift
 	// staleness and the UI.
 	bool referenceDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	bool targetDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	uint32_t jumpsCompensated = 0;
-	double jumpTiltResidualDeg = 0.0;    // non-rigid rotation discarded by yaw constraint
-	double jumpSpreadResidualM = 0.0;    // device disagreement at accepted jumps
 	uint32_t referenceGapEvents = 0;     // hard reference-stream gaps (no compensation possible)
 
 	// Drift staleness (detect + notify only; never auto-corrects). Counters
@@ -144,7 +160,15 @@ struct CalibrationContext
 	// Both records share one quiet-period clock: any persistent mutation restarts
 	// the debounce, while the independent dirty bits retain partial-write state.
 	double persistenceDirtyTime = 0.0;
+	// When the current dirty streak began. A session that keeps correcting
+	// never reaches a quiet period, so the debounce alone would defer both
+	// records until shutdown and lose everything to a crash or a SteamVR kill.
+	double persistenceFirstDirtyTime = 0.0;
 	uint32_t persistenceRevision = 0;
+	// A universe rebase writes the calibration and the protected standing
+	// center as one revision: the Settings half must not land without the
+	// Config half. Independent dirty bits carry no such ordering requirement.
+	bool persistenceCoupled = false;
 	// Older releases embedded global settings in Config.  Until their first
 	// Settings write succeeds, SaveProfile must not replace that only copy.
 	bool legacySettingsMigrationPending = false;
@@ -166,10 +190,20 @@ struct CalibrationContext
 
 	bool enabled = false;
 	bool validProfile = false;
-	// Runtime fail-closed latch: a persisted HMD universe baseline changed
-	// while normal multi-device monitoring had no continuity. Only a fresh
-	// base calibration can safely re-enable this profile.
+	// Fail-closed latch (persisted with the profile): the profile's HMD universe
+	// baseline changed while normal multi-device monitoring had no continuity.
+	// Only a fresh base calibration can safely re-enable this profile, so the
+	// latch must survive a restart — a session-only latch simply hands the
+	// corrupted profile back at the next launch.
 	bool profileUniverseUnsafe = false;
+	// The reference universe the calibration was solved in: the headset that
+	// owns it plus that headset's raw worldFromDriver, persisted with the
+	// profile. The protected chaperone snapshot used to be the only carrier of
+	// this, so a user who never protected a room got no continuity check at all.
+	bool profileUniverseValid = false;
+	std::string profileHmdSerial;
+	Eigen::Quaterniond profileWorldFromDriverRotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d profileWorldFromDriverTranslation{ 0, 0, 0 };
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
 
@@ -221,6 +255,7 @@ struct CalibrationContext
 	{
 		if (++persistenceRevision == 0)
 			persistenceRevision = 1;
+		persistenceCoupled = true;
 	}
 
 	bool HasDirtyPersistence() const
@@ -228,29 +263,42 @@ struct CalibrationContext
 		return profileSaveDirty || settingsSaveDirty;
 	}
 
+	// Starts the maximum-age clock only on the clean -> dirty transition, so a
+	// stream of corrections cannot push the forced flush out indefinitely.
+	void StartPersistenceDebounce(double now)
+	{
+		if (!HasDirtyPersistence())
+			persistenceFirstDirtyTime = now;
+		persistenceDirtyTime = now;
+	}
+
 	void MarkProfileDirty(double now)
 	{
+		StartPersistenceDebounce(now);
 		profileSaveDirty = true;
-		persistenceDirtyTime = now;
 	}
 
 	void MarkSettingsDirty(double now)
 	{
+		StartPersistenceDebounce(now);
 		settingsSaveDirty = true;
-		persistenceDirtyTime = now;
 	}
 
 	void MarkProfileAndSettingsDirty(double now)
 	{
+		StartPersistenceDebounce(now);
 		profileSaveDirty = true;
 		settingsSaveDirty = true;
-		persistenceDirtyTime = now;
 	}
 
 	void DelayPersistenceRetry(double now)
 	{
-		if (HasDirtyPersistence())
-			persistenceDirtyTime = now;
+		if (!HasDirtyPersistence())
+			return;
+		// Restart both clocks: a record that keeps refusing the write must retry
+		// on the 5 s cadence, not once per tick because the ceiling has passed.
+		persistenceDirtyTime = now;
+		persistenceFirstDirtyTime = now;
 	}
 
 	void DisarmChaperone()
@@ -346,6 +394,10 @@ struct CalibrationContext
 		enabled = false;
 		validProfile = false;
 		profileUniverseUnsafe = false;
+		profileUniverseValid = false;
+		profileHmdSerial.clear();
+		profileWorldFromDriverRotation = Eigen::Quaterniond(1, 0, 0, 0);
+		profileWorldFromDriverTranslation = Eigen::Vector3d::Zero();
 		profileSaveDirty = false;
 		timeLastScan = -1e9;
 		ClearSampleBuffers();
@@ -380,6 +432,17 @@ struct CalibrationContext
 	};
 
 	std::vector<Message> messages;
+	size_t messageBytes = 0;
+	// The pane is the bug-report surface for a GUI binary with no stderr, so it
+	// keeps recent history — but the runtime monitors log for the whole session
+	// and a driver that rebases at pose rate grows it at MB/minute. Bound it the
+	// way AppendSessionLog bounds the file. Entries are capped too: without that
+	// the whole session is one std::string, which nothing can trim and which
+	// ImGui::TextWrapped re-wraps every frame while the modal is open.
+	// StartCalibration clears the pane, so trimming only ever drops backlog the
+	// calibration modal does not render.
+	static constexpr size_t MessageEntryMaxBytes = 8 * 1024;
+	static constexpr size_t MessagePaneMaxBytes = 256 * 1024;
 	// Persistent banner for failures that occur outside the calibration modal
 	// (registry/chaperone operations in the settings screen).
 	enum class ErrorSource
@@ -395,12 +458,28 @@ struct CalibrationContext
 	std::string uiError;
 	ErrorSource uiErrorSource = ErrorSource::None;
 
+	void ClearMessages()
+	{
+		messages.clear();
+		messageBytes = 0;
+	}
+
 	void Log(const std::string &msg)
 	{
-		if (messages.empty() || messages.back().type == Message::Progress)
+		if (messages.empty() || messages.back().type == Message::Progress ||
+			messages.back().str.size() >= MessageEntryMaxBytes)
 			messages.push_back(Message(Message::String));
 
 		messages.back().str += msg;
+		messageBytes += msg.size();
+		// Never drop the entry being appended to: the newest lines are the ones
+		// a bug report is about.
+		while (messageBytes > MessagePaneMaxBytes && messages.size() > 1)
+		{
+			messageBytes -= messages.front().str.size();
+			messages.erase(messages.begin());
+		}
+
 		AppendSessionLog(msg);
 		std::cerr << msg;
 	}
@@ -441,6 +520,13 @@ bool StartCalibration();
 bool StartAnchorCalibration();     // same collection; result becomes a field anchor
 bool LoadChaperoneBounds();
 bool ApplyChaperoneBounds(bool logSuccess = true);
+
+// Push the live profile to the driver immediately. A UI action that changes
+// what the driver should be applying must call this once its save succeeds:
+// the runtime monitors read the local flags on the very next tick, so waiting
+// for the periodic scan leaves them measuring against a calibration the driver
+// is not applying yet.
+void ResyncDriverState();
 
 // Dashboard overlay handle (0 until created); owned by QuestCalibrator.cpp.
 vr::VROverlayHandle_t GetMainOverlayHandle();

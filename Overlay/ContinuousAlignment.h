@@ -153,15 +153,27 @@ public:
 
 	struct Event
 	{
+		// The two freeze causes are separate enumerators rather than one type
+		// discriminated by deviation.valid: they are different messages with
+		// different evidence, and a consumer that handles the name without
+		// testing a nested flag used to print an all-zero deviation for the
+		// mount-fault case — exactly when the user most needs to be told the
+		// mount looks wrong.
 		enum Type
 		{
-			FrozenLargeDeviation,
+			FrozenLargeDeviation,   // sustained deviation vs the calibration
+			FrozenMountScatter,     // sustained STRUCTURED scatter: the slipped-mount signature
 			Resumed,
 			TrackerLost,
 			TrackerRecovered,
 			ObservationsUnstable,   // sustained unstructured scatter; informational
 		} type = FrozenLargeDeviation;
-		Deviation deviation;   // populated for a deviation-path FrozenLargeDeviation
+		// Each event carries its own evidence, so one message never needs a
+		// second data source: the deviation for FrozenLargeDeviation, the
+		// window scatter for the two scatter-path events.
+		Deviation deviation;
+		double scatterRotDeg = 0.0;
+		double scatterPosM = 0.0;
 	};
 
 	using ExpectedCalibrationAt = std::function<void(
@@ -212,11 +224,12 @@ public:
 	// Derive the mount extrinsic from a manual calibration's sample buffers
 	// and its solved result. The per-pair spread doubles as the rigidity gate:
 	// a tracker that was not rigid on the HMD fails it and `out` is left
-	// invalid (the caller keeps any previous extrinsic).
+	// untouched (the caller keeps any previous extrinsic). The speed/interp
+	// gates and the rigidity thresholds are fixed policy — whether continuous
+	// calibration arms at all is not a caller knob — so this takes no config.
 	static bool DeriveMountExtrinsic(const std::vector<PoseSample> &refStream,
 	                                 const std::vector<PoseSample> &targetStream,
 	                                 const EngineResult &calibration,
-	                                 const Config &config,
 	                                 MountExtrinsic &out);
 
 private:
@@ -228,16 +241,33 @@ private:
 		Eigen::Vector3d targetRawPos{ 0, 0, 0 };
 	};
 
+	// One window's worth of estimate: the robust average plus the scatter and
+	// noise figures derived in the same pass. Returned as a unit so "are the
+	// published figures stale?" has one answer in one place — Decide copies
+	// them to the members only on success, and a refused estimate publishes
+	// nothing at all.
+	struct WindowEstimate
+	{
+		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
+		Eigen::Vector3d trans{ 0, 0, 0 };
+		double scatterRotDeg = 0.0;
+		double scatterPosM = 0.0;
+		double noiseRotDeg = 0.0;
+		double noisePosM = 0.0;
+	};
+
 	void FormObservations(double calScale, double calTimeOffset);
 	void TrimWindows(double now);
+	void CompactWindows();
 	bool EstimateWindow(const Eigen::Quaterniond &calRotation,
 	                    const Eigen::Vector3d &calTranslationMeters,
 	                    const ExpectedCalibrationAt &expectedAt,
-	                    Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut);
+	                    WindowEstimate &out) const;
 	void Decide(double now, const Eigen::Quaterniond &calRotation,
 	            const Eigen::Vector3d &calTranslationMeters,
 	            const ExpectedCalibrationAt &expectedAt);
 	void EnterState(State s);
+	void ClearConfirmMarks();
 
 	Config config;
 	MountExtrinsic extrinsic;
@@ -245,6 +275,12 @@ private:
 
 	std::vector<PoseSample> refWindow;
 	std::vector<PoseSample> targetWindow;
+	// Expired-prefix cursors. A tick retires a handful of samples out of
+	// thousands, so erasing from the front relocated the whole retained window
+	// every tick; consumers work off the live range [head, size) and the dead
+	// prefix is compacted away only when it is worth one move.
+	size_t refHead = 0;
+	size_t targetHead = 0;
 	std::deque<Observation> observations;
 	size_t targetProcessed = 0;        // targetWindow prefix already turned into obs
 	double lastObsTime = 0.0;          // sample clock
@@ -254,8 +290,9 @@ private:
 	Deviation deviation;
 	double scatterRotRmsDeg = 0.0;
 	double scatterPosRmsM = 0.0;
-	// Short-term noise estimate (robust sigma from consecutive-obs deltas):
-	// the unstructured part of the window scatter.
+	// Short-term noise estimate (robust sigma from deltas between observations
+	// ~2 x the thinning spacing apart): the unstructured part of the window
+	// scatter. Published by Decide from the estimate that produced it.
 	double noiseRotDeg = 0.0;
 	double noisePosM = 0.0;
 
@@ -268,7 +305,14 @@ private:
 	// so a slip that starts deep into a long degraded-tracking episode still
 	// freezes within ~scatterVoteWindow evaluations instead of having to
 	// outvote the entire episode's history.
-	double scatterSince = -1.0;
+	double scatterSince = -1.0;          // gates the freeze; cleared on a gap
+	// How long the degraded episode has really been running. Unlike
+	// scatterSince this survives a coast, because the episode does: the
+	// notification it drives is an observation about tracking quality, not an
+	// action taken on the calibration, and the degraded tracking it reports is
+	// exactly what produces the gaps that reset scatterSince. Only the settle
+	// path and Reset clear it.
+	double scatterEpisodeSince = -1.0;
 	std::deque<char> scatterStructuredVotes;
 	bool unstableNotified = false;
 

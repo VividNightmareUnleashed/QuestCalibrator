@@ -126,16 +126,24 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now);
 
 static bool SaveDirtyPersistence(CalibrationContext &ctx)
 {
-	// Coupled changes always write Config first.  A crash after that first
-	// write is detected by the shared revision at the next launch.
+	// SaveSettings owns the ordering: it commits a dirty Config first, and only
+	// a coupled revision bump lets a Config failure hold the Settings half back.
+	// A crash (or a failure) after that first write is detected by the shared
+	// revision at the next launch.
+	if (ctx.settingsSaveDirty)
+		return SaveSettings(ctx);
 	if (ctx.profileSaveDirty)
 	{
-		if (!ctx.validProfile || !SaveProfile(ctx))
+		if (!ctx.validProfile)
+		{
+			ctx.ReportError(PendingProfileWithoutValidProfileMessage,
+				CalibrationContext::ErrorSource::ProfilePersistence);
 			return false;
-		ctx.profileSaveDirty = false;
+		}
+		if (!SaveProfile(ctx))
+			return false;
 	}
-	if (ctx.settingsSaveDirty && !SaveSettings(ctx))
-		return false;
+	ctx.persistenceCoupled = false;
 	return true;
 }
 
@@ -144,7 +152,11 @@ static void PersistenceTick(CalibrationContext &ctx, double now)
 	if (!ctx.HasDirtyPersistence())
 		return;
 
-	if (now - ctx.persistenceDirtyTime <= 5.0)
+	// The quiet period avoids a registry write per continuous correction, but a
+	// steadily drifting universe never goes quiet: force the write once the
+	// dirty streak passes the ceiling so a crash cannot discard a whole session.
+	if (now - ctx.persistenceDirtyTime <= 5.0 &&
+		now - ctx.persistenceFirstDirtyTime <= 60.0)
 		return;
 
 	if (!SaveDirtyPersistence(ctx))
@@ -220,7 +232,21 @@ void AppendSessionLog(const std::string &msg)
 
 void InitCalibrator()
 {
-	Driver.Connect();
+	// "Driver not reachable" is an observable property, not a startup
+	// precondition: SteamVR auto-launch can beat vrserver's driver load, and a
+	// throw here would kill the overlay before LoadProfile, exactly when the
+	// user needs the UI to inspect or clear the profile. SendBlocking
+	// reconnects (with the same exact-version handshake) on the first request,
+	// and until then SynchronizeDriverState fails closed with enabled = false
+	// and the Driver banner reports it, as after any mid-session restart.
+	try
+	{
+		Driver.Connect();
+	}
+	catch (const std::exception &e)
+	{
+		AppendSessionLog(std::string("Driver not reachable at startup: ") + e.what());
+	}
 
 	LARGE_INTEGER freq;
 	QueryPerformanceFrequency(&freq);
@@ -326,6 +352,18 @@ static bool ResetAndDisableOffsets(CalibrationContext &ctx, uint32_t id,
 
 static_assert(vr::k_unTrackedDeviceIndex_Hmd == 0, "HMD index expected to be 0");
 
+// "Which anchors is the driver blending right now" has exactly one answer, and
+// both the sender and the continuous loop must read it from here: they used to
+// spell the predicate out separately and already disagreed, so a toggle could
+// leave the loop comparing against raw base while the driver still applied
+// anchor deltas.
+static const std::vector<CalibrationContext::FieldAnchor> &ActiveFieldAnchors(
+	const CalibrationContext &ctx)
+{
+	static const std::vector<CalibrationContext::FieldAnchor> none;
+	return ctx.fieldEnabled ? ctx.fieldAnchors : none;
+}
+
 // Ship the spatial correction field. Deltas are derived here against the
 // current base calibration: delta_i = anchor_i o base^-1 is the correction
 // that, applied after the base calibration, reproduces the absolute solve at
@@ -336,9 +374,14 @@ static bool SendAlignmentField(CalibrationContext &ctx, bool baseBatchComplete,
 	protocol::Request req(protocol::RequestSetAlignmentField);
 	auto &f = req.setAlignmentField;
 
-	f.enabled = baseBatchComplete && ctx.enabled && ctx.fieldEnabled &&
-		!ctx.fieldAnchors.empty();
+	const auto &anchors = ActiveFieldAnchors(ctx);
+	f.enabled = baseBatchComplete && ctx.enabled && !anchors.empty();
 	f.generation = ctx.fieldGeneration;
+	// Ship the width explicitly rather than leaning on the struct default
+	// coinciding with what the overlay blends: the driver shapes its field from
+	// whatever arrives here, so this assignment is what keeps the driver's
+	// blend and ContinuousTick's expectation the same function.
+	f.sigmaMeters = questcal::FieldBlendSigmaMeters;
 	if (!f.enabled)
 	{
 		// Disabled messages are canonical and independent of live calibration
@@ -348,13 +391,13 @@ static bool SendAlignmentField(CalibrationContext &ctx, bool baseBatchComplete,
 			batchConnectionGeneration);
 	}
 	f.anchorCount = static_cast<uint32_t>(std::min(
-		ctx.fieldAnchors.size(), static_cast<size_t>(protocol::SetAlignmentField::MaxAnchors)));
+		anchors.size(), static_cast<size_t>(protocol::SetAlignmentField::MaxAnchors)));
 
 	Eigen::Quaterniond baseInv = ctx.calibratedRotationQ.conjugate();
 	Eigen::Vector3d baseT = ctx.TranslationMeters();
 	for (uint32_t i = 0; i < f.anchorCount; ++i)
 	{
-		const auto &a = ctx.fieldAnchors[i];
+		const auto &a = anchors[i];
 		Eigen::Quaterniond dR;
 		Eigen::Vector3d dT;
 		questcal::AnchorDelta(a.rotation, a.translationMeters, baseInv, baseT, dR, dT);
@@ -704,7 +747,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 			};
 			req.setDeviceTransform.generation = ctx.baseGeneration;
 			req.setDeviceTransform.hidden =
-				ctx.continuousEnabled && ctx.hideMountedTracker &&
+				ctx.ContinuousArmed() && ctx.hideMountedTracker &&
 				id == ctx.continuousTrackerId;
 			// Mark before sending: a response loss can leave an accepted enable
 			// indistinguishable from a failed request, so future disappearance must
@@ -777,6 +820,15 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 		ctx.ClearError(CalibrationContext::ErrorSource::Driver);
 		LastDriverRequestErrorTime = -1e9;
 	}
+}
+
+void ResyncDriverState()
+{
+	// Same guard as CalibrationTick: with no runtime (UI preview) there is no
+	// driver to synchronize, and SynchronizeDriverState reads OpenVR directly.
+	if (!vr::VRSystem())
+		return;
+	SynchronizeDriverState(CalCtx);
 }
 
 static void CheckProtectedChaperone(CalibrationContext &ctx)
@@ -1051,33 +1103,217 @@ static void ApplyAlignmentDelta(CalibrationContext &ctx, const Eigen::Quaternion
 // ---------------------------------------------------------------------------
 // Runtime monitoring: universe-jump compensation
 
+// How long the universe check defers its verdict once it first sees a mismatch,
+// and how long a compensated-but-endpointless jump may claim the observation
+// that follows it. The jump detector's heuristic path can only accept between
+// its window (0.2 s) and agreeWindow (0.25 s) after the discontinuity, so a
+// verdict on the first observation always lands ~0.2 s before the compensation
+// it would have to account for — and parking the monitor discards the pending
+// candidate, so the jump is never compensated at all. Fail-closed survives; it
+// is only this much later. Kept below the detector's 1 s retrigger hold so a
+// second, suppressed rebase still reads as unobserved.
+static constexpr double UniverseVerdictGraceSeconds = 0.5;
+
+// UI-clock time the current mismatch was first observed; negative = none.
+static double UniverseMismatchSince = -1e9;
+
+// Ring time of a compensated jump whose endpoint the detector could not report
+// (the heuristic path regresses a heading from velocity-compensated windows; it
+// never reads the new worldFromDriver), so the next observation is the
+// compensated endpoint rather than evidence of an unobserved rebase.
+static double CompensatedJumpAwaitingEndpoint = -1e9;
+
+static bool UniverseVerdictPending()
+{
+	return UniverseMismatchSince >= 0.0;
+}
+
+// Bind both universe baselines to the endpoint we are looking at, if it is the
+// one a heuristic jump compensation was waiting for.
+static bool AdoptObservedUniverseAfterJump(CalibrationContext &ctx, double now)
+{
+	if (CurrentHmdObservation.sampleTime < CompensatedJumpAwaitingEndpoint ||
+		CurrentHmdObservation.sampleTime - CompensatedJumpAwaitingEndpoint >
+			UniverseVerdictGraceSeconds)
+		return false;
+	CompensatedJumpAwaitingEndpoint = -1e9;
+
+	ctx.profileWorldFromDriverRotation = CurrentHmdObservation.rotation;
+	ctx.profileWorldFromDriverTranslation = CurrentHmdObservation.translation;
+	ctx.profileUniverseValid = true;
+	ctx.MarkProfileDirty(now);
+	if (ctx.chaperone.valid)
+	{
+		ctx.chaperone.worldFromDriverRotation = CurrentHmdObservation.rotation;
+		ctx.chaperone.worldFromDriverTranslation = CurrentHmdObservation.translation;
+		ctx.chaperone.worldFromDriverValid = true;
+		ctx.chaperone.baselineVerifiedThisSession = true;
+		ctx.MarkSettingsDirty(now);
+	}
+	return true;
+}
+
 // Fold an accepted universe delta into the calibration: the reference universe
 // moved by D in one frame, so target devices must follow to stay aligned.
 static void ApplyUniverseDelta(CalibrationContext &ctx, const JumpDetector::UniverseDelta &d, double now)
 {
 	ApplyAlignmentDelta(ctx, d.rotation, d.translation, /*snap=*/true, now);
-	if (d.exact && ctx.chaperone.valid)
+	if (d.exact)
 	{
 		// Bind to this accepted HMD sample's exact endpoint, never to the
 		// consumer's global latest value: a drained backlog may already contain
 		// a second rebase which retrigger hysteresis intentionally suppressed.
-		ctx.chaperone.worldFromDriverRotation =
-			d.worldFromDriverRotation.normalized();
-		ctx.chaperone.worldFromDriverTranslation =
-			d.worldFromDriverTranslation;
-		ctx.chaperone.worldFromDriverValid = true;
-		ctx.chaperone.baselineVerifiedThisSession = true;
+		if (ctx.profileUniverseValid)
+		{
+			ctx.profileWorldFromDriverRotation =
+				d.worldFromDriverRotation.normalized();
+			ctx.profileWorldFromDriverTranslation =
+				d.worldFromDriverTranslation;
+		}
+		if (ctx.chaperone.valid)
+		{
+			ctx.chaperone.worldFromDriverRotation =
+				d.worldFromDriverRotation.normalized();
+			ctx.chaperone.worldFromDriverTranslation =
+				d.worldFromDriverTranslation;
+			ctx.chaperone.worldFromDriverValid = true;
+			ctx.chaperone.baselineVerifiedThisSession = true;
+		}
 	}
+	else
+		CompensatedJumpAwaitingEndpoint = d.time;
 
 	ctx.jumpsCompensated++;
-	ctx.jumpTiltResidualDeg += d.residualTiltRad * 180.0 / EIGEN_PI;
-	ctx.jumpSpreadResidualM += d.residualSpread;
 
 	double yawDeg = 2.0 * std::atan2(d.rotation.y(), d.rotation.w()) * 180.0 / EIGEN_PI;
 	char buf[256];
 	snprintf(buf, sizeof buf, "Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)\n",
 		d.exact ? "exact" : "estimated", yawDeg, d.translation.norm(), d.devicesAgreeing);
 	ctx.Log(buf);
+}
+
+// Does the live calibration still describe the universe it was solved in? The
+// profile owns that question: it carries its own persisted headset identity and
+// worldFromDriver baseline, so the check works with no protected room and
+// survives a restart. The chaperone snapshot references the same verdict rather
+// than deciding it. Runs on the drained observation, before any snapshot logic.
+static void ProfileUniverseTick(CalibrationContext &ctx, double now)
+{
+	// Same state gate as the runtime monitors: a rebase seen mid-collection is
+	// not a verdict, because the solve in flight rebinds the baseline itself
+	// (and a failed solve leaves this to decide on the next idle tick).
+	if (ctx.state != CalibrationState::None || !ctx.validProfile ||
+		ctx.profileUniverseUnsafe)
+	{
+		UniverseMismatchSince = -1e9;
+		return;
+	}
+	// Losing freshness deliberately does NOT restart the grace below: a flapping
+	// ring would otherwise postpone the verdict indefinitely.
+	if (!HasFreshHmdWorldFromDriver())
+		return;
+
+	// Steady state first: an unchanged baseline decides nothing and must not
+	// pay for the device-property reads below, which are comparatively
+	// expensive OpenVR calls on a tick that runs at up to 50 Hz.
+	bool changed = !ctx.profileUniverseValid || questcal::WorldFromDriverChanged(
+		ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation,
+		CurrentHmdObservation.rotation, CurrentHmdObservation.translation);
+	if (!changed)
+	{
+		UniverseMismatchSince = -1e9;
+		return;
+	}
+
+	// Scoped to one physical headset. SynchronizeDriverState only matches the
+	// tracking-system name, so a same-system spare headset is a different
+	// universe rather than a rebase of this one, and an identity that cannot be
+	// read proves nothing either way.
+	std::string trackingSystem;
+	std::string serial;
+	if (!ReadCurrentHmdIdentity(trackingSystem, serial) ||
+		trackingSystem != ctx.referenceTrackingSystem)
+		return;
+
+	if (!ctx.profileUniverseValid || ctx.profileHmdSerial != serial)
+	{
+		// A profile saved before this baseline existed adopts one: absence of a
+		// baseline is not evidence of a rebase. A protected room captured by
+		// this same headset already carries the universe the profile was
+		// calibrated in, so prefer it and keep that protection across the
+		// migration instead of silently adopting a universe that may have
+		// already moved.
+		bool fromSnapshot = ctx.chaperone.valid &&
+			ctx.chaperone.worldFromDriverValid &&
+			ctx.chaperone.ownerTrackingSystem == trackingSystem &&
+			ctx.chaperone.ownerHmdSerial == serial;
+		ctx.profileHmdSerial = serial;
+		ctx.profileWorldFromDriverRotation = fromSnapshot
+			? ctx.chaperone.worldFromDriverRotation : CurrentHmdObservation.rotation;
+		ctx.profileWorldFromDriverTranslation = fromSnapshot
+			? ctx.chaperone.worldFromDriverTranslation : CurrentHmdObservation.translation;
+		ctx.profileUniverseValid = true;
+		ctx.MarkProfileDirty(now);
+		UniverseMismatchSince = -1e9;
+		if (!fromSnapshot)
+			return;
+	}
+
+	if (!questcal::WorldFromDriverChanged(
+		ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation,
+		CurrentHmdObservation.rotation, CurrentHmdObservation.translation))
+	{
+		UniverseMismatchSince = -1e9;
+		return;
+	}
+
+	// A rebase the jump detector compensated moved the calibration, the field
+	// anchors and the standing center by the same D. It was observed, so it is
+	// not this failure.
+	if (AdoptObservedUniverseAfterJump(ctx, now))
+	{
+		UniverseMismatchSince = -1e9;
+		return;
+	}
+
+	// Give the jump detector its window before answering. Its heuristic path
+	// cannot produce a delta until ~0.2 s after the discontinuity, so a verdict
+	// on the first observation is always premature — and because the verdict
+	// parks the monitor, it also destroys the compensation it was judging.
+	if (!UniverseVerdictPending())
+		UniverseMismatchSince = now;
+	if (now - UniverseMismatchSince < UniverseVerdictGraceSeconds)
+	{
+		// Nothing may be restored against a baseline still being adjudicated.
+		ctx.chaperone.baselineVerifiedThisSession = false;
+		return;
+	}
+	UniverseMismatchSince = -1e9;
+
+	// We know the reference universe moved, but not whether the target universe
+	// moved with it. Applying only the HMD delta could silently corrupt
+	// alignment; keep both profile and room fail-closed until a fresh base
+	// calibration establishes the relation.
+	ctx.profileUniverseUnsafe = true;
+	ctx.enabled = false;
+	ctx.MarkProfileDirty(now);
+	bool autoApplyChanged = ctx.chaperone.autoApply;
+	ctx.chaperone.autoApply = false;
+	ctx.chaperone.baselineVerifiedThisSession = false;
+	if (autoApplyChanged)
+		ctx.MarkSettingsDirty(now);
+	ctx.ReportError(autoApplyChanged
+		? "The headset raw universe changed while calibration monitoring had no continuity. "
+			"The profile and protected chaperone are disabled until you run a new base calibration.\n"
+		: "The headset raw universe changed while calibration monitoring had no continuity. "
+			"The profile is disabled until you run a new base calibration.\n",
+		CalibrationContext::ErrorSource::Chaperone);
+	// Fail closed in the driver immediately; waiting for the periodic
+	// one-second scan would leave the previous transforms live.
+	SynchronizeDriverState(ctx);
+	// The latch is worth nothing if a crash before the debounce elapses hands
+	// the profile back enabled; the dirty bits survive a failed write and retry.
+	SaveDirtyPersistence(ctx);
 }
 
 static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
@@ -1133,6 +1369,11 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 		if (!HasFreshHmdWorldFromDriver())
 			ctx.chaperone.baselineVerifiedThisSession = false;
 	}
+
+	// The profile's own universe check runs on this observation first, so the
+	// snapshot logic below sees a verdict (and, after a compensated jump, an
+	// already-advanced baseline) rather than deciding the same question again.
+	ProfileUniverseTick(ctx, now);
 
 	// Device properties are stable for a session but comparatively expensive
 	// OpenVR calls; the tick runs at up to 50 Hz. Recheck once per second, or
@@ -1199,29 +1440,29 @@ static void ChaperoneMonitorTick(CalibrationContext &ctx, double now)
 
 	if (ctx.validProfile)
 	{
-		// Across a monitor discontinuity we know the reference universe moved,
-		// but not whether the target universe also moved. Applying only the HMD
-		// delta could silently corrupt alignment; keep both profile and room
-		// fail-closed until a fresh base calibration establishes the relation.
-		bool newlyUnsafe = !ctx.profileUniverseUnsafe;
+		// The profile owns the universe verdict and has already acted on this
+		// same observation (latched, or re-bound after a compensated jump). All
+		// that is left here is the room: this snapshot's baseline no longer
+		// describes the live universe, so it is not restorable until recaptured.
+		// Re-anchoring it from HMD continuity alone is only safe with no
+		// profile — with one, the target universe's relation is unknown.
+		if (UniverseVerdictPending())
+		{
+			// Still deferred: block restores, but do not persist a disarm that a
+			// compensation landing inside the grace window would make wrong.
+			ctx.chaperone.baselineVerifiedThisSession = false;
+			return;
+		}
 		bool autoApplyChanged = ctx.chaperone.autoApply;
-		ctx.profileUniverseUnsafe = true;
-		ctx.enabled = false;
 		ctx.chaperone.autoApply = false;
 		ctx.chaperone.baselineVerifiedThisSession = false;
-		if (newlyUnsafe)
-		{
-			ctx.ReportError(
-				"The headset raw universe changed while calibration monitoring had no continuity. "
-				"The profile and protected chaperone are disabled until you run a new base calibration.\n",
-				CalibrationContext::ErrorSource::Chaperone);
-			// Fail closed in the driver immediately; waiting for the periodic
-			// one-second scan would leave the previous transforms live.
-			SynchronizeDriverState(ctx);
-		}
 		if (autoApplyChanged)
 		{
 			ctx.MarkSettingsDirty(now);
+			ctx.ReportError(
+				"The protected chaperone no longer matches the headset raw universe and was disarmed. "
+				"Capture it again before restoring it.\n",
+				CalibrationContext::ErrorSource::Chaperone);
 			SaveSettings(ctx);
 		}
 		return;
@@ -1372,18 +1613,21 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 	double repeatScore = std::min((ctx.driftSlideEvents + 0.5 * ctx.discontinuousLossEvents) / 8.0, 1.0);
 	double evidence = std::max(slideScore, repeatScore);
 
+	// Soft-OR: independent evidence compounds without exceeding 1.
+	ctx.driftScore = 1.0 - (1.0 - ageScore) * (1.0 - evidence);
+
 	// Corroboration gate: one slide window on one device is a measurement,
 	// not a verdict — a resting body's posture creep passes the rest gates and
 	// produces exactly one such window, and used to flip the rating straight
-	// to Stale/Very Poor while the alignment looked visibly fine. Genuine
-	// detector-band drift persists, so the monitor re-fires within ~one window
-	// (its window clears per event) and the cap lifts almost immediately;
-	// until then a lone event can only ever say "aging".
+	// to Stale/Very Poor while the alignment looked visibly fine. The cap is on
+	// the combined score, not the evidence term: age saturates at 0.5, so a
+	// capped-at-0.5 evidence term still soft-ORs to 0.75 and rates every
+	// day-old calibration Stale off one benign event. Genuine detector-band
+	// drift persists, so the monitor re-fires within ~one window (its window
+	// clears per event) and the cap lifts almost immediately; until then a lone
+	// event can only ever say "aging".
 	if (ctx.driftSlideEvents + ctx.discontinuousLossEvents <= 1)
-		evidence = std::min(evidence, 0.5);
-
-	// Soft-OR: independent evidence compounds without exceeding 1.
-	ctx.driftScore = 1.0 - (1.0 - ageScore) * (1.0 - evidence);
+		ctx.driftScore = std::min(ctx.driftScore, 0.5);
 
 	ctx.alignment =
 		ctx.driftScore >= 0.65 ? CalibrationContext::AlignmentHealth::Stale :
@@ -1393,7 +1637,7 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 	// A healthy continuous loop re-measures the alignment constantly; the
 	// rating already skips staleness for it, and toasting "quality looks poor"
 	// while it is visibly being maintained is pure noise.
-	bool maintained = ctx.continuousEnabled && ctx.mountExtrinsic.valid &&
+	bool maintained = ctx.ContinuousArmed() &&
 		ctx.continuousState ==
 			static_cast<int>(questcal::ContinuousAlignment::State::Tracking);
 	if (ctx.alignment == CalibrationContext::AlignmentHealth::Stale && !maintained)
@@ -1581,7 +1825,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 {
 	bool shouldRun = ctx.state == CalibrationState::None &&
 		ctx.enabled && ctx.validProfile && PoseHub.RingOpen() &&
-		ctx.continuousEnabled && ctx.mountExtrinsic.valid &&
+		ctx.ContinuousArmed() &&
 		ctx.continuousTrackerId < vr::k_unMaxTrackedDeviceCount &&
 		ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd];
 
@@ -1644,27 +1888,26 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	LARGE_INTEGER qnow;
 	QueryPerformanceCounter(&qnow);
 	double ringNow = static_cast<double>(qnow.QuadPart) * QpcToSeconds;
-	if (ctx.fieldEnabled && !ctx.fieldAnchors.empty())
+
+	// Re-evaluate the current field for each retained observation. Comparing a
+	// multi-position history with only the latest spot turns healthy anchor
+	// gradients into apparent temporal drift as the user walks through them.
+	// Always passed, from the same active set the driver is blending: with no
+	// active anchors the blend returns the base calibration exactly, so there
+	// is no second way to spell "the field is off" that could disagree.
+	auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
+		Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
 	{
-		// Re-evaluate the current field for each retained observation. Comparing a
-		// multi-position history with only the latest spot turns healthy anchor
-		// gradients into apparent temporal drift as the user walks through them.
-		auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
-			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
-		{
-			Eigen::Vector3d basePos = ctx.calibratedRotationQ
-				* (ctx.calibratedScale * targetRawPos) + ctx.TranslationMeters();
-			questcal::BlendedFieldCalibration(ctx.fieldAnchors, ctx.calibratedRotationQ,
-				ctx.TranslationMeters(), basePos, rotationOut, translationOut);
-		};
-		Continuous->Update(ringNow, ctx.calibratedRotationQ, ctx.TranslationMeters(),
-			ctx.calibratedScale, ctx.calibratedTimeOffset, expectedAt);
-	}
-	else
-	{
-		Continuous->Update(ringNow, ctx.calibratedRotationQ, ctx.TranslationMeters(),
-			ctx.calibratedScale, ctx.calibratedTimeOffset);
-	}
+		Eigen::Vector3d basePos = ctx.calibratedRotationQ
+			* (ctx.calibratedScale * targetRawPos) + ctx.TranslationMeters();
+		// Same width SendAlignmentField put on the wire - the expectation has to
+		// be the field the driver is actually applying, not a similar one.
+		questcal::BlendedFieldCalibration(ActiveFieldAnchors(ctx), ctx.calibratedRotationQ,
+			ctx.TranslationMeters(), basePos, rotationOut, translationOut,
+			questcal::FieldBlendSigmaMeters);
+	};
+	Continuous->Update(ringNow, ctx.calibratedRotationQ, ctx.TranslationMeters(),
+		ctx.calibratedScale, ctx.calibratedTimeOffset, expectedAt);
 
 	questcal::ContinuousAlignment::Correction corr;
 	while (Continuous->PollCorrection(corr))
@@ -1688,14 +1931,20 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		switch (ev.type)
 		{
 		case questcal::ContinuousAlignment::Event::FrozenLargeDeviation:
-			if (ev.deviation.valid)
-				snprintf(buf, sizeof buf,
-					"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm\n",
-					ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
-			else
-				snprintf(buf, sizeof buf,
-					"Continuous calibration frozen: observation scatter %.2f deg / %.1f cm stays far above the tracking noise -- mount fault signature\n",
-					Continuous->ScatterRotRmsDeg(), Continuous->ScatterPosRmsM() * 100.0);
+			snprintf(buf, sizeof buf,
+				"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm\n",
+				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
+			ctx.Log(buf);
+			NotifyOnce(ctx, FreezeNotified,
+				"The headset-mounted tracker moved or lost tracking -- alignment updates are on hold",
+				"QuestCalibrator: the headset-mounted tracker moved or lost tracking. Alignment updates are on hold -- recalibrate to re-learn the mount.");
+			break;
+		case questcal::ContinuousAlignment::Event::FrozenMountScatter:
+			// The event now carries the scatter it froze on, so this no longer
+			// re-reads live accessors that have moved on since it was raised.
+			snprintf(buf, sizeof buf,
+				"Continuous calibration frozen: observation scatter %.2f deg / %.1f cm stays far above the tracking noise -- mount fault signature\n",
+				ev.scatterRotDeg, ev.scatterPosM * 100.0);
 			ctx.Log(buf);
 			NotifyOnce(ctx, FreezeNotified,
 				"The headset-mounted tracker moved or lost tracking -- alignment updates are on hold",
@@ -1857,7 +2106,6 @@ static void FinishCalibration(CalibrationContext &ctx)
 	ctx.Log(buf);
 
 	questcal::EngineResult result = questcal::CalibrationEngine::Solve(ctx.refSamples, ctx.targetSamples, config);
-	ctx.lastResult = result;
 
 	Eigen::Vector3d targetCentroid = Eigen::Vector3d::Zero();
 	if (!ctx.targetSamples.empty())
@@ -1875,10 +2123,9 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// happened without the tracker) is kept.
 	if (result.valid && !asAnchor && ctx.calibrationReferenceID == vr::k_unTrackedDeviceIndex_Hmd)
 	{
-		questcal::ContinuousAlignment::Config contCfg;
 		questcal::MountExtrinsic extrinsic;
 		if (questcal::ContinuousAlignment::DeriveMountExtrinsic(
-			ctx.refSamples, ctx.targetSamples, result, contCfg, extrinsic))
+			ctx.refSamples, ctx.targetSamples, result, extrinsic))
 		{
 			std::string serial;
 			if (ReadTrackedDeviceString(ctx.calibrationTargetID,
@@ -1928,16 +2175,25 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// is contaminated (the guard then takes scale from the gross band).
 	if (result.motionGainValid)
 	{
+		const char *guardNote = "";
+		switch (result.scaleGuard)
+		{
+		case questcal::ScaleGuard::FromGrossMotion:
+			guardNote = " -- fine motion attenuated; scale taken from clean gross motion";
+			break;
+		case questcal::ScaleGuard::NeutralizedForSmoothing:
+			guardNote = " -- gross and fine motion attenuated; scale held at neutral 1.0";
+			break;
+		case questcal::ScaleGuard::NotApplied:
+			// The smoothing diagnostic is independent of the guard and fires
+			// even with scale solving off, so it only speaks when it is alone.
+			if (result.motionSmoothingDetected)
+				guardNote = " -- streamed-pose smoothing detected";
+			break;
+		}
 		snprintf(buf, sizeof buf,
 			"Motion gain (reference vs target): %.3f gross / %.3f fine%s\n",
-			result.motionGainLow, result.motionGainHigh,
-			result.scaleFromGrossMotion
-				? " -- fine motion attenuated; scale taken from clean gross motion"
-				: (result.scaleNeutralizedForSmoothing
-					? " -- gross and fine motion attenuated; scale held at neutral 1.0"
-					: (result.motionSmoothingDetected
-						? " -- streamed-pose smoothing detected"
-						: "")));
+			result.motionGainLow, result.motionGainHigh, guardNote);
 		ctx.Log(buf);
 	}
 
@@ -1946,6 +2202,12 @@ static void FinishCalibration(CalibrationContext &ctx)
 		StoreFieldAnchor(ctx, result, targetCentroid);
 		return;
 	}
+
+	// Only a successful base solve publishes its residuals: the advanced row
+	// labels them "Last calibration" and ComputeCalibrationRating caps the
+	// rating from them, so a deliberately short, spatially local anchor solve
+	// (or a failure, which leaves the old profile live) must not replace them.
+	ctx.lastResult = result;
 
 	// Commit the tracking-system identity atomically with the successful base
 	// solve. The UI's pending selection must never redirect an old transform.
@@ -1981,6 +2243,24 @@ static void FinishCalibration(CalibrationContext &ctx)
 
 	bool priorUniverseUnsafe = ctx.profileUniverseUnsafe;
 	ctx.profileUniverseUnsafe = false;
+
+	// This solve defines the reference universe the profile now lives in, so it
+	// is the one place the persisted identity is (re-)bound. If the ring is
+	// unavailable there is nothing to bind to; the monitor adopts the first
+	// fresh observation instead, exactly as it does for an older profile.
+	ctx.profileUniverseValid = false;
+	ctx.profileHmdSerial.clear();
+	std::string universeHmdSerial;
+	if (HasFreshHmdWorldFromDriver() &&
+		ReadTrackedDeviceString(vr::k_unTrackedDeviceIndex_Hmd,
+			vr::Prop_SerialNumber_String, universeHmdSerial))
+	{
+		ctx.profileHmdSerial = universeHmdSerial;
+		ctx.profileWorldFromDriverRotation = CurrentHmdObservation.rotation;
+		ctx.profileWorldFromDriverTranslation = CurrentHmdObservation.translation;
+		ctx.profileUniverseValid = true;
+	}
+
 	ctx.AdvancePersistenceRevision();
 	if (ctx.chaperone.valid &&
 		(ctx.chaperone.ownerTrackingSystem != ctx.referenceTrackingSystem ||
@@ -2023,7 +2303,7 @@ bool StartCalibration()
 	CalCtx.collectAsAnchor = false;
 	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
-	CalCtx.messages.clear();
+	CalCtx.ClearMessages();
 	return true;
 }
 
@@ -2044,6 +2324,9 @@ bool StartAnchorCalibration()
 void CalibrationTick(double time)
 {
 	auto &ctx = CalCtx;
+	// Channel health is independent of SteamVR and of the profile: the UI must
+	// report it even on the ticks that return early below.
+	ctx.poseRingOpen = PoseHub.RingOpen();
 	// Persistence is independent of SteamVR, profile validity, and the current
 	// UI/calibration state. In particular, settings-only retries must continue
 	// while the runtime is unavailable or the advanced editor is open.

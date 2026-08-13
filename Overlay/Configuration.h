@@ -17,3 +17,8 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 // but first flushes an already-dirty coupled Config revision so Settings can
 // never overtake it. A malformed-but-recoverable profile is never overwritten.
 bool SaveSettings(CalibrationContext &ctx);
+
+// A pending Config write with no valid profile to write is the same fault
+// wherever it is noticed, so both flush paths say the same thing about it.
+inline constexpr const char *PendingProfileWithoutValidProfileMessage =
+	"Could not flush the pending calibration profile: there is no valid profile to write\n";

@@ -721,6 +721,13 @@ static bool s_showSettings = false;
 
 enum CalRating { Rating_Good = 0, Rating_Decent, Rating_Poor, Rating_VeryPoor };
 
+// The driver's pose channel feeds every runtime monitor. Preview mode has no
+// driver at all, so it must not display a fault for it.
+static bool PoseChannelDown()
+{
+	return !g_uiPreviewMode && !CalCtx.poseRingOpen;
+}
+
 static CalRating ComputeCalibrationRating()
 {
 	int r = Rating_Good;
@@ -738,10 +745,16 @@ static CalRating ComputeCalibrationRating()
 			r = q;
 	}
 
+	// Without the pose channel the monitors that would demote this rating
+	// cannot run at all: no jump compensation, no drift evidence, and the solve
+	// itself fell back to tick-rate runtime poses. Never claim Good on that.
+	if (PoseChannelDown() && r < Rating_Decent)
+		r = Rating_Decent;
+
 	// Staleness/drift only degrade the rating when nothing is maintaining the
 	// alignment; a healthy continuous loop re-measures it constantly. A frozen
 	// loop (bumped mount) is itself a Poor signal.
-	bool continuouslyMaintained = CalCtx.continuousEnabled && CalCtx.mountExtrinsic.valid &&
+	bool continuouslyMaintained = CalCtx.ContinuousArmed() &&
 		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
 			questcal::ContinuousAlignment::State::Tracking;
 	if (!continuouslyMaintained)
@@ -753,7 +766,7 @@ static CalRating ComputeCalibrationRating()
 		if (CalCtx.driftScore >= 0.85)
 			r = Rating_VeryPoor;
 	}
-	if (CalCtx.continuousEnabled && CalCtx.mountExtrinsic.valid &&
+	if (CalCtx.ContinuousArmed() &&
 		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
 			questcal::ContinuousAlignment::State::Frozen && r < Rating_Poor)
 		r = Rating_Poor;
@@ -766,14 +779,14 @@ static const char *RatingLabels[] = { "Good", "Decent", "Poor", "Very Poor" };
 // Continuous-calibration status helpers (see ContinuousAlignment.h).
 static bool ContinuousHealthy()
 {
-	return CalCtx.continuousEnabled && CalCtx.mountExtrinsic.valid &&
+	return CalCtx.ContinuousArmed() &&
 		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
 			questcal::ContinuousAlignment::State::Tracking;
 }
 
 static bool ContinuousFrozen()
 {
-	return CalCtx.continuousEnabled && CalCtx.mountExtrinsic.valid &&
+	return CalCtx.ContinuousArmed() &&
 		(questcal::ContinuousAlignment::State)CalCtx.continuousState ==
 			questcal::ContinuousAlignment::State::Frozen;
 }
@@ -783,7 +796,7 @@ static const char *ContinuousStatusText()
 	using CA = questcal::ContinuousAlignment;
 	if (CalCtx.continuousTrackerSerial.empty())
 		return "no tracker selected";
-	if (!CalCtx.mountExtrinsic.valid)
+	if (!CalCtx.ContinuousArmed())
 		return "needs one calibration with the tracker mounted";
 	switch ((CA::State)CalCtx.continuousState)
 	{
@@ -1245,7 +1258,7 @@ static void OpenCalibrationPopup(bool anchor)
 	if (g_uiPreviewMode)
 	{
 		// Preview: fake progress so the modal can be styled without VR.
-		CalCtx.messages.clear();
+		CalCtx.ClearMessages();
 		CalCtx.Log("Keep the selected devices rigidly together.\n"
 			"Move them through wide, varied rotations around at least two different axes and across the play area.\n\n");
 		CalCtx.Progress(65, 100);
@@ -1264,16 +1277,26 @@ static void BuildMainScreen()
 	const float gap = 12.0f;
 
 	{
-		if (CalCtx.validProfile && !CalCtx.enabled)
 		{
 			std::vector<StatusRowData> warn;
-			warn.push_back({ IconInfo, Pal::Bad,
-				CalCtx.profileUniverseUnsafe
-					? "Raw tracking universe changed while monitoring was offline -- recalibrate before using this profile"
-					: FormatString("%s headset not detected -- profile disabled",
-						FriendlySystemName(CalCtx.referenceTrackingSystem).c_str()) });
-			DrawStatusCard(warn);
-			ImGui::Spacing();
+			if (CalCtx.validProfile && !CalCtx.enabled)
+			{
+				warn.push_back({ IconInfo, Pal::Bad,
+					CalCtx.profileUniverseUnsafe
+						? "Raw tracking universe changed while monitoring was offline -- recalibrate before using this profile"
+						: FormatString("%s headset not detected -- profile disabled",
+							FriendlySystemName(CalCtx.referenceTrackingSystem).c_str()) });
+			}
+			if (PoseChannelDown())
+			{
+				warn.push_back({ IconInfo, Pal::Warn,
+					"Pose channel unavailable -- runtime monitoring is off (universe jumps, drift and continuous calibration)" });
+			}
+			if (!warn.empty())
+			{
+				DrawStatusCard(warn);
+				ImGui::Spacing();
+			}
 		}
 
 		// ---- Action buttons: Start dominates; Clear is a narrow sidecar ----
@@ -1579,6 +1602,8 @@ static void BuildSettingsScreen(const VRState &state)
 					CalCtx.fieldEnabled = enabled;
 					CalCtx.fieldGeneration = generation;
 				}
+				else
+					ResyncDriverState();
 			}
 			if (ImGui::IsItemHovered())
 			{
@@ -1604,6 +1629,8 @@ static void BuildSettingsScreen(const VRState &state)
 						CalCtx.fieldAnchors = std::move(anchors);
 						CalCtx.fieldGeneration = generation;
 					}
+					else
+						ResyncDriverState();
 				}
 
 				ImDrawList *dl = ImGui::GetWindowDrawList();
