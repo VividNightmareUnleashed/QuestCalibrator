@@ -49,7 +49,21 @@ namespace protocol
 	// is dropped instead of blocking a pose thread.
 	struct PoseRing
 	{
-		static const uint64_t Capacity = 4096;   // power of two; seconds of history at full pose rate
+		// Capacity is a SAMPLE count. How many seconds of history it buys is
+		// entirely a function of the aggregate publish rate, and that rate has
+		// never been measured on real hardware - there is no benchmark anywhere
+		// in this repository. So the assumption is stated here and the margin is
+		// derived from it (see the static_assert below) rather than asserted in
+		// prose that silently stops being true on faster hardware.
+		static const uint64_t AssumedDeviceCount = 5;
+		static const uint64_t AssumedPerDevicePoseHz = 300;
+		static const uint64_t AssumedAggregatePoseHz =
+			AssumedDeviceCount * AssumedPerDevicePoseHz;
+		// What the ring exists to survive: one full idle wait of the overlay's
+		// drain loop without the readable prefix being overwritten.
+		static const uint64_t DrainStallBudgetMs = 1000;
+
+		static const uint64_t Capacity = 4096;   // power of two
 		static const uint32_t Magic = 0x51435052; // "QCPR"
 		static const uint32_t LayoutVersion = 3;
 
@@ -92,6 +106,17 @@ namespace protocol
 	};
 
 	static_assert((PoseRing::Capacity & (PoseRing::Capacity - 1)) == 0, "capacity must be a power of two");
+	// The margin, computed rather than claimed: 4096 samples / 1500 Hz is ~2.7 s
+	// at the assumed rate, and the same 4096 samples are ~0.68 s at 6 devices x
+	// 1000 Hz - the assumption, not the capacity, is what the design rests on.
+	// Raising the assumed rate past ~4 kHz fires this, and the only fix is a
+	// larger Capacity, which changes sizeof(PoseRing) and therefore requires a
+	// PoseRing::LayoutVersion bump AND a new mapping name (a driver reinstall
+	// plus a SteamVR restart for every user). That cost is exactly why the real
+	// rate should be measured before the capacity is changed rather than after.
+	static_assert(PoseRing::Capacity * 1000 >=
+		PoseRing::DrainStallBudgetMs * PoseRing::AssumedAggregatePoseHz,
+		"PoseRing::Capacity no longer covers DrainStallBudgetMs at the assumed aggregate pose rate");
 	static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
 		"the shared pose queue requires lock-free 64-bit atomics");
 
@@ -197,22 +222,34 @@ namespace protocol
 				}
 				ring->initialized.store(1, std::memory_order_release);
 			}
+			// The three codes below are the whole diagnostic value of this
+			// failure: the driver's only consumer is one GetLastError() log
+			// line, and each code means a different user action (reinstall the
+			// driver and restart SteamVR / another live vrserver owns the ring /
+			// readers would not drain). Close() must still run on every path -
+			// no handle or view may leak - but its UnmapViewOfFile and
+			// CloseHandle are permitted to change the thread's last error even
+			// when they succeed, so the code is asserted after the cleanup. Same
+			// preservation the reset-mutex guard performs around its own release,
+			// and that guard then carries this code out past its own teardown.
 			else if (!HasExpectedLayout())
 			{
-				SetLastError(ERROR_REVISION_MISMATCH);
 				Close();
+				SetLastError(ERROR_REVISION_MISMATCH);
 				return false;
 			}
 			else if (ExistingWriterAlive())
 			{
-				SetLastError(ERROR_ALREADY_EXISTS);
 				Close();
+				SetLastError(ERROR_ALREADY_EXISTS);
 				return false;
 			}
 			else if (!ResetForNewWriterSession(waitBudgetMs < ReaderDrainWaitMs
 				? waitBudgetMs : static_cast<DWORD>(ReaderDrainWaitMs)))
 			{
+				DWORD error = GetLastError();   // ERROR_BUSY: readers would not drain
 				Close();
+				SetLastError(error);
 				return false;
 			}
 

@@ -4,23 +4,36 @@
 #include "IPCProtocolGate.h"
 
 #include <atomic>
+#include <cstddef>
+#include <functional>
 #include <thread>
 #include <set>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-class ServerTrackedDeviceProvider;
-
 class IPCServer
 {
 public:
-	IPCServer(ServerTrackedDeviceProvider *driver) : driver(driver) { }
+	// The two mutations this transport is allowed to perform. Naming them here
+	// instead of holding a pointer to the concrete driver class makes the
+	// dependency one-directional - no header cycle, and the overlapped-pipe
+	// machinery (short-message rejection, per-connection state, listener retry
+	// backoff, teardown drain) can be constructed against a recording sink.
+	struct RequestSink
+	{
+		std::function<bool(const protocol::SetDeviceTransform &)> setDeviceTransform;
+		std::function<bool(const protocol::SetAlignmentField &)> setAlignmentField;
+	};
+
 	~IPCServer();
 
 	// Returns only after the first listener has been created successfully. A
-	// false result means no server thread owns the IPC resources.
-	bool Run();
+	// false result means no server thread owns the IPC resources. `sink` is
+	// established before the first accept and, being a member, is torn down only
+	// with this object - which Stop() has already joined the server thread out
+	// of, after the alertable drain.
+	bool Run(RequestSink newSink);
 	void Stop();
 
 private:
@@ -38,9 +51,19 @@ private:
 		questcal::ipc::ConnectionState connection;
 	};
 
+	// Both completion callbacks reinterpret_cast the LPOVERLAPPED the API hands
+	// back straight to PipeInstance*. Inserting any member above `overlap` would
+	// silently corrupt every callback, with no diagnostic; this is the check.
+	static_assert(offsetof(PipeInstance, overlap) == 0,
+		"PipeInstance::overlap must stay the first member: the IO completion callbacks "
+		"cast LPOVERLAPPED back to PipeInstance*");
+
 	PipeInstance *CreatePipeInstance(HANDLE pipe);
 	void ClosePipeInstance(PipeInstance *pipeInst);
-	static PipeInstance *ActivePipeInstance(LPOVERLAPPED overlap);
+	// Named for what it does: on the stop path it CLOSES the instance the
+	// overlapped belongs to and returns null. A null result means "already
+	// destroyed", never "not found".
+	static PipeInstance *ActivePipeInstanceOrClose(LPOVERLAPPED overlap);
 
 	static void RunThread(IPCServer *_this);
 	static bool CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending);
@@ -61,5 +84,5 @@ private:
 	HANDLE listenerPipe = INVALID_HANDLE_VALUE;
 	bool listenerConnectPending = false;
 
-	ServerTrackedDeviceProvider *driver;
+	RequestSink sink;
 };

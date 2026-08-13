@@ -4,6 +4,8 @@
 #include "PoseTransform.h"
 #include "ProtocolValidation.h"
 
+#include <utility>
+
 // Vertical displacement applied to a hidden device's forwarded pose.
 static constexpr double HiddenPoseOffsetY = 1000.0;   // meters
 static constexpr uint64_t PoseRingRetryIntervalMs = 1000;
@@ -52,7 +54,20 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 		return FailInit(vr::VRInitError_Driver_Failed);
 	}
 
-	if (!server.Run())
+	// The transport is handed the two mutations it may perform rather than a
+	// pointer to this class, so the pipe layer names no driver type. The sink
+	// outlives the server thread: `server` is declared last, so Stop() (which
+	// joins that thread) always runs before any member it touches is destroyed.
+	IPCServer::RequestSink sink;
+	sink.setDeviceTransform = [this](const protocol::SetDeviceTransform &transform)
+	{
+		return TrySetDeviceTransform(transform);
+	};
+	sink.setAlignmentField = [this](const protocol::SetAlignmentField &field)
+	{
+		return TrySetAlignmentField(field);
+	};
+	if (!server.Run(std::move(sink)))
 	{
 		LOG("IPC server could not establish its control listener");
 		return FailInit(vr::VRInitError_Driver_Failed);
@@ -130,20 +145,13 @@ bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDevic
 		return false;
 	}
 
-	DeviceTransform tf;
-	tf.enabled = sanitized.enabled;
-	tf.translation = sanitized.translation;
-	tf.rotation = sanitized.rotation;
-	tf.scale = sanitized.scale;
-	tf.timeOffset = sanitized.timeOffset;
-	tf.generation = sanitized.generation;
-	tf.hidden = sanitized.hidden;
-
 	auto &slot = transforms[sanitized.openVRID];
 	// The IPC thread is the single writer. Odd means a coherent generation is
 	// in flight; payload stores are atomic so a failed reader attempt is safe.
+	// The sanitized wire struct is stored directly: there is no intermediate
+	// copy of the payload left to keep field-by-field in sync with the protocol.
 	slot.sequence.fetch_add(1, std::memory_order_acq_rel);
-	slot.Store(tf);
+	slot.Store(sanitized);
 	slot.sequence.fetch_add(1, std::memory_order_release);
 	return true;
 }
@@ -251,8 +259,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 
 	double nowSeconds = static_cast<double>(now.QuadPart) * qpcToSeconds;
 
-	if (tf.enabled)
+	if (tf.control.enabled)
 	{
+		// Meaningful only inside this branch; outside it the payload holds the
+		// protocol's neutral defaults (see TransformSlot::Load).
+		const protocol::SetDeviceTransform &cal = tf.calibration;
+
 		// Base-calibration slew (protocol v5): continuous-calibration
 		// corrections arrive with an unchanged generation and are rate-limited
 		// here so the world never visibly steps; intentional discontinuities
@@ -261,8 +273,8 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		// older generation; the later consistent read then snaps to the value
 		// it was already slewing toward, which is benign.
 		auto &bs = baseState[openVRID];
-		alignfield::SlewToward(tf.rotation, tf.translation.v, nowSeconds,
-			alignfield::BaseSlewLimits, tf.generation, bs);
+		alignfield::SlewToward(cal.rotation, cal.translation.v, nowSeconds,
+			alignfield::BaseSlewLimits, tf.control.generation, bs);
 		vr::HmdQuaternion_t baseRot = bs.rot;
 		vr::HmdVector3d_t baseTrans{ { bs.trans[0], bs.trans[1], bs.trans[2] } };
 
@@ -284,27 +296,24 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			}
 			else if (pose.poseIsValid)
 			{
-				double scaled[3] = {
-					pose.vecPosition[0] * tf.scale,
-					pose.vecPosition[1] * tf.scale,
-					pose.vecPosition[2] * tf.scale,
-				};
-				vr::HmdVector3d_t world =
-					questcal::driverpose::RotateVector(pose.qWorldFromDriverRotation, scaled);
-				double raw[3] = {
-					world.v[0] + pose.vecWorldFromDriverTranslation[0] * tf.scale,
-					world.v[1] + pose.vecWorldFromDriverTranslation[1] * tf.scale,
-					world.v[2] + pose.vecWorldFromDriverTranslation[2] * tf.scale,
-				};
-				vr::HmdVector3d_t based =
-					questcal::driverpose::RotateVector(baseRot, raw);
-				double basePos[3] = {
-					based.v[0] + baseTrans.v[0],
-					based.v[1] + baseTrans.v[1],
-					based.v[2] + baseTrans.v[2],
-				};
+				// The device's own base-calibrated world position, named step by
+				// step. Same operations in the same order as the component
+				// expressions this replaces - see PoseTransform.h, which performs
+				// the identical scaled-worldFromDriver and rotate-then-add.
+				vr::HmdVector3d_t scaledPosition =
+					questcal::driverpose::Scale(pose.vecPosition, cal.scale);
+				vr::HmdVector3d_t rotatedPosition = questcal::driverpose::RotateVector(
+					pose.qWorldFromDriverRotation, scaledPosition.v);
+				vr::HmdVector3d_t scaledOrigin = questcal::driverpose::Scale(
+					pose.vecWorldFromDriverTranslation, cal.scale);
+				vr::HmdVector3d_t rawWorld =
+					questcal::driverpose::Add(rotatedPosition.v, scaledOrigin.v);
+				vr::HmdVector3d_t rotatedRawWorld =
+					questcal::driverpose::RotateVector(baseRot, rawWorld.v);
+				vr::HmdVector3d_t basePos =
+					questcal::driverpose::Add(rotatedRawWorld.v, baseTrans.v);
 
-				alignfield::Evaluate(field, basePos, nowSeconds, fs);
+				alignfield::Evaluate(field, basePos.v, nowSeconds, fs);
 			}
 			// Invalid pose: keep the previous delta without advancing the
 			// slew clock; Evaluate's gap check snaps after a long loss.
@@ -316,15 +325,13 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 			calRot = questcal::driverpose::Multiply(fs.rot, baseRot);
 			vr::HmdVector3d_t rotatedBase =
 				questcal::driverpose::RotateVector(fs.rot, baseTrans.v);
-			calTrans.v[0] = rotatedBase.v[0] + fs.trans[0];
-			calTrans.v[1] = rotatedBase.v[1] + fs.trans[1];
-			calTrans.v[2] = rotatedBase.v[2] + fs.trans[2];
+			calTrans = questcal::driverpose::Add(rotatedBase.v, fs.trans);
 		}
 
 		// Apply the exact solver model to the composed raw-world pose, including
 		// scale on worldFromDriver translation and every linear derivative.
 		questcal::driverpose::Apply(
-			pose, calRot, calTrans.v, tf.scale, tf.timeOffset);
+			pose, calRot, calTrans.v, cal.scale, cal.timeOffset);
 	}
 	else
 	{
@@ -338,7 +345,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	// out of reach of proximity-based tracker auto-assignment in games. The
 	// raw pose was already published to the ring above, so the overlay's
 	// solver always sees the true pose.
-	if (tf.hidden)
+	if (tf.control.hidden)
 		pose.vecWorldFromDriverTranslation[1] += HiddenPoseOffsetY;
 
 	return true;

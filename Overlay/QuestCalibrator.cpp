@@ -454,11 +454,46 @@ void RunLoop()
 	}
 }
 
+// Two instances would each open a pose-ring reader and split the driver's pose
+// stream disjointly between them - each seeing roughly half the samples, with
+// no loss marker to say so, and both feeding the runtime monitors. The OpenVR
+// dashboard key catches a duplicate too, but only once SteamVR is up and the
+// overlay interface exists; this answers "am I already running" on its own and
+// before anything is opened or rotated. Local\ is the session scope, which is
+// the scope that shares the ring. The handle is deliberately held for the
+// process lifetime and released by exit.
+static HANDLE g_singleInstanceMutex = nullptr;
+
+static bool ClaimSingleInstance()
+{
+	g_singleInstanceMutex = CreateMutexW(nullptr, FALSE,
+		L"Local\\QuestCalibrator.SingleInstance");
+	if (!g_singleInstanceMutex)
+		return true;   // cannot prove a duplicate; never lock the user out on it
+	if (GetLastError() == ERROR_ALREADY_EXISTS)
+	{
+		CloseHandle(g_singleInstanceMutex);
+		g_singleInstanceMutex = nullptr;
+		return false;
+	}
+	return true;
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
 	// Resolve first: the CLI commands below register and load files by path.
 	bool appDirResolved = ResolveAppDir();
 	HandleCommandLine(lpCmdLine, appDirResolved);
+
+	// After the CLI commands, so registering a manifest still works while the
+	// overlay runs, and before the session log, so a duplicate launch cannot
+	// rotate a live session's log away.
+	if (!g_uiPreviewMode && !ClaimSingleInstance())
+	{
+		MessageBox(nullptr, L"QuestCalibrator is already running.",
+			L"QuestCalibrator", MB_ICONINFORMATION | MB_OK);
+		return -1;
+	}
 
 	// Before the try block so even InitVR/window-creation failures land in the
 	// log; skipped for UI preview so a dev preview never rotates a real

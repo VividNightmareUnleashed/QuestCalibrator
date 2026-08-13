@@ -302,6 +302,25 @@ void ForwardPoseUpdate(PoseUpdateHook &hook, vr::IVRServerDriverHost *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	auto original = hook.originalFunc.load(std::memory_order_acquire);
+
+	// unPoseStructSize is the caller's declaration of the layout behind
+	// `newPose`, and it is the only signal that layout carries. Our copy below
+	// is sized by the vendored vr::DriverPose_t: if a SteamVR build ever passes
+	// a larger struct, forwarding that size over a smaller stack object makes
+	// vrserver read past it, and the trailing bytes become pose fields. When the
+	// size does not match, touch nothing - forward the caller's own object with
+	// the caller's own size, and skip both the ring publish and the transform,
+	// since the provider reads rotation/position/velocity from a layout we
+	// cannot interpret. A layout change then degrades to "calibration not
+	// applied", never to a corrupt or disappearing device. No logging here: this
+	// is a pose thread, and stdio must not run on one.
+	if (unPoseStructSize != sizeof(vr::DriverPose_t))
+	{
+		if (original)
+			original(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+
 	ServerTrackedDeviceProvider *driver = Driver.load(std::memory_order_acquire);
 	auto pose = newPose;
 	if (!driver || driver->HandleDevicePoseUpdated(unWhichDevice, pose))
