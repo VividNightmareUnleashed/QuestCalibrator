@@ -102,6 +102,8 @@
     <ClInclude Include="RingPoseMath.h" />
     <ClInclude Include="ContinuousAlignment.h" />
     <ClInclude Include="DriftMonitor.h" />
+    <ClInclude Include="DriverSession.h" />
+    <ClInclude Include="DriverSyncPolicy.h" />
     <ClInclude Include="EmbeddedFiles.h" />
     <ClInclude Include="FieldMath.h" />
     <ClInclude Include="IPCClient.h" />

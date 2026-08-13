@@ -4,6 +4,7 @@
 #include "ChaperoneMath.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
+#include "DriverSession.h"
 #include "DriverSyncPolicy.h"
 #include "FieldMath.h"
 #include "IPCClient.h"
@@ -110,10 +111,15 @@ struct MonitorState
 
 static MonitorState Monitors;
 
-// The slot ledger plus every decision that reads it (DriverSyncPolicy.h). This
-// file owns only the OpenVR enumeration and the pipe transport around it.
-static questcal::DriverSlotPolicy DriverSlots;
-static uint64_t SynchronizedDriverConnectionGeneration = 0;
+// The whole driver conversation: the slot ledger, the connection generation it
+// last converged, the error debounce and the send sequencing (DriverSession.h).
+// This file owns only the two things the session cannot name -- the real pipe
+// and the OpenVR enumeration -- and hands them over as injected seams.
+//
+// The IPCClient instance stays here rather than inside the session because
+// DriverSession.h has to remain free of windows.h: the test translation unit
+// includes it beside openvr_driver.h, and IPCClient.h needs HANDLE and DWORD.
+static questcal::DriverSession DriverLink;
 
 // Dedicated consumer/cache for the HMD's raw-universe transform. It drains
 // even without a profile or protected room, so captures always bind to a
@@ -188,7 +194,6 @@ static std::unique_ptr<questcal::ContinuousAlignment> Continuous;
 static int ContinuousConsumer = -1;
 static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
-static double LastDriverRequestErrorTime = -1e9;
 
 CalibrationContext CalCtx;
 
@@ -346,58 +351,6 @@ void ShutdownCalibrator(bool cleanExit)
 		AppendSessionLog("session ended cleanly");
 }
 
-static bool SendDriverRequest(CalibrationContext &ctx, const protocol::Request &request,
-	const char *operation, uint64_t *batchConnectionGeneration = nullptr)
-{
-	try
-	{
-		protocol::Response response = Driver.SendBlocking(request);
-		bool accepted = response.type == protocol::ResponseSuccess ||
-			(request.type == protocol::RequestHandshake &&
-				response.type == protocol::ResponseHandshake &&
-				response.protocol.version == protocol::Version);
-		if (accepted)
-		{
-			if (batchConnectionGeneration)
-			{
-				uint64_t generation = Driver.ConnectionGeneration();
-				if (*batchConnectionGeneration == 0)
-					*batchConnectionGeneration = generation;
-				else if (*batchConnectionGeneration != generation)
-					return false;
-			}
-			return true;
-		}
-		if (ctx.timeLastTick - LastDriverRequestErrorTime >= 30.0)
-		{
-			ctx.ReportError(std::string("QuestCalibrator driver rejected ") + operation +
-				"; the requested live state was not applied\n",
-				CalibrationContext::ErrorSource::Driver);
-			LastDriverRequestErrorTime = ctx.timeLastTick;
-		}
-	}
-	catch (const std::exception &e)
-	{
-		if (ctx.timeLastTick - LastDriverRequestErrorTime >= 30.0)
-		{
-			ctx.ReportError(std::string("QuestCalibrator driver communication failed while ") +
-				operation + ": " + e.what() + "\n",
-				CalibrationContext::ErrorSource::Driver);
-			LastDriverRequestErrorTime = ctx.timeLastTick;
-		}
-	}
-	return false;
-}
-
-static bool ResetAndDisableOffsets(CalibrationContext &ctx, uint32_t id,
-	uint64_t *batchConnectionGeneration = nullptr)
-{
-	protocol::Request req(protocol::RequestSetDeviceTransform);
-	req.setDeviceTransform = protocol::SetDeviceTransform(id, false);
-	return SendDriverRequest(ctx, req, "disabling a device transform",
-		batchConnectionGeneration);
-}
-
 static_assert(vr::k_unTrackedDeviceIndex_Hmd == 0, "HMD index expected to be 0");
 
 // "Which anchors is the driver blending right now" has exactly one answer, and
@@ -412,18 +365,23 @@ static const std::vector<CalibrationContext::FieldAnchor> &ActiveFieldAnchors(
 	return ctx.fieldEnabled ? ctx.fieldAnchors : none;
 }
 
-// Ship the spatial correction field. Deltas are derived here against the
-// current base calibration: delta_i = anchor_i o base^-1 is the correction
-// that, applied after the base calibration, reproduces the absolute solve at
-// that anchor's spot.
-static bool SendAlignmentField(CalibrationContext &ctx, bool baseBatchComplete,
-	uint64_t *batchConnectionGeneration)
+// The spatial correction field as a value, not a send: deltas are derived here
+// against the current base calibration, and DriverSession decides whether the
+// batch earned the right to ship them. delta_i = anchor_i o base^-1 is the
+// correction that, applied after the base calibration, reproduces the absolute
+// solve at that anchor's spot.
+//
+// `enabled` carries only this side's half of the predicate -- the profile is
+// live and there is something to blend. The session ANDs in "a complete base
+// batch reached one connection" and builds the canonical disable itself, so the
+// anchor derivation below is never even attempted against a base the validity
+// gates already rejected.
+static protocol::SetAlignmentField BuildAlignmentField(const CalibrationContext &ctx)
 {
-	protocol::Request req(protocol::RequestSetAlignmentField);
-	auto &f = req.setAlignmentField;
+	protocol::SetAlignmentField f;
 
 	const auto &anchors = ActiveFieldAnchors(ctx);
-	f.enabled = baseBatchComplete && ctx.enabled && !anchors.empty();
+	f.enabled = ctx.enabled && !anchors.empty();
 	f.generation = ctx.fieldGeneration;
 	// Ship the width explicitly rather than leaning on the struct default
 	// coinciding with what the overlay blends: the driver shapes its field from
@@ -431,13 +389,8 @@ static bool SendAlignmentField(CalibrationContext &ctx, bool baseBatchComplete,
 	// blend and ContinuousTick's expectation the same function.
 	f.sigmaMeters = questcal::FieldBlendSigmaMeters;
 	if (!f.enabled)
-	{
-		// Disabled messages are canonical and independent of live calibration
-		// numerics. This guarantees a bad base can still clear a stale field.
-		f.anchorCount = 0;
-		return SendDriverRequest(ctx, req, "disabling the alignment field",
-			batchConnectionGeneration);
-	}
+		return f;
+
 	f.anchorCount = static_cast<uint32_t>(std::min(
 		anchors.size(), static_cast<size_t>(protocol::SetAlignmentField::MaxAnchors)));
 
@@ -458,53 +411,7 @@ static bool SendAlignmentField(CalibrationContext &ctx, bool baseBatchComplete,
 		f.anchors[i].rotationDelta = questcal::WireQuaternion(dR);
 	}
 
-	return SendDriverRequest(ctx, req, "applying the alignment field",
-		batchConnectionGeneration);
-}
-
-// Put a single, positively identified driver connection into canonical neutral
-// state. A pipe can reconnect during any request; restart from slot zero so no
-// generation ever receives only a suffix of the reset pass. Retries are bounded
-// so a flapping vrserver cannot stall the UI tick indefinitely.
-static bool NeutralizeDriverConnection(CalibrationContext &ctx,
-	uint64_t &neutralizedConnectionGeneration)
-{
-	constexpr int MaxNeutralizationAttempts = 3;
-	neutralizedConnectionGeneration = 0;
-
-	for (int attempt = 0; attempt < MaxNeutralizationAttempts; ++attempt)
-	{
-		uint64_t passConnectionGeneration = 0;
-		protocol::Request handshake(protocol::RequestHandshake);
-		if (!SendDriverRequest(ctx, handshake,
-			"checking the driver connection before neutralizing it",
-			&passConnectionGeneration))
-			continue;
-
-		bool complete = SendAlignmentField(ctx, false,
-			&passConnectionGeneration);
-		bool generationChanged =
-			Driver.ConnectionGeneration() != passConnectionGeneration;
-		for (uint32_t id = 0;
-			id < vr::k_unMaxTrackedDeviceCount && !generationChanged; ++id)
-		{
-			complete = ResetAndDisableOffsets(ctx, id,
-				&passConnectionGeneration) && complete;
-			generationChanged =
-				Driver.ConnectionGeneration() != passConnectionGeneration;
-		}
-
-		// One decision, not two: a reconnect and a refused request are the same
-		// verdict here -- this pass did not converge, so retry it.
-		if (generationChanged || !complete)
-			continue;
-
-		DriverSlots.ForgetEverySlot();
-		neutralizedConnectionGeneration = passConnectionGeneration;
-		return true;
-	}
-
-	return false;
+	return f;
 }
 
 static bool ReadTrackedDeviceString(uint32_t id,
@@ -581,6 +488,43 @@ static questcal::SyncDevice EnumerateSyncDevice(uint32_t id,
 		device.serialKnown = ReadTrackedDeviceString(id,
 			vr::Prop_SerialNumber_String, device.serial);
 	return device;
+}
+
+// Point the session's three injected seams at this process's real pipe, real
+// OpenVR enumeration and this context's error banner.
+//
+// Re-bound at every entry rather than once at startup so the session can never
+// report a driver failure into a context other than the one being synchronized.
+// Nothing here allocates: the transport lambda captures nothing, the enumerator
+// is a function pointer, and the error sinks capture one reference each.
+static void BindDriverSession(CalibrationContext &ctx)
+{
+	DriverLink.SetTransport([](const protocol::Request &request)
+	{
+		questcal::DriverTransportResult result;
+		try
+		{
+			result.response = Driver.SendBlocking(request);
+			result.completed = true;
+		}
+		catch (const std::exception &e)
+		{
+			result.error = e.what();
+		}
+		// Read after the attempt either way. SendBlocking reconnects and replays
+		// internally, so a request can be accepted on a pipe the batch did not
+		// start on, and even a request that ultimately failed can have advanced
+		// the generation on the way -- both are what the batch rules react to.
+		result.connectionGeneration = Driver.ConnectionGeneration();
+		return result;
+	});
+	DriverLink.SetDeviceEnumerator(EnumerateSyncDevice);
+	DriverLink.SetErrorSink(
+		[&ctx](const std::string &message)
+		{
+			ctx.ReportError(message, CalibrationContext::ErrorSource::Driver);
+		},
+		[&ctx]() { ctx.ClearError(CalibrationContext::ErrorSource::Driver); });
 }
 
 static bool CacheHmdWorldFromDriver(
@@ -661,17 +605,28 @@ static bool CopyCurrentHmdWorldFromDriver(
 	return true;
 }
 
+// Derive what the driver should be applying, hand it to the session, and mirror
+// back what the session says the rest of the overlay may now believe.
+//
+// Everything below is derivation: no request is built or sent here. The batch
+// itself -- the handshake, the ledger, the connection generation, the send
+// ordering and the fail-closed rule -- belongs to DriverSession.h, where it can
+// be driven from a test.
 static void SynchronizeDriverState(CalibrationContext &ctx)
 {
+	BindDriverSession(ctx);
+
 	ctx.enabled = ctx.validProfile && !ctx.profileUniverseUnsafe;
 	ctx.disableReason = ctx.enabled
 		? CalibrationContext::DisableReason::None
 		: CalibrationContext::DisableReason::UniverseUnsafe;
-	uint64_t batchConnectionGeneration = 0;
-	protocol::Request handshake(protocol::RequestHandshake);
-	bool connectionReady = SendDriverRequest(ctx, handshake,
-		"checking the driver connection", &batchConnectionGeneration);
-	bool driverSynchronized = connectionReady;
+
+	// The connection check happens before the validity gates below, exactly
+	// where it did when this function owned the pipe. Both halves can report an
+	// error in the same tick and the banner keeps the last one, so this ordering
+	// is what decides which failure the user is actually told about.
+	questcal::DriverBatch batch = DriverLink.Begin(ctx.timeLastTick);
+
 	if (ctx.enabled && !questcal::IsValidTrackingSystemPair(
 		ctx.referenceTrackingSystem, ctx.targetTrackingSystem))
 	{
@@ -718,47 +673,12 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 	}
 	ctx.appliedTimeOffset = timeShift;
 
-	// A new pipe generation may be a restarted vrserver (fresh slots) or a new
-	// pipe to the same provider (retained slots). Treat both alike: neutralize
-	// the complete connection before rebuilding desired state. This one-time
-	// pass is intentionally not paid on steady-state scans.
-	bool newlyObservedConnection = connectionReady &&
-		batchConnectionGeneration != SynchronizedDriverConnectionGeneration;
-	if (newlyObservedConnection)
-	{
-		uint64_t neutralizedConnectionGeneration = 0;
-		bool neutralized = NeutralizeDriverConnection(ctx,
-			neutralizedConnectionGeneration);
-		connectionReady = neutralized;
-		driverSynchronized = neutralized;
-		if (neutralized)
-			batchConnectionGeneration = neutralizedConnectionGeneration;
-	}
-
-	ctx.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
-	bool desiredMutationAttempted = false;
-	auto disableSlot = [&](uint32_t id)
-	{
-		desiredMutationAttempted = true;
-		bool disabled = ResetAndDisableOffsets(ctx, id,
-			&batchConnectionGeneration);
-		if (disabled)
-			DriverSlots.NoteSlotDisabled(id);
-		if (Driver.ConnectionGeneration() != batchConnectionGeneration)
-			connectionReady = false;
-		driverSynchronized = disabled && driverSynchronized;
-	};
-
-	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
-	{
-		ctx.referenceDeviceMask[id] = false;
-		ctx.targetDeviceMask[id] = false;
-	}
-
 	// What the driver should be applying, as the slot policy reads it. Built
 	// once here, after the validity gates above have run, so every slot decides
 	// against the same transform.
-	questcal::DriverSyncDesired desired;
+	questcal::DriverApplyRequest request;
+	request.enabled = ctx.enabled;
+	questcal::DriverSyncDesired &desired = request.desired;
 	desired.referenceTrackingSystem = ctx.referenceTrackingSystem;
 	desired.targetTrackingSystem = ctx.targetTrackingSystem;
 	desired.rotation = ctx.calibratedRotationQ;
@@ -769,127 +689,35 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 	desired.continuousArmed = ctx.ContinuousArmed();
 	desired.hideMountedTracker = ctx.hideMountedTracker;
 	desired.continuousTrackerSerial = ctx.continuousTrackerSerial;
+	request.field = BuildAlignmentField(ctx);
 
-	if (!ctx.enabled)
+	questcal::DriverApplyResult result =
+		DriverLink.Apply(batch, request, ctx.timeLastTick);
+
+	// The result is already fail-closed, so this mirror is a plain assignment:
+	// on anything short of a complete batch the masks and the tracker id come
+	// back cleared, and no monitor can infer that the live driver matches the
+	// profile. Each cause is kept distinct because the UI switches on it and
+	// sends the user somewhere different for each.
+	ctx.enabled = result.enabled;
+	switch (result.cause)
 	{
-		// No OpenVR device scan is needed to converge to neutral state. The
-		// conservative slot ledger already identifies every transform that may
-		// still be live, including response-loss uncertainty.
-		for (uint32_t id = 0;
-			id < vr::k_unMaxTrackedDeviceCount && connectionReady && driverSynchronized;
-			++id)
-		{
-			if (DriverSlots.DecideNeutralSlot(id).action == questcal::SlotAction::Disable)
-				disableSlot(id);
-		}
-	}
-	else
-	{
-		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
-		{
-			if (!connectionReady || !driverSynchronized)
-				continue;
-			if (!ctx.enabled)
-			{
-				if (DriverSlots.DecideNeutralSlot(id).action == questcal::SlotAction::Disable)
-					disableSlot(id);
-				continue;
-			}
-
-			// Enumerate, then decide, then send. The ledger mark for an enable
-			// happens inside DecideSlot, i.e. strictly before this loop can send
-			// anything — see DriverSyncPolicy.h for why marking on success instead
-			// is the dangerous direction.
-			questcal::SlotDecision decision =
-				DriverSlots.DecideSlot(desired, EnumerateSyncDevice(id, desired));
-			ctx.referenceDeviceMask[id] = decision.referenceDevice;
-			ctx.targetDeviceMask[id] = decision.targetDevice;
-			if (decision.continuousTracker)
-				ctx.continuousTrackerId = id;
-			if (decision.disableProfile)
-			{
-				// Currently using an HMD with a different tracking system than the calibration.
-				ctx.enabled = false;
-				ctx.disableReason = CalibrationContext::DisableReason::HmdMismatch;
-			}
-
-			if (decision.action == questcal::SlotAction::Disable)
-			{
-				disableSlot(id);
-				continue;
-			}
-			if (decision.action != questcal::SlotAction::ApplyTransform)
-				continue;
-
-			protocol::Request req(protocol::RequestSetDeviceTransform);
-			req.setDeviceTransform = decision.transform;
-			desiredMutationAttempted = true;
-			bool applied = SendDriverRequest(ctx, req,
-				"applying a device transform", &batchConnectionGeneration);
-			if (Driver.ConnectionGeneration() != batchConnectionGeneration)
-			{
-				connectionReady = false;
-				// The enable may have landed just before the response path exposed
-				// the reconnect. Neutralize that one known slot on the new pipe now;
-				// the generation-wide recovery pass below clears every other slot.
-				if (ResetAndDisableOffsets(ctx, id, nullptr))
-					DriverSlots.NoteSlotDisabled(id);
-			}
-			driverSynchronized = applied && driverSynchronized;
-		}
-	}
-
-	// Re-asserted alongside the per-device transforms so a restarted driver
-	// converges without special casing. On a universe jump the base transforms
-	// land first and the field one pipe round-trip later; the mixed window is
-	// bounded by the (small) delta magnitudes and the generation bump snaps
-	// driver-side smoothing when it arrives.
-	// A spatial field is meaningful only on top of a complete base-transform
-	// batch from this same driver connection. Never send a field enable after a
-	// failed base request. If any mutation failed or reconnected, immediately
-	// neutralize the whole current connection before retrying desired state on
-	// the next periodic scan.
-	bool fieldSynchronized = false;
-	if (connectionReady && driverSynchronized)
-	{
-		desiredMutationAttempted = true;
-		fieldSynchronized = SendAlignmentField(ctx, true,
-			&batchConnectionGeneration);
-	}
-	driverSynchronized = fieldSynchronized && driverSynchronized;
-	if (!driverSynchronized && desiredMutationAttempted)
-	{
-		uint64_t neutralizedConnectionGeneration = 0;
-		if (NeutralizeDriverConnection(ctx, neutralizedConnectionGeneration))
-		{
-			// The profile batch still failed, but the connection is now known
-			// neutral. Next scan can safely apply desired state without another
-			// generation-wide reset.
-			SynchronizedDriverConnectionGeneration =
-				neutralizedConnectionGeneration;
-		}
-	}
-
-	// Never let the jump/drift/continuous monitors infer that the live driver
-	// matches the profile after a partial pipe failure. The next periodic scan
-	// rebuilds and retries the complete desired state, including after vrserver
-	// restarts; until then, all device identities are deliberately unavailable.
-	if (!driverSynchronized)
-	{
-		ctx.enabled = false;
+	case questcal::DriverDisableCause::HmdMismatch:
+		// Currently using an HMD with a different tracking system than the calibration.
+		ctx.disableReason = CalibrationContext::DisableReason::HmdMismatch;
+		break;
+	case questcal::DriverDisableCause::DriverUnreachable:
 		ctx.disableReason = CalibrationContext::DisableReason::DriverUnreachable;
-		ctx.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
-		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
-		{
-			ctx.referenceDeviceMask[id] = false;
-			ctx.targetDeviceMask[id] = false;
-		}
+		break;
+	case questcal::DriverDisableCause::None:
+		// The profile's own validity gates above already recorded their cause.
+		break;
 	}
-	else
+	ctx.continuousTrackerId = result.continuousTrackerId;
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
-		SynchronizedDriverConnectionGeneration = batchConnectionGeneration;
-		ctx.ClearError(CalibrationContext::ErrorSource::Driver);
-		LastDriverRequestErrorTime = -1e9;
+		ctx.referenceDeviceMask[id] = result.referenceDeviceMask[id];
+		ctx.targetDeviceMask[id] = result.targetDeviceMask[id];
 	}
 }
 
@@ -2523,7 +2351,11 @@ void CalibrationTick(double time)
 			ctx.calibrationTargetID, ctx.calibrationTargetSerial.c_str());
 		ctx.Log(buf);
 
-		if (!ResetAndDisableOffsets(ctx, ctx.calibrationTargetID))
+		// Outside any reconciliation batch, and deliberately outside the ledger:
+		// this clears a stale transform off the device about to be sampled, it
+		// does not speak for what the live profile left enabled.
+		BindDriverSession(ctx);
+		if (!DriverLink.DisableDeviceTransform(ctx.calibrationTargetID, ctx.timeLastTick))
 		{
 			ctx.state = CalibrationState::None;
 			ctx.Log("Could not disable the existing target transform; calibration aborted\n");

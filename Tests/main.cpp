@@ -24,6 +24,7 @@
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/FieldMath.h"
 #include "../Overlay/DriftMonitor.h"
+#include "../Overlay/DriverSession.h"
 #include "../Overlay/DriverSyncPolicy.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/ProfileValidation.h"
@@ -1286,6 +1287,477 @@ void RunDriverSyncScenarios()
 		Check("driver sync: connection neutralize",
 			marked && forgotEverything && nothingToRetire,
 			"an acknowledged connection-wide reset is the only bulk way out");
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Overlay -> driver session sequencing (Overlay/DriverSession.h)
+//
+// The transport half of the same reconciliation: not which slot gets what, but
+// the order the requests go out in and what the overlay is allowed to believe
+// afterwards. Every rule below only ever fails against a pipe that refuses,
+// dies or reconnects mid-batch, which is exactly what no test could produce
+// while the sends were fused to a live IPCClient. Both of the session's seams
+// are driven here; everything between them is the production sequencing.
+
+enum class LinkFault
+{
+	None,
+	// The driver answered, and said no.
+	Refuse,
+	// The send failed and IPCClient's one reconnect-and-replay failed too.
+	Throw,
+	// SendBlocking's replay-after-reconnect: the request WAS accepted, but by a
+	// new pipe. Nothing in the response says so -- the connection generation is
+	// the only evidence, which is the whole reason a batch stamps one.
+	Reconnect,
+};
+
+// A scripted driver connection. Records every request in order and answers each
+// from a small script keyed on the request itself, so a scenario names the
+// failure the way the invariant does ("the enable for slot 3 is refused")
+// rather than by counting round-trips.
+struct FakeDriverLink
+{
+	std::vector<protocol::Request> sent;
+	// Real connections start at 1: zero is the session's "this batch has not
+	// been stamped yet" sentinel, so a scripted zero would drive a state
+	// production cannot reach.
+	uint64_t generation = 1;
+	std::function<LinkFault(size_t index, const protocol::Request &)> script;
+
+	questcal::DriverTransport Transport()
+	{
+		return [this](const protocol::Request &request)
+		{
+			size_t index = sent.size();
+			sent.push_back(request);
+			LinkFault fault = script ? script(index, request) : LinkFault::None;
+
+			questcal::DriverTransportResult result;
+			if (fault == LinkFault::Reconnect)
+				++generation;
+			// Reported after the attempt whether or not it succeeded, exactly as
+			// IPCClient::ConnectionGeneration() is read in production.
+			result.connectionGeneration = generation;
+			if (fault == LinkFault::Throw)
+			{
+				result.error = "scripted pipe failure";
+				return result;
+			}
+			result.completed = true;
+			result.response = protocol::Response(
+				fault == LinkFault::Refuse ? protocol::ResponseInvalid :
+				request.type == protocol::RequestHandshake ? protocol::ResponseHandshake :
+				protocol::ResponseSuccess);
+			return result;
+		};
+	}
+};
+
+// One span of recorded traffic, summarized at the level the sequencing rules
+// are written in. Deliberately not an exact wire transcript: the neutralization
+// pass retries up to three times, and a transcript assertion would make every
+// scenario brittle against a retry that is allowed to happen.
+struct LinkSpan
+{
+	size_t requests = 0;
+	int handshakes = 0;
+	int fieldEnables = 0;
+	int fieldDisables = 0;
+	std::vector<uint32_t> enables;
+	std::vector<uint32_t> disables;
+};
+
+LinkSpan SpanOf(const FakeDriverLink &link, size_t from)
+{
+	LinkSpan span;
+	for (size_t i = from; i < link.sent.size(); ++i)
+	{
+		const protocol::Request &request = link.sent[i];
+		++span.requests;
+		if (request.type == protocol::RequestHandshake)
+		{
+			++span.handshakes;
+		}
+		else if (request.type == protocol::RequestSetAlignmentField)
+		{
+			if (request.setAlignmentField.enabled)
+				++span.fieldEnables;
+			else
+				++span.fieldDisables;
+		}
+		else if (request.type == protocol::RequestSetDeviceTransform)
+		{
+			if (request.setDeviceTransform.enabled)
+				span.enables.push_back(request.setDeviceTransform.openVRID);
+			else
+				span.disables.push_back(request.setDeviceTransform.openVRID);
+		}
+	}
+	return span;
+}
+
+// A session wired to a scripted pipe and a device table, with the error banner
+// reduced to counters. Non-copyable: the transport closes over `link`'s address.
+struct SessionFixture
+{
+	FakeDriverLink link;
+	SyncDeviceTable table;
+	questcal::DriverSession session;
+	int errors = 0;
+	int clears = 0;
+
+	SessionFixture()
+	{
+		session.SetTransport(link.Transport());
+		session.SetDeviceEnumerator(
+			[this](uint32_t id, const questcal::DriverSyncDesired &)
+			{
+				return id < vr::k_unMaxTrackedDeviceCount
+					? table.devices[id] : questcal::SyncDevice();
+			});
+		session.SetErrorSink([this](const std::string &) { ++errors; },
+			[this]() { ++clears; });
+	}
+
+	SessionFixture(const SessionFixture &) = delete;
+	SessionFixture &operator=(const SessionFixture &) = delete;
+};
+
+// One reconciliation scan in production's order: Begin -- the handshake that
+// stamps the batch -- and then Apply.
+questcal::DriverApplyResult RunSessionScan(questcal::DriverSession &session,
+	const questcal::DriverApplyRequest &request, double now)
+{
+	questcal::DriverBatch batch = session.Begin(now);
+	return session.Apply(batch, request, now);
+}
+
+questcal::DriverApplyRequest MakeSessionRequest(bool enabled, bool fieldWanted)
+{
+	questcal::DriverApplyRequest request;
+	request.enabled = enabled;
+	request.desired = MakeDriverSyncDesired();
+
+	protocol::SetAlignmentField &field = request.field;
+	// The caller's half of the field predicate only: the profile is live and
+	// there is something to blend. Non-default generation and anchor values so a
+	// message that lost the caller's payload is visible on the wire.
+	field.enabled = fieldWanted ? 1 : 0;
+	field.generation = 7;
+	field.sigmaMeters = questcal::FieldBlendSigmaMeters;
+	if (fieldWanted)
+	{
+		field.anchorCount = 2;
+		field.anchors[0].position[0] = 1.25;
+		field.anchors[1].translationDelta[2] = -0.03;
+	}
+	return request;
+}
+
+void RunDriverSessionScenarios()
+{
+	// 1. A batch that fails partway is never left half-applied. The whole
+	// connection is neutralized before the scan returns, so the next one starts
+	// from a driver that is known neutral instead of an unknown mixture.
+	// Deleting that recovery -- or narrowing it to the one slot that failed --
+	// leaves every transform that DID land live on a driver the overlay is
+	// simultaneously reporting as off.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		for (uint32_t id = 1; id <= 4; ++id)
+			fx.table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
+
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
+		RunSessionScan(fx.session, request, 0.0);   // converge; the ledger now holds 1..4
+
+		size_t from = fx.link.sent.size();
+		fx.link.script = [](size_t, const protocol::Request &request)
+		{
+			return request.type == protocol::RequestSetDeviceTransform &&
+				request.setDeviceTransform.enabled == 1 &&
+				request.setDeviceTransform.openVRID == 3
+				? LinkFault::Refuse : LinkFault::None;
+		};
+		questcal::DriverApplyResult failed = RunSessionScan(fx.session, request, 1.0);
+		LinkSpan span = SpanOf(fx.link, from);
+
+		// The batch stopped at the refusal rather than pressing on...
+		bool stopped = span.enables.size() == 3 && span.enables[2] == 3 &&
+			!failed.synchronized;
+		// ...and the whole generation was retired: one neutralization pass is a
+		// handshake, a canonical field disable and all 64 slots from zero.
+		bool everySlot = span.handshakes == 2 && span.fieldEnables == 0 &&
+			span.fieldDisables == 1 &&
+			span.disables.size() == vr::k_unMaxTrackedDeviceCount;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount && everySlot; ++id)
+			everySlot = span.disables[id] == id;
+
+		// The ledger was forgotten and the neutral generation recorded, so the
+		// next scan neither resets again nor re-retires anything: a handshake and
+		// the canonical field disable, and nothing else.
+		fx.link.script = nullptr;
+		size_t settledFrom = fx.link.sent.size();
+		RunSessionScan(fx.session, MakeSessionRequest(false, true), 2.0);
+		LinkSpan settled = SpanOf(fx.link, settledFrom);
+		bool quiet = settled.requests == 2 && settled.handshakes == 1 &&
+			settled.fieldDisables == 1;
+
+		char detail[96];
+		snprintf(detail, sizeof detail, "%d slots reset, next scan %d requests",
+			static_cast<int>(span.disables.size()),
+			static_cast<int>(settled.requests));
+		Check("driver session: batch neutralize", stopped && everySlot && quiet,
+			detail);
+	}
+
+	// 2. The spatial field is enabled only on top of a COMPLETE base-transform
+	// batch on this same connection, and only while the profile is still live.
+	// Hoisting the send out of that guard is the obvious "always re-assert the
+	// field" simplification, and it leaves a driver holding a stale or partial
+	// base set blending anchor deltas on top of it.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		for (uint32_t id = 1; id <= 3; ++id)
+			fx.table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
+
+		size_t from = fx.link.sent.size();
+		RunSessionScan(fx.session, request, 0.0);
+		LinkSpan clean = SpanOf(fx.link, from);
+		protocol::Request last = fx.link.sent.back();
+		// Shipped last, after every base transform, with the caller's payload
+		// intact -- a session that rebuilt the message would lose these.
+		bool shipped = clean.fieldEnables == 1 &&
+			last.type == protocol::RequestSetAlignmentField &&
+			last.setAlignmentField.enabled == 1 &&
+			last.setAlignmentField.anchorCount == 2 &&
+			last.setAlignmentField.generation == 7 &&
+			std::abs(last.setAlignmentField.anchors[0].position[0] - 1.25) < 1e-12;
+
+		// A refused base transform: no field enable anywhere in the scan, the
+		// neutralization pass included.
+		from = fx.link.sent.size();
+		fx.link.script = [](size_t, const protocol::Request &request)
+		{
+			return request.type == protocol::RequestSetDeviceTransform &&
+				request.setDeviceTransform.enabled == 1 &&
+				request.setDeviceTransform.openVRID == 2
+				? LinkFault::Refuse : LinkFault::None;
+		};
+		RunSessionScan(fx.session, request, 1.0);
+		LinkSpan broken = SpanOf(fx.link, from);
+		bool withheld = broken.fieldEnables == 0 && broken.fieldDisables == 1;
+
+		// A perfectly healthy connection with the profile off never enables it
+		// either, however much the caller has to blend.
+		fx.link.script = nullptr;
+		from = fx.link.sent.size();
+		RunSessionScan(fx.session, MakeSessionRequest(false, true), 2.0);
+		LinkSpan off = SpanOf(fx.link, from);
+		bool clearedWithProfile = off.fieldEnables == 0 && off.fieldDisables == 1;
+
+		Check("driver session: field after base batch",
+			shipped && withheld && clearedWithProfile,
+			"enabled only after a complete base batch on a live profile");
+	}
+
+	// 3. What the caller may believe afterwards. A partial batch clears BOTH
+	// device masks, the resolved tracker id and `enabled` -- including for the
+	// slots that did land -- because the jump, drift and continuous monitors all
+	// steer against those identities and the driver may no longer be applying
+	// them. The two causes stay distinct as well: the UI sends the user to check
+	// SteamVR for one and their headset for the other.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		fx.table.Place(1, questcal::SyncDeviceClass::Other, "lighthouse");
+		fx.table.Place(2, questcal::SyncDeviceClass::Other, "oculus", "T-MOUNT");
+		fx.table.Place(3, questcal::SyncDeviceClass::Other, "oculus", "T-FOOT");
+
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
+		request.desired.continuousTrackerSerial = "T-MOUNT";
+
+		questcal::DriverApplyResult live = RunSessionScan(fx.session, request, 0.0);
+		bool derived = live.synchronized && live.enabled &&
+			live.cause == questcal::DriverDisableCause::None &&
+			live.referenceDeviceMask[0] && live.referenceDeviceMask[1] &&
+			live.targetDeviceMask[2] && live.targetDeviceMask[3] &&
+			live.continuousTrackerId == 2;
+
+		// Slot 3's enable is refused, after slot 2's landed and resolved the
+		// tracker -- so there is real derived state to throw away.
+		fx.link.script = [](size_t, const protocol::Request &request)
+		{
+			return request.type == protocol::RequestSetDeviceTransform &&
+				request.setDeviceTransform.enabled == 1 &&
+				request.setDeviceTransform.openVRID == 3
+				? LinkFault::Refuse : LinkFault::None;
+		};
+		questcal::DriverApplyResult partial = RunSessionScan(fx.session, request, 1.0);
+		bool closed = !partial.synchronized && !partial.enabled &&
+			partial.cause == questcal::DriverDisableCause::DriverUnreachable &&
+			partial.continuousTrackerId == vr::k_unTrackedDeviceIndexInvalid;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount && closed; ++id)
+			closed = !partial.referenceDeviceMask[id] && !partial.targetDeviceMask[id];
+
+		// A foreign headset on a healthy pipe is a different verdict entirely:
+		// the batch completes, and the cause names the headset.
+		fx.link.script = nullptr;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "oculus");
+		questcal::DriverApplyResult foreign = RunSessionScan(fx.session, request, 2.0);
+		bool distinct = foreign.synchronized && !foreign.enabled &&
+			foreign.cause == questcal::DriverDisableCause::HmdMismatch;
+
+		Check("driver session: fail-closed result", derived && closed && distinct,
+			"a partial batch clears masks/tracker; a foreign HMD reports its own cause");
+	}
+
+	// 4. A connection the overlay has not converged yet is neutralized in full
+	// before any desired state goes near it: a restarted vrserver may have fresh
+	// slots, a new pipe to the same provider may have retained them, and nothing
+	// on the wire tells the two apart. Equally, it happens ONCE -- the pass is 66
+	// blocking round-trips on the UI thread, and paying it on every 1 Hz scan is
+	// a visibly stuttering overlay.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		fx.table.Place(1, questcal::SyncDeviceClass::Other, "oculus");
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, false);
+
+		size_t from = fx.link.sent.size();
+		RunSessionScan(fx.session, request, 0.0);
+		LinkSpan first = SpanOf(fx.link, from);
+		bool neutralizedFirst = first.handshakes == 2 &&
+			first.disables.size() == vr::k_unMaxTrackedDeviceCount &&
+			first.enables.size() == 1 && first.enables[0] == 1;
+
+		from = fx.link.sent.size();
+		RunSessionScan(fx.session, request, 1.0);
+		LinkSpan second = SpanOf(fx.link, from);
+		// The handshake, the one enable, the field. Nothing else at all.
+		bool steadyState = second.requests == 3 && second.handshakes == 1 &&
+			second.disables.empty() && second.enables.size() == 1;
+
+		// A vrserver restart while idle is a new generation, and that pays for
+		// the reset pass again.
+		++fx.link.generation;
+		from = fx.link.sent.size();
+		RunSessionScan(fx.session, request, 2.0);
+		LinkSpan restarted = SpanOf(fx.link, from);
+		bool reNeutralized = restarted.handshakes == 2 &&
+			restarted.disables.size() == vr::k_unMaxTrackedDeviceCount;
+
+		char detail[96];
+		snprintf(detail, sizeof detail, "first %d, steady %d, after restart %d requests",
+			static_cast<int>(first.requests), static_cast<int>(second.requests),
+			static_cast<int>(restarted.requests));
+		Check("driver session: connection neutralize",
+			neutralizedFirst && steadyState && reNeutralized, detail);
+	}
+
+	// 5. A reconnect mid-batch. IPCClient replays the request on the fresh pipe
+	// and reports success, so the only evidence is the connection generation --
+	// and the enable it just replayed is now live on a connection this batch
+	// never neutralized. That one slot is retired immediately, on the new pipe,
+	// before the generation-wide pass reaches the rest. Drop the recovery and
+	// the slot stays enabled while the overlay reports the profile off.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		for (uint32_t id = 1; id <= 3; ++id)
+			fx.table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
+		RunSessionScan(fx.session, request, 0.0);
+
+		size_t from = fx.link.sent.size();
+		fx.link.script = [](size_t, const protocol::Request &request)
+		{
+			return request.type == protocol::RequestSetDeviceTransform &&
+				request.setDeviceTransform.enabled == 1 &&
+				request.setDeviceTransform.openVRID == 2
+				? LinkFault::Reconnect : LinkFault::None;
+		};
+		questcal::DriverApplyResult result = RunSessionScan(fx.session, request, 1.0);
+
+		// The request straight after the replayed enable is that slot's disable.
+		// A neutralization handshake there instead means the recovery is gone.
+		bool recovered = false;
+		for (size_t i = from; i + 1 < fx.link.sent.size(); ++i)
+		{
+			const protocol::Request &enable = fx.link.sent[i];
+			if (enable.type != protocol::RequestSetDeviceTransform ||
+				enable.setDeviceTransform.enabled != 1 ||
+				enable.setDeviceTransform.openVRID != 2)
+				continue;
+			const protocol::Request &next = fx.link.sent[i + 1];
+			recovered = next.type == protocol::RequestSetDeviceTransform &&
+				next.setDeviceTransform.enabled == 0 &&
+				next.setDeviceTransform.openVRID == 2;
+			break;
+		}
+
+		LinkSpan span = SpanOf(fx.link, from);
+		// The batch stopped there -- slot 3 was never attempted -- and failed closed.
+		bool stopped = span.enables.size() == 2 && span.enables[1] == 2 &&
+			span.fieldEnables == 0 && !result.synchronized && !result.enabled;
+
+		// The new generation was neutralized and recorded, so the next scan is a
+		// steady-state one rather than another 66-round-trip reset.
+		fx.link.script = nullptr;
+		size_t settledFrom = fx.link.sent.size();
+		RunSessionScan(fx.session, request, 2.0);
+		LinkSpan settled = SpanOf(fx.link, settledFrom);
+		bool recorded = settled.handshakes == 1 && settled.disables.empty() &&
+			settled.enables.size() == 3;
+
+		Check("driver session: mid-batch reconnect",
+			recovered && stopped && recorded,
+			"the replayed enable is retired on the new pipe before the generation-wide reset");
+	}
+
+	// 6. One driver failure is one banner. A dead pipe fails every request in a
+	// scan and every scan after it, so without the 30 s debounce the user's error
+	// line is rewritten dozens of times a second; without the re-arm on a
+	// recovered batch, the next genuine failure is swallowed for up to 30 s.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		fx.table.Place(1, questcal::SyncDeviceClass::Other, "oculus");
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
+
+		fx.link.script = [](size_t, const protocol::Request &) { return LinkFault::Throw; };
+		questcal::DriverApplyResult dead = RunSessionScan(fx.session, request, 100.0);
+		bool reportedOnce = fx.errors == 1 && !dead.synchronized && !dead.enabled &&
+			dead.cause == questcal::DriverDisableCause::DriverUnreachable;
+		// A handshake that never answered leaves nothing to roll back, so the scan
+		// does not spend a neutralization pass on a pipe that is not there.
+		bool cheapWhenDead = fx.link.sent.size() == 1;
+
+		RunSessionScan(fx.session, request, 110.0);
+		bool debounced = fx.errors == 1;
+		RunSessionScan(fx.session, request, 131.0);
+		bool reportedAgain = fx.errors == 2;
+
+		// A recovered batch withdraws the banner and re-arms the clock...
+		fx.link.script = nullptr;
+		RunSessionScan(fx.session, request, 132.0);
+		bool withdrawn = fx.errors == 2 && fx.clears == 1;
+
+		// ...so the next failure is reported immediately, not 30 s later.
+		fx.link.script = [](size_t, const protocol::Request &) { return LinkFault::Throw; };
+		RunSessionScan(fx.session, request, 133.0);
+		bool reArmed = fx.errors == 3;
+
+		char detail[80];
+		snprintf(detail, sizeof detail, "%d error(s), %d withdrawal(s)",
+			fx.errors, fx.clears);
+		Check("driver session: error debounce",
+			reportedOnce && cheapWhenDead && debounced && reportedAgain &&
+				withdrawn && reArmed, detail);
 	}
 }
 
@@ -7245,6 +7717,7 @@ int main(int argc, char **argv)
 	RunDriverPoseTransformScenarios();
 	RunDriverProtocolValidationScenarios();
 	RunDriverSyncScenarios();
+	RunDriverSessionScenarios();
 	RunPoseChannelScenarios();
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();
