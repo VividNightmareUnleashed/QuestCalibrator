@@ -696,6 +696,37 @@ void RunDriverProtocolValidationScenarios()
 	badField = goodField; badField.enabled = 2;
 	pass = pass && rejectsField(badField);
 
+	// Every rejection above poisons anchor 0, and the accepted field carries one
+	// anchor - so a loop bound of `i < 1`, or hoisting the per-anchor checks out
+	// of the loop, passes all of them. Build a full field and poison its LAST
+	// anchor. The output is value-initialised first, so an unvalidated tail does
+	// not fault: the user's per-spot corrections are silently dropped to identity
+	// behind a success response from the driver.
+	protocol::SetAlignmentField tailField = goodField;
+	tailField.anchorCount = protocol::SetAlignmentField::MaxAnchors;
+	for (uint32_t i = 0; i < tailField.anchorCount; ++i)
+	{
+		tailField.anchors[i].position[0] = 1.0 + static_cast<double>(i);
+		tailField.anchors[i].rotationDelta = { 1.0, 0.0, 0.0, 0.0 };
+		tailField.anchors[i].translationDelta[2] = -0.05;
+	}
+	const uint32_t lastAnchor = protocol::SetAlignmentField::MaxAnchors - 1;
+	protocol::SetAlignmentField sanitizedTail;
+	// Non-vacuity: the tail must survive a clean field, or the rejections below
+	// would prove nothing about where the loop stops.
+	pass = pass && ValidateAndSanitize(tailField, sanitizedTail) &&
+		sanitizedTail.anchors[lastAnchor].position[0] ==
+			1.0 + static_cast<double>(lastAnchor);
+
+	badField = tailField; badField.anchors[lastAnchor].position[1] = inf;
+	pass = pass && rejectsField(badField);
+	badField = tailField; badField.anchors[lastAnchor].position[2] = 10001.0;
+	pass = pass && rejectsField(badField);
+	badField = tailField; badField.anchors[lastAnchor].translationDelta[0] = 100.01;
+	pass = pass && rejectsField(badField);
+	badField = tailField; badField.anchors[lastAnchor].rotationDelta = { 0.0, 0.0, 0.0, 0.0 };
+	pass = pass && rejectsField(badField);
+
 	// Unused wire anchors are deliberately scrubbed instead of trusted.
 	protocol::SetAlignmentField unusedGarbage;
 	unusedGarbage.anchorCount = 0;
