@@ -139,6 +139,7 @@ IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 	}
 	pipeInst->pipe = pipe;
 	pipeInst->server = this;
+	pipeInst->lastActivityMs = GetTickCount64();
 	try
 	{
 		pipes.insert(pipeInst);
@@ -158,6 +159,26 @@ void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 	CloseHandle(pipeInst->pipe);
 	pipes.erase(pipeInst);
 	delete pipeInst;
+}
+
+// A peer that connects and never writes leaves its read pending forever, so
+// nothing else reclaims these. Cancel the pending IO first: the completion
+// routine runs against the instance, and freeing it underneath the kernel
+// would corrupt the callback that casts the OVERLAPPED straight back to it.
+void IPCServer::CloseIdleConnections()
+{
+	const ULONGLONG now = GetTickCount64();
+	for (auto it = pipes.begin(); it != pipes.end(); )
+	{
+		PipeInstance *pipeInst = *it;
+		++it;   // ClosePipeInstance erases, so advance first
+		if (now - pipeInst->lastActivityMs < ConnectionIdleDeadlineMs)
+			continue;
+
+		LOG("Dropping IPC connection idle for %llu ms", now - pipeInst->lastActivityMs);
+		CancelIoEx(pipeInst->pipe, &pipeInst->overlap);
+		ClosePipeInstance(pipeInst);
+	}
 }
 
 void IPCServer::RunThread(IPCServer *_this)
@@ -240,7 +261,17 @@ void IPCServer::RunThread(IPCServer *_this)
 			HANDLE connectedPipe = _this->listenerPipe;
 			_this->listenerPipe = INVALID_HANDLE_VALUE;
 			_this->listenerConnectPending = false;
-			auto pipeInst = _this->CreatePipeInstance(connectedPipe);
+
+			// Reap first, so a stale connection can never be what refuses the
+			// real client.
+			_this->CloseIdleConnections();
+
+			PipeInstance *pipeInst = nullptr;
+			if (_this->pipes.size() >= MaxConcurrentConnections)
+				LOG("Refusing IPC connection: %zu already open", _this->pipes.size());
+			else
+				pipeInst = _this->CreatePipeInstance(connectedPipe);
+
 			if (pipeInst)
 				CompletedWriteCallback(0, sizeof(protocol::Response), (LPOVERLAPPED) pipeInst);
 			else
@@ -251,6 +282,10 @@ void IPCServer::RunThread(IPCServer *_this)
 		}
 		else if (wait == WAIT_TIMEOUT || wait == WAIT_IO_COMPLETION)
 		{
+			// Also sweep here: a peer that connects once and then goes quiet
+			// produces no further connection events to reap it on. The set is
+			// bounded by MaxConcurrentConnections, so this stays trivial.
+			_this->CloseIdleConnections();
 			continue;
 		}
 		else
@@ -358,7 +393,14 @@ IPCServer::PipeInstance *IPCServer::ActivePipeInstanceOrClose(LPOVERLAPPED overl
 {
 	PipeInstance *pipeInst = reinterpret_cast<PipeInstance *>(overlap);
 	if (!pipeInst->server->stop.load(std::memory_order_acquire))
+	{
+		// Both completion callbacks funnel through here, so this is the one
+		// place that sees every completed IO on a connection - stamping it here
+		// rather than at each callback keeps the idle deadline honest whatever
+		// the peer is doing.
+		pipeInst->lastActivityMs = GetTickCount64();
 		return pipeInst;
+	}
 
 	pipeInst->server->ClosePipeInstance(pipeInst);
 	return nullptr;

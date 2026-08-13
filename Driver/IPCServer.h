@@ -50,7 +50,26 @@ private:
 		protocol::Request request;
 		protocol::Response response;
 		questcal::ipc::ConnectionState connection;
+		// Last time this connection completed an IO. The protocol is
+		// request/response with no long-lived subscription, so a connection that
+		// has neither read nor written for the deadline below is not waiting on
+		// anything we owe it.
+		ULONGLONG lastActivityMs;
 	};
+
+	// The overlay needs exactly one connection. The cap is well above that so a
+	// reconnect overlapping a not-yet-reaped previous connection is never
+	// refused - wedging out the real client would be a worse failure than the
+	// drain this bounds. Past the cap the accept is closed immediately, before
+	// any instance is allocated.
+	static const size_t MaxConcurrentConnections = 8;
+	// A connection that holds the pipe open without ever writing costs a kernel
+	// pipe instance, a handle and an instance inside vrserver, and the
+	// per-message validation the pipe's trust boundary relies on is never
+	// reached because it runs only after a full message arrives.
+	static const ULONGLONG ConnectionIdleDeadlineMs = 30000;
+
+	void CloseIdleConnections();
 
 	// Both completion callbacks reinterpret_cast the LPOVERLAPPED the API hands
 	// back straight to PipeInstance*. Inserting any member above `overlap`, or
