@@ -25,11 +25,12 @@ $testExecutable = [System.IO.Path]::GetFullPath(
     (Join-Path $Root ([string]$config.testExecutable)))
 $duplicateMinLines = [int]$config.duplicateMinLines
 $duplicateMinTokens = [int]$config.duplicateMinTokens
+$minScenarios = [int]$config.minScenarios
 if (-not $solution.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not [string]$config.testExecutable -or
     -not $testExecutable.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not $configuration -or -not $platform -or
-    $duplicateMinLines -lt 1 -or $duplicateMinTokens -lt 1) {
+    $duplicateMinLines -lt 1 -or $duplicateMinTokens -lt 1 -or $minScenarios -lt 1) {
     Write-Output "Invalid C++ validation config: $configPath"
     exit 2
 }
@@ -89,7 +90,11 @@ function Invoke-MSBuildValidation {
         $solution,
         "/p:Configuration=$configuration",
         "/p:Platform=$platform",
-        '/m:1',
+        # The three projects declare no inter-dependencies, so MSBuild can build
+        # them concurrently. Per-project ClangTidy logs are still written per
+        # project, which is what the tidy scan below reads — console interleaving
+        # does not affect it.
+        '/m',
         '/v:m',
         '/nologo'
     )
@@ -97,7 +102,21 @@ function Invoke-MSBuildValidation {
         # Rebuild is intentional: Visual Studio's integrated Clang-Tidy target
         # then receives the exact evaluated MSVC defines, include paths, PCH,
         # SDK, and per-file options for every translation unit.
-        $checks = '-*%2Cclang-analyzer-deadcode.*%2Cbugprone-unused-return-value' +
+        # clang-analyzer-core/cplusplus carry the null-deref, uninitialized-read
+        # and use-after-free checks; the bugprone entries below are the logic
+        # checks that matter in this codebase specifically — memory manipulation
+        # of the pose/transform structs (invariant 1 forbids memsetting the
+        # slots) and the bounded retry loops on the pose path.
+        $checks = '-*%2Cclang-analyzer-core.*%2Cclang-analyzer-cplusplus.*' +
+            '%2Cclang-analyzer-deadcode.*%2Cbugprone-unused-return-value' +
+            '%2Cbugprone-use-after-move' +
+            '%2Cbugprone-dangling-handle' +
+            '%2Cbugprone-infinite-loop' +
+            '%2Cbugprone-integer-division' +
+            '%2Cbugprone-sizeof-expression' +
+            '%2Cbugprone-suspicious-memset-usage' +
+            '%2Cbugprone-undefined-memory-manipulation' +
+            '%2Cbugprone-macro-parentheses' +
             '%2Cperformance-for-range-copy' +
             '%2Cperformance-inefficient-string-concatenation' +
             '%2Cperformance-inefficient-vector-operation' +
@@ -161,6 +180,24 @@ function Invoke-SolverTests {
         exit 2
     }
 
+    # A Test-Path alone cannot tell a fresh harness from one that detached from
+    # the code under test — if the Tests project ever stops building as part of
+    # the solution, the build still succeeds and an old executable runs green.
+    # Compare against the sources rather than against the build start, so an
+    # incremental build that legitimately relinks nothing still passes.
+    $exeWritten = (Get-Item -LiteralPath $testExecutable).LastWriteTime
+    $newestSource = @('Driver', 'Overlay', 'common', 'Tests') |
+        ForEach-Object { Join-Path $Root $_ } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Container } |
+        Get-ChildItem -Recurse -File -Include '*.cpp', '*.h', '*.vcxproj' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($newestSource -and $newestSource.LastWriteTime -gt $exeWritten) {
+        Write-Output ("Solver test executable is older than $($newestSource.FullName); " +
+            'it did not rebuild and would report on stale code.')
+        exit 2
+    }
+
     $output = @(& $testExecutable 2>&1 | ForEach-Object { [string]$_ })
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
@@ -171,6 +208,20 @@ function Invoke-SolverTests {
     }
 
     $summary = $output | Select-Object -Last 1
+    # A zero exit means "nothing failed", which is also what an empty run
+    # reports. Assert the harness actually ran its scenarios, so deleting a
+    # Run*Scenarios() call fails here instead of passing quietly.
+    if ($summary -notmatch '^(\d+) scenario\(s\) ran, \d+ failed$') {
+        Write-Output "Could not read a scenario count from the harness summary: $summary"
+        exit 2
+    }
+    $ran = [int]$Matches[1]
+    if ($ran -lt $minScenarios) {
+        Write-Output "Solver harness ran $ran scenario(s), below the floor of $minScenarios."
+        Write-Output 'Coverage regressed, or the floor in cpp-validation.json needs raising.'
+        exit 1
+    }
+
     Write-Output "Solver tests passed: $summary"
 }
 

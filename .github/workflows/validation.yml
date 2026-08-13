@@ -52,13 +52,22 @@ jobs:
           & pwsh -NoProfile -File tools\validate-cpp.ps1 -Mode Duplicates
           $validationExit = $LASTEXITCODE
           if ($validationExit -eq 3) {
+              # Clone findings stay advisory by design: similar-looking blocks in
+              # this codebase can encode intentionally distinct invariants, so
+              # consolidation needs human review rather than a hard gate.
               Write-Warning 'Clone findings require review but do not fail CI.'
               exit 0
           }
           exit $validationExit
 
   deep-analysis:
+    # Six translation units — Configuration.cpp, Calibration.cpp,
+    # UserInterface.cpp, QuestCalibrator.cpp, IPCServer.cpp and
+    # InterfaceHookInjector.cpp — are compiled by no test, so Clang-Tidy is
+    # their only automated signal beyond "MSVC accepted the syntax". That makes
+    # it a pull-request gate, not just a weekly report.
     if: >-
+      github.event_name == 'pull_request' ||
       github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' && inputs.run_deep_analysis)
     runs-on: windows-2022
@@ -68,13 +77,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      # Exit 3 (Clang-Tidy findings) is deliberately NOT mapped to 0: the
+      # advisory backlog was triaged to empty when this gate was made blocking,
+      # so any finding here is new.
       - name: Rebuild with project-aware Clang-Tidy and run solver tests
         shell: pwsh
-        run: |
-          & pwsh -NoProfile -File tools\validate-cpp.ps1 -Mode Analyze -All
-          $validationExit = $LASTEXITCODE
-          if ($validationExit -eq 3) {
-              Write-Warning 'Clang-Tidy findings require review but do not fail CI.'
-              exit 0
-          }
-          exit $validationExit
+        run: tools\validate-cpp.ps1 -Mode Analyze -All

@@ -318,6 +318,18 @@ struct Expectation
 };
 
 int failures = 0;
+int checksRun = 0;
+
+// Every reported result funnels through here. The exit code alone cannot
+// distinguish "everything passed" from "nothing ran", so a deleted
+// Run*Scenarios() call or an early return that skips the rest of a group
+// shows up as a drop in the reported count instead of a green build.
+void RecordResult(bool pass)
+{
+	checksRun++;
+	if (!pass)
+		failures++;
+}
 
 void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &truth,
                  const EngineConfig &config, const Expectation &expect, uint32_t seed = 1234)
@@ -363,11 +375,9 @@ void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &
 		r.scale, r.axisSpread, r.transEigRatio, r.pairsUsed,
 		why.empty() ? "" : "  <-", why.c_str());
 
+	RecordResult(pass);
 	if (!pass)
-	{
 		printf("%-28s      message: %s\n", "", r.message.c_str());
-		failures++;
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -457,8 +467,7 @@ void RefTrajectory(double t, uint32_t id, Eigen::Quaterniond &rot, Eigen::Vector
 void Check(const char *name, bool pass, const char *detail)
 {
 	printf("%-28s %s%s%s\n", name, pass ? "PASS" : "FAIL", detail[0] ? "  " : "", detail);
-	if (!pass)
-		failures++;
+	RecordResult(pass);
 }
 
 Eigen::Quaterniond RandomQuaternion(std::mt19937 &rng, double maxAngle = EIGEN_PI)
@@ -4742,8 +4751,7 @@ int main(int argc, char **argv)
 			!IsValidScale(std::numeric_limits<double>::infinity()) &&
 			!IsValidScale(10.0);
 		printf("%-28s %s\n", "profile semantics", pass ? "PASS" : "FAIL");
-		if (!pass)
-			failures++;
+		RecordResult(pass);
 	}
 	bool corruptMissingUse = CanUseRecoveredSettings(
 		RecordLoadState::Missing, RecordLoadState::Unreadable);
@@ -4773,8 +4781,7 @@ int main(int argc, char **argv)
 			velocity[0] == -4.0 && velocity[1] == 5.0 && velocity[2] == 6.0 &&
 			acceleration[0] == 7.0 && acceleration[1] == -8.0 && acceleration[2] == 9.0;
 		printf("%-28s %s\n", "driver linear scale", pass ? "PASS" : "FAIL");
-		if (!pass)
-			failures++;
+		RecordResult(pass);
 	}
 
 	// Production-shared driver algebra and broad solver edge/property passes.
@@ -4975,8 +4982,7 @@ int main(int argc, char **argv)
 		printf("%-28s %s  applied %d  trans %.4f -> %.4f m  rot %.4f -> %.4f deg\n",
 			"joint refinement", pass ? "PASS" : "FAIL",
 			joint.refinementApplied, seqErr, jointErr, seqRot, jointRot);
-		if (!pass)
-			failures++;
+		RecordResult(pass);
 	}
 
 	// 7c. Scale-artifact discriminator: validates the live-diagnosis advice
@@ -5044,6 +5050,7 @@ int main(int argc, char **argv)
 			bFast.scale, bSlow.scale,
 			bFast.motionGainLow, bFast.motionGainHigh,
 			aRaw.valid, aFast.valid, aSlow.valid, bFast.valid, bSlow.valid);
+		RecordResult(pass);
 		if (!pass)
 		{
 			for (const EngineResult *r : { &aRaw, &aFast, &aSlow, &bFast, &bSlow })
@@ -5051,7 +5058,6 @@ int main(int argc, char **argv)
 					printf("%-28s      rotRms %.2f transRms %.4f spread %.4f cond %.4f: %s\n",
 						"", r->rotationRmsDeg, r->translationRmsMeters,
 						r->axisSpread, r->transEigRatio, r->message.c_str());
-			failures++;
 		}
 	}
 
@@ -5098,8 +5104,7 @@ int main(int argc, char **argv)
 			"scale diagnostic branches", pass ? "PASS" : "FAIL",
 			shortResult.valid, shortResult.motionGainValid, shortResult.scale,
 			cleanGrossSeen, cleanGross.scale, cleanGross.motionGainLow, cleanGross.motionGainHigh);
-		if (!pass)
-			failures++;
+		RecordResult(pass);
 	}
 
 	// 8. Runtime application of the solved offset: sign and asymmetric clamp.
@@ -5113,8 +5118,7 @@ int main(int argc, char **argv)
 			std::abs(ComputeAppliedTimeOffset(+0.010) + 0.010) < 1e-12 &&
 			std::abs(ComputeAppliedTimeOffset(+0.040) + 0.015) < 1e-12;
 		printf("%-28s %s\n", "applied offset sign/clamp", pass ? "PASS" : "FAIL");
-		if (!pass)
-			failures++;
+		RecordResult(pass);
 	}
 
 	// 9. Publish-before-rewrite invariant (regression). The driver publishes
@@ -5154,8 +5158,7 @@ int main(int argc, char **argv)
 		printf("%-28s %s  first %+.1f ms  re-solve %+.1f ms  bugged-pipeline %+.1f ms\n",
 			"publish-before-rewrite", pass ? "PASS" : "FAIL",
 			first.timeOffset * 1000.0, second.timeOffset * 1000.0, erased.timeOffset * 1000.0);
-		if (!pass)
-			failures++;
+		RecordResult(pass);
 	}
 
 	// ---- Universe-jump detection ----
@@ -5176,6 +5179,6 @@ int main(int argc, char **argv)
 	// ---- Continuous calibration (HMD-mounted tracker) ----
 	RunContinuousScenarios();
 
-	printf("\n%d scenario(s) failed\n", failures);
+	printf("\n%d scenario(s) ran, %d failed\n", checksRun, failures);
 	return failures;
 }

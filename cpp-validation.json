@@ -4,6 +4,7 @@
   "configuration": "Release",
   "platform": "x64",
   "testExecutable": "x64/Release/SolverTests.exe",
+  "minScenarios": 109,
   "duplicateMinLines": 20,
   "duplicateMinTokens": 120
 }
