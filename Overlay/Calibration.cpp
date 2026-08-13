@@ -663,6 +663,9 @@ static bool CopyCurrentHmdWorldFromDriver(
 static void SynchronizeDriverState(CalibrationContext &ctx)
 {
 	ctx.enabled = ctx.validProfile && !ctx.profileUniverseUnsafe;
+	ctx.disableReason = ctx.enabled
+		? CalibrationContext::DisableReason::None
+		: CalibrationContext::DisableReason::UniverseUnsafe;
 	uint64_t batchConnectionGeneration = 0;
 	protocol::Request handshake(protocol::RequestHandshake);
 	bool connectionReady = SendDriverRequest(ctx, handshake,
@@ -674,6 +677,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 		ctx.ReportError(
 			"The live profile has invalid tracking-system identities and was disabled before sending it to the driver\n");
 		ctx.enabled = false;
+		ctx.disableReason = CalibrationContext::DisableReason::InvalidIdentity;
 	}
 
 	// Resolve the reference HMD before any target transform can be enabled.
@@ -689,6 +693,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 			hmdTrackingSystem != ctx.referenceTrackingSystem)
 		{
 			ctx.enabled = false;
+			ctx.disableReason = CalibrationContext::DisableReason::HmdMismatch;
 		}
 	}
 
@@ -707,6 +712,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 	{
 		ctx.ReportError("The live calibration contains invalid numeric values and was disabled before sending it to the driver\n");
 		ctx.enabled = false;
+		ctx.disableReason = CalibrationContext::DisableReason::InvalidTransform;
 		timeShift = 0.0;
 	}
 	ctx.appliedTimeOffset = timeShift;
@@ -803,6 +809,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 			{
 				// Currently using an HMD with a different tracking system than the calibration.
 				ctx.enabled = false;
+				ctx.disableReason = CalibrationContext::DisableReason::HmdMismatch;
 			}
 
 			if (decision.action == questcal::SlotAction::Disable)
@@ -869,6 +876,7 @@ static void SynchronizeDriverState(CalibrationContext &ctx)
 	if (!driverSynchronized)
 	{
 		ctx.enabled = false;
+		ctx.disableReason = CalibrationContext::DisableReason::DriverUnreachable;
 		ctx.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 		{

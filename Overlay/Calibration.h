@@ -214,6 +214,23 @@ struct CalibrationContext
 	std::string calibrationTargetTrackingSystem;
 
 	bool enabled = false;
+
+	// Why the last driver synchronization cleared `enabled`. Six distinct
+	// conditions disable a profile, and the UI reported one cause for all of
+	// them - it told a user their headset was not detected when the real
+	// problem was a dead pipe or a universe rebase, sending them to check
+	// hardware that was fine. Recorded where the decision is made, because
+	// nothing downstream can reconstruct it.
+	enum class DisableReason
+	{
+		None,
+		InvalidIdentity,    // the profile's tracking-system pair is unusable
+		InvalidTransform,   // the calibration's numerics failed validation
+		HmdMismatch,        // the live HMD belongs to another tracking system
+		DriverUnreachable,  // the transform batch did not complete
+		UniverseUnsafe,     // reference universe moved; relation unknown
+	};
+	DisableReason disableReason = DisableReason::None;
 	bool validProfile = false;
 	// Fail-closed latch (persisted with the profile): the profile's HMD universe
 	// baseline changed while normal multi-device monitoring had no continuity.

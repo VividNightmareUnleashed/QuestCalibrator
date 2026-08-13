@@ -1448,11 +1448,32 @@ static void BuildMainScreen()
 			std::vector<StatusRowData> warn;
 			if (CalCtx.validProfile && !CalCtx.enabled)
 			{
-				warn.push_back({ IconInfo, Pal::Bad,
-					CalCtx.profileUniverseUnsafe
-						? "Raw tracking universe changed while monitoring was offline -- recalibrate before using this profile"
-						: FormatString("%s headset not detected -- profile disabled",
-							FriendlySystemName(CalCtx.referenceTrackingSystem).c_str()) });
+				// Six conditions disable a profile and each wants a different
+				// action from the user; naming the headset for all of them sent
+				// people to check hardware that was working.
+				using Reason = CalibrationContext::DisableReason;
+				std::string why;
+				switch (CalCtx.disableReason)
+				{
+				case Reason::HmdMismatch:
+					why = FormatString("%s headset not detected -- profile disabled",
+						FriendlySystemName(CalCtx.referenceTrackingSystem).c_str());
+					break;
+				case Reason::DriverUnreachable:
+					why = "Driver did not accept the profile -- profile disabled until the next scan";
+					break;
+				case Reason::InvalidIdentity:
+					why = "The profile's tracking systems are no longer valid -- recalibrate";
+					break;
+				case Reason::InvalidTransform:
+					why = "The stored calibration contains invalid values -- recalibrate";
+					break;
+				case Reason::UniverseUnsafe:
+				case Reason::None:
+					why = "Raw tracking universe changed while monitoring was offline -- recalibrate before using this profile";
+					break;
+				}
+				warn.push_back({ IconInfo, Pal::Bad, why });
 			}
 			if (PoseChannelDown())
 			{
