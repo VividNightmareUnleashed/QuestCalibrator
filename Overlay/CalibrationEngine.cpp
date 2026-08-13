@@ -883,7 +883,41 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		return eig.eigenvalues()(0) / std::max(1e-12, eig.eigenvalues()(2));
 	};
 
-	auto solveTranslation = [&rows, &config](double scale, Eigen::Vector3d &tOut) -> double
+	// The Huber weighting rule and the weighted score, each written once. Both
+	// the IRLS loop below and the joint-refinement block need them, and
+	// transRms is what the maxTranslationRms gate judges - so with the rule
+	// copied, a change to the knee, the weight form or the 1e-12 floor applied
+	// to one leaves the other (the path that ships whenever refineIterations >
+	// 0, the default) gated on a residual computed under the old rule, both
+	// numbers finite and plausible.
+	//
+	// They stay SEPARATE on purpose. solveTranslation scores with the weights
+	// its last reweight produced - its loop solves and then breaks without
+	// reweighting - while the refinement block reweights at the refined
+	// transform first. Fusing them into one reweight-and-score would quietly
+	// change the solver's own scores.
+	auto reweightRows = [&rows, &config](const Eigen::Vector3d &t, double scale)
+	{
+		for (auto &r : rows)
+		{
+			double residual = (r.dQ * t - (r.base + scale * r.scalePart)).norm();
+			r.weight = (residual <= config.huberTranslation) ? 1.0 : config.huberTranslation / residual;
+		}
+	};
+	auto weightedRms = [&rows](const Eigen::Vector3d &t, double scale) -> double
+	{
+		double sq = 0.0, wsum = 0.0;
+		for (const auto &r : rows)
+		{
+			double residual = (r.dQ * t - (r.base + scale * r.scalePart)).norm();
+			sq += r.weight * residual * residual;
+			wsum += r.weight;
+		}
+		return std::sqrt(sq / std::max(1e-12, wsum));
+	};
+
+	auto solveTranslation = [&rows, &config, &reweightRows, &weightedRms](
+		double scale, Eigen::Vector3d &tOut) -> double
 	{
 		// Each scale candidate is a separate robust objective evaluation. Do
 		// not inherit IRLS weights from whichever candidate the golden-section
@@ -906,21 +940,10 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 
 			if (iter == config.irlsIterations)
 				break;
-			for (auto &r : rows)
-			{
-				double residual = (r.dQ * tOut - (r.base + scale * r.scalePart)).norm();
-				r.weight = (residual <= config.huberTranslation) ? 1.0 : config.huberTranslation / residual;
-			}
+			reweightRows(tOut, scale);
 		}
 
-		double sq = 0.0, wsum = 0.0;
-		for (const auto &r : rows)
-		{
-			double residual = (r.dQ * tOut - (r.base + scale * r.scalePart)).norm();
-			sq += r.weight * residual * residual;
-			wsum += r.weight;
-		}
-		return std::sqrt(sq / std::max(1e-12, wsum));
+		return weightedRms(tOut, scale);
 	};
 
 	double scale = 1.0;
@@ -982,19 +1005,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			// Rebuild the eq. 8 system at the refined rotation so the reported
 			// residual (and the gates below) judge the transform that ships.
 			buildRows(rot);
-			for (auto &r : rows)
-			{
-				double residual = (r.dQ * translation - (r.base + scale * r.scalePart)).norm();
-				r.weight = (residual <= config.huberTranslation) ? 1.0 : config.huberTranslation / residual;
-			}
-			double sq = 0.0, wsum = 0.0;
-			for (const auto &r : rows)
-			{
-				double residual = (r.dQ * translation - (r.base + scale * r.scalePart)).norm();
-				sq += r.weight * residual * residual;
-				wsum += r.weight;
-			}
-			transRms = std::sqrt(sq / std::max(1e-12, wsum));
+			reweightRows(translation, scale);
+			transRms = weightedRms(translation, scale);
 			result.transEigRatio = weightedTransEigRatio();
 		}
 	}
