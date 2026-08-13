@@ -32,30 +32,9 @@ processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 extern "C" __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
 extern "C" __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x00000001;
 
-void CreateConsole()
-{
-	static bool created = false;
-	if (!created)
-	{
-		AllocConsole();
-		FILE *file = nullptr;
-		freopen_s(&file, "CONIN$", "r", stdin);
-		freopen_s(&file, "CONOUT$", "w", stdout);
-		freopen_s(&file, "CONOUT$", "w", stderr);
-		created = true;
-	}
-}
-
-//#define DEBUG_LOGS
-
 void GLFWErrorCallback(int error, const char* description)
 {
 	fprintf(stderr, "GLFW Error %d: %s\n", error, description);
-}
-
-void openGLDebugCallback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *message, const void *userParam)
-{
-	fprintf(stderr, "OpenGL Debug %u: %.*s\n", id, length, message);
 }
 
 static void HandleCommandLine(LPWSTR lpCmdLine);
@@ -133,10 +112,6 @@ void CreateGLFWWindow()
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_RESIZABLE, false);
 
-#ifdef DEBUG_LOGS
-	glfwWindowHint(GLFW_OPENGL_DEBUG_CONTEXT, GL_TRUE);
-#endif
-
 	fboTextureWidth = 1200;
 	fboTextureHeight = 800;
 
@@ -155,11 +130,6 @@ void CreateGLFWWindow()
 
 	if (!g_uiPreviewMode)
 		glfwIconifyWindow(glfwWindow);
-
-#ifdef DEBUG_LOGS
-	glDebugMessageCallback(openGLDebugCallback, nullptr);
-	glEnable(GL_DEBUG_OUTPUT);
-#endif
 
 	imguiContextInitialized = ImGui::CreateContext() != nullptr;
 	if (!imguiContextInitialized)
@@ -446,10 +416,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	// session's log away.
 	if (!g_uiPreviewMode)
 		InitSessionLog();
-
-#ifdef DEBUG_LOGS
-	CreateConsole();
-#endif
 
 	if (!glfwInit())
 	{

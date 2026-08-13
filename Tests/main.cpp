@@ -362,6 +362,14 @@ void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &
 			pass = false; why += " offsetErr";
 		}
 		if (expect.maxScaleErr > 0.0 && scaleErr > expect.maxScaleErr) { pass = false; why += " scaleErr"; }
+		// solveScale is experimental and opt-in, so this is the configuration
+		// essentially every user runs -- and with it off the engine must leave
+		// scale at EXACTLY 1.0 (nothing on that path ever writes it). Without
+		// this, a leak from the guard path, an unconditional 1-D search, or a
+		// refinement writing out its nuisance scale would go unnoticed as long
+		// as the composed transform stayed self-consistent, while the driver
+		// multiplied every position, velocity and acceleration by it.
+		if (!config.solveScale && r.scale != 1.0) { pass = false; why += " scaleLeak"; }
 	}
 	if (expect.messageContains && r.message.find(expect.messageContains) == std::string::npos)
 	{
@@ -2457,8 +2465,10 @@ void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
 		worstOffset = std::max(worstOffset, offsetErr);
 		worstScale = std::max(worstScale, scaleErr);
 
+		// With solveScale off the field must be untouched, not merely close:
+		// roughly two thirds of these trials run that way and never looked.
 		bool pass = r.valid && rotErr < 0.8 && transErr < 0.025 &&
-			offsetErr < 0.005 && (!cfg.solveScale || scaleErr < 0.012);
+			offsetErr < 0.005 && (cfg.solveScale ? scaleErr < 0.012 : r.scale == 1.0);
 		if (!pass && firstFailure < 0)
 		{
 			firstFailure = trial;
@@ -2816,6 +2826,182 @@ void RunJumpScenarios()
 			r.deltas, r.last.exact, r.YawErrDeg(jumpYaw), r.TransErr(D_T));
 		Check("jump: malformed inputs recover", pass, detail);
 	}
+
+	// E. Gravity constraint (invariant 15) under a re-localization that is NOT
+	// gravity-preserving: the worldFromDriver delta carries genuine tilt. Every
+	// other jump scenario builds a pure-UnitY jump, so a detector that folded
+	// the raw delta straight into the calibration would pass all of them. Here
+	// the accepted delta must be the yaw part alone -- applying the tilt would
+	// slope the floor and roll the horizon in one step -- and the discarded
+	// tilt must be reported as the non-rigid residual rather than dropped.
+	{
+		const double tiltRad = 6.0 * EIGEN_PI / 180.0;
+		auto runWithTilt = [&](double tilt)
+		{
+			JumpDetector jd(TestQpcToSeconds);
+			Eigen::Quaterniond jumpRot =
+				(Eigen::Quaterniond(Eigen::AngleAxisd(jumpYaw, Eigen::Vector3d::UnitY())) *
+				 Eigen::Quaterniond(Eigen::AngleAxisd(tilt, Eigen::Vector3d::UnitX()))).normalized();
+			return DriveJump(jd, rate, [&](double t, uint32_t id)
+			{
+				Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
+				RefTrajectory(t, id, rot, pos, vel, angVel);
+				bool after = t >= tJump;
+				return RingSample(id, t,
+					after ? jumpRot : Eigen::Quaterniond::Identity(),
+					after ? D_T : Eigen::Vector3d::Zero(),
+					rot, pos, vel, angVel);
+			});
+		};
+
+		JumpRun tilted = runWithTilt(tiltRad);
+		JumpRun upright = runWithTilt(0.0);
+
+		// The accepted rotation is built from an AngleAxis about UnitY, so its
+		// x/z components are exactly zero -- assert the AXIS, not the magnitude.
+		double offAxis = std::max(std::abs(tilted.last.rotation.x()),
+			std::abs(tilted.last.rotation.z()));
+		double reportedTiltDeg = tilted.last.residualTiltRad * 180.0 / EIGEN_PI;
+		double uprightTiltDeg = upright.last.residualTiltRad * 180.0 / EIGEN_PI;
+
+		bool pass = tilted.deltas == 1 && tilted.last.exact &&
+			offAxis < 1e-12 &&
+			tilted.YawErrDeg(jumpYaw) < 0.05 && tilted.TransErr(D_T) < 0.01 &&
+			std::abs(reportedTiltDeg - 6.0) < 0.05 &&
+			upright.deltas == 1 && uprightTiltDeg < 0.01;
+		snprintf(detail, sizeof detail,
+			"offAxis %.2e  yawErr %.4f deg  residual tilt %.3f deg (built 6.0)  upright residual %.4f deg",
+			offAxis, tilted.YawErrDeg(jumpYaw), reportedTiltDeg, uprightTiltDeg);
+		Check("jump: yaw-only under tilt", pass, detail);
+	}
+
+	// F. The bookkeeping an accepted exact delta carries for the drift/staleness
+	// scoring, plus the two drain APIs. Push the non-HMD device FIRST at the
+	// rebase frame: TryAccept clears the candidate list the instant the HMD's
+	// own candidate lands, so per-device disagreement is only observable when
+	// another device's candidate is already pending.
+	{
+		auto runWithSecondDevice = [&](const Eigen::Vector3d &shift)
+		{
+			JumpDetector jd(TestQpcToSeconds);
+			JumpRun r;
+			JumpDetector::UniverseDelta d;
+			Eigen::Vector3d shifted = D_T + shift;
+			for (double t = 0.0; t < 3.0; t += 1.0 / rate)
+			{
+				bool after = t >= tJump;
+				for (int order = 1; order >= 0; --order)
+				{
+					uint32_t id = static_cast<uint32_t>(order);
+					Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
+					RefTrajectory(t, id, rot, pos, vel, angVel);
+					Eigen::Quaterniond wfdRot = Eigen::Quaterniond::Identity();
+					Eigen::Vector3d wfdTrans = Eigen::Vector3d::Zero();
+					if (after)
+					{
+						wfdRot = D_R;
+						wfdTrans = id == 0 ? D_T : shifted;
+					}
+					jd.Push(RingSample(id, t, wfdRot, wfdTrans, rot, pos, vel, angVel));
+				}
+				while (jd.PollDelta(d)) { r.deltas++; r.last = d; }
+			}
+			return r;
+		};
+
+		// The HMD is authoritative either way; the second device's disagreement
+		// only decides whether it counts as corroboration.
+		JumpRun agreeing = runWithSecondDevice(Eigen::Vector3d(0.03, 0.0, 0.0));
+		JumpRun disagreeing = runWithSecondDevice(Eigen::Vector3d(0.25, 0.0, 0.0));
+		bool spreadOk =
+			agreeing.deltas == 1 && agreeing.last.devicesAgreeing == 2 &&
+			std::abs(agreeing.last.residualSpread - 0.03) < 1e-9 &&
+			disagreeing.deltas == 1 && disagreeing.last.devicesAgreeing == 1 &&
+			std::abs(disagreeing.last.residualSpread - 0.25) < 1e-9 &&
+			agreeing.TransErr(D_T) < 0.01 && disagreeing.TransErr(D_T) < 0.01;
+
+		// Notes are the calibration log's only record of what the detector saw;
+		// Reset is what calibration start and monitor-disable call.
+		JumpDetector jd(TestQpcToSeconds);
+		auto pushHmd = [&](double t, const Eigen::Quaterniond &wfdRot, const Eigen::Vector3d &wfdTrans)
+		{
+			Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
+			RefTrajectory(t, vr::k_unTrackedDeviceIndex_Hmd, rot, pos, vel, angVel);
+			jd.Push(RingSample(vr::k_unTrackedDeviceIndex_Hmd, t, wfdRot, wfdTrans,
+				rot, pos, vel, angVel));
+		};
+		const Eigen::Quaterniond D_R2(
+			Eigen::AngleAxisd(-10.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Vector3d D_T2(-0.2, 0.0, 0.15);
+
+		// Every timestamp comes from the same step index. Accumulating `t +=
+		// 1.0 / rate` up to a hand-written boundary constant does NOT reach it
+		// cleanly: 135 additions of 1/90 land on 1.4999999999999967, which is
+		// still < 1.5, so the loop emits one extra sample -- and RingSample's
+		// `t / TestQpcToSeconds + 0.5` rounds a 3e-15 s difference into the SAME
+		// 10 MHz tick as 1.5. Push then reads the following rebase sample as a
+		// composed-time inversion, drops it, and clears wfdValid, so the rebase
+		// is never looked for at all (no note, no candidate, no delta -- which
+		// also made the Reset check below vacuous). Integer steps keep adjacent
+		// samples a full frame apart, which is the property Push depends on.
+		const int jumpStep = static_cast<int>(tJump * rate);   // 135 at 90 Hz
+		std::string firstNote;
+		bool noteDescribesRebase = false;
+		for (int step = 0; step <= jumpStep + 1; ++step)
+		{
+			Eigen::Quaterniond wfdRot = Eigen::Quaterniond::Identity();
+			Eigen::Vector3d wfdTrans = Eigen::Vector3d::Zero();
+			if (step == jumpStep)
+			{
+				wfdRot = D_R;
+				wfdTrans = D_T;
+			}
+			else if (step > jumpStep)
+			{
+				wfdRot = D_R2;
+				wfdTrans = D_T2;
+			}
+			pushHmd(static_cast<double>(step) / rate, wfdRot, wfdTrans);
+
+			// Poll where the rebase actually happens, and only the first note:
+			// the second rebase then leaves its own note AND its delta pending,
+			// so Reset below has something real to drop rather than passing on
+			// an empty queue.
+			if (step == jumpStep)
+				noteDescribesRebase = jd.PollNote(firstNote) &&
+					firstNote.find("rebase") != std::string::npos;
+		}
+
+		jd.Reset();
+		JumpDetector::UniverseDelta stale;
+		std::string drain;
+		bool resetDrained = !jd.PollDelta(stale) && !jd.PollNote(drain);
+
+		// Reset drops worldFromDriver validity, so the first sample after it
+		// re-seeds silently; a genuine rebase after THAT is still detected.
+		int reseedDeltas = 0, postResetDeltas = 0;
+		for (double t = 2.0; t < 2.6; t += 1.0 / rate)
+		{
+			bool second = t >= 2.3;
+			pushHmd(t, second ? D_R2 : D_R, second ? D_T2 : D_T);
+			while (jd.PollDelta(stale))
+			{
+				if (second)
+					postResetDeltas++;
+				else
+					reseedDeltas++;
+			}
+		}
+
+		bool resetOk = resetDrained && reseedDeltas == 0 && postResetDeltas == 1;
+		snprintf(detail, sizeof detail,
+			"spread %.3f/%.3f m  agreeing %d/%d  note %d [%.60s]  reset drained %d reseed %d re-detect %d",
+			agreeing.last.residualSpread, disagreeing.last.residualSpread,
+			agreeing.last.devicesAgreeing, disagreeing.last.devicesAgreeing,
+			noteDescribesRebase, firstNote.c_str(),
+			resetDrained, reseedDeltas, postResetDeltas);
+		Check("jump: spread, notes, reset", spreadOk && noteDescribesRebase && resetOk, detail);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -3163,34 +3349,75 @@ protocol::SetAlignmentField BuildField(const FieldTransform &base,
 	return f;
 }
 
-// Independent Eigen reference of the driver's blend.
-void ReferenceBlend(const protocol::SetAlignmentField &f, const Eigen::Vector3d &pos,
+// Independent oracle for the driver's blend, derived from the field's
+// DEFINITION (see AlignmentField.h) rather than transcribed from BlendAt: a
+// Gaussian radial basis over horizontal separation plus one constant identity
+// contributor, combined as a weighted mean.
+//
+//   w_i   = exp(-(r_i / sigma)^2 / 2),  r_i = horizontal |query - anchor_i|
+//   w_0   = the identity floor; its delta is the identity transform
+//   rot   = normalize(sum_j w_j q_j)    (each q_j in identity's hemisphere)
+//   trans = sum_j w_j t_j / sum_j w_j
+//
+// Every constant is spelled out as its own literal on purpose. Reading
+// alignfield::IdentityFloorWeight (or the protocol's sigma default) would move
+// oracle and implementation together, which is precisely the failure this
+// oracle exists to catch: the floor decides how much of a measured anchor
+// delta the runtime actually applies -- 1/(1+w0), ~95% at 0.05 -- so a silent
+// change to it MUST break the comparison scenario below.
+//
+// `anchorCount` is supplied by the caller rather than read off the field, so
+// the oracle carries no opinion about the implementation's MaxAnchors clamp;
+// that clamp gets its own differential scenario.
+void ReferenceBlend(const protocol::SetAlignmentField &f, uint32_t anchorCount,
+                    const Eigen::Vector3d &pos,
                     Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut)
 {
-	double wSum = alignfield::IdentityFloorWeight;
-	Eigen::Vector4d q(alignfield::IdentityFloorWeight, 0.0, 0.0, 0.0);   // w, x, y, z
-	Eigen::Vector3d t = Eigen::Vector3d::Zero();
+	const double identityFloorWeight = 0.05;   // must equal alignfield::IdentityFloorWeight
+	const double fallbackSigmaMeters = 1.5;    // must equal protocol::SetAlignmentField's default
+	const double minUsableSigma = 0.01;        // at or below this the stored sigma is unusable
 
-	double sigma = f.sigmaMeters > 0.01 ? f.sigmaMeters : 1.5;
-	for (uint32_t i = 0; i < f.anchorCount; ++i)
+	double sigma = f.sigmaMeters > minUsableSigma ? f.sigmaMeters : fallbackSigmaMeters;
+
+	struct Contribution
+	{
+		double weight;
+		Eigen::Quaterniond rotation;
+		Eigen::Vector3d translation;
+	};
+	std::vector<Contribution> mix;
+	mix.push_back({ identityFloorWeight,
+		Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero() });
+
+	for (uint32_t i = 0; i < anchorCount; ++i)
 	{
 		const auto &a = f.anchors[i];
-		double dx = pos.x() - a.position[0];
-		double dz = pos.z() - a.position[2];
-		double w = std::exp(-(dx * dx + dz * dz) / (2.0 * sigma * sigma));
-
-		Eigen::Vector4d qa(a.rotationDelta.w, a.rotationDelta.x, a.rotationDelta.y, a.rotationDelta.z);
-		if (qa(0) < 0.0)
-			qa = -qa;
-
-		q += w * qa;
-		t += w * Eigen::Vector3d(a.translationDelta[0], a.translationDelta[1], a.translationDelta[2]);
-		wSum += w;
+		Eigen::Vector2d horizontal(pos.x() - a.position[0], pos.z() - a.position[2]);
+		double r = horizontal.norm() / sigma;
+		mix.push_back({ std::exp(-0.5 * r * r),
+			Eigen::Quaterniond(a.rotationDelta.w, a.rotationDelta.x,
+				a.rotationDelta.y, a.rotationDelta.z),
+			Eigen::Vector3d(a.translationDelta[0], a.translationDelta[1],
+				a.translationDelta[2]) });
 	}
 
-	q.normalize();
-	rotOut = Eigen::Quaterniond(q(0), q(1), q(2), q(3));
-	transOut = t / wSum;
+	Eigen::Vector4d qSum = Eigen::Vector4d::Zero();   // w, x, y, z
+	Eigen::Vector3d tSum = Eigen::Vector3d::Zero();
+	double weightSum = 0.0;
+	for (const auto &c : mix)
+	{
+		// q and -q name the same rotation: take the representative on identity's
+		// side of the hemisphere so the linear mean is the short-arc one.
+		double sign = c.rotation.w() < 0.0 ? -1.0 : 1.0;
+		qSum += (c.weight * sign) * Eigen::Vector4d(c.rotation.w(), c.rotation.x(),
+			c.rotation.y(), c.rotation.z());
+		tSum += c.weight * c.translation;
+		weightSum += c.weight;
+	}
+
+	qSum.normalize();
+	rotOut = Eigen::Quaterniond(qSum(0), qSum(1), qSum(2), qSum(3));
+	transOut = tSum / weightSum;
 }
 
 // The driver's effective transform at a base-calibrated position: delta o base.
@@ -3289,12 +3516,15 @@ void RunFieldScenarios()
 		std::uniform_real_distribution<double> u(-1.0, 1.0);
 		double worstQ = 0.0, worstT = 0.0;
 
-		for (int trial = 0; trial < 3; ++trial)
+		// Include a full field: the previous 1/4/7 progression never reached
+		// MaxAnchors, so the last slot was blended by neither side.
+		const uint32_t counts[] = { 1, 4, 7, protocol::SetAlignmentField::MaxAnchors };
+		for (int trial = 0; trial < static_cast<int>(sizeof counts / sizeof counts[0]); ++trial)
 		{
 			protocol::SetAlignmentField rf;
 			rf.enabled = true;
 			rf.generation = trial;
-			rf.anchorCount = 1 + (trial * 3) % protocol::SetAlignmentField::MaxAnchors;
+			rf.anchorCount = counts[trial];
 			rf.sigmaMeters = 1.0 + 0.5 * (trial + 1);
 			for (uint32_t i = 0; i < rf.anchorCount; ++i)
 			{
@@ -3320,7 +3550,7 @@ void RunFieldScenarios()
 
 				Eigen::Quaterniond refR;
 				Eigen::Vector3d refT;
-				ReferenceBlend(rf, pos, refR, refT);
+				ReferenceBlend(rf, rf.anchorCount, pos, refR, refT);
 
 				worstQ = std::max(worstQ, 1.0 - std::abs(r.w * refR.w() + r.x * refR.x() + r.y * refR.y() + r.z * refR.z()));
 				worstT = std::max(worstT, (Eigen::Vector3d(t[0], t[1], t[2]) - refT).norm());
@@ -3328,6 +3558,78 @@ void RunFieldScenarios()
 		}
 		snprintf(detail, sizeof detail, "worst 1-|dot| %.2e  worst dTrans %.2e", worstQ, worstT);
 		Check("field: matches reference", worstQ < 1e-12 && worstT < 1e-12, detail);
+	}
+
+	// D2. Bounds clamp. A stored snapshot claiming more anchors than the fixed
+	// array holds must blend exactly the first MaxAnchors and read nothing past
+	// them: ValidateAndSanitize rejects an over-large count on the IPC path, but
+	// the clamp exists because the blend runs on vrserver's pose thread against
+	// whatever the snapshot happens to hold. Differential against the same field
+	// with an in-range count -- no oracle involved, so this pins the clamp alone.
+	{
+		// `anchors` is the last member of SetAlignmentField, so an unclamped
+		// read walks straight into whatever follows the struct. Give it
+		// something loud: anchors sitting on the query points with meter-scale
+		// deltas, so even a partial overrun moves the blend far past epsilon.
+		struct SpilledField
+		{
+			protocol::SetAlignmentField field;
+			protocol::FieldAnchor spill[4];
+		};
+
+		SpilledField s{};
+		s.field.enabled = true;
+		s.field.generation = 3;
+		s.field.sigmaMeters = 2.0;
+		s.field.anchorCount = protocol::SetAlignmentField::MaxAnchors;
+
+		std::mt19937 rng(4242);
+		std::uniform_real_distribution<double> u(-1.0, 1.0);
+		for (uint32_t i = 0; i < protocol::SetAlignmentField::MaxAnchors; ++i)
+		{
+			Eigen::Quaterniond dq(Eigen::AngleAxisd(0.04 * u(rng),
+				Eigen::Vector3d(u(rng), u(rng), u(rng)).normalized()));
+			s.field.anchors[i].rotationDelta = { dq.w(), dq.x(), dq.y(), dq.z() };
+			for (int k = 0; k < 3; ++k)
+			{
+				s.field.anchors[i].position[k] = 3.0 * u(rng);
+				s.field.anchors[i].translationDelta[k] = 0.04 * u(rng);
+			}
+		}
+		const Eigen::Quaterniond poisonRot(Eigen::AngleAxisd(1.2, Eigen::Vector3d::UnitZ()));
+		for (auto &poison : s.spill)
+		{
+			poison.rotationDelta = { poisonRot.w(), poisonRot.x(), poisonRot.y(), poisonRot.z() };
+			for (int k = 0; k < 3; ++k)
+			{
+				poison.position[k] = 0.0;             // right on top of the query points
+				poison.translationDelta[k] = 5.0;     // meters
+			}
+		}
+
+		// Reference behaviour: the same anchors under a count the array can hold.
+		protocol::SetAlignmentField inRange = s.field;
+		s.field.anchorCount = protocol::SetAlignmentField::MaxAnchors + 4;
+
+		double worstRot = 0.0, worstTrans = 0.0;
+		for (int k = 0; k < 12; ++k)
+		{
+			Eigen::Vector3d q(2.0 * u(rng), 1.0 + u(rng), 2.0 * u(rng));
+			double p[3] = { q.x(), q.y(), q.z() };
+
+			vr::HmdQuaternion_t rClamped, rOverlarge;
+			double tClamped[3], tOverlarge[3];
+			alignfield::BlendAt(inRange, p, rClamped, tClamped);
+			alignfield::BlendAt(s.field, p, rOverlarge, tOverlarge);
+
+			worstRot = std::max(worstRot, 1.0 - std::abs(
+				rClamped.w * rOverlarge.w + rClamped.x * rOverlarge.x +
+				rClamped.y * rOverlarge.y + rClamped.z * rOverlarge.z));
+			worstTrans = std::max(worstTrans, Dist3(tClamped, tOverlarge));
+		}
+		snprintf(detail, sizeof detail, "count %u vs %u  worst 1-|dot| %.2e  dTrans %.2e",
+			inRange.anchorCount, s.field.anchorCount, worstRot, worstTrans);
+		Check("field: anchor count clamp", worstRot < 1e-12 && worstTrans < 1e-12, detail);
 	}
 
 	// E. Same generation slews (rate-limited steps toward the target, then
@@ -3806,6 +4108,9 @@ struct ContinuousSim
 	int unstables = 0;
 	double maxCorrRotDeg = 0.0;   // largest single emitted correction
 	double maxCorrPosM = 0.0;     // measured as displacement at the head
+	// Largest off-UnitY component any emitted correction quaternion carried.
+	// Magnitude alone cannot tell a yaw correction from a full-delta one.
+	double maxCorrOffAxis = 0.0;
 	double afterMark = 1e18;
 	int correctionsAfter = 0;
 
@@ -3824,6 +4129,21 @@ void CalError(const ContinuousSim &sim, const GroundTruth &truth, double t,
 	Eigen::Vector3d tD = truth.translation - dR * sim.calTrans;
 	Eigen::Vector3d hp = PositionAt(t);
 	posMOut = (dR * hp + tD - hp).norm();
+}
+
+// Tilt (non-yaw) part of the sim's calibration error. A yaw-only correction
+// policy leaves it EXACTLY invariant: both left- and right-multiplying by a
+// rotation about UnitY preserve |(w, y)| of the delta quaternion, and the tilt
+// is 2*acos of that. So this doubles as a detector for a correction that
+// carried any tilt at all.
+double CalTiltDeg(const ContinuousSim &sim, const GroundTruth &truth)
+{
+	Eigen::Quaterniond dR = (truth.rotation * sim.calRot.conjugate()).normalized();
+	if (dR.w() < 0.0)
+		dR.coeffs() = -dR.coeffs();
+	Eigen::Quaterniond yaw(Eigen::AngleAxisd(
+		2.0 * std::atan2(dR.y(), dR.w()), Eigen::Vector3d::UnitY()));
+	return yaw.angularDistance(dR) * 180.0 / EIGEN_PI;
 }
 
 // One closed-loop segment: generate both streams, tick Update at 50 Hz, apply
@@ -3888,6 +4208,8 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 				sim.maxCorrRotDeg = std::max(sim.maxCorrRotDeg, corrDeg);
 				Eigen::Vector3d hp = PositionAt(t);
 				sim.maxCorrPosM = std::max(sim.maxCorrPosM, (c.rotation * hp + c.translation - hp).norm());
+				sim.maxCorrOffAxis = std::max(sim.maxCorrOffAxis,
+					std::max(std::abs(c.rotation.x()), std::abs(c.rotation.z())));
 
 				sim.calRot = (c.rotation * sim.calRot).normalized();
 				sim.calTrans = c.rotation * sim.calTrans + c.translation;
@@ -4253,10 +4575,26 @@ void RunContinuousScenarios()
 	}
 
 	// 8. Opt-in latency re-estimation: the true latency ramps 8 -> 16 ms over
-	// six minutes; the EWMA-tracked offset (mirroring ContinuousTick's clamp)
-	// follows within 3 ms after the ramp settles and never steps more than
-	// 2 ms per update. With the option off the offset never moves, and a
-	// motionless window yields no estimate at all.
+	// six minutes and the EWMA-tracked offset follows within 3 ms after the ramp
+	// settles. With the option off the offset never moves, and a motionless
+	// window yields no estimate at all.
+	//
+	// UNVERIFIED, deliberately: the EWMA itself and its limits are NOT pinned
+	// here. The shipped filter lives in ContinuousTick (Overlay/Calibration.cpp
+	// :1741-1758) -- the 0.75/0.25 blend, the +/-0.002 s per-update step clamp,
+	// the +/-0.060 s absolute clamp on the accumulated offset, and the 0.5 ms
+	// threshold that decides whether the driver is re-synchronized -- and
+	// Calibration.cpp is not in SolverTests. `applyEwma` below is a DRIVER for
+	// the scenario, not an oracle: it exists so the offset moves at all, and it
+	// carries neither the absolute clamp nor the resync threshold. Asserting its
+	// own step bound (as this scenario used to) was a tautology over the two
+	// lines above the assertion and could not fail for any behaviour of the
+	// shipped code. What IS pinned below reaches ContinuousAlignment:
+	// PollTimeOffset's cadence, its measurements tracking a moving true latency,
+	// its silence when the opt-in is off, and the correlator's refusal on
+	// motionless streams. Pinning the filter needs it lifted out of
+	// ContinuousTick into a compiled unit (a pure `double NextTimeOffset(double
+	// current, double measured)` would do it).
 	{
 		std::mt19937 rng(707);
 		auto rampTruth = [&](double t)
@@ -4276,7 +4614,7 @@ void RunContinuousScenarios()
 		sim.calRot = baseTruth.rotation;
 		sim.calTrans = baseTruth.translation;
 
-		double maxStep = 0.0;
+		double maxStep = 0.0;   // reported only; see the note above
 		int offsetUpdates = 0;
 		auto applyEwma = [&](double)
 		{
@@ -4329,11 +4667,11 @@ void RunContinuousScenarios()
 		bool stillEstimated = CalibrationEngine::EstimateTimeOffset(stillRef, stillTgt, ecfg, stillOut);
 
 		snprintf(detail, sizeof detail,
-			"tracked to %.1f ms (err %.2f ms)  %d updates  maxStep %.2f ms  off %d  still %d",
+			"tracked to %.1f ms (err %.2f ms)  %d updates  harness maxStep %.2f ms (unasserted)  off %d  still %d",
 			sim.solvedOffset * 1000.0, trackErr * 1000.0, offsetUpdates, maxStep * 1000.0,
 			offUpdates, stillEstimated);
 		Check("continuous: latency re-estimation",
-			offsetUpdates >= 5 && trackErr < 0.003 && maxStep <= 0.002 + 1e-12 &&
+			offsetUpdates >= 5 && trackErr < 0.003 &&
 			offUpdates == 0 && simOff.solvedOffset == 0.008 && !stillEstimated, detail);
 	}
 
@@ -4464,10 +4802,16 @@ void RunContinuousScenarios()
 			{ Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(),
 				Eigen::Vector3d(0.06, 0.0, 0.0) } };
 
+		// Same shape as the closure ContinuousTick builds (Overlay/Calibration.cpp
+		// :1663-1670): the field is looked up at the tracker's BASE-CALIBRATED
+		// world position, so the calibrated scale multiplies the raw target
+		// position before the base transform. Unity here; scenario 17 drives it
+		// with a non-unity scale, which is the only way that factor is visible.
+		const double calScale = 1.0;
 		auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
 			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
 		{
-			Eigen::Vector3d basePos = base.R * targetRawPos + base.T;
+			Eigen::Vector3d basePos = base.R * (calScale * targetRawPos) + base.T;
 			BlendedFieldCalibration(anchors, base.R, base.T, basePos,
 				rotationOut, translationOut);
 		};
@@ -4511,8 +4855,8 @@ void RunContinuousScenarios()
 			latestOnly.PushReference(reference);
 			latestOnly.PushTarget(target);
 
-			perObservation.Update(t, base.R, base.T, 1.0, 0.0, expectedAt);
-			latestOnly.Update(t, localRot, localTrans, 1.0, 0.0);
+			perObservation.Update(t, base.R, base.T, calScale, 0.0, expectedAt);
+			latestOnly.Update(t, localRot, localTrans, calScale, 0.0);
 
 			ContinuousAlignment::Correction correction;
 			while (perObservation.PollCorrection(correction))
@@ -4667,6 +5011,212 @@ void RunContinuousScenarios()
 			quietBefore, sim.freezes, frozeAfter);
 		Check("continuous: slip during warble freezes", quietBefore && frozeAfter, detail);
 	}
+
+	// 15. Corrections are yaw-only (invariant 15). Every other scenario starts
+	// from a pure-yaw offset and only measures correction MAGNITUDE, so a Decide
+	// that reconstructed the correction from the full delta rD -- which is
+	// sitting right there, already computed -- would converge just as well and
+	// pass all of them, while quietly folding mount creep and lighthouse noise
+	// into the playspace as pitch and roll. Start 0.3 deg of yaw AND 0.6 deg of
+	// pitch from truth, both inside the freeze band: the yaw must be walked out,
+	// the tilt must survive bit-for-bit, and no correction may carry an off-axis
+	// component.
+	{
+		std::mt19937 rng(1212);
+		ContinuousSim sim;
+		sim.ca.SetExtrinsic(trueExtrinsic);
+		sim.solvedOffset = baseTruth.latency;
+		Eigen::Quaterniond dR =
+			Eigen::Quaterniond(Eigen::AngleAxisd(0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())) *
+			Eigen::Quaterniond(Eigen::AngleAxisd(0.6 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX()));
+		dR.normalize();
+		sim.calRot = (dR.conjugate() * baseTruth.rotation).normalized();
+		sim.calTrans = baseTruth.translation;
+
+		double startTilt = CalTiltDeg(sim, baseTruth);
+		RunContinuousSegment(sim, scene, 0.0, 25.0, rng, constTruth, constMount, alwaysVisible);
+		double endTilt = CalTiltDeg(sim, baseTruth);
+		double yawErr, posErr;
+		CalError(sim, baseTruth, 25.0, yawErr, posErr);
+
+		// posErr is NOT asserted: the surviving tilt shows up there as ~17 mm of
+		// effective displacement at the head, and removing it is exactly what
+		// this scenario forbids.
+		snprintf(detail, sizeof detail,
+			"corr %d  offAxis %.2e  tilt %.4f -> %.4f deg (built 0.6)  yaw %.3f deg  pos %.1f mm",
+			sim.corrections, sim.maxCorrOffAxis, startTilt, endTilt, yawErr, posErr * 1000.0);
+		Check("continuous: corrections yaw-only",
+			sim.corrections >= 1 && sim.freezes == 0 &&
+			sim.maxCorrOffAxis < 1e-12 &&
+			std::abs(startTilt - 0.6) < 1e-9 && std::abs(endTilt - startTilt) < 1e-6 &&
+			yawErr < 0.12, detail);
+	}
+
+	// 16. Frozen -> Tracking. The resume hysteresis (deviation below the freeze
+	// band by resumeFactor, latched, then confirmed for resumeConfirmSeconds) is
+	// the only exit from Frozen short of Reset, and no scenario ever took it --
+	// every mention of Resumed in this harness asserted it stayed at ZERO. So an
+	// inverted comparison or a latch that never sets would leave continuous
+	// calibration dead for the rest of the session after any transient fault
+	// cleared, with the UI still blaming a mount that is fine.
+	//
+	// Perturbing the CALIBRATION rather than the truth is what a folded jump
+	// delta or a recalibration does, and it leaves the observation stream
+	// continuous, so the jump guard never sees it. Warble injected while frozen
+	// also pins the `state == Frozen` early return on the scatter path: it must
+	// raise neither an ObservationsUnstable event nor a second freeze.
+	{
+		std::mt19937 rng(1313);
+		auto frozenWarble = [](double t, PoseSample &s)
+		{
+			if (t < 26.0 || t >= 31.0)
+				return;
+			double angle = (1.6 * EIGEN_PI / 180.0) * std::sin(2.0 * EIGEN_PI * t / 0.8);
+			s.rot = (Eigen::Quaterniond(Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitX()))
+				* s.rot).normalized();
+			s.pos += Eigen::Vector3d(
+				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.7),
+				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.5 + 0.8),
+				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.9 + 2.0));
+		};
+
+		ContinuousSim sim;
+		sim.ca.SetExtrinsic(trueExtrinsic);
+		sim.solvedOffset = baseTruth.latency;
+		sim.calRot = baseTruth.rotation;
+		sim.calTrans = baseTruth.translation;
+
+		RunContinuousSegment(sim, scene, 0.0, 15.0, rng, constTruth, constMount, alwaysVisible);
+		bool trackingFirst = sim.ca.GetState() == ContinuousAlignment::State::Tracking;
+
+		// 3 deg of yaw error: past freezeYawDeg, sustained -> Frozen (~t=22).
+		const Eigen::Quaterniond kick(
+			Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		int correctionsAtKick = sim.corrections;
+		sim.calRot = (kick * sim.calRot).normalized();
+		RunContinuousSegment(sim, scene, 15.0, 34.0, rng, constTruth, constMount, alwaysVisible,
+			frozenWarble);
+		int correctionsWhileFrozen = sim.corrections - correctionsAtKick;
+		bool froze = sim.freezes == 1 && sim.resumes == 0 && sim.unstables == 0 &&
+			correctionsWhileFrozen == 0 &&
+			sim.ca.GetState() == ContinuousAlignment::State::Frozen;
+
+		// Undo the kick, leaving a 0.3 deg residual: the deviation lands well
+		// inside the resume band (freeze * resumeFactor) and stays there, and is
+		// still outside the deadband so corrections are observable afterwards.
+		const Eigen::Quaterniond residual(
+			Eigen::AngleAxisd(0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		sim.calRot = (residual * kick.conjugate() * sim.calRot).normalized();
+		RunContinuousSegment(sim, scene, 34.0, 58.0, rng, constTruth, constMount, alwaysVisible);
+		bool resumed = sim.resumes == 1 && sim.freezes == 1 &&
+			sim.ca.GetState() == ContinuousAlignment::State::Tracking &&
+			sim.corrections > correctionsAtKick;
+
+		snprintf(detail, sizeof detail,
+			"freezes %d  resumes %d  unstable %d  corr while frozen %d  post-resume corr %d  state %d",
+			sim.freezes, sim.resumes, sim.unstables, correctionsWhileFrozen,
+			sim.corrections - correctionsAtKick - correctionsWhileFrozen,
+			static_cast<int>(sim.ca.GetState()));
+		Check("continuous: freeze then resume", trackingFirst && froze && resumed, detail);
+	}
+
+	// 17. The field lookup is a function of the tracker's BASE-CALIBRATED world
+	// position, so the closure must scale the raw target position before the
+	// base transform -- exactly what ContinuousTick's expectedAt does
+	// (Overlay/Calibration.cpp:1663-1670). At scale 1.0 that factor is
+	// invisible, which is why scenarios 9-11 never exercised it. Run the same
+	// anchor crossing at scale 1.25, once through a scale-carrying closure and
+	// once through one that drops the factor (the shape of the bug): the first
+	// must stay silent, the second must invent corrections because it reads the
+	// field 20% of the way back toward the origin.
+	{
+		const double calScale = 1.25;
+		const FieldTransform base{ Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero() };
+		std::vector<OverlayAnchor> anchors{
+			{ Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(),
+				Eigen::Vector3d(0.06, 0.0, 0.0) } };
+
+		auto lookupAt = [&](const Eigen::Vector3d &basePos,
+			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
+		{
+			BlendedFieldCalibration(anchors, base.R, base.T, basePos,
+				rotationOut, translationOut);
+		};
+		auto withScale = [&](const Eigen::Vector3d &targetRawPos,
+			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
+		{
+			lookupAt(base.R * (calScale * targetRawPos) + base.T, rotationOut, translationOut);
+		};
+		auto withoutScale = [&](const Eigen::Vector3d &targetRawPos,
+			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
+		{
+			lookupAt(base.R * targetRawPos + base.T, rotationOut, translationOut);
+		};
+
+		MountExtrinsic identityMount;
+		identityMount.valid = true;
+		ContinuousAlignment scaled, unscaled;
+		scaled.SetExtrinsic(identityMount);
+		unscaled.SetExtrinsic(identityMount);
+
+		std::mt19937 rng(912);
+		std::normal_distribution<double> refNoise(0.0, 0.0001);
+		int scaledCorrections = 0, unscaledCorrections = 0;
+		double unscaledMaxCorrection = 0.0;
+		for (double t = 0.0; t < 16.0; t += 1.0 / 90.0)
+		{
+			// World sweep from 5 m out into the anchor's centre. The tracker
+			// reports RAW positions; the driver scales them by calScale, so the
+			// raw track is the world track divided by it.
+			double worldX = t < 10.0 ? -5.0 + 0.5 * t : 0.0;
+			double worldVx = t < 10.0 ? 0.5 : 0.0;
+
+			PoseSample target;
+			target.time = t;
+			target.rot = Eigen::Quaterniond::Identity();
+			target.pos = Eigen::Vector3d(worldX / calScale, 0.0, 0.0);
+			target.vel = Eigen::Vector3d(worldVx / calScale, 0.0, 0.0);
+
+			Eigen::Quaterniond localRot;
+			Eigen::Vector3d localTrans;
+			withScale(target.pos, localRot, localTrans);
+
+			PoseSample reference;
+			reference.time = t;
+			reference.rot = localRot;
+			reference.pos = localRot * (calScale * target.pos) + localTrans +
+				Eigen::Vector3d(refNoise(rng), refNoise(rng), refNoise(rng));
+			reference.vel = Eigen::Vector3d(worldVx, 0.0, 0.0);
+
+			scaled.PushReference(reference);
+			scaled.PushTarget(target);
+			unscaled.PushReference(reference);
+			unscaled.PushTarget(target);
+
+			scaled.Update(t, base.R, base.T, calScale, 0.0, withScale);
+			unscaled.Update(t, base.R, base.T, calScale, 0.0, withoutScale);
+
+			ContinuousAlignment::Correction correction;
+			while (scaled.PollCorrection(correction))
+				scaledCorrections++;
+			while (unscaled.PollCorrection(correction))
+			{
+				unscaledCorrections++;
+				unscaledMaxCorrection = std::max(unscaledMaxCorrection,
+					correction.translation.norm());
+			}
+		}
+
+		snprintf(detail, sizeof detail,
+			"scale %.2f: with-scale %d corrections / state %d; scale-dropped %d, max %.1f mm",
+			calScale, scaledCorrections, static_cast<int>(scaled.GetState()),
+			unscaledCorrections, unscaledMaxCorrection * 1000.0);
+		Check("continuous: field lookup scale",
+			scaledCorrections == 0 &&
+			scaled.GetState() == ContinuousAlignment::State::Tracking &&
+			unscaledCorrections > 0 && unscaledMaxCorrection > 0.005,
+			detail);
+	}
 }
 
 } // namespace
@@ -4818,8 +5368,14 @@ int main(int argc, char **argv)
 		GroundTruth t2 = truth;
 		t2.latency = 0.018;
 		Expectation e;
-		e.maxRotErrDeg = 0.5;
-		e.maxTransErrM = 0.015;
+		// Deliberately below the uncompensated damage the counterfactual below
+		// measures (~0.185 deg / 5.4 mm on this exact data). At the old
+		// 0.5 deg / 15 mm the two scenarios overlapped: an inert or inverted
+		// application at CalibrationEngine.cpp:1020 landed inside the pass band
+		// while r.timeOffset -- the ESTIMATE, produced before and independently
+		// of the application -- still read +18.0 ms.
+		e.maxRotErrDeg = 0.12;
+		e.maxTransErrM = 0.004;
 		RunScenario("latency 18ms", scene, t2, config, e);
 
 		// Same data without compensation: document the damage (not asserted).
@@ -4830,6 +5386,31 @@ int main(int argc, char **argv)
 		e2.maxRotErrDeg = 90.0;    // report-only run
 		e2.maxTransErrM = 10.0;
 		RunScenario("latency uncompensated", scene, t2, noComp, e2);
+
+		// The absolute tolerances above still only bound the compensated
+		// residual. What pins the APPLICATION is the ratio: compensating must
+		// remove most of the damage its own counterfactual measures. A sign flip
+		// at the application site roughly doubles the residual instead of
+		// shrinking it, so this fails hard where an absolute band can be tuned
+		// around. Same streams for both, so the comparison is exact.
+		std::vector<PoseSample> refStream, targetStream;
+		GenerateStreams(scene, t2, 1234, refStream, targetStream);
+		EngineResult on = CalibrationEngine::Solve(refStream, targetStream, config);
+		EngineResult off = CalibrationEngine::Solve(refStream, targetStream, noComp);
+
+		double onRot = t2.rotation.angularDistance(on.rotation) * 180.0 / EIGEN_PI;
+		double offRot = t2.rotation.angularDistance(off.rotation) * 180.0 / EIGEN_PI;
+		double onTrans = (on.translation - t2.translation).norm();
+		double offTrans = (off.translation - t2.translation).norm();
+
+		char detail[256];
+		snprintf(detail, sizeof detail,
+			"rot %.4f vs %.4f deg (%.0f%%)  trans %.1f vs %.1f mm (%.0f%%)",
+			onRot, offRot, 100.0 * onRot / std::max(offRot, 1e-12),
+			onTrans * 1000.0, offTrans * 1000.0, 100.0 * onTrans / std::max(offTrans, 1e-12));
+		Check("latency compensation separates",
+			on.valid && off.valid &&
+			onRot < 0.5 * offRot && onTrans < 0.5 * offTrans, detail);
 	}
 
 	// 4. Outliers on top of noise: IRLS must hold the line.
@@ -5094,16 +5675,78 @@ int main(int argc, char **argv)
 			SmoothStreamZeroPhase(ref, 0.30, 0.05), tgt, grossCfg);
 		bool cleanGrossSeen = cleanGross.valid && cleanGross.scaleFromGrossMotion;
 
+		// The gain diagnostic abstains on this short stream. That means the
+		// scale is not identifiable from this motion, NOT that it is clean, so
+		// the guard takes the neutral path instead of committing the
+		// free-scale fit. (That fit lands near this scene's 1.02 ground truth,
+		// which is exactly what made the old silent commit look harmless.)
 		bool pass = shortResult.valid && !shortResult.motionGainValid &&
-			std::abs(shortResult.scale - shortTruth.scale) < 0.01 &&
+			shortResult.scale == 1.0 &&
+			shortResult.scaleNeutralizedForSmoothing &&
+			!shortResult.scaleFromGrossMotion &&
 			cleanGrossSeen && cleanGross.motionSmoothingDetected &&
 			!cleanGross.scaleNeutralizedForSmoothing &&
 			std::abs(cleanGross.scale - cleanGross.motionGainLow) < 1e-6 &&
 			std::abs(cleanGross.scale - 1.0) <= grossCfg.maxCleanGrossDeviation + 1e-6;
-		printf("%-28s %s  short valid/gain/scale %d/%d/%.3f  clean gross %d scale %.3f gain %.3f/%.3f\n",
+		printf("%-28s %s  short valid/gain/scale/neutralized %d/%d/%.3f/%d  clean gross %d scale %.3f gain %.3f/%.3f\n",
 			"scale diagnostic branches", pass ? "PASS" : "FAIL",
 			shortResult.valid, shortResult.motionGainValid, shortResult.scale,
+			shortResult.scaleNeutralizedForSmoothing,
 			cleanGrossSeen, cleanGross.scale, cleanGross.motionGainLow, cleanGross.motionGainHigh);
+		RecordResult(pass);
+	}
+
+	// 7e. Scale guard, fail-closed branch. When streamed-pose smoothing is
+	// detected and the guarded fixed-scale re-solve fails its OWN gates, the
+	// result must be marked invalid rather than falling back to the contaminated
+	// free-scale fit: that fit collapses to ~0.88 for a true 1.0, and the driver
+	// multiplies every position, velocity and acceleration by it, shrinking the
+	// user's whole target universe ~12% behind a green verdict. 7c and 7d pin
+	// both success branches; this else has never executed.
+	//
+	// Reuse 7c's hypothesis-A data, whose fingerprint (smoothing detected, gross
+	// band dirty, guarded scale neutralised to 1.0) is already asserted there.
+	// The residual gate is then placed BETWEEN the two fits' own measured
+	// residuals rather than at a guessed constant: the free-scale fit absorbs
+	// the attenuation into scale, the scale-pinned fit cannot, so one threshold
+	// admits the first and rejects the second — exactly the case the branch
+	// exists for, with no magic numbers to go stale.
+	{
+		EngineConfig sc = config;
+		sc.solveScale = true;
+
+		SceneConfig scene;
+		scene.posNoise = 0.001;
+		scene.rotNoiseDeg = 0.1;
+		std::vector<PoseSample> ref, tgt;
+		GenerateStreams(scene, truth, 777, ref, tgt);
+		std::vector<PoseSample> refSm = SmoothStreamZeroPhase(ref, 0.3, 0.05);
+
+		EngineConfig freeCfg = sc;
+		freeCfg.pinScaleOnSmoothing = false;
+		EngineResult freeFit = CalibrationEngine::Solve(refSm, tgt, freeCfg);
+
+		// Exactly the fit the guard's re-solve performs on this data: scale
+		// pinned, targets pre-scaled by the guarded 1.0 (i.e. unchanged).
+		EngineConfig pinnedCfg = config;
+		pinnedCfg.solveScale = false;
+		EngineResult pinnedFit = CalibrationEngine::Solve(refSm, tgt, pinnedCfg);
+
+		double gate = 0.5 * (freeFit.translationRmsMeters + pinnedFit.translationRmsMeters);
+		EngineConfig guardCfg = sc;
+		guardCfg.maxTranslationRms = gate;
+		EngineResult guarded = CalibrationEngine::Solve(refSm, tgt, guardCfg);
+
+		// A collapsed separation would let this pass vacuously; fail loudly.
+		// Measured separation on this data is ~1.9x, so the bar sits below that
+		// and well above the ~1.0 a collapse would produce.
+		bool separated = pinnedFit.translationRmsMeters > 1.5 * freeFit.translationRmsMeters;
+		bool pass = freeFit.valid && separated && !guarded.valid &&
+			guarded.message.find("guarded fixed-scale re-solve failed") != std::string::npos;
+		printf("%-28s %s  rms free %.4f m (scale %.3f) vs pinned %.4f m  gate %.4f  guarded valid %d: %s\n",
+			"scale guard fail-closed", pass ? "PASS" : "FAIL",
+			freeFit.translationRmsMeters, freeFit.scale, pinnedFit.translationRmsMeters, gate,
+			guarded.valid, guarded.message.c_str());
 		RecordResult(pass);
 	}
 

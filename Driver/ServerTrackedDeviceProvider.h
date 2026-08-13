@@ -46,6 +46,12 @@ public:
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
+	// The one unwind path shared by Cleanup and every Init failure. Init must not
+	// leave detours enabled behind a failure return, and the ring must not be
+	// unmapped while a pose thread can still be inside the publish path.
+	void Teardown();
+	vr::EVRInitError FailInit(vr::EVRInitError error);
+
 	IPCServer server;
 
 	// A zeroed quaternion or scale is a degenerate transform, not a neutral one:
@@ -204,8 +210,9 @@ private:
 	// Publishes every raw (pre-transform) pose for the overlay's solver.
 	protocol::PoseRingWriter poseRing;
 	// Init may encounter a stale overlay-held mapping while a prior writer is
-	// disappearing. RunFrame retries off the latency-sensitive pose threads;
-	// this release/acquire flag publishes a completed Create to those threads.
+	// disappearing. RunFrame retries on vrserver's driver frame loop with a zero
+	// wait budget, so a retry never blocks that loop; this release/acquire flag
+	// publishes a completed Create to the pose threads.
 	std::atomic<bool> poseRingReady{ false };
 	uint64_t lastPoseRingCreateAttemptMs = 0;
 };

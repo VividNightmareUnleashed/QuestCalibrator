@@ -312,13 +312,22 @@ static void ParseChaperone(SettingsRecord &settings, const picojson::object &obj
 		parsed.worldFromDriverValid = true;
 	}
 
+	// Required, unlike every optional field above. These were read with a bare
+	// .at(), so a missing key threw out_of_range carrying picojson's own
+	// "invalid map<K, T> key" - naming neither the field nor the record - and
+	// failed the WHOLE record: on the Config path a damaged room snapshot
+	// discarded a good calibration, on the Settings path it locked every
+	// settings write permanently. Same inputs rejected, but say what broke.
+	for (const char *required : { "play_space_size", "standing_center", "geometry" })
+		if (!HasTypedValue<picojson::array>(chaperone, required))
+			throw std::runtime_error(
+				std::string("chaperone is missing the array ") + required);
+
 	LoadFloatArray(chaperone.at("play_space_size"), parsed.playSpaceSize.v, 2);
 	LoadFloatArray(chaperone.at("standing_center"),
 		reinterpret_cast<float *>(parsed.standingCenter.m),
 		sizeof(parsed.standingCenter.m) / sizeof(float));
 
-	if (!chaperone.at("geometry").is<picojson::array>())
-		throw std::runtime_error("chaperone geometry is not an array");
 	auto &geometry = chaperone.at("geometry").get<picojson::array>();
 
 	// HmdQuad_t is twelve packed floats. Reject partial or absurd payloads
@@ -383,6 +392,47 @@ static void WriteChaperone(const SettingsRecord &settings, picojson::object &obj
 		(sizeof(vr::HmdQuad_t) / sizeof(float)) * snapshot.geometry.size()));
 	chaperone["copy_time"].set<double>(snapshot.copyUnixTime);
 	obj["chaperone"].set<picojson::object>(std::move(chaperone));
+}
+
+// picojson parses by recursive descent with no depth limit, and the registry
+// admits values far larger than any real record. A stack overflow on Windows
+// is an SEH exception, so neither the runtime_error catch around the parse nor
+// wWinMain's catch (...) can see it: a deeply nested value crashes at startup
+// with no window, no dialog and no session log, and the only recovery is
+// deleting the registry value by hand. Reject that shape before parsing so it
+// lands in Unreadable like any other malformed record. Both persisted schemas
+// nest at most three levels; this bound is far above them and far below what
+// exhausts the stack. Nesting inside strings does not count, so a value whose
+// text merely contains brackets still round-trips.
+static void RejectExcessiveJsonNesting(const std::string &text)
+{
+	constexpr int maxDepth = 16;
+	int depth = 0;
+	bool inString = false;
+	bool escaped = false;
+	for (char c : text)
+	{
+		if (inString)
+		{
+			if (escaped)
+				escaped = false;
+			else if (c == '\\')
+				escaped = true;
+			else if (c == '"')
+				inString = false;
+			continue;
+		}
+
+		if (c == '"')
+			inString = true;
+		else if (c == '[' || c == '{')
+		{
+			if (++depth > maxDepth)
+				throw std::runtime_error("record nesting is too deep");
+		}
+		else if (c == ']' || c == '}')
+			--depth;
+	}
 }
 
 static ProfileParseResult ParseProfile(ProfileRecord &profile,
@@ -791,6 +841,14 @@ static std::string RegistryError(LSTATUS result)
 
 static const char *RegistryKey = "Software\\QuestCalibrator";
 
+// HKEY_CURRENT_USER_LOCAL_SETTINGS is a predefined handle, not a location
+// regedit displays: it resolves under HKCU\Software\Classes\Local Settings.
+// An unreadable record is fail-closed by design (it must never be silently
+// overwritten), so clearing it by hand is the only escape - and the error text
+// is the only place the user can learn where "it" actually is.
+static const char *RegistryKeyDisplayPath =
+	"HKEY_CURRENT_USER\\Software\\Classes\\Local Settings\\Software\\QuestCalibrator";
+
 enum class RegistryReadStatus
 {
 	Missing,
@@ -899,6 +957,7 @@ void LoadProfile(CalibrationContext &ctx)
 	{
 		try
 		{
+			RejectExcessiveJsonNesting(profileRead.value);
 			std::stringstream io(profileRead.value);
 			// Parse transactionally. A malformed late field must not leave an
 			// earlier transform active after the overall profile load failed.
@@ -926,7 +985,9 @@ void LoadProfile(CalibrationContext &ctx)
 		catch (const std::exception &e)
 		{
 			ctx.profileLoadState = questcal::RecordLoadState::Unreadable;
-			ctx.ReportError(std::string("Error loading calibration profile: ") + e.what() + "\n",
+			ctx.ReportError(std::string("Error loading calibration profile: ") + e.what() +
+					"\nThe profile is preserved, not overwritten. To start over, delete the"
+					" Config value under " + RegistryKeyDisplayPath + "\n",
 				CalibrationContext::ErrorSource::ProfilePersistence);
 		}
 	}
@@ -949,6 +1010,7 @@ void LoadProfile(CalibrationContext &ctx)
 		try
 		{
 			SettingsRecord parsed = CaptureSettingsRecord(ctx);
+			RejectExcessiveJsonNesting(settingsRead.value);
 			std::stringstream io(settingsRead.value);
 			settingsRevision = ParseSettings(parsed, io);
 			ApplySettingsRecord(ctx, std::move(parsed));
@@ -958,7 +1020,11 @@ void LoadProfile(CalibrationContext &ctx)
 		catch (const std::exception &e)
 		{
 			ctx.settingsLoadState = questcal::RecordLoadState::Unreadable;
-			ctx.ReportError(std::string("Error loading application settings: ") + e.what() + "\n",
+			// Until this record is cleared every settings write is refused, so
+			// the toggles in the UI will silently roll back. Say where it is.
+			ctx.ReportError(std::string("Error loading application settings: ") + e.what() +
+					"\nSettings changes will not save until this is fixed. To start over,"
+					" delete the Settings value under " + RegistryKeyDisplayPath + "\n",
 				CalibrationContext::ErrorSource::SettingsPersistence);
 		}
 	}

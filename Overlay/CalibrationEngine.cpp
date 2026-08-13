@@ -1059,10 +1059,23 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	bool smoothingDetected = gainValid &&
 		gainHigh < gainLow - config.gainSmoothingMargin;
 
-	if (result.valid && config.solveScale && config.pinScaleOnSmoothing && gainValid &&
-	    smoothingDetected)
+	// A guard that runs only when its own detector succeeded cannot honour "a
+	// contaminated free-scale fit is never applied". EstimateMotionGain
+	// abstains on six conditions that have nothing to do with whether
+	// smoothing is present, and two of them fire precisely in the
+	// low-translation regime the calibration instructions produce (vary
+	// rotation about two axes, which a user can do largely in place). An
+	// abstention means the scale is not identifiable from this motion, not
+	// that it is clean - so take the same guarded path at neutral scale
+	// instead of committing and persisting the free fit with no log line.
+	bool scaleNotIdentifiable = !gainValid;
+
+	if (result.valid && config.solveScale && config.pinScaleOnSmoothing &&
+	    (smoothingDetected || scaleNotIdentifiable))
 	{
-		bool grossClean = std::abs(gainLow - 1.0) <= config.maxCleanGrossDeviation;
+		// Without a valid diagnostic there is no gross band to trust.
+		bool grossClean = gainValid &&
+			std::abs(gainLow - 1.0) <= config.maxCleanGrossDeviation;
 		double guardedScale = grossClean
 			? std::min(1.0 + config.scaleSearchRange,
 				std::max(1.0 - config.scaleSearchRange, gainLow))
@@ -1085,17 +1098,21 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 			r2.scale = guardedScale;
 			r2.scaleFromGrossMotion = grossClean;
 			r2.scaleNeutralizedForSmoothing = !grossClean;
-			r2.message += grossClean
-				? " Fine-motion attenuation detected (streamed-pose smoothing); scale taken from clean gross motion."
-				: " Gross and fine motion are attenuated (streamed-pose smoothing); scale held at neutral 1.0.";
+			r2.message += scaleNotIdentifiable
+				? " Motion did not identify playspace scale (too little translation); scale held at neutral 1.0."
+				: grossClean
+					? " Fine-motion attenuation detected (streamed-pose smoothing); scale taken from clean gross motion."
+					: " Gross and fine motion are attenuated (streamed-pose smoothing); scale held at neutral 1.0.";
 			result = r2;
 		}
 		else
 		{
 			// Never silently fall back to the contaminated free-scale fit.
 			result.valid = false;
-			result.message = "Streamed-pose smoothing was detected, but the guarded fixed-scale re-solve failed: " +
-				r2.message;
+			result.message = std::string(scaleNotIdentifiable
+					? "Playspace scale could not be identified from this motion"
+					: "Streamed-pose smoothing was detected") +
+				", but the guarded fixed-scale re-solve failed: " + r2.message;
 		}
 	}
 

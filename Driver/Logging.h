@@ -18,7 +18,3 @@ void LogFlush();
 #endif
 
 #define TRACE(...) {}
-
-#ifndef TRACE
-#define TRACE LOG
-#endif

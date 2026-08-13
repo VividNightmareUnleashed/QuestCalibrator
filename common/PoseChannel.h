@@ -97,10 +97,21 @@ namespace protocol
 
 	class PoseRingWriter
 	{
+	private:
+		// One Create attempt blocks for at most this long on the reset mutex and,
+		// separately, on the reader-drain gate. Init can afford the full budget;
+		// vrserver's driver frame loop passes zero rather than stalling every
+		// other driver's RunFrame behind a peer that holds either gate.
+		static constexpr DWORD WriterResetMutexWaitMs = 2000;
+		static constexpr DWORD ReaderDrainWaitMs = 1000;
+		// A departing writer only needs the mutex long enough to retire its own
+		// identity, and this runs on vrserver's shutdown path.
+		static constexpr DWORD WriterRetireWaitMs = 200;
+
 	public:
 		~PoseRingWriter() { Close(); }
 
-		bool Create(const char *name)
+		bool Create(const char *name, DWORD waitBudgetMs = WriterResetMutexWaitMs)
 		{
 			if (ring != nullptr)
 				return true;
@@ -121,7 +132,9 @@ namespace protocol
 			HANDLE resetMutex = CreateWriterResetMutex(name);
 			if (resetMutex == nullptr)
 				return false;
-			DWORD waitResult = WaitForSingleObject(resetMutex, WriterResetMutexWaitMs);
+			// An abandoned mutex is still acquired immediately, so a zero budget
+			// costs nothing on the crash-recovery path.
+			DWORD waitResult = WaitForSingleObject(resetMutex, waitBudgetMs);
 			if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_ABANDONED)
 			{
 				DWORD error = waitResult == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
@@ -196,7 +209,8 @@ namespace protocol
 				Close();
 				return false;
 			}
-			else if (!ResetForNewWriterSession())
+			else if (!ResetForNewWriterSession(waitBudgetMs < ReaderDrainWaitMs
+				? waitBudgetMs : static_cast<DWORD>(ReaderDrainWaitMs)))
 			{
 				Close();
 				return false;
@@ -211,20 +225,24 @@ namespace protocol
 			// This prevents a second writer from slipping between reset completion
 			// and publication of writerActive.
 			ring->resetting.store(0, std::memory_order_seq_cst);
+			// Close retires this identity under the same mutex that published it
+			// and has no mapping name of its own, so hold a second handle open for
+			// the session. If it cannot be opened, Close skips the clear and the
+			// next writer falls back to the PID + creation-time liveness proof.
+			writerResetMutex = CreateWriterResetMutex(name);
 			return true;
 		}
 
 		void Close()
 		{
-			if (ring && ownedSessionEpoch != 0 &&
-				ring->sessionEpoch.load(std::memory_order_acquire) == ownedSessionEpoch &&
-				ring->writerProcessId.load(std::memory_order_acquire) == GetCurrentProcessId())
-			{
-				ring->writerActive.store(0, std::memory_order_release);
-				ring->writerProcessId.store(0, std::memory_order_relaxed);
-				ring->writerProcessCreationTime.store(0, std::memory_order_relaxed);
-			}
+			// Create's own failure paths call Close while they still hold the reset
+			// mutex. They get here with no owned session and no retained handle
+			// (both are established only on Create's success tail), so the retire
+			// step is skipped rather than re-entered.
+			if (ring != nullptr && ownedSessionEpoch != 0 && writerResetMutex != nullptr)
+				RetireWriterIdentity();
 			ownedSessionEpoch = 0;
+			if (writerResetMutex) { CloseHandle(writerResetMutex); writerResetMutex = nullptr; }
 			if (ring) { UnmapViewOfFile(ring); ring = nullptr; }
 			if (hMap) { CloseHandle(hMap); hMap = nullptr; }
 		}
@@ -314,13 +332,44 @@ namespace protocol
 					std::memory_order_release);
 			}
 			ownedSessionEpoch = 0;
+			if (writerResetMutex) { CloseHandle(writerResetMutex); writerResetMutex = nullptr; }
 			if (ring) { UnmapViewOfFile(ring); ring = nullptr; }
 			if (hMap) { CloseHandle(hMap); hMap = nullptr; }
 		}
 #endif
 
 	private:
-		static constexpr DWORD WriterResetMutexWaitMs = 2000;
+		// Retiring the advertised owner belongs under the reset mutex exactly like
+		// publishing it. Unlocked, a departing writer that is preempted between its
+		// check and its stores can zero the identity a replacement published in the
+		// meantime, leaving a live writer that every reader reports as dead for the
+		// rest of the session. Skipping the clear when the mutex is contended is
+		// safe: a writer that never runs Close at all is already covered by the
+		// PID + creation-time liveness proof.
+		void RetireWriterIdentity()
+		{
+			DWORD waitResult = WaitForSingleObject(writerResetMutex, WriterRetireWaitMs);
+			if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_ABANDONED)
+				return;
+			struct RetireMutexGuard
+			{
+				HANDLE handle;
+				~RetireMutexGuard()
+				{
+					// Preserve the operation's diagnostic across the release.
+					DWORD error = GetLastError();
+					ReleaseMutex(handle);
+					SetLastError(error);
+				}
+			} retireGuard{ writerResetMutex };
+
+			if (ring->sessionEpoch.load(std::memory_order_acquire) != ownedSessionEpoch ||
+				ring->writerProcessId.load(std::memory_order_acquire) != GetCurrentProcessId())
+				return;
+			ring->writerActive.store(0, std::memory_order_release);
+			ring->writerProcessId.store(0, std::memory_order_relaxed);
+			ring->writerProcessCreationTime.store(0, std::memory_order_relaxed);
+		}
 
 		static HANDLE CreateWriterResetMutex(const char *mappingName)
 		{
@@ -378,7 +427,7 @@ namespace protocol
 				ring->layoutBytes == sizeof(PoseRing);
 		}
 
-		bool ResetForNewWriterSession()
+		bool ResetForNewWriterSession(DWORD drainWaitMs)
 		{
 			// Create holds the crash-recoverable named mutex, so an inherited 1 is
 			// known to belong to an abandoned reset and can be reasserted safely.
@@ -391,7 +440,7 @@ namespace protocol
 			ULONGLONG started = GetTickCount64();
 			while (ring->activeReaders.load(std::memory_order_seq_cst) != 0)
 			{
-				if (GetTickCount64() - started >= 1000)
+				if (GetTickCount64() - started >= drainWaitMs)
 				{
 					ring->resetting.store(0, std::memory_order_seq_cst);
 					SetLastError(ERROR_BUSY);
@@ -522,6 +571,9 @@ namespace protocol
 		}
 
 		HANDLE hMap = nullptr;
+		// Held for the whole writer session so Close can retire this writer's
+		// published identity under the mutex that published it.
+		HANDLE writerResetMutex = nullptr;
 		PoseRing *ring = nullptr;
 		uint64_t ownedSessionEpoch = 0;
 	};
@@ -761,22 +813,30 @@ namespace protocol
 			return false;
 		}
 
+		// The producer claim lock stays producer-only: this drain thread runs at
+		// normal priority in a GUI process, and holding that lock while descheduled
+		// (or while the whole process is suspended) would make every vrserver pose
+		// thread fail its claim and drop. Seeing the same empty queue on both sides
+		// of the marker load proves no producer completed a claim in between, and
+		// the compare-exchange then transfers exactly the observed markers: a
+		// producer that wins instead carries them in its own failedDropsBefore, so
+		// they are neither counted twice nor lost.
 		template<typename G>
 		void EmitTerminalGapIfEmpty(G &gapFn)
 		{
-			uint32_t expected = 0;
-			if (!ring->claimLock.compare_exchange_strong(expected, 1,
-				std::memory_order_acquire, std::memory_order_relaxed))
+			uint64_t emptyAt = ring->dequeuePos.load(std::memory_order_acquire);
+			if (ring->enqueuePos.load(std::memory_order_acquire) != emptyAt)
 				return;
-			uint64_t drops = 0;
-			if (ring->dequeuePos.load(std::memory_order_acquire) ==
-				ring->enqueuePos.load(std::memory_order_acquire))
-			{
-				drops = ring->pendingFailedDrops.exchange(0, std::memory_order_acq_rel);
-			}
-			ring->claimLock.store(0, std::memory_order_release);
-			if (drops != 0)
-				gapFn(drops);
+			uint64_t drops = ring->pendingFailedDrops.load(std::memory_order_acquire);
+			if (drops == 0)
+				return;
+			if (ring->dequeuePos.load(std::memory_order_acquire) != emptyAt ||
+				ring->enqueuePos.load(std::memory_order_acquire) != emptyAt)
+				return;   // a sample was published; its slot carries the markers
+			if (!ring->pendingFailedDrops.compare_exchange_strong(drops, 0,
+				std::memory_order_acq_rel, std::memory_order_relaxed))
+				return;   // a producer harvested them, or more arrived; retry next drain
+			gapFn(drops);
 		}
 
 		bool BeginRead()

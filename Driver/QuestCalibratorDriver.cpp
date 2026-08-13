@@ -1,5 +1,4 @@
-﻿#include "QuestCalibratorDriver.h"
-#include "ServerTrackedDeviceProvider.h"
+﻿#include "ServerTrackedDeviceProvider.h"
 #include "VRWatchdogProvider.h"
 #include "Logging.h"
 

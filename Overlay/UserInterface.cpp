@@ -2174,11 +2174,8 @@ static bool BuildProfileEditor()
 			g_transformDraft.rotationEdited = true;
 			if (g_transformDraft.rotationEuler.allFinite())
 			{
-				Eigen::Vector3d radians = g_transformDraft.rotationEuler * EIGEN_PI / 180.0;
-				g_transformDraft.rotationQ =
-					Eigen::AngleAxisd(radians(0), Eigen::Vector3d::UnitZ()) *
-					Eigen::AngleAxisd(radians(1), Eigen::Vector3d::UnitY()) *
-					Eigen::AngleAxisd(radians(2), Eigen::Vector3d::UnitX());
+				g_transformDraft.rotationQ = CalibrationContext::RebuildRotationFromEuler(
+					g_transformDraft.rotationEuler);
 			}
 			else
 			{

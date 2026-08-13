@@ -115,9 +115,6 @@
     <ClCompile Include="..\lib\imgui\imgui.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\lib\imgui\imgui_demo.cpp">
-      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
-    </ClCompile>
     <ClCompile Include="..\lib\imgui\imgui_draw.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -158,7 +155,6 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="QuestCalibrator.ico" />
-    <Image Include="small.ico" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="QuestCalibrator.rc" />

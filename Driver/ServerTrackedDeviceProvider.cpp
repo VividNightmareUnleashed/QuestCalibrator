@@ -21,9 +21,9 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	}
 	qpcToSeconds = 1.0 / static_cast<double>(freq.QuadPart);
 
-	lastPoseRingCreateAttemptMs = GetTickCount64();
 	bool poseRingCreated = poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME);
 	poseRingReady.store(poseRingCreated, std::memory_order_release);
+	lastPoseRingCreateAttemptMs = GetTickCount64();
 	if (!poseRingCreated)
 	{
 		// Non-fatal: calibration transforms still apply, but the overlay will
@@ -32,53 +32,70 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	}
 
 	// Install the context detour before OpenVR initializes its cached interfaces.
-	// InitServerDriverContext requests IVRServerDriverHost through the detour, so
-	// a successful return proves that one of the supported 005/006 pose hooks is
-	// active rather than letting the overlay handshake with a no-op driver.
+	// InitServerDriverContext requests IVRServerDriverHost_005 through the detour,
+	// which is why the check below can succeed on our own context init alone: it
+	// proves a pose hook was created on some host object, not that the device
+	// drivers in this vrserver are routed through it. A driver that resolved
+	// IVRServerDriverHost_006 before this detour existed keeps forwarding poses
+	// untouched; only the `01questcalibrator` manifest name orders this driver
+	// first, and nothing in code enforces that.
 	if (!InjectHooks(this, pDriverContext))
-	{
-		poseRing.Close();
-		return vr::VRInitError_Driver_Failed;
-	}
+		return FailInit(vr::VRInitError_Driver_Failed);
 
 	vr::EVRInitError contextError = vr::InitServerDriverContext(pDriverContext);
 	if (contextError != vr::VRInitError_None)
-	{
-		DisableHooks();
-		poseRing.Close();
-		vr::CleanupDriverContext();
-		return contextError;
-	}
+		return FailInit(contextError);
 
 	if (!IsPoseUpdateHookInstalled())
 	{
 		LOG("No supported IVRServerDriverHost pose hook was installed");
-		DisableHooks();
-		poseRing.Close();
-		vr::CleanupDriverContext();
-		return vr::VRInitError_Driver_Failed;
+		return FailInit(vr::VRInitError_Driver_Failed);
 	}
 
 	if (!server.Run())
 	{
 		LOG("IPC server could not establish its control listener");
-		server.Stop();
-		DisableHooks();
-		poseRing.Close();
-		vr::CleanupDriverContext();
-		return vr::VRInitError_Driver_Failed;
+		return FailInit(vr::VRInitError_Driver_Failed);
 	}
 
 	return vr::VRInitError_None;
 }
 
+void ServerTrackedDeviceProvider::Teardown()
+{
+	server.Stop();
+	// Hooks may already have been live when Init failed: InjectHooks also
+	// refuses when a previous Init left everything running. Quiesce the detours
+	// before the ring goes away, or a pose thread still inside
+	// HandleDevicePoseUpdated publishes into a view Close() has unmapped.
+	bool quiesced = DisableHooks();
+	poseRingReady.store(false, std::memory_order_release);
+	if (quiesced)
+		poseRing.Close();
+	else
+	{
+		// Teardown gave up proving quiescence and kept the module resident, so a
+		// pose thread may still reach the ring. Leaking the mapping is the safe
+		// half of that trade: an owner that never runs Close is exactly the crash
+		// case the next writer's PID + creation-time liveness proof covers.
+		LOG("Hook quiescence could not be proven; the pose ring mapping is retained");
+	}
+}
+
+vr::EVRInitError ServerTrackedDeviceProvider::FailInit(vr::EVRInitError error)
+{
+	// Every Init failure unwinds through here, including the one where hooks from
+	// an earlier Init are still installed; returning with live detours would let
+	// SteamVR unload this DLL under an entered detour frame.
+	Teardown();
+	vr::CleanupDriverContext();
+	return error;
+}
+
 void ServerTrackedDeviceProvider::Cleanup()
 {
 	TRACE("ServerTrackedDeviceProvider::Cleanup()");
-	server.Stop();
-	DisableHooks();
-	poseRingReady.store(false, std::memory_order_release);
-	poseRing.Close();
+	Teardown();
 	VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
@@ -90,12 +107,18 @@ void ServerTrackedDeviceProvider::RunFrame()
 	uint64_t now = GetTickCount64();
 	if (now - lastPoseRingCreateAttemptMs < PoseRingRetryIntervalMs)
 		return;
-	lastPoseRingCreateAttemptMs = now;
-	if (poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME))
+	// This is vrserver's driver frame loop, so the attempt gets a zero wait
+	// budget: a peer holding the reset mutex or a live reader would otherwise
+	// stall every other driver's RunFrame for seconds at a time. An abandoned
+	// mutex is still acquired immediately, so crash recovery is unaffected.
+	if (poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME, 0))
 	{
 		poseRingReady.store(true, std::memory_order_release);
 		LOG("Pose ring shared memory became available after retry");
 	}
+	// Stamp after the attempt. Stamping before it lets a slow failure consume its
+	// own throttle interval, so the retries run back to back.
+	lastPoseRingCreateAttemptMs = GetTickCount64();
 }
 
 bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform)

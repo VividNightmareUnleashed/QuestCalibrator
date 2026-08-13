@@ -23,9 +23,12 @@
 //    windows on both sides of the discontinuity, never a single frame pair.
 //
 // Accepted deltas are constrained to yaw + translation (a recenter preserves
-// gravity); the discarded tilt magnitude is reported as the non-rigid
-// residual, which feeds drift staleness. Times are ring-sample seconds
-// (QPC * QpcToSeconds), not UI time.
+// gravity). On the exact path the discarded tilt magnitude is reported as the
+// non-rigid residual; on the heuristic path only a scalar heading is
+// regressed, so residualTiltRad stays at its default there. Nothing consumes
+// either residual today - they are reported for diagnostics, and drift
+// staleness is scored from age, slide events and loss events alone. Times are
+// ring-sample seconds (QPC * QpcToSeconds), not UI time.
 class JumpDetector
 {
 public:

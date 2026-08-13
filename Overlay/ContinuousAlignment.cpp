@@ -438,6 +438,17 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	Eigen::Vector3d headPos = refWindow.empty() ? Eigen::Vector3d::Zero() : refWindow.back().pos;
 	double dEff = (rD * headPos + tD - headPos).norm();
 
+	// The correction below is yaw-only, so the share of that displacement the
+	// tilt contributes cannot be reduced by it. Measure the reachable part
+	// separately: gating and clamping on the full delta gives any real mount
+	// tilt a floor no correction can get under, and the loop then emits a
+	// near-zero correction every cycle forever - each one re-stamping the
+	// drift counters and pinning alignment health at Fresh. deviation.posM
+	// keeps the full delta, because tilt is the mount-fault signal the freeze
+	// and resume tests exist to catch.
+	Eigen::Vector3d tPrime = tBar - rYaw * calTranslationMeters;
+	double dEffYaw = (rYaw * headPos + tPrime - headPos).norm();
+
 	deviation.valid = true;
 	deviation.yawDeg = std::abs(yawAngle) * RadToDeg;
 	deviation.tiltDeg = tiltDeg;
@@ -498,19 +509,18 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 
 	state = State::Tracking;
 
-	if (deviation.yawDeg < config.deadbandYawDeg && deviation.posM < config.deadbandPosM)
+	if (deviation.yawDeg < config.deadbandYawDeg && dEffYaw < config.deadbandPosM)
 		return;
 
 	// Yaw + translation correction only (see header). The translation is
 	// chosen so a full step lands the calibration's translation exactly on the
 	// windowed estimate; a clamped fractional step is second-order accurate
 	// and the next cycle corrects the remainder.
-	Eigen::Vector3d tPrime = tBar - rYaw * calTranslationMeters;
 	double f = 1.0;
 	if (deviation.yawDeg > config.maxStepYawDeg)
 		f = std::min(f, config.maxStepYawDeg / deviation.yawDeg);
-	if (deviation.posM > config.maxStepPosM)
-		f = std::min(f, config.maxStepPosM / deviation.posM);
+	if (dEffYaw > config.maxStepPosM)
+		f = std::min(f, config.maxStepPosM / dEffYaw);
 
 	pendingCorrection.rotation = Eigen::Quaterniond(
 		Eigen::AngleAxisd(f * yawAngle, Eigen::Vector3d::UnitY()));

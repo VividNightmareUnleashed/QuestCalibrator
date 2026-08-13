@@ -203,10 +203,6 @@ public:
 	double ScatterRotRmsDeg() const { return scatterRotRmsDeg; }
 	double ScatterPosRmsM() const { return scatterPosRmsM; }
 	size_t ObservationCount() const { return observations.size(); }
-	double SecondsSinceObservation(double now) const
-	{
-		return lastObsTime > 0.0 ? now - lastObsTime : -1.0;
-	}
 
 	// Drop all windows and pending output (ring gap, accepted universe jump,
 	// suspension). Keeps the extrinsic; a persisting deviation re-freezes

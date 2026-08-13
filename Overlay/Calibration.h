@@ -120,7 +120,6 @@ struct CalibrationContext
 	bool referenceDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	bool targetDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	uint32_t jumpsCompensated = 0;
-	double lastJumpUiTime = 0.0;
 	double jumpTiltResidualDeg = 0.0;    // non-rigid rotation discarded by yaw constraint
 	double jumpSpreadResidualM = 0.0;    // device disagreement at accepted jumps
 	uint32_t referenceGapEvents = 0;     // hard reference-stream gaps (no compensation possible)
@@ -289,11 +288,13 @@ struct CalibrationContext
 	}
 
 	// The one sanctioned Euler -> quaternion conversion: an explicit user edit
-	// in the profile editor.
-	void RebuildRotationFromEuler()
+	// in the profile editor. The editor converts its own draft before
+	// validating it, so this takes the angles and returns the quaternion
+	// instead of touching the live members.
+	static Eigen::Quaterniond RebuildRotationFromEuler(const Eigen::Vector3d &eulerDegrees)
 	{
-		Eigen::Vector3d e = calibratedRotation * EIGEN_PI / 180.0;
-		calibratedRotationQ =
+		Eigen::Vector3d e = eulerDegrees * EIGEN_PI / 180.0;
+		return
 			Eigen::AngleAxisd(e(0), Eigen::Vector3d::UnitZ()) *
 			Eigen::AngleAxisd(e(1), Eigen::Vector3d::UnitY()) *
 			Eigen::AngleAxisd(e(2), Eigen::Vector3d::UnitX());
@@ -433,8 +434,6 @@ struct CalibrationContext
 
 extern CalibrationContext CalCtx;
 
-class PoseStreamHub;
-
 void InitCalibrator();
 void ShutdownCalibrator(bool cleanExit = true);
 void CalibrationTick(double time);
@@ -442,10 +441,6 @@ bool StartCalibration();
 bool StartAnchorCalibration();     // same collection; result becomes a field anchor
 bool LoadChaperoneBounds();
 bool ApplyChaperoneBounds(bool logSuccess = true);
-
-// Shared pose-stream access for runtime monitors (jump detection, drift).
-PoseStreamHub &GetPoseHub();
-double GetQpcToSeconds();
 
 // Dashboard overlay handle (0 until created); owned by QuestCalibrator.cpp.
 vr::VROverlayHandle_t GetMainOverlayHandle();

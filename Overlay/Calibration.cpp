@@ -253,16 +253,6 @@ void ShutdownCalibrator(bool cleanExit)
 		AppendSessionLog("session ended cleanly");
 }
 
-PoseStreamHub &GetPoseHub()
-{
-	return PoseHub;
-}
-
-double GetQpcToSeconds()
-{
-	return QpcToSeconds;
-}
-
 static vr::HmdQuaternion_t VRQuat(const Eigen::Quaterniond &q)
 {
 	vr::HmdQuaternion_t out;
@@ -1080,7 +1070,6 @@ static void ApplyUniverseDelta(CalibrationContext &ctx, const JumpDetector::Univ
 	}
 
 	ctx.jumpsCompensated++;
-	ctx.lastJumpUiTime = now;
 	ctx.jumpTiltResidualDeg += d.residualTiltRad * 180.0 / EIGEN_PI;
 	ctx.jumpSpreadResidualM += d.residualSpread;
 

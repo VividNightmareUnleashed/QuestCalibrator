@@ -62,8 +62,12 @@ Driver and IPC:
 Profiles:
 
 - The calibrated rotation is stored as a **quaternion** (plus translation in meters);
-  Euler angles exist only in the profile editor UI. Stored under
-  `HKCU\Software\QuestCalibrator` — profiles from upstream are not migrated.
+  Euler angles exist only in the profile editor UI. Stored in the per-user local-settings
+  hive, which regedit shows as
+  `HKEY_CURRENT_USER\Software\Classes\Local Settings\Software\QuestCalibrator` — profiles from
+  upstream are not migrated. If the overlay reports a profile or settings record it cannot
+  read, it preserves the record rather than overwriting it; deleting the `Config` or
+  `Settings` value there is how you start over.
 
 ## Runtime alignment maintenance
 
