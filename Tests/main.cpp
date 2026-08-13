@@ -183,9 +183,15 @@ PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
 		? Eigen::Vector3d(dq.vec().normalized() * (angle / (2.0 * h)))
 		: Eigen::Vector3d::Zero();
 
-	// Noise and outliers.
-	std::normal_distribution<double> pn(0.0, scene.posNoise);
-	std::normal_distribution<double> rn(0.0, scene.rotNoiseDeg * EIGEN_PI / 180.0);
+	// Noise and outliers. Same constraint as the timestamp jitter in
+	// GenerateStreamsWithMount: normal_distribution requires sigma > 0 at
+	// CONSTRUCTION, and a clean scene sets both of these to zero. The draws
+	// below are already gated on the same values, so the substitute sigma is
+	// never sampled - but constructing with zero aborts the Debug STL, which
+	// is why no Debug build of this harness has ever run to completion.
+	std::normal_distribution<double> pn(0.0, scene.posNoise > 0.0 ? scene.posNoise : 1.0);
+	std::normal_distribution<double> rn(0.0,
+		scene.rotNoiseDeg > 0.0 ? scene.rotNoiseDeg * EIGEN_PI / 180.0 : 1.0);
 	std::uniform_real_distribution<double> u(0.0, 1.0);
 	std::uniform_real_distribution<double> axisPick(-1.0, 1.0);
 
@@ -2998,8 +3004,16 @@ void RunSolverRobustnessScenarios()
 			"valid %d scale %.5f err %.5f rot %.3f deg trans %.1f mm rms %.1f mm",
 			r.valid, r.scale, scaleErr, rotErr, transErr * 1000.0,
 			r.translationRmsMeters * 1000.0);
+		// The one band widened rather than tightened by the measurement pass.
+		// Measured scaleErr is 0.01315 against a 0.015 bound - a 12% margin on
+		// a quantity that depends on the outlier draws. The property scenario,
+		// the only place draws actually vary here, moves its worst case ~1.3x
+		// above the mean across 12 seeds; 12% would not survive that, so a
+		// different STL's normal_distribution could fail this on correct code.
+		// 0.025 is ~1.9x the measured error, in line with the other bands.
+		// rotErr and transErr sit at 0.000 deg / 20.6 mm, so those stay.
 		Check("solver: robust scale outliers",
-			r.valid && scaleErr < 0.015 && rotErr < 0.5 && transErr < 0.03,
+			r.valid && scaleErr < 0.025 && rotErr < 0.5 && transErr < 0.03,
 			detail);
 	}
 
@@ -7066,6 +7080,11 @@ void RunPersistenceScenarios()
 
 int main(int argc, char **argv)
 {
+	// Unbuffered: an abort discards a buffered stdout, so a harness that dies
+	// mid-run reports nothing at all about where. That is precisely how a
+	// zero-sigma normal_distribution kept every Debug build of this harness
+	// from ever completing without leaving a single line of evidence.
+	setvbuf(stdout, nullptr, _IONBF, 0);
 	int propertyTrials = 64;
 	uint32_t propertySeed = 0x5EED1234u;
 	for (int i = 1; i < argc; ++i)
@@ -7186,21 +7205,41 @@ int main(int argc, char **argv)
 	RunSolverRobustnessScenarios();
 	RunSolverPropertyScenarios(propertyTrials, propertySeed);
 
-	// 1. Clean data: near-exact recovery.
+	// Accuracy bands below are derived, not guessed. Measurement: 12 seeds x
+	// {Debug, Release} on MSVC 14.44. Two results shaped every number here.
+	// First, the deterministic scenarios are bit-identical across seeds AND
+	// across optimization level - only the property scenario varies with
+	// --property-seed - so these bands were never absorbing observed noise;
+	// the 12x-43x headroom was pure slack. Second, where draws DO change (the
+	// property scenario, 12 seeds) the worst-case error moves about 1.3x above
+	// its mean.
+	//
+	// So each band is ~4x its measured error: comfortably past the 1.3x that
+	// changing draws costs, while turning an assertion that could not fail
+	// into one that can. 4x rather than 2x because std::normal_distribution is
+	// implementation-defined - a different STL generates different scenes
+	// entirely, which is the one axis this machine cannot measure. Bands
+	// already inside 4x were left alone; none were loosened.
+	// Floors of 0.02 deg / 0.001 m keep the exact-recovery cases off
+	// bit-for-bit equality.
+
+	// 1. Clean data: near-exact recovery (measured 0.0000 deg / 0.0000 m).
 	{
 		SceneConfig scene;
 		Expectation e;
+		e.maxRotErrDeg = 0.02;
+		e.maxTransErrM = 0.001;
 		RunScenario("clean", scene, truth, config, e);
 	}
 
-	// 2. Realistic noise.
+	// 2. Realistic noise (measured 0.0117 deg / 0.0006 m; was 43x / 25x).
 	{
 		SceneConfig scene;
 		scene.posNoise = 0.002;
 		scene.rotNoiseDeg = 0.2;
 		Expectation e;
-		e.maxRotErrDeg = 0.5;
-		e.maxTransErrM = 0.015;
+		e.maxRotErrDeg = 0.05;
+		e.maxTransErrM = 0.0025;
 		RunScenario("noise", scene, truth, config, e);
 	}
 
@@ -7263,9 +7302,10 @@ int main(int argc, char **argv)
 		scene.posNoise = 0.002;
 		scene.rotNoiseDeg = 0.2;
 		scene.outlierRate = 0.02;
+		// Measured 0.0297 deg / 0.0008 m; was 24x / 25x.
 		Expectation e;
-		e.maxRotErrDeg = 0.7;
-		e.maxTransErrM = 0.02;
+		e.maxRotErrDeg = 0.12;
+		e.maxTransErrM = 0.0035;
 		RunScenario("outliers 2%", scene, truth, config, e);
 	}
 
@@ -7277,9 +7317,10 @@ int main(int argc, char **argv)
 		scene.rotNoiseDeg = 0.2;
 		GroundTruth tilted = truth;
 		tilted.rotation = truth.rotation * Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX()));
+		// Measured 0.0592 deg / 0.0016 m; was 17x / 12x.
 		Expectation e;
-		e.maxRotErrDeg = 1.0;
-		e.maxTransErrM = 0.02;
+		e.maxRotErrDeg = 0.24;
+		e.maxTransErrM = 0.007;
 		RunScenario("tilted universe 3deg", scene, tilted, config, e);
 	}
 
@@ -7325,9 +7366,10 @@ int main(int argc, char **argv)
 		scene.rotNoiseDeg = 0.2;
 		scene.offAxisScale = 0.16;
 		scene.offAxisRate = 2.0;
+		// Measured 0.0135 deg / 0.0007 m; was 44x / 29x - the loosest band here.
 		Expectation e;
-		e.maxRotErrDeg = 0.6;
-		e.maxTransErrM = 0.02;
+		e.maxRotErrDeg = 0.06;
+		e.maxTransErrM = 0.003;
 		RunScenario("sustained slight nods", scene, truth, config, e);
 	}
 
@@ -7340,9 +7382,10 @@ int main(int argc, char **argv)
 		scene.posNoise = 0.002;
 		scene.rotNoiseDeg = 0.4;
 		scene.motionScale = 0.35;
+		// Measured 0.0256 deg / 0.0011 m; was 14x / 18x.
 		Expectation e;
-		e.maxRotErrDeg = 0.35;
-		e.maxTransErrM = 0.02;
+		e.maxRotErrDeg = 0.11;
+		e.maxTransErrM = 0.005;
 		RunScenario("slow cautious motion", scene, truth, config, e);
 	}
 
@@ -7355,9 +7398,12 @@ int main(int argc, char **argv)
 		scene.duration = 40.0;
 		scene.posNoise = 0.002;
 		scene.rotNoiseDeg = 0.4;
+		// Measured 0.0487 deg / 0.0012 m; was 12x / 17x. This is the scenario
+		// built to pin the near-pi pair gate, so slack here is the least
+		// affordable: removing the gate has to move the number past this band.
 		Expectation e;
-		e.maxRotErrDeg = 0.6;
-		e.maxTransErrM = 0.02;
+		e.maxRotErrDeg = 0.20;
+		e.maxTransErrM = 0.005;
 		RunScenario("near-180 sweeps", scene, truth, config, e, 4321);
 	}
 
