@@ -686,7 +686,7 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 		// re-scans, while the caller gates usability at ingestion. Re-scanning
 		// ~20 s of both streams here costs a frame on the render thread.
 		if (CalibrationEngine::EstimateTimeOffset(refWindow, targetWindow, engineCfg,
-			measured, false))
+			measured, nullptr, nullptr, false))
 			pendingTimeOffset = measured;
 	}
 }

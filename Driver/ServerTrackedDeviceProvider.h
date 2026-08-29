@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 
 class ServerTrackedDeviceProvider : public vr::IServerTrackedDeviceProvider
 {
@@ -41,7 +42,7 @@ public:
 	////// End vr::IServerTrackedDeviceProvider functions
 
 	bool TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
-	bool TrySetAlignmentField(const protocol::SetAlignmentField &newField);
+	bool TrySetRuntimeState(const protocol::SetRuntimeState &newState);
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
 private:
@@ -142,10 +143,13 @@ private:
 	bool ReadDeviceTransform(uint32_t openVRID, DeviceTransform &out);
 
 	TransformSlot transforms[vr::k_unMaxTrackedDeviceCount];
+	// Different devices remain fully concurrent. Same-device callbacks share
+	// lastGood and both slew states, so serialize that narrow ownership domain.
+	std::mutex poseMutexes[vr::k_unMaxTrackedDeviceCount];
 
-	// Per-device fallback when a read keeps racing a write. Poses for a given
-	// device always arrive on that device driver's own thread, so each entry has
-	// a single effective writer even though different devices update concurrently.
+	// Per-device fallback when a read keeps racing a write. The matching pose
+	// mutex makes this a true single-writer value even if a driver dispatches
+	// concurrent callbacks for one OpenVR slot.
 	DeviceTransform lastGood[vr::k_unMaxTrackedDeviceCount];
 
 	struct AtomicFieldAnchor
@@ -221,8 +225,7 @@ private:
 	// then keeps the device's previously applied delta for this frame.
 	bool ReadAlignmentField(protocol::SetAlignmentField &out);
 
-	// Per-device blend/slew state, owned by that device's pose thread (same
-	// single-writer argument as lastGood).
+	// Per-device blend/slew state, under the matching pose mutex.
 	alignfield::EvalState fieldState[vr::k_unMaxTrackedDeviceCount];
 
 	// Per-device slew state for the BASE calibration transform (continuous

@@ -81,5 +81,29 @@ inline bool ValidateAndSanitize(const protocol::SetAlignmentField &input,
 	return true;
 }
 
+inline bool ValidateAndSanitize(const protocol::SetRuntimeState &input,
+	protocol::SetRuntimeState &output)
+{
+	if ((input.hiddenMask & ~input.enabledMask) != 0 ||
+		input.transform.openVRID != 0 || input.transform.enabled != 1 ||
+		input.transform.hidden != 0)
+		return false;
+
+	protocol::SetDeviceTransform transform;
+	protocol::SetAlignmentField field;
+	if (!ValidateAndSanitize(input.transform, transform) ||
+		!ValidateAndSanitize(input.field, field))
+		return false;
+	if (field.enabled != 0 && input.enabledMask == 0)
+		return false;
+
+	output = protocol::SetRuntimeState{};
+	output.enabledMask = input.enabledMask;
+	output.hiddenMask = input.hiddenMask;
+	output.transform = transform;
+	output.field = field;
+	return true;
+}
+
 } // namespace driverinput
 } // namespace questcal

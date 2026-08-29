@@ -24,7 +24,8 @@ public:
 	struct RequestSink
 	{
 		std::function<bool(const protocol::SetDeviceTransform &)> setDeviceTransform;
-		std::function<bool(const protocol::SetAlignmentField &)> setAlignmentField;
+		std::function<bool(const protocol::SetRuntimeState &)> setRuntimeState;
+		std::function<uint32_t()> poseHookMask;
 	};
 
 	~IPCServer();
@@ -63,6 +64,10 @@ private:
 		protocol::Request request;
 		protocol::Response response;
 		questcal::ipc::ConnectionState connection;
+		// Cancellation is asynchronous. Once set, no callback may reuse this
+		// connection; the callback that observes the cancelled operation is the
+		// sole owner allowed to close and delete it.
+		bool closing = false;
 		// Last time this connection completed an IO. The protocol is
 		// request/response with no long-lived subscription, so a connection that
 		// has neither read nor written for the deadline below is not waiting on
@@ -83,6 +88,7 @@ private:
 	static const ULONGLONG ConnectionIdleDeadlineMs = 30000;
 
 	void CloseIdleConnections();
+	DWORD NextIdleTimeoutMs() const;
 
 	// Both completion callbacks reinterpret_cast the LPOVERLAPPED the API hands
 	// back straight to PipeInstance*. Inserting any member above `overlap`, or
@@ -93,7 +99,12 @@ private:
 	static_assert(std::is_standard_layout<PipeInstance>::value,
 		"PipeInstance must stay standard-layout: the IO completion callbacks cast "
 		"LPOVERLAPPED back to PipeInstance*");
-	static_assert(offsetof(PipeInstance, overlap) == 0,
+	static_assert(
+#if defined(__clang__)
+		__builtin_offsetof(PipeInstance, overlap) == 0,
+#else
+		offsetof(PipeInstance, overlap) == 0,
+#endif
 		"PipeInstance::overlap must stay the first member: the IO completion callbacks "
 		"cast LPOVERLAPPED back to PipeInstance*");
 

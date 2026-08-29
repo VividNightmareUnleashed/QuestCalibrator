@@ -164,8 +164,8 @@ private:
 	void DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	                     const Eigen::Quaterniond &newRot, const Eigen::Vector3d &newTrans);
 	void DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist &incoming);
-	void EvaluatePendingCandidates(double now);
-	void TryAccept(double now);
+	void EvaluatePendingCandidates();
+	void TryAccept();
 	int ActiveDeviceCount(double now) const;
 
 	Config config;

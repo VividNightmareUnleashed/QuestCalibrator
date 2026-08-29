@@ -137,14 +137,19 @@ inline vr::HmdMatrix34_t DeltaTimesPose(
 inline bool QuadsMatch(const std::vector<vr::HmdQuad_t> &a,
 	const std::vector<vr::HmdQuad_t> &b, float epsMeters)
 {
-	if (a.size() != b.size())
+	if (!std::isfinite(epsMeters) || epsMeters < 0.0f || a.size() != b.size())
 		return false;
 
 	for (size_t i = 0; i < a.size(); ++i)
 		for (int c = 0; c < 4; ++c)
 			for (int k = 0; k < 3; ++k)
-				if (std::fabs(a[i].vCorners[c].v[k] - b[i].vCorners[c].v[k]) > epsMeters)
+			{
+				float x = a[i].vCorners[c].v[k];
+				float y = b[i].vCorners[c].v[k];
+				if (!std::isfinite(x) || !std::isfinite(y) ||
+					std::fabs(x - y) > epsMeters)
 					return false;
+			}
 
 	return true;
 }

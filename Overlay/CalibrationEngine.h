@@ -17,8 +17,9 @@
 //      gravity prior in the form of weighted virtual up-axis pairs (prior,
 //      not constraint: rich motion outvotes it, so genuinely tilted universes
 //      are still recovered).
-//   4. Translation: linear least squares over sample pairs (math.pdf eq. 8)
-//      with the same IRLS weights; optional playspace scale via a 1-D search.
+//   4. Translation and optional playspace scale: one joint robust linear solve
+//      over sample pairs, with conditional-information/uncertainty gates that
+//      reject trajectories which cannot distinguish scale from translation.
 //   5. Validation: rotation and translation residuals, axis-cloud conditioning,
 //      and a plain-language verdict. `valid` is only set when all gates pass.
 
@@ -89,7 +90,9 @@ struct EngineConfig
 
 	// --- scale ---
 	bool   solveScale = false;
-	double scaleSearchRange = 0.15;    // searched as [1-r, 1+r]
+	double scaleSearchRange = 0.15;    // bounded to [1-r, 1+r]
+	double minScaleCondition = 0.002;  // conditional scale information after eliminating translation
+	double maxScaleStdDev = 0.02;      // one-sigma uncertainty in the dimensionless scale
 
 	// --- motion-amplitude gain diagnostic + scale guard ---
 	// The two position tracks' amplitude ratio, split into a gross-motion band
@@ -143,17 +146,24 @@ struct EngineResult
 	Eigen::Vector3d translation{ 0, 0, 0 };     // meters
 	double scale = 1.0;
 	double timeOffset = 0.0;                    // seconds; positive = target stream lags reference
+	bool timeOffsetValid = false;
+	double timeOffsetScore = 0.0;
+	double timeOffsetPeakMargin = 0.0;
 
 	// Quality metrics (populated even when invalid, when computable).
 	double rotationRmsDeg = 0.0;       // axis-pair residual after the solve
 	double translationRmsMeters = 0.0; // translation LS residual
 	double axisSpread = 0.0;           // rotation-axis diversity; ~0 = single-axis motion
 	double transEigRatio = 0.0;        // translation-system conditioning; ~0 = a direction is unobservable
+	bool scaleIdentifiable = false;
+	double scaleCondition = 0.0;
+	double scaleStdDev = 0.0;
 
 	// Motion-amplitude gain diagnostic (see EngineConfig::gainSplitSeconds).
 	bool   motionGainValid = false;
 	double motionGainLow = 0.0;        // gross-motion band; ~true scale under either hypothesis
 	double motionGainHigh = 0.0;       // fine-motion band; sits below gross under smoothing
+	bool   motionGainInconsistent = false; // either direction differs beyond the physical tolerance
 	// Independent of the guard below: this legitimately fires with solveScale off.
 	bool   motionSmoothingDetected = false;
 	ScaleGuard scaleGuard = ScaleGuard::NotApplied;
@@ -184,6 +194,8 @@ public:
 	                               const std::vector<PoseSample> &targetStream,
 	                               const EngineConfig &config,
 	                               double &offsetOut,
+	                               double *scoreOut = nullptr,
+	                               double *peakMarginOut = nullptr,
 	                               bool validateInputs = true);
 
 	static bool InterpolateAt(const std::vector<PoseSample> &stream, double t,

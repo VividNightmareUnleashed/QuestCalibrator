@@ -30,7 +30,7 @@ inline bool PrepareRequest(const protocol::Request &request,
 	}
 
 	bool mutation = request.type == protocol::RequestSetDeviceTransform ||
-		request.type == protocol::RequestSetAlignmentField;
+		request.type == protocol::RequestSetRuntimeState;
 	return mutation && state.handshakeComplete &&
 		request.protocol.version == protocol::Version;
 }

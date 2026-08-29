@@ -220,8 +220,19 @@ function Invoke-SolverTests {
         exit 2
     }
 
-    $output = @(& $testExecutable 2>&1 | ForEach-Object { [string]$_ })
-    $exitCode = $LASTEXITCODE
+    # The IPC rejection tests intentionally log to stderr. Windows PowerShell
+    # promotes native stderr records to non-terminating ErrorRecords; with the
+    # script-wide Stop policy that aborts the validation before the executable's
+    # real exit code and summary can be checked.
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = @(& $testExecutable 2>&1 | ForEach-Object { [string]$_ })
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorAction
+    }
     if ($exitCode -ne 0) {
         $output | Write-Output
         # Normalize: the exe returns its failing-scenario count, which would

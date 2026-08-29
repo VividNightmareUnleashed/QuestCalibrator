@@ -63,10 +63,11 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	{
 		return TrySetDeviceTransform(transform);
 	};
-	sink.setAlignmentField = [this](const protocol::SetAlignmentField &field)
+	sink.setRuntimeState = [this](const protocol::SetRuntimeState &state)
 	{
-		return TrySetAlignmentField(field);
+		return TrySetRuntimeState(state);
 	};
+	sink.poseHookMask = [] { return PoseUpdateHookMask(); };
 	if (!server.Run(std::move(sink)))
 	{
 		LOG("IPC server could not establish its control listener");
@@ -156,20 +157,32 @@ bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDevic
 	return true;
 }
 
-bool ServerTrackedDeviceProvider::TrySetAlignmentField(const protocol::SetAlignmentField &newField)
+bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeState &newState)
 {
-	protocol::SetAlignmentField sanitized;
-	if (!questcal::driverinput::ValidateAndSanitize(newField, sanitized))
+	protocol::SetRuntimeState sanitized;
+	if (!questcal::driverinput::ValidateAndSanitize(newState, sanitized))
 	{
-		LOG("SetAlignmentField: rejected invalid field (enabled=%d, anchors=%u)",
-			newField.enabled ? 1 : 0, newField.anchorCount);
+		LOG("SetRuntimeState: rejected invalid state (enabled=%llx, hidden=%llx, anchors=%u)",
+			static_cast<unsigned long long>(newState.enabledMask),
+			static_cast<unsigned long long>(newState.hiddenMask),
+			newState.field.anchorCount);
 		return false;
 	}
 
-	// Same seqlock discipline as the transform slots: IPC thread writes, pose
-	// threads read.
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		protocol::SetDeviceTransform transform = sanitized.transform;
+		transform.openVRID = id;
+		transform.enabled = (sanitized.enabledMask >> id) & 1;
+		transform.hidden = (sanitized.hiddenMask >> id) & 1;
+		auto &slot = transforms[id];
+		slot.sequence.fetch_add(1, std::memory_order_acq_rel);
+		slot.Store(transform);
+		slot.sequence.fetch_add(1, std::memory_order_release);
+	}
+
 	alignmentField.sequence.fetch_add(1, std::memory_order_acq_rel);
-	alignmentField.field.Store(sanitized);
+	alignmentField.field.Store(sanitized.field);
 	alignmentField.sequence.fetch_add(1, std::memory_order_release);
 	return true;
 }
@@ -221,6 +234,7 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 {
 	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
 		return true;
+	std::lock_guard<std::mutex> poseLock(poseMutexes[openVRID]);
 
 	// Publish the raw driver-space pose (pre-transform) for the solver, stamped
 	// at capture. This is the overlay's time base for cross-system alignment.

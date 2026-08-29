@@ -39,11 +39,13 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 {
 	if (!questcal::ipc::PrepareRequest(request, connection, response))
 	{
+		if (response.type == protocol::ResponseHandshake && sink.poseHookMask)
+			response.poseHookMask = sink.poseHookMask();
 		// The other cause of ResponseInvalid. Handshake and unknown request
 		// types are handled below/inside the gate, so only a mutation refused
 		// for the connection's own state is worth a line here.
 		if (request.type == protocol::RequestSetDeviceTransform ||
-			request.type == protocol::RequestSetAlignmentField)
+			request.type == protocol::RequestSetRuntimeState)
 			LOG("IPC mutation %d refused by the protocol gate: this connection has "
 				"no same-version handshake (request version %u, driver %u)",
 				request.type, request.protocol.version, protocol::Version);
@@ -57,9 +59,9 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 			sink.setDeviceTransform(request.setDeviceTransform), "SetDeviceTransform");
 		break;
 
-	case protocol::RequestSetAlignmentField:
+	case protocol::RequestSetRuntimeState:
 		response.type = SetterResult(
-			sink.setAlignmentField(request.setAlignmentField), "SetAlignmentField");
+			sink.setRuntimeState(request.setRuntimeState), "SetRuntimeState");
 		break;
 
 	default:
@@ -81,7 +83,8 @@ bool IPCServer::Run(RequestSink newSink)
 
 	// Checked once here rather than per request: an empty std::function called
 	// from a completion APC would throw out of the APC and terminate vrserver.
-	if (!newSink.setDeviceTransform || !newSink.setAlignmentField)
+	if (!newSink.setDeviceTransform || !newSink.setRuntimeState ||
+		!newSink.poseHookMask)
 	{
 		LOG("IPC server refused to start without a complete request sink");
 		return false;
@@ -206,17 +209,36 @@ void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 void IPCServer::CloseIdleConnections()
 {
 	const ULONGLONG now = GetTickCount64();
-	for (auto it = pipes.begin(); it != pipes.end(); )
+	for (PipeInstance *pipeInst : pipes)
 	{
-		PipeInstance *pipeInst = *it;
-		++it;   // ClosePipeInstance erases, so advance first
-		if (now - pipeInst->lastActivityMs < ConnectionIdleDeadlineMs)
+		if (pipeInst->closing ||
+			now - pipeInst->lastActivityMs < ConnectionIdleDeadlineMs)
 			continue;
 
 		LOG("Dropping IPC connection idle for %llu ms", now - pipeInst->lastActivityMs);
-		CancelIoEx(pipeInst->pipe, &pipeInst->overlap);
-		ClosePipeInstance(pipeInst);
+		pipeInst->closing = true;
+		if (!CancelIoEx(pipeInst->pipe, &pipeInst->overlap) &&
+			GetLastError() != ERROR_NOT_FOUND)
+		{
+			LOG("CancelIoEx failed for idle IPC connection. Error: %d", GetLastError());
+		}
 	}
+}
+
+DWORD IPCServer::NextIdleTimeoutMs() const
+{
+	const ULONGLONG now = GetTickCount64();
+	ULONGLONG nearest = MAXDWORD;
+	for (const PipeInstance *pipeInst : pipes)
+	{
+		if (pipeInst->closing)
+			continue;
+		ULONGLONG elapsed = now - pipeInst->lastActivityMs;
+		if (elapsed >= ConnectionIdleDeadlineMs)
+			return 0;
+		nearest = std::min(nearest, ConnectionIdleDeadlineMs - elapsed);
+	}
+	return static_cast<DWORD>(nearest);
 }
 
 void IPCServer::RunThread(IPCServer *_this)
@@ -253,13 +275,14 @@ void IPCServer::RunThread(IPCServer *_this)
 		}
 
 		DWORD handleCount = _this->listenerPipe == INVALID_HANDLE_VALUE ? 1 : 2;
-		DWORD timeout = INFINITE;
+		DWORD timeout = _this->NextIdleTimeoutMs();
 		if (handleCount == 1)
 		{
 			ULONGLONG now = GetTickCount64();
 			ULONGLONG remaining = nextListenerAttempt > now
 				? nextListenerAttempt - now : 0;
-			timeout = static_cast<DWORD>(std::min<ULONGLONG>(remaining, MAXDWORD));
+			timeout = std::min(timeout,
+				static_cast<DWORD>(std::min<ULONGLONG>(remaining, MAXDWORD)));
 		}
 
 		DWORD wait = WaitForMultipleObjectsEx(handleCount, waitHandles, FALSE, timeout, TRUE);
@@ -430,7 +453,8 @@ bool IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, boo
 IPCServer::PipeInstance *IPCServer::ActivePipeInstanceOrClose(LPOVERLAPPED overlap)
 {
 	PipeInstance *pipeInst = reinterpret_cast<PipeInstance *>(overlap);
-	if (!pipeInst->server->stop.load(std::memory_order_acquire))
+	if (!pipeInst->closing &&
+		!pipeInst->server->stop.load(std::memory_order_acquire))
 	{
 		// Both completion callbacks funnel through here, so this is the one
 		// place that sees every completed IO on a connection - stamping it here

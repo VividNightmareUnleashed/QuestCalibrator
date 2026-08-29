@@ -20,12 +20,15 @@
 #include "../Driver/IPCServer.h"
 #include "../Driver/Logging.h"
 #include "../Overlay/CalibrationEngine.h"
+#include "../Overlay/CalibrationRun.h"
 #include "../Overlay/ChaperoneMath.h"
 #include "../Overlay/ContinuousAlignment.h"
+#include "../Overlay/ContinuousCorrectionGate.h"
 #include "../Overlay/FieldMath.h"
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/DriverSession.h"
 #include "../Overlay/DriverSyncPolicy.h"
+#include "../Overlay/DriverSyncWorker.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/PersistenceState.h"
 #include "../Overlay/ProfileValidation.h"
@@ -748,7 +751,37 @@ void RunDriverProtocolValidationScenarios()
 	pass = pass && ValidateAndSanitize(unusedGarbage, scrubbed) &&
 		scrubbed.anchors[0].position[0] == 0.0 && scrubbed.anchors[0].rotationDelta.w == 1.0;
 
-	Check("driver: protocol validation", pass, "finite/range/quaternion/unused-anchor matrix");
+	protocol::SetRuntimeState runtime;
+	runtime.enabledMask = (uint64_t{ 1 } << 3) | (uint64_t{ 1 } << 7);
+	runtime.hiddenMask = uint64_t{ 1 } << 7;
+	runtime.transform = good;
+	runtime.transform.openVRID = 0;
+	runtime.transform.enabled = 1;
+	runtime.transform.hidden = 0;
+	runtime.field = goodField;
+	protocol::SetRuntimeState cleanRuntime;
+	pass = pass && ValidateAndSanitize(runtime, cleanRuntime) &&
+		cleanRuntime.enabledMask == runtime.enabledMask &&
+		cleanRuntime.hiddenMask == runtime.hiddenMask;
+	auto rejectsRuntime = [&](protocol::SetRuntimeState candidate)
+	{
+		protocol::SetRuntimeState ignored;
+		return !ValidateAndSanitize(candidate, ignored);
+	};
+	auto badRuntime = runtime;
+	badRuntime.hiddenMask |= uint64_t{ 1 } << 9;
+	pass = pass && rejectsRuntime(badRuntime);
+	badRuntime = runtime; badRuntime.transform.openVRID = 3;
+	pass = pass && rejectsRuntime(badRuntime);
+	badRuntime = runtime; badRuntime.transform.enabled = 0;
+	pass = pass && rejectsRuntime(badRuntime);
+	badRuntime = runtime; badRuntime.transform.hidden = 1;
+	pass = pass && rejectsRuntime(badRuntime);
+	badRuntime = runtime; badRuntime.enabledMask = 0; badRuntime.hiddenMask = 0;
+	pass = pass && rejectsRuntime(badRuntime);
+
+	Check("driver: protocol validation", pass,
+		"finite/range/quaternion/unused-anchor/atomic-state matrix");
 
 	questcal::ipc::ConnectionState connection;
 	protocol::Response response;
@@ -792,11 +825,11 @@ void RunDriverProtocolValidationScenarios()
 
 	// The gate's `mutation` clause names BOTH mutating request types, and only
 	// SetDeviceTransform was ever driven through it. Dropping the
-	// RequestSetAlignmentField term would make every spatial-field send fall
+	// RequestSetRuntimeState term would make every complete-state send fall
 	// through to ResponseInvalid -- indistinguishable, on the wire, from a broken
 	// handshake -- while the driver's own field validation kept passing.
 	questcal::ipc::ConnectionState fieldConnection;
-	protocol::Request fieldMutation(protocol::RequestSetAlignmentField);
+	protocol::Request fieldMutation(protocol::RequestSetRuntimeState);
 	bool fieldPreHandshake =
 		questcal::ipc::PrepareRequest(fieldMutation, fieldConnection, response);
 	protocol::Request fieldHandshake(protocol::RequestHandshake);
@@ -805,7 +838,7 @@ void RunDriverProtocolValidationScenarios()
 		questcal::ipc::PrepareRequest(fieldMutation, fieldConnection, response);
 	Check("driver: alignment-field dispatch gate",
 		!fieldPreHandshake && fieldConnection.handshakeComplete && fieldAccepted,
-		"SetAlignmentField refused before the handshake, dispatched after it");
+		"SetRuntimeState refused before the handshake, dispatched after it");
 
 	// Everything above exercises the gate in isolation. This is the first
 	// coverage of anything in IPCServer.cpp itself: which sink a request
@@ -824,17 +857,18 @@ void RunDriverProtocolValidationScenarios()
 		++transformCalls;
 		return setterAccepts;
 	};
-	sink.setAlignmentField = [&](const protocol::SetAlignmentField &)
+	sink.setRuntimeState = [&](const protocol::SetRuntimeState &)
 	{
 		++fieldCalls;
 		return setterAccepts;
 	};
+	sink.poseHookMask = [] { return protocol::PoseHook006; };
 	server.SetSinkForTest(sink);
 
 	questcal::ipc::ConnectionState dispatchConn;
 	protocol::Response dispatched(protocol::ResponseInvalid);
 	protocol::Request transformReq(protocol::RequestSetDeviceTransform);
-	protocol::Request fieldReq(protocol::RequestSetAlignmentField);
+	protocol::Request fieldReq(protocol::RequestSetRuntimeState);
 
 	// A gate refusal must not reach a setter at all: the driver never sees
 	// values from a connection that has not proven its version.
@@ -844,7 +878,8 @@ void RunDriverProtocolValidationScenarios()
 
 	protocol::Request dispatchHandshake(protocol::RequestHandshake);
 	server.DispatchForTest(dispatchHandshake, dispatched, dispatchConn);
-	bool dispatchHandshakeOk = dispatched.type == protocol::ResponseHandshake;
+	bool dispatchHandshakeOk = dispatched.type == protocol::ResponseHandshake &&
+		dispatched.poseHookMask == protocol::PoseHook006;
 
 	// Each mutation reaches its own setter and only its own.
 	server.DispatchForTest(transformReq, dispatched, dispatchConn);
@@ -875,10 +910,8 @@ void RunDriverProtocolValidationScenarios()
 // ---------------------------------------------------------------------------
 // Overlay -> driver slot reconciliation (Overlay/DriverSyncPolicy.h)
 //
-// SynchronizeDriverState's decision half: which slot gets the calibration,
-// which slots must be retired, and the conservative ledger answering "what
-// might this slot still be applying?" across scans. Only the transport is faked
-// below; every decision and every ledger update is the production one.
+// SynchronizeDriverState's pure decision half: which slots receive the
+// calibration and how their complete masks are derived.
 
 // A device table indexed by OpenVR id. A slot nobody filled in enumerates as
 // TrackedDeviceClass_Invalid, which is exactly what OpenVR reports for an id it
@@ -914,80 +947,6 @@ struct SyncDeviceTable
 	}
 };
 
-struct SyncPassResult
-{
-	std::vector<protocol::SetDeviceTransform> enables;   // sent AND acknowledged
-	std::vector<uint32_t> attemptedEnables;              // includes the lost ones
-	std::vector<uint32_t> disables;
-	bool referenceMask[vr::k_unMaxTrackedDeviceCount] = {};
-	bool targetMask[vr::k_unMaxTrackedDeviceCount] = {};
-	uint32_t continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
-	bool profileEnabled = false;
-};
-
-// Mirrors SynchronizeDriverState's send loop over a scripted transport.
-// `loseResponsesFrom` is the first slot whose request never gets a response
-// back: the driver may well have applied it, and production stops issuing the
-// rest of the batch once a request fails, so this does too.
-//
-// The ordering this exists to expose is the one a fake cannot fake: the ledger
-// mark happens inside DecideSlot, so it is already done by the time this
-// function reaches its send.
-SyncPassResult RunDriverSyncPass(questcal::DriverSlotPolicy &policy,
-	const questcal::DriverSyncDesired &desired, bool profileEnabled,
-	const SyncDeviceTable &table,
-	uint32_t loseResponsesFrom = vr::k_unTrackedDeviceIndexInvalid)
-{
-	SyncPassResult out;
-	out.profileEnabled = profileEnabled;
-	bool synchronized = true;
-	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
-	{
-		if (!synchronized)
-			continue;
-		const bool acknowledged = id < loseResponsesFrom;
-
-		if (!out.profileEnabled)
-		{
-			if (policy.DecideNeutralSlot(id).action == questcal::SlotAction::Disable)
-			{
-				out.disables.push_back(id);
-				if (acknowledged)
-					policy.NoteSlotDisabled(id);
-				else
-					synchronized = false;
-			}
-			continue;
-		}
-
-		questcal::SlotDecision decision = policy.DecideSlot(desired, table.devices[id]);
-		out.referenceMask[id] = decision.referenceDevice;
-		out.targetMask[id] = decision.targetDevice;
-		if (decision.continuousTracker)
-			out.continuousTrackerId = id;
-		if (decision.disableProfile)
-			out.profileEnabled = false;
-
-		if (decision.action == questcal::SlotAction::Disable)
-		{
-			out.disables.push_back(id);
-			if (acknowledged)
-				policy.NoteSlotDisabled(id);
-			else
-				synchronized = false;
-		}
-		else if (decision.action == questcal::SlotAction::ApplyTransform)
-		{
-			out.attemptedEnables.push_back(id);
-			if (acknowledged)
-				out.enables.push_back(decision.transform);
-			else
-				synchronized = false;
-		}
-	}
-	return out;
-}
-
 questcal::DriverSyncDesired MakeDriverSyncDesired()
 {
 	questcal::DriverSyncDesired desired;
@@ -998,297 +957,73 @@ questcal::DriverSyncDesired MakeDriverSyncDesired()
 	desired.translationMeters = Eigen::Vector3d(0.4, -0.1, 1.2);
 	desired.scale = 1.02;
 	desired.timeShift = -0.012;
-	// Non-zero and not a round default, so both "hardcoded a constant" and
-	// "dropped the assignment and kept the struct default" are visible.
 	desired.baseGeneration = 9;
 	return desired;
 }
 
 void RunDriverSyncScenarios()
 {
-	// 1. The snap/slew discriminator on the wire. baseGeneration is what makes
-	// the driver snap to an intentional change; drop or hardcode this and every
-	// recalibration, universe-jump compensation and profile edit routes through
-	// the driver's slew path, smearing a whole recalibration delta over seconds
-	// of visibly drifting world. Three sends pin it: steady state, a continuous
-	// correction (transform moves, generation must NOT), and a recalibration
-	// (generation must follow the bump).
-	{
-		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
-		SyncDeviceTable table;
-		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		table.Place(4, questcal::SyncDeviceClass::Other, "oculus");
+	questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
 
-		questcal::DriverSlotPolicy policy;
-		SyncPassResult steady = RunDriverSyncPass(policy, desired, true, table);
+	questcal::SyncDevice target;
+	target.id = 4;
+	target.deviceClass = questcal::SyncDeviceClass::Other;
+	target.trackingSystemKnown = true;
+	target.trackingSystem = "oculus";
+	auto applied = questcal::DecideSlot(desired, target);
+	bool payload = applied.action == questcal::SlotAction::ApplyTransform &&
+		applied.transform.openVRID == 4 && applied.transform.enabled == 1 &&
+		applied.transform.generation == desired.baseGeneration &&
+		std::abs(applied.transform.scale - desired.scale) < 1e-12 &&
+		std::abs(applied.transform.timeOffset - desired.timeShift) < 1e-12 &&
+		std::abs(applied.transform.translation.v[0] - desired.translationMeters(0)) < 1e-12 &&
+		std::abs(applied.transform.rotation.y - desired.rotation.y()) < 1e-12;
+	Check("driver sync: target payload", payload,
+		"one target decision carries the complete canonical transform");
 
-		questcal::DriverSyncDesired slewed = desired;
-		slewed.translationMeters += Eigen::Vector3d(0.001, 0.0, -0.002);
-		SyncPassResult slew = RunDriverSyncPass(policy, slewed, true, table);
+	questcal::SyncDevice hmd;
+	hmd.id = vr::k_unTrackedDeviceIndex_Hmd;
+	hmd.deviceClass = questcal::SyncDeviceClass::Hmd;
+	hmd.trackingSystemKnown = true;
+	hmd.trackingSystem = "lighthouse";
+	auto reference = questcal::DecideSlot(desired, hmd);
+	hmd.trackingSystem = "oculus";
+	auto foreign = questcal::DecideSlot(desired, hmd);
+	questcal::SyncDevice unknown = target;
+	unknown.trackingSystemKnown = false;
+	auto unreadable = questcal::DecideSlot(desired, unknown);
+	Check("driver sync: identity gates",
+		reference.referenceDevice && reference.action == questcal::SlotAction::None &&
+		!reference.disableProfile && foreign.disableProfile &&
+		unreadable.action == questcal::SlotAction::None &&
+		!unreadable.referenceDevice && !unreadable.targetDevice,
+		"reference HMD is never transformed; foreign HMD disables; unknown stays neutral");
 
-		questcal::DriverSyncDesired snapped = slewed;
-		snapped.baseGeneration = desired.baseGeneration + 1;
-		SyncPassResult snap = RunDriverSyncPass(policy, snapped, true, table);
+	desired.continuousTrackerSerial = "T-MOUNT";
+	desired.continuousArmed = true;
+	desired.hideMountedTracker = true;
+	target.serialKnown = true;
+	target.serial = "T-MOUNT";
+	auto mounted = questcal::DecideSlot(desired, target);
+	target.serial = "T-FOOT";
+	auto ordinary = questcal::DecideSlot(desired, target);
+	desired.continuousArmed = false;
+	target.serial = "T-MOUNT";
+	auto unarmed = questcal::DecideSlot(desired, target);
+	Check("driver sync: mounted tracker",
+		mounted.continuousTracker && mounted.transform.hidden == 1 &&
+		!ordinary.continuousTracker && ordinary.transform.hidden == 0 &&
+		unarmed.continuousTracker && unarmed.transform.hidden == 0,
+		"only the armed tracker serial is hidden");
 
-		bool shapes = steady.enables.size() == 1 && slew.enables.size() == 1 &&
-			snap.enables.size() == 1;
-		bool generations = shapes &&
-			steady.enables[0].generation == desired.baseGeneration &&
-			slew.enables[0].generation == desired.baseGeneration &&
-			snap.enables[0].generation == desired.baseGeneration + 1;
-		// The rest of the message is the live calibration, so a generation that
-		// survives a gutted payload still fails here.
-		bool payload = shapes &&
-			steady.enables[0].openVRID == 4 && steady.enables[0].enabled == 1 &&
-			std::abs(steady.enables[0].scale - desired.scale) < 1e-12 &&
-			std::abs(steady.enables[0].timeOffset - desired.timeShift) < 1e-12 &&
-			std::abs(steady.enables[0].translation.v[0] - desired.translationMeters(0)) < 1e-12 &&
-			std::abs(steady.enables[0].translation.v[2] - desired.translationMeters(2)) < 1e-12 &&
-			std::abs(steady.enables[0].rotation.w - desired.rotation.w()) < 1e-12 &&
-			std::abs(steady.enables[0].rotation.y - desired.rotation.y()) < 1e-12 &&
-			std::abs(slew.enables[0].translation.v[2] - slewed.translationMeters(2)) < 1e-12;
-		Check("driver sync: base generation", generations && payload,
-			"9 / 9 on a continuous correction / 10 on a recalibration");
-	}
-
-	// 2. The conservative slot ledger under response loss. Marking on success
-	// instead of before the send is the obvious-looking cleanup, and it leaves
-	// an enabled transform on a slot the overlay believes is neutral: when the
-	// id is later reassigned to a reference-side device, the target transform is
-	// applied to it and the device flies to a wrong position with no error
-	// anywhere.
-	{
-		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
-		SyncDeviceTable table;
-		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		table.Place(5, questcal::SyncDeviceClass::Other, "oculus");
-
-		questcal::DriverSlotPolicy policy;
-		SyncPassResult lost = RunDriverSyncPass(policy, desired, true, table, 5);
-		bool attempted = lost.attemptedEnables.size() == 1 &&
-			lost.attemptedEnables[0] == 5 && lost.enables.empty();
-		bool ledgerHeld = policy.SlotMayBeEnabled(5);
-
-		// The id disappears from OpenVR; the driver slot does not.
-		SyncDeviceTable gone = table;
-		gone.Remove(5);
-		questcal::DriverSlotPolicy afterGone = policy;
-		SyncPassResult retire = RunDriverSyncPass(afterGone, desired, true, gone);
-		bool retired = retire.disables.size() == 1 && retire.disables[0] == 5 &&
-			retire.enables.empty() && !afterGone.SlotMayBeEnabled(5);
-
-		// The dangerous case: the id comes back as a reference-side device.
-		SyncDeviceTable reassigned = table;
-		reassigned.Place(5, questcal::SyncDeviceClass::Other, "lighthouse");
-		questcal::DriverSlotPolicy afterReassign = policy;
-		SyncPassResult reassign =
-			RunDriverSyncPass(afterReassign, desired, true, reassigned);
-		bool reassignedRetired = reassign.disables.size() == 1 &&
-			reassign.disables[0] == 5 && reassign.enables.empty() &&
-			reassign.referenceMask[5] && !reassign.targetMask[5];
-
-		// A confirmed disable is the one per-slot way out: the next pass is silent.
-		SyncPassResult settled = RunDriverSyncPass(afterGone, desired, true, gone);
-		bool quiet = settled.disables.empty() && settled.enables.empty();
-
-		Check("driver sync: response-loss ledger",
-			attempted && ledgerHeld && retired && reassignedRetired && quiet,
-			"a lost enable stays marked; disappearance and reassignment both retire it");
-	}
-
-	// 3. Converging to neutral takes no OpenVR scan at all -- the ledger names
-	// every slot that may still be live. The empty table below is the scan that
-	// production deliberately never performs on this path; a neutral pass that
-	// read devices instead of the ledger would retire nothing.
-	{
-		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
-		SyncDeviceTable table;
-		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		table.Place(2, questcal::SyncDeviceClass::Other, "oculus");
-		table.Place(7, questcal::SyncDeviceClass::Other, "oculus");
-
-		questcal::DriverSlotPolicy policy;
-		SyncPassResult on = RunDriverSyncPass(policy, desired, true, table);
-		bool enabledBoth = on.enables.size() == 2 &&
-			on.enables[0].openVRID == 2 && on.enables[1].openVRID == 7;
-
-		SyncDeviceTable unscanned;
-		SyncPassResult off = RunDriverSyncPass(policy, desired, false, unscanned);
-		bool retiredBoth = off.disables.size() == 2 &&
-			off.disables[0] == 2 && off.disables[1] == 7;
-
-		// ... and then stops. A pass that kept re-disabling would spend 64
-		// blocking pipe round-trips on the UI thread every scan, forever.
-		SyncPassResult again = RunDriverSyncPass(policy, desired, false, unscanned);
-		bool settled = again.disables.empty();
-
-		Check("driver sync: neutral path", enabledBoth && retiredBoth && settled,
-			"ledger alone retires 2 slots with no device scan, then goes quiet");
-	}
-
-	// 4. Only target-system devices that are not the headset may carry the
-	// transform. The headset defines the reference universe, so slot 0 is never
-	// a target whatever it reports -- and a headset on a foreign tracking system
-	// is a different rig, which must stop the profile rather than be calibrated.
-	{
-		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
-		SyncDeviceTable table;
-		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		table.Place(1, questcal::SyncDeviceClass::Other, "lighthouse");
-		table.Place(2, questcal::SyncDeviceClass::Other, "oculus");
-		table.Place(3, questcal::SyncDeviceClass::Other, "wmr");
-		table.Place(6, questcal::SyncDeviceClass::Other, nullptr);
-
-		questcal::DriverSlotPolicy policy;
-		SyncPassResult live = RunDriverSyncPass(policy, desired, true, table);
-		bool onlyTargetEnabled = live.enables.size() == 1 &&
-			live.enables[0].openVRID == 2 && live.profileEnabled;
-		bool masks =
-			live.referenceMask[0] && live.referenceMask[1] &&
-			!live.referenceMask[2] && !live.referenceMask[3] && !live.referenceMask[6] &&
-			live.targetMask[2] &&
-			!live.targetMask[0] && !live.targetMask[1] &&
-			!live.targetMask[3] && !live.targetMask[6];
-
-		SyncDeviceTable foreignHmd = table;
-		foreignHmd.Place(0, questcal::SyncDeviceClass::Hmd, "oculus");
-		questcal::DriverSlotPolicy fresh;
-		SyncPassResult disowned =
-			RunDriverSyncPass(fresh, desired, true, foreignHmd);
-		bool profileDropped = !disowned.profileEnabled && disowned.enables.empty();
-
-		Check("driver sync: reference-side slots",
-			onlyTargetEnabled && masks && profileDropped,
-			"HMD/reference/third-system/unreadable carry nothing; foreign HMD disables");
-	}
-
-	// 5. Which device gets displaced out of games' reach. The mounted tracker is
-	// resolved by serial because ids are not stable across sessions, and the
-	// hide is gated on the feature being ARMED (pick plus learned extrinsic):
-	// gating it on the weaker half displaced the tracker out of every game while
-	// nothing maintained the alignment.
-	{
-		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
-		desired.continuousTrackerSerial = "T-MOUNT";
-		desired.continuousArmed = true;
-		desired.hideMountedTracker = true;
-
-		SyncDeviceTable table;
-		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		table.Place(1, questcal::SyncDeviceClass::Other, "lighthouse", "LHR-9");
-		table.Place(3, questcal::SyncDeviceClass::Other, "oculus", "T-MOUNT");
-		table.Place(4, questcal::SyncDeviceClass::Other, "oculus", "T-FOOT");
-
-		questcal::DriverSlotPolicy armedSlots;
-		SyncPassResult armedPass = RunDriverSyncPass(armedSlots, desired, true, table);
-		bool hidesOne = armedPass.enables.size() == 2 &&
-			armedPass.enables[0].openVRID == 3 && armedPass.enables[0].hidden == 1 &&
-			armedPass.enables[1].openVRID == 4 && armedPass.enables[1].hidden == 0 &&
-			armedPass.continuousTrackerId == 3;
-
-		questcal::DriverSyncDesired unarmed = desired;
-		unarmed.continuousArmed = false;
-		questcal::DriverSlotPolicy unarmedSlots;
-		SyncPassResult shown = RunDriverSyncPass(unarmedSlots, unarmed, true, table);
-		// Still resolved (the drift monitor and the UI need the id), just not hidden.
-		bool shownWhenUnarmed = shown.enables.size() == 2 &&
-			shown.enables[0].hidden == 0 && shown.enables[1].hidden == 0 &&
-			shown.continuousTrackerId == 3;
-
-		questcal::DriverSyncDesired noHide = desired;
-		noHide.hideMountedTracker = false;
-		questcal::DriverSlotPolicy noHideSlots;
-		SyncPassResult visible = RunDriverSyncPass(noHideSlots, noHide, true, table);
-		bool shownWhenPreferenceOff = visible.enables.size() == 2 &&
-			visible.enables[0].hidden == 0 && visible.enables[1].hidden == 0;
-
-		// Reading a serial is an OpenVR string property read per device, so the
-		// enumerator pays it only where a decision can use the answer.
-		questcal::DriverSyncDesired noTracker = desired;
-		noTracker.continuousTrackerSerial.clear();
-		bool serialWhereItCounts =
-			questcal::SlotNeedsSerial(desired, table.devices[3]) &&
-			questcal::SlotNeedsSerial(desired, table.devices[4]) &&
-			!questcal::SlotNeedsSerial(desired, table.devices[0]) &&
-			!questcal::SlotNeedsSerial(desired, table.devices[1]) &&
-			!questcal::SlotNeedsSerial(desired, table.devices[9]) &&
-			!questcal::SlotNeedsSerial(noTracker, table.devices[3]);
-
-		Check("driver sync: mounted tracker",
-			hidesOne && shownWhenUnarmed && shownWhenPreferenceOff && serialWhereItCounts,
-			"hidden only for the armed pick; serial read only where it decides");
-	}
-
-	// 6. Device ids are untrusted input everywhere they index a 64-entry table.
-	{
-		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
-		questcal::DriverSlotPolicy policy;
-
-		questcal::SyncDevice pastEnd;
-		pastEnd.id = vr::k_unMaxTrackedDeviceCount;
-		pastEnd.deviceClass = questcal::SyncDeviceClass::Other;
-		pastEnd.trackingSystemKnown = true;
-		pastEnd.trackingSystem = "oculus";
-		bool ignoresPastEnd =
-			policy.DecideSlot(desired, pastEnd).action == questcal::SlotAction::None &&
-			!questcal::SlotNeedsSerial(desired, pastEnd);
-
-		questcal::SyncDevice invalidId = pastEnd;
-		invalidId.id = vr::k_unTrackedDeviceIndexInvalid;
-		bool ignoresInvalid =
-			policy.DecideSlot(desired, invalidId).action == questcal::SlotAction::None;
-
-		bool quietQueries =
-			!policy.SlotMayBeEnabled(vr::k_unMaxTrackedDeviceCount) &&
-			!policy.SlotMayBeEnabled(vr::k_unTrackedDeviceIndexInvalid) &&
-			policy.DecideNeutralSlot(vr::k_unMaxTrackedDeviceCount).action ==
-				questcal::SlotAction::None;
-		policy.NoteSlotDisabled(vr::k_unMaxTrackedDeviceCount);
-		policy.NoteSlotDisabled(vr::k_unTrackedDeviceIndexInvalid);
-
-		// The last legal slot still reconciles, so the bound is not off by one.
-		const uint32_t lastId = vr::k_unMaxTrackedDeviceCount - 1;
-		SyncDeviceTable table;
-		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		table.Place(lastId, questcal::SyncDeviceClass::Other, "oculus");
-		SyncPassResult last = RunDriverSyncPass(policy, desired, true, table);
-		bool lastSlotUsable = last.enables.size() == 1 &&
-			last.enables[0].openVRID == lastId && policy.SlotMayBeEnabled(lastId);
-
-		Check("driver sync: slot bounds",
-			ignoresPastEnd && ignoresInvalid && quietQueries && lastSlotUsable,
-			"out-of-range ids decide nothing; slot 63 still reconciles");
-	}
-
-	// 7. A pipe reconnect neutralizes the whole connection before desired state
-	// is rebuilt. That acknowledged bulk reset is the only thing besides a
-	// confirmed per-slot disable that may clear the ledger.
-	{
-		questcal::DriverSyncDesired desired = MakeDriverSyncDesired();
-		SyncDeviceTable table;
-		table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		for (uint32_t id = 1; id < 5; ++id)
-			table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
-
-		questcal::DriverSlotPolicy policy;
-		SyncPassResult live = RunDriverSyncPass(policy, desired, true, table);
-		bool marked = live.enables.size() == 4 && policy.SlotMayBeEnabled(1) &&
-			policy.SlotMayBeEnabled(4);
-
-		policy.ForgetEverySlot();
-		bool forgotEverything = true;
-		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
-			forgotEverything = forgotEverything && !policy.SlotMayBeEnabled(id);
-
-		SyncDeviceTable unscanned;
-		SyncPassResult afterReset =
-			RunDriverSyncPass(policy, desired, false, unscanned);
-		bool nothingToRetire = afterReset.disables.empty();
-
-		Check("driver sync: connection neutralize",
-			marked && forgotEverything && nothingToRetire,
-			"an acknowledged connection-wide reset is the only bulk way out");
-	}
+	questcal::SyncDevice pastEnd = target;
+	pastEnd.id = vr::k_unMaxTrackedDeviceCount;
+	questcal::SyncDevice last = target;
+	last.id = vr::k_unMaxTrackedDeviceCount - 1;
+	Check("driver sync: slot bounds",
+		questcal::DecideSlot(desired, pastEnd).action == questcal::SlotAction::None &&
+		questcal::DecideSlot(desired, last).action == questcal::SlotAction::ApplyTransform,
+		"out-of-range ids decide nothing; slot 63 remains usable");
 }
 
 // ---------------------------------------------------------------------------
@@ -1381,12 +1116,19 @@ LinkSpan SpanOf(const FakeDriverLink &link, size_t from)
 		{
 			++span.handshakes;
 		}
-		else if (request.type == protocol::RequestSetAlignmentField)
+		else if (request.type == protocol::RequestSetRuntimeState)
 		{
-			if (request.setAlignmentField.enabled)
+			if (request.setRuntimeState.field.enabled)
 				++span.fieldEnables;
 			else
 				++span.fieldDisables;
+			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+			{
+				if ((request.setRuntimeState.enabledMask >> id) & 1)
+					span.enables.push_back(id);
+				else
+					span.disables.push_back(id);
+			}
 		}
 		else if (request.type == protocol::RequestSetDeviceTransform)
 		{
@@ -1472,33 +1214,22 @@ void RunDriverSessionScenarios()
 			fx.table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
 
 		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
-		RunSessionScan(fx.session, request, 0.0);   // converge; the ledger now holds 1..4
+		RunSessionScan(fx.session, request, 0.0);
 
 		size_t from = fx.link.sent.size();
 		fx.link.script = [](size_t, const protocol::Request &request)
 		{
-			return request.type == protocol::RequestSetDeviceTransform &&
-				request.setDeviceTransform.enabled == 1 &&
-				request.setDeviceTransform.openVRID == 3
+			return request.type == protocol::RequestSetRuntimeState
 				? LinkFault::Refuse : LinkFault::None;
 		};
 		questcal::DriverApplyResult failed = RunSessionScan(fx.session, request, 1.0);
 		LinkSpan span = SpanOf(fx.link, from);
 
-		// The batch stopped at the refusal rather than pressing on...
-		bool stopped = span.enables.size() == 3 && span.enables[2] == 3 &&
-			!failed.synchronized;
-		// ...and the whole generation was retired: one neutralization pass is a
-		// handshake, a canonical field disable and all 64 slots from zero.
-		bool everySlot = span.handshakes == 2 && span.fieldEnables == 0 &&
-			span.fieldDisables == 1 &&
-			span.disables.size() == vr::k_unMaxTrackedDeviceCount;
-		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount && everySlot; ++id)
-			everySlot = span.disables[id] == id;
+		bool stopped = span.requests == 2 && span.handshakes == 1 &&
+			span.enables == std::vector<uint32_t>({ 1, 2, 3, 4 }) &&
+			!failed.synchronized && !failed.enabled;
 
-		// The ledger was forgotten and the neutral generation recorded, so the
-		// next scan neither resets again nor re-retires anything: a handshake and
-		// the canonical field disable, and nothing else.
+		// The next scan sends one canonical disabled state after its handshake.
 		fx.link.script = nullptr;
 		size_t settledFrom = fx.link.sent.size();
 		RunSessionScan(fx.session, MakeSessionRequest(false, true), 2.0);
@@ -1510,7 +1241,7 @@ void RunDriverSessionScenarios()
 		snprintf(detail, sizeof detail, "%d slots reset, next scan %d requests",
 			static_cast<int>(span.disables.size()),
 			static_cast<int>(settled.requests));
-		Check("driver session: batch neutralize", stopped && everySlot && quiet,
+		Check("driver session: complete-state failure", stopped && quiet,
 			detail);
 	}
 
@@ -1533,25 +1264,22 @@ void RunDriverSessionScenarios()
 		// Shipped last, after every base transform, with the caller's payload
 		// intact -- a session that rebuilt the message would lose these.
 		bool shipped = clean.fieldEnables == 1 &&
-			last.type == protocol::RequestSetAlignmentField &&
-			last.setAlignmentField.enabled == 1 &&
-			last.setAlignmentField.anchorCount == 2 &&
-			last.setAlignmentField.generation == 7 &&
-			std::abs(last.setAlignmentField.anchors[0].position[0] - 1.25) < 1e-12;
+			last.type == protocol::RequestSetRuntimeState &&
+			last.setRuntimeState.field.enabled == 1 &&
+			last.setRuntimeState.field.anchorCount == 2 &&
+			last.setRuntimeState.field.generation == 7 &&
+			std::abs(last.setRuntimeState.field.anchors[0].position[0] - 1.25) < 1e-12;
 
-		// A refused base transform: no field enable anywhere in the scan, the
-		// neutralization pass included.
+		// The transform mask and field are one request. A refusal applies neither.
 		from = fx.link.sent.size();
 		fx.link.script = [](size_t, const protocol::Request &request)
 		{
-			return request.type == protocol::RequestSetDeviceTransform &&
-				request.setDeviceTransform.enabled == 1 &&
-				request.setDeviceTransform.openVRID == 2
+			return request.type == protocol::RequestSetRuntimeState
 				? LinkFault::Refuse : LinkFault::None;
 		};
-		RunSessionScan(fx.session, request, 1.0);
+		questcal::DriverApplyResult refused = RunSessionScan(fx.session, request, 1.0);
 		LinkSpan broken = SpanOf(fx.link, from);
-		bool withheld = broken.fieldEnables == 0 && broken.fieldDisables == 1;
+		bool withheld = broken.requests == 2 && !refused.synchronized;
 
 		// A perfectly healthy connection with the profile off never enables it
 		// either, however much the caller has to blend.
@@ -1593,9 +1321,7 @@ void RunDriverSessionScenarios()
 		// tracker -- so there is real derived state to throw away.
 		fx.link.script = [](size_t, const protocol::Request &request)
 		{
-			return request.type == protocol::RequestSetDeviceTransform &&
-				request.setDeviceTransform.enabled == 1 &&
-				request.setDeviceTransform.openVRID == 3
+			return request.type == protocol::RequestSetRuntimeState
 				? LinkFault::Refuse : LinkFault::None;
 		};
 		questcal::DriverApplyResult partial = RunSessionScan(fx.session, request, 1.0);
@@ -1632,16 +1358,14 @@ void RunDriverSessionScenarios()
 		size_t from = fx.link.sent.size();
 		RunSessionScan(fx.session, request, 0.0);
 		LinkSpan first = SpanOf(fx.link, from);
-		bool neutralizedFirst = first.handshakes == 2 &&
-			first.disables.size() == vr::k_unMaxTrackedDeviceCount &&
+		bool neutralizedFirst = first.handshakes == 1 && first.requests == 2 &&
 			first.enables.size() == 1 && first.enables[0] == 1;
 
 		from = fx.link.sent.size();
 		RunSessionScan(fx.session, request, 1.0);
 		LinkSpan second = SpanOf(fx.link, from);
-		// The handshake, the one enable, the field. Nothing else at all.
-		bool steadyState = second.requests == 3 && second.handshakes == 1 &&
-			second.disables.empty() && second.enables.size() == 1;
+		bool steadyState = second.requests == 2 && second.handshakes == 1 &&
+			second.enables.size() == 1;
 
 		// A vrserver restart while idle is a new generation, and that pays for
 		// the reset pass again.
@@ -1649,8 +1373,8 @@ void RunDriverSessionScenarios()
 		from = fx.link.sent.size();
 		RunSessionScan(fx.session, request, 2.0);
 		LinkSpan restarted = SpanOf(fx.link, from);
-		bool reNeutralized = restarted.handshakes == 2 &&
-			restarted.disables.size() == vr::k_unMaxTrackedDeviceCount;
+		bool reNeutralized = restarted.handshakes == 1 &&
+			restarted.requests == 2 && restarted.enables.size() == 1;
 
 		char detail[96];
 		snprintf(detail, sizeof detail, "first %d, steady %d, after restart %d requests",
@@ -1677,34 +1401,16 @@ void RunDriverSessionScenarios()
 		size_t from = fx.link.sent.size();
 		fx.link.script = [](size_t, const protocol::Request &request)
 		{
-			return request.type == protocol::RequestSetDeviceTransform &&
-				request.setDeviceTransform.enabled == 1 &&
-				request.setDeviceTransform.openVRID == 2
+			return request.type == protocol::RequestSetRuntimeState
 				? LinkFault::Reconnect : LinkFault::None;
 		};
 		questcal::DriverApplyResult result = RunSessionScan(fx.session, request, 1.0);
 
-		// The request straight after the replayed enable is that slot's disable.
-		// A neutralization handshake there instead means the recovery is gone.
-		bool recovered = false;
-		for (size_t i = from; i + 1 < fx.link.sent.size(); ++i)
-		{
-			const protocol::Request &enable = fx.link.sent[i];
-			if (enable.type != protocol::RequestSetDeviceTransform ||
-				enable.setDeviceTransform.enabled != 1 ||
-				enable.setDeviceTransform.openVRID != 2)
-				continue;
-			const protocol::Request &next = fx.link.sent[i + 1];
-			recovered = next.type == protocol::RequestSetDeviceTransform &&
-				next.setDeviceTransform.enabled == 0 &&
-				next.setDeviceTransform.openVRID == 2;
-			break;
-		}
-
 		LinkSpan span = SpanOf(fx.link, from);
-		// The batch stopped there -- slot 3 was never attempted -- and failed closed.
-		bool stopped = span.enables.size() == 2 && span.enables[1] == 2 &&
-			span.fieldEnables == 0 && !result.synchronized && !result.enabled;
+		// The replay may have applied state, but it applied the complete state;
+		// only the overlay's confidence is withdrawn until the next scan.
+		bool stopped = span.requests == 2 && span.enables.size() == 3 &&
+			!result.synchronized && !result.enabled;
 
 		// The new generation was neutralized and recorded, so the next scan is a
 		// steady-state one rather than another 66-round-trip reset.
@@ -1712,12 +1418,12 @@ void RunDriverSessionScenarios()
 		size_t settledFrom = fx.link.sent.size();
 		RunSessionScan(fx.session, request, 2.0);
 		LinkSpan settled = SpanOf(fx.link, settledFrom);
-		bool recorded = settled.handshakes == 1 && settled.disables.empty() &&
+		bool recorded = settled.handshakes == 1 && settled.requests == 2 &&
 			settled.enables.size() == 3;
 
 		Check("driver session: mid-batch reconnect",
-			recovered && stopped && recorded,
-			"the replayed enable is retired on the new pipe before the generation-wide reset");
+			stopped && recorded,
+			"a reconnect can only replay one complete state and the next scan reconfirms it");
 	}
 
 	// 6. One driver failure is one banner. A dead pipe fails every request in a
@@ -1762,8 +1468,75 @@ void RunDriverSessionScenarios()
 	}
 }
 
+void RunDriverSyncWorkerScenario()
+{
+	std::atomic<int> requests{ 0 };
+	questcal::DriverSyncWorker worker;
+	worker.Start([&](const protocol::Request &request)
+	{
+		++requests;
+		questcal::DriverTransportResult result;
+		result.completed = true;
+		result.connectionGeneration = 1;
+		result.response = protocol::Response(request.type == protocol::RequestHandshake
+			? protocol::ResponseHandshake : protocol::ResponseSuccess);
+		result.response.poseHookMask = protocol::PoseHook006;
+		return result;
+	});
+
+	questcal::DriverSyncJob job;
+	job.request.enabled = false;
+	auto first = worker.Submit(job);
+	auto duplicate = worker.Submit(job);
+	job.request.desired.scale = 1.01;
+	auto changed = worker.Submit(job);
+
+	questcal::DriverSyncCompletion completion;
+	bool gotLatest = false;
+	for (int attempt = 0; attempt < 1000 && !gotLatest; ++attempt)
+	{
+		if (worker.Poll(completion) && completion.sequence == changed.sequence)
+			gotLatest = true;
+		else
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	worker.Stop();
+
+	Check("driver worker: coalesced background sync",
+		first.stateChanged && !duplicate.stateChanged && changed.stateChanged &&
+		gotLatest && completion.result.synchronized &&
+		completion.result.poseHookMask == protocol::PoseHook006 && requests >= 2,
+		"same-state submissions coalesce; latest completion carries handshake health");
+}
+
 void RunPoseSampleScenarios()
 {
+	{
+		CalibrationRun run;
+		run.referenceId = 1;
+		run.targetId = 2;
+		const Eigen::Quaterniond identity = Eigen::Quaterniond::Identity();
+		bool accepted = run.AcceptUniverse(1, identity, Eigen::Vector3d::Zero()) &&
+			run.AcceptUniverse(2, identity, Eigen::Vector3d(1.0, 0.0, 0.0)) &&
+			run.AcceptUniverse(1, identity, Eigen::Vector3d::Zero()) &&
+			!run.AcceptUniverse(2, identity, Eigen::Vector3d(1.01, 0.0, 0.0));
+		run.referenceSamples.reserve(8);
+		run.referenceSamples.push_back(PoseSample());
+		run.driverNeutralized = true;
+		run.Reset();
+		Check("calibration run: universe continuity and complete reset",
+			accepted && run.referenceId == UINT32_MAX &&
+			!run.referenceUniverse.valid && !run.targetUniverse.valid &&
+			!run.driverNeutralized && run.referenceSamples.empty() &&
+			run.referenceSamples.capacity() >= 8,
+			"stable epochs accepted, changed epoch rejected, reset clears ownership and retains buffers");
+	}
+	Check("profile identity: physical HMD ownership",
+		ProfileHmdIdentityMatches("quest-pro-A", "quest-pro-A") &&
+		!ProfileHmdIdentityMatches("quest-pro-A", "quest-pro-B") &&
+		!ProfileHmdIdentityMatches("", "quest-pro-A"),
+		"only the persisted non-empty physical serial matches");
+
 	// Ring consumers reject finite-but-implausible values before Eigen
 	// composition. These are numerically finite yet large enough to overflow
 	// downstream squared norms/products.
@@ -3250,7 +3023,9 @@ void RunSolverPrimitiveScenarios()
 			(out.angVel - Eigen::Vector3d(0.0, 1.5, 0.0)).norm() < 1e-12 &&
 			out.rot.angularDistance(expected) < 1e-12 &&
 			!CalibrationEngine::InterpolateAt(stream, 0.9, 1.1, out) &&
-			!CalibrationEngine::InterpolateAt(stream, 1.5, 0.5, out);
+			!CalibrationEngine::InterpolateAt(stream, 1.5, 0.5, out) &&
+			CalibrationEngine::InterpolateAt(stream, 1.0, 0.5, out) &&
+			CalibrationEngine::InterpolateAt(stream, 2.0, 0.5, out);
 		Check("solver: interpolation contract", pass, "");
 	}
 
@@ -3331,6 +3106,36 @@ void RunSolverPrimitiveScenarios()
 		snprintf(detail, sizeof detail, "worst %.3f ms of %.2f ms allowed",
 			worstSubStep * 1000.0, 100.0 * cfg.timeOffsetStep);
 		Check("solver: sub-step offset recovery", subStepPass, detail);
+	}
+
+	// Dropouts are holes, not long interpolation ramps. Correlating across them
+	// used to turn a true +18 ms lag into a high-scoring negative lag. The
+	// estimator may recover the truth from the surviving support or abstain, but
+	// it must never bless a distant answer.
+	{
+		GroundTruth truth;
+		truth.latency = 0.018;
+		SceneConfig scene;
+		scene.duration = 20.0;
+		scene.refRate = 90.0;
+		scene.targetRate = 72.0;
+		std::vector<PoseSample> ref, target;
+		GenerateStreams(scene, truth, 3190, ref, target);
+		ref.erase(std::remove_if(ref.begin(), ref.end(), [](const PoseSample &s)
+		{
+			return (s.time > 5.0 && s.time < 6.5) ||
+				(s.time > 12.0 && s.time < 13.5);
+		}), ref.end());
+
+		EngineConfig cfg;
+		double solved = 0.0, score = 0.0, margin = 0.0;
+		bool estimated = CalibrationEngine::EstimateTimeOffset(ref, target, cfg,
+			solved, &score, &margin);
+		bool pass = !estimated || std::abs(solved - truth.latency) < 0.004;
+		snprintf(detail, sizeof detail,
+			"estimated %d lag %+.2f ms score %.3f margin %.4f",
+			estimated, solved * 1000.0, score, margin);
+		Check("solver: offset dropout confidence", pass, detail);
 	}
 
 	// Explicitly exercise both velocity gates and even thinning. The corrupted
@@ -4070,6 +3875,38 @@ void RunJumpScenarios()
 		snprintf(detail, sizeof detail, "deltas %d  agree %d  yawErr %.3f deg  transErr %.4f m",
 			r.deltas, r.last.devicesAgreeing, r.YawErrDeg(jumpYaw), r.TransErr(D_T));
 		Check("jump: raw-pose (windowed)", pass, detail);
+	}
+
+	// One device can fill its post-window before another reports the same rebase.
+	// Advancing the second device must not age the first candidate on the second
+	// device's clock, and the agreement deadline includes the 200 ms fit window.
+	{
+		JumpDetector jd(TestQpcToSeconds);
+		auto feedDevice = [&](uint32_t id, double start, double jumpAt, double end)
+		{
+			const int firstStep = static_cast<int>(std::ceil(start * 100.0));
+			const int steps = static_cast<int>(end * 100.0);
+			for (int step = firstStep; step <= steps; ++step)
+			{
+				double t = step / 100.0;
+				Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
+				RefTrajectory(t, id, rot, pos, vel, angVel);
+				if (t >= jumpAt)
+					ApplyUniverse(D_R, D_T, rot, pos, vel, angVel);
+				jd.Push(RingSample(id, t, Eigen::Quaterniond::Identity(),
+					Eigen::Vector3d::Zero(), rot, pos, vel, angVel));
+			}
+		};
+		feedDevice(0, 0.0, 10.0, 1.49);
+		feedDevice(1, 0.0, 10.0, 1.49); // keep the second device active: no solo acceptance
+		feedDevice(0, 1.50, 1.50, 1.72); // ready, waiting for agreement
+		feedDevice(1, 1.50, 1.70, 1.92); // agrees 200 ms later
+		JumpDetector::UniverseDelta delta;
+		bool accepted = jd.PollDelta(delta);
+		Check("jump: device-local candidate clocks", accepted && !delta.exact &&
+			delta.devicesAgreeing == 2 &&
+			std::abs(delta.time - 1.5) < 0.02,
+			"a delayed agreeing device survives the full fit + agreement window");
 	}
 
 	// C. Fast continuous motion, no jump: no false positives.
@@ -5240,9 +5077,12 @@ void RunChaperoneScenarios()
 		moved[3].vCorners[2].v[0] += 0.05f;
 
 		std::vector<vr::HmdQuad_t> fewer(a.begin(), a.end() - 1);
+		std::vector<vr::HmdQuad_t> nonFinite = a;
+		nonFinite[1].vCorners[0].v[2] = std::numeric_limits<float>::quiet_NaN();
 
 		bool pass = QuadsMatch(a, a, 0.002f) && QuadsMatch(a, jitter, 0.002f) &&
-			!QuadsMatch(a, moved, 0.002f) && !QuadsMatch(a, fewer, 0.002f);
+			!QuadsMatch(a, moved, 0.002f) && !QuadsMatch(a, fewer, 0.002f) &&
+			!QuadsMatch(a, nonFinite, 0.002f) && !QuadsMatch(a, a, -0.1f);
 		Check("chaperone: quads match", pass, "");
 	}
 
@@ -6571,6 +6411,39 @@ void RunContinuousScenarios()
 			unscaledCorrections > 0 && unscaledMaxCorrection > 0.005,
 			detail);
 	}
+
+	// 18. Confirmation retains the latest correction and requires a trigger
+	// release after the correction becomes pending. A trigger already held by
+	// gameplay must not silently approve it.
+	{
+		ContinuousCorrectionGate gate;
+		ContinuousAlignment::Correction first;
+		first.rotation = Eigen::Quaterniond(
+			Eigen::AngleAxisd(0.01, Eigen::Vector3d::UnitY()));
+		first.translation = Eigen::Vector3d(0.001, 0.0, 0.0);
+		ContinuousAlignment::Correction latest;
+		latest.rotation = Eigen::Quaterniond(
+			Eigen::AngleAxisd(-0.02, Eigen::Vector3d::UnitY()));
+		latest.translation = Eigen::Vector3d(0.0, 0.002, 0.0);
+
+		ContinuousAlignment::Correction taken;
+		gate.Offer(first, true);
+		bool heldRejected = !gate.Take(true, true, taken) && gate.HasPending();
+		bool releaseObserved = !gate.Take(true, false, taken) && gate.HasPending();
+		gate.Offer(latest, false);
+		bool confirmedLatest = gate.Take(true, true, taken) && !gate.HasPending() &&
+			taken.rotation.angularDistance(latest.rotation) < 1e-12 &&
+			(taken.translation - latest.translation).norm() < 1e-12;
+
+		gate.Offer(first, true);
+		bool bypassedWhenDisabled = gate.Take(false, true, taken) && !gate.HasPending();
+		gate.Offer(first, false);
+		gate.Clear();
+		Check("continuous: trigger confirmation gate",
+			heldRejected && releaseObserved && confirmedLatest &&
+			bypassedWhenDisabled && !gate.HasPending(),
+			"held trigger rejected, latest retained, opt-out bypasses, reset clears");
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -6625,6 +6498,7 @@ ProfileRecord PersistGoodRecord()
 	r.continuousEnabled = true;
 	r.continuousTrackerSerial = "LHR-ABC";
 	r.continuousLatencyReestimation = true;
+	r.continuousRequireTrigger = true;
 	r.hideMountedTracker = false;
 	r.mountExtrinsic.valid = true;
 	r.mountExtrinsic.rotation = Eigen::Quaterniond(0.9, 0.1, -0.25, 0.35).normalized();
@@ -6695,6 +6569,7 @@ std::string PersistProfileDiff(const ProfileRecord &a, const ProfileRecord &b)
 	if (a.continuousEnabled != b.continuousEnabled) note("continuousEnabled");
 	if (a.continuousTrackerSerial != b.continuousTrackerSerial) note("continuousSerial");
 	if (a.continuousLatencyReestimation != b.continuousLatencyReestimation) note("continuousLatency");
+	if (a.continuousRequireTrigger != b.continuousRequireTrigger) note("continuousTrigger");
 	if (a.hideMountedTracker != b.hideMountedTracker) note("hideMountedTracker");
 	if (a.mountExtrinsic.valid != b.mountExtrinsic.valid) note("mount.valid");
 	else if (a.mountExtrinsic.valid)
@@ -6838,8 +6713,8 @@ void RunPersistenceRoundTripScenario()
 		else if (!r2.continuousTrackerSerial.empty()) fail("A2", "serial survived");
 	}
 
-	// A3: universeValid=false must suppress all three baseline keys together --
-	// a partial baseline is what the parser rejects outright.
+	// A3: universeValid=false suppresses the world-from-driver baseline, while
+	// physical-headset ownership remains independently persisted.
 	{
 		ProfileRecord record = good;
 		record.universeValid = false;
@@ -6848,8 +6723,9 @@ void RunPersistenceRoundTripScenario()
 		ProfileParseResult p3;
 		std::string e3 = PersistReadBack(PersistWrite(record, 7), r3, l3, p3);
 		if (!e3.empty()) fail("A3", e3);
-		else if (r3.universeValid || !r3.universeHmdSerial.empty())
-			fail("A3", "baseline survived");
+		else if (r3.universeValid ||
+			r3.universeHmdSerial != record.universeHmdSerial)
+			fail("A3", "baseline/identity coupling");
 	}
 
 	// A4: an invalid mount extrinsic must not be written at all, or continuous
@@ -6960,11 +6836,11 @@ void RunPersistenceRevisionScenario()
 	rejects("negative", picojson::value(-1.0));
 	rejects("fractional", picojson::value(1.5));
 	rejects("overflow", picojson::value(4294967296.0));
-	rejects("string", picojson::value(std::string("3")));
+	rejects("boolean", picojson::value(true));
 
 	char detail[256];
 	snprintf(detail, sizeof detail,
-		"absent {%d,%u}, 3 -> {%d,%u}, 0/-1/1.5/2^32/\"3\" rejected%s%s",
+		"absent {%d,%u}, 3 -> {%d,%u}, 0/-1/1.5/2^32/true rejected%s%s",
 		absent.present ? 1 : 0, absent.value, three.present ? 1 : 0, three.value,
 		why.empty() ? "" : "  <-", why.c_str());
 	Check("persistence B: revision", why.empty(), detail);
@@ -7828,6 +7704,7 @@ int main(int argc, char **argv)
 	RunDriverProtocolValidationScenarios();
 	RunDriverSyncScenarios();
 	RunDriverSessionScenarios();
+	RunDriverSyncWorkerScenario();
 	RunPoseChannelScenarios();
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();
@@ -8194,6 +8071,37 @@ int main(int argc, char **argv)
 		bool cleanGrossSeen = cleanGross.valid &&
 			cleanGross.scaleGuard == ScaleGuard::FromGrossMotion;
 
+		// The opposite frequency ordering is non-physical too. Smoothing the
+		// target makes reference/target fine gain exceed gross gain; it must be
+		// neutralized, never accepted merely because it is not the familiar
+		// fine-below-gross signature.
+		EngineConfig oppositeCfg = sc;
+		oppositeCfg.gainSmoothingMargin = 0.01;
+		EngineResult opposite = CalibrationEngine::Solve(
+			ref, SmoothStreamZeroPhase(tgt, 0.12, 0.02), oppositeCfg);
+		bool oppositeGuarded = opposite.valid && opposite.motionGainValid &&
+			opposite.motionGainHigh > opposite.motionGainLow + oppositeCfg.gainSmoothingMargin &&
+			opposite.motionGainInconsistent && !opposite.motionSmoothingDetected &&
+			opposite.scaleGuard == ScaleGuard::NeutralizedForSmoothing &&
+			std::abs(opposite.scale - 1.0) < 1e-9;
+
+		// Exercise the conditional-information gate independently of the band
+		// estimator. A deliberately stricter confidence contract rejects the
+		// free fit; the default-safe guard can still produce a neutral transform.
+		EngineConfig confidenceCfg = sc;
+		confidenceCfg.minScaleCondition = 0.9;
+		confidenceCfg.pinScaleOnSmoothing = false;
+		EngineResult rejectedConfidence = CalibrationEngine::Solve(ref, tgt,
+			confidenceCfg);
+		confidenceCfg.pinScaleOnSmoothing = true;
+		EngineResult neutralConfidence = CalibrationEngine::Solve(ref, tgt,
+			confidenceCfg);
+		bool confidenceGated = !rejectedConfidence.valid &&
+			!rejectedConfidence.scaleIdentifiable && neutralConfidence.valid &&
+			!neutralConfidence.scaleIdentifiable &&
+			neutralConfidence.scaleGuard == ScaleGuard::NeutralizedForSmoothing &&
+			neutralConfidence.scale == 1.0;
+
 		// The gain diagnostic abstains on this short stream. That means the
 		// scale is not identifiable from this motion, NOT that it is clean, so
 		// the guard takes the neutral path instead of committing the
@@ -8204,12 +8112,14 @@ int main(int argc, char **argv)
 			shortResult.scaleGuard == ScaleGuard::NeutralizedForSmoothing &&
 			cleanGrossSeen && cleanGross.motionSmoothingDetected &&
 			std::abs(cleanGross.scale - cleanGross.motionGainLow) < 1e-6 &&
-			std::abs(cleanGross.scale - 1.0) <= grossCfg.maxCleanGrossDeviation + 1e-6;
-		printf("%-28s %s  short valid/gain/scale/guard %d/%d/%.3f/%d  clean gross %d scale %.3f gain %.3f/%.3f\n",
+			std::abs(cleanGross.scale - 1.0) <= grossCfg.maxCleanGrossDeviation + 1e-6 &&
+			oppositeGuarded && confidenceGated;
+		printf("%-28s %s  short %d/%d/%.3f/%d  gross %d %.3f  opposite %.3f/%.3f guard %d  confidence %d\n",
 			"scale diagnostic branches", pass ? "PASS" : "FAIL",
 			shortResult.valid, shortResult.motionGainValid, shortResult.scale,
 			static_cast<int>(shortResult.scaleGuard),
-			cleanGrossSeen, cleanGross.scale, cleanGross.motionGainLow, cleanGross.motionGainHigh);
+			cleanGrossSeen, cleanGross.scale, opposite.motionGainLow,
+			opposite.motionGainHigh, static_cast<int>(opposite.scaleGuard), confidenceGated);
 		RecordResult(pass);
 	}
 

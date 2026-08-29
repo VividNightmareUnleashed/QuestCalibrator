@@ -31,14 +31,21 @@ namespace protocol
 	// versioned and requires a same-version handshake on that connection, and the
 	// shared-memory pose ring uses race-free ownership. Older overlays must
 	// reinstall the driver rather than silently relying on prior trust semantics.
-	const uint32_t Version = 6;
+	// v7: one SetRuntimeState atomically validates the complete 64-slot transform
+	// mask and alignment field. Reconciliation is one bounded pipe transaction,
+	// not up to 65 blocking requests with partial-state recovery bookkeeping.
+	// v8: handshake replies expose which supported server-host bindings have
+	// actually been hooked, so setup/load-order failures are diagnosable.
+	const uint32_t Version = 8;
+	const uint32_t PoseHook005 = 1u << 0;
+	const uint32_t PoseHook006 = 1u << 1;
 
 	enum RequestType : uint32_t
 	{
 		RequestInvalid,
 		RequestHandshake,
 		RequestSetDeviceTransform,
-		RequestSetAlignmentField,
+		RequestSetRuntimeState,
 	};
 
 	enum ResponseType : uint32_t
@@ -112,6 +119,17 @@ namespace protocol
 		FieldAnchor anchors[MaxAnchors];
 	};
 
+	struct SetRuntimeState
+	{
+		uint64_t enabledMask = 0;
+		uint64_t hiddenMask = 0;
+		// The payload shared by every enabled slot. openVRID/enabled/hidden are
+		// canonical placeholders; the driver derives their per-slot values from
+		// the masks only after validating the complete message.
+		SetDeviceTransform transform{ 0, true };
+		SetAlignmentField field;
+	};
+
 	// Raw driver-space pose as captured by the pose hook inside vrserver, stamped
 	// with QueryPerformanceCounter at capture. Field set mirrors what the solver
 	// needs from vr::DriverPose_t; kept protocol-owned because the overlay compiles
@@ -140,7 +158,7 @@ namespace protocol
 		Protocol protocol;
 		RequestType type = RequestInvalid;
 		SetDeviceTransform setDeviceTransform;
-		SetAlignmentField setAlignmentField;
+		SetRuntimeState setRuntimeState;
 
 		Request() = default;
 		explicit Request(RequestType type) : type(type) { }
@@ -150,6 +168,7 @@ namespace protocol
 	{
 		ResponseType type = ResponseInvalid;
 		Protocol protocol;
+		uint32_t poseHookMask = 0;
 
 		Response() = default;
 		explicit Response(ResponseType type) : type(type) { }
@@ -172,8 +191,9 @@ namespace protocol
 	static_assert(sizeof(SetDeviceTransform) == 88, "SetDeviceTransform wire layout changed");
 	static_assert(sizeof(FieldAnchor) == 80, "FieldAnchor wire layout changed");
 	static_assert(sizeof(SetAlignmentField) == 664, "SetAlignmentField wire layout changed");
-	static_assert(sizeof(Request) == 760, "Request wire layout changed");
-	static_assert(sizeof(Response) == 8, "Response wire layout changed");
+	static_assert(sizeof(SetRuntimeState) == 768, "SetRuntimeState wire layout changed");
+	static_assert(sizeof(Request) == 864, "Request wire layout changed");
+	static_assert(sizeof(Response) == 12, "Response wire layout changed");
 	// Crosses the shared-memory ring rather than the pipe; the mapping name
 	// carries its own layout version (QUESTCALIBRATOR_SHMEM_NAME) to bump.
 	static_assert(sizeof(DevicePoseSample) == 192, "DevicePoseSample layout changed");

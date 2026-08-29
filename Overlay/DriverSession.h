@@ -8,18 +8,13 @@
 #include <string>
 #include <utility>
 
-// The overlay's side of one driver conversation: the slot ledger, the
-// connection generation the driver was last known converged on, the error
-// debounce clock, the four send helpers and the ordering rules between them.
+// The overlay's side of one driver conversation: one handshake, one atomic
+// desired-state request, and error debouncing.
 //
 // This is the transport half of what SynchronizeDriverState used to be. The
 // decision half already lives in DriverSyncPolicy.h; what stayed unreachable
-// was the sequencing around it — mark before send, neutralize the whole
-// generation on partial failure, never ship a field enable after a failed base
-// request, fail closed on anything less than a complete batch. Those rules only
-// ever failed under a pipe that reconnects or refuses mid-batch, which is
-// exactly what no test could produce while the sends were fused to a live
-// IPCClient. Both seams are injected instead:
+// was the connection sequencing and fail-closed behavior. Both seams are
+// injected instead:
 //
 //   - the transport, so a refusal, a dead pipe and a silent reconnect are
 //     scriptable values;
@@ -70,6 +65,7 @@ struct DriverBatch
 {
 	bool connectionReady = false;
 	uint64_t connectionGeneration = 0;
+	uint32_t poseHookMask = 0;
 };
 
 // Everything one reconciliation needs, as plain values.
@@ -114,6 +110,7 @@ struct DriverApplyResult
 	bool referenceDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	bool targetDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	uint32_t continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+	uint32_t poseHookMask = 0;
 };
 
 class DriverSession
@@ -146,8 +143,11 @@ public:
 		now = atTime;
 		DriverBatch batch;
 		protocol::Request handshake(protocol::RequestHandshake);
+		protocol::Response response;
 		batch.connectionReady = SendRequest(handshake, "checking the driver connection",
-			&batch.connectionGeneration);
+			&batch.connectionGeneration, &response);
+		if (batch.connectionReady)
+			batch.poseHookMask = response.poseHookMask;
 		return batch;
 	}
 
@@ -158,80 +158,27 @@ public:
 		now = atTime;
 		DriverApplyResult result;
 		result.enabled = request.enabled;
-
-		bool connectionReady = batch.connectionReady;
-		bool driverSynchronized = connectionReady;
+		result.poseHookMask = batch.poseHookMask;
 		uint64_t batchConnectionGeneration = batch.connectionGeneration;
 
-		// A new pipe generation may be a restarted vrserver (fresh slots) or a
-		// new pipe to the same provider (retained slots). Treat both alike:
-		// neutralize the complete connection before rebuilding desired state.
-		// This one-time pass is intentionally not paid on steady-state scans.
-		bool newlyObservedConnection = connectionReady &&
-			batchConnectionGeneration != synchronizedConnectionGeneration;
-		if (newlyObservedConnection)
-		{
-			uint64_t neutralizedConnectionGeneration = 0;
-			bool neutralized = NeutralizeConnection(request.field,
-				neutralizedConnectionGeneration);
-			connectionReady = neutralized;
-			driverSynchronized = neutralized;
-			if (neutralized)
-				batchConnectionGeneration = neutralizedConnectionGeneration;
-		}
+		protocol::SetRuntimeState desiredState;
+		desiredState.transform = protocol::SetDeviceTransform(0, true,
+			WireVector(request.desired.translationMeters),
+			WireQuaternion(request.desired.rotation), request.desired.scale,
+			request.desired.timeShift);
+		desiredState.transform.generation = request.desired.baseGeneration;
+		desiredState.field = request.field;
 
-		bool desiredMutationAttempted = false;
-		auto disableSlot = [&](uint32_t id)
-		{
-			desiredMutationAttempted = true;
-			bool disabled = SendDisable(id, &batchConnectionGeneration);
-			if (disabled)
-				slots.NoteSlotDisabled(id);
-			if (lastConnectionGeneration != batchConnectionGeneration)
-				connectionReady = false;
-			driverSynchronized = disabled && driverSynchronized;
-		};
-
-		if (!result.enabled)
-		{
-			// No device enumeration is needed to converge to neutral state. The
-			// conservative slot ledger already identifies every transform that may
-			// still be live, including response-loss uncertainty.
-			for (uint32_t id = 0;
-				id < vr::k_unMaxTrackedDeviceCount && connectionReady && driverSynchronized;
-				++id)
-			{
-				if (slots.DecideNeutralSlot(id).action == SlotAction::Disable)
-					disableSlot(id);
-			}
-		}
-		else
+		if (result.enabled)
 		{
 			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 			{
-				if (!connectionReady || !driverSynchronized)
-					continue;
-				if (!result.enabled)
-				{
-					// A slot decision below withdrew the profile mid-batch; the rest
-					// of the pass converges to neutral instead.
-					if (slots.DecideNeutralSlot(id).action == SlotAction::Disable)
-						disableSlot(id);
-					continue;
-				}
-
-				// Enumerate, then decide, then send. The ledger mark for an enable
-				// happens inside DecideSlot, i.e. strictly before this loop can send
-				// anything — see DriverSyncPolicy.h for why marking on success
-				// instead is the dangerous direction.
 				SyncDevice device;
 				device.id = id;
-				// No enumerator is the same conservative answer as no runtime:
-				// nothing describes this device, so the slot gets retired.
 				if (enumerate)
 					device = enumerate(id, request.desired);
 
-				SlotDecision decision = slots.DecideSlot(request.desired, device);
+				SlotDecision decision = DecideSlot(request.desired, device);
 				result.referenceDeviceMask[id] = decision.referenceDevice;
 				result.targetDeviceMask[id] = decision.targetDevice;
 				if (decision.continuousTracker)
@@ -241,63 +188,31 @@ public:
 					result.enabled = false;
 					result.cause = DriverDisableCause::HmdMismatch;
 				}
-
-				if (decision.action == SlotAction::Disable)
-				{
-					disableSlot(id);
-					continue;
-				}
 				if (decision.action != SlotAction::ApplyTransform)
 					continue;
-
-				protocol::Request req(protocol::RequestSetDeviceTransform);
-				req.setDeviceTransform = decision.transform;
-				desiredMutationAttempted = true;
-				bool applied = SendRequest(req, "applying a device transform",
-					&batchConnectionGeneration);
-				if (lastConnectionGeneration != batchConnectionGeneration)
-				{
-					connectionReady = false;
-					// The enable may have landed just before the response path
-					// exposed the reconnect. Neutralize that one known slot on the
-					// new pipe now; the generation-wide recovery pass below clears
-					// every other slot.
-					if (SendDisable(id, nullptr))
-						slots.NoteSlotDisabled(id);
-				}
-				driverSynchronized = applied && driverSynchronized;
+				desiredState.enabledMask |= uint64_t{ 1 } << id;
+				if (decision.transform.hidden)
+					desiredState.hiddenMask |= uint64_t{ 1 } << id;
 			}
 		}
 
-		// Re-asserted alongside the per-device transforms so a restarted driver
-		// converges without special casing. On a universe jump the base transforms
-		// land first and the field one pipe round-trip later; the mixed window is
-		// bounded by the (small) delta magnitudes and the generation bump snaps
-		// driver-side smoothing when it arrives.
-		// A spatial field is meaningful only on top of a complete base-transform
-		// batch from this same driver connection. Never send a field enable after
-		// a failed base request. If any mutation failed or reconnected,
-		// immediately neutralize the whole current connection before retrying
-		// desired state on the next periodic scan.
-		bool fieldSynchronized = false;
-		if (connectionReady && driverSynchronized)
+		if (!result.enabled)
 		{
-			desiredMutationAttempted = true;
-			fieldSynchronized = SendField(request.field,
-				request.field.enabled != 0 && result.enabled, &batchConnectionGeneration);
+			desiredState.enabledMask = 0;
+			desiredState.hiddenMask = 0;
+			for (bool &value : result.referenceDeviceMask) value = false;
+			for (bool &value : result.targetDeviceMask) value = false;
+			result.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
 		}
-		driverSynchronized = fieldSynchronized && driverSynchronized;
-		if (!driverSynchronized && desiredMutationAttempted)
-		{
-			uint64_t neutralizedConnectionGeneration = 0;
-			if (NeutralizeConnection(request.field, neutralizedConnectionGeneration))
-			{
-				// The profile batch still failed, but the connection is now known
-				// neutral. Next scan can safely apply desired state without another
-				// generation-wide reset.
-				synchronizedConnectionGeneration = neutralizedConnectionGeneration;
-			}
-		}
+		desiredState.field.enabled = desiredState.field.enabled &&
+			desiredState.enabledMask != 0;
+		if (!desiredState.field.enabled)
+			desiredState.field.anchorCount = 0;
+
+		protocol::Request stateRequest(protocol::RequestSetRuntimeState);
+		stateRequest.setRuntimeState = desiredState;
+		bool driverSynchronized = batch.connectionReady && SendRequest(stateRequest,
+			"applying the complete driver state", &batchConnectionGeneration);
 
 		// Never let the jump/drift/continuous monitors infer that the live driver
 		// matches the profile after a partial pipe failure. The next periodic scan
@@ -318,7 +233,6 @@ public:
 		}
 		else
 		{
-			synchronizedConnectionGeneration = batchConnectionGeneration;
 			if (clearError)
 				clearError();
 			lastErrorTime = -1e9;
@@ -343,15 +257,14 @@ private:
 	// and share one 30 s debounce, so a dead pipe cannot rewrite the user's
 	// banner 65 times a second.
 	bool SendRequest(const protocol::Request &request, const char *operation,
-		uint64_t *batchConnectionGeneration)
+		uint64_t *batchConnectionGeneration,
+		protocol::Response *acceptedResponse = nullptr)
 	{
 		DriverTransportResult result;
 		if (transport)
 			result = transport(request);
 		else
 			result.error = "no driver transport is installed";
-		lastConnectionGeneration = result.connectionGeneration;
-
 		if (result.completed)
 		{
 			bool accepted = result.response.type == protocol::ResponseSuccess ||
@@ -360,6 +273,8 @@ private:
 					result.response.protocol.version == protocol::Version);
 			if (accepted)
 			{
+				if (acceptedResponse)
+					*acceptedResponse = result.response;
 				if (batchConnectionGeneration)
 				{
 					if (*batchConnectionGeneration == 0)
@@ -400,85 +315,13 @@ private:
 		return SendRequest(req, "disabling a device transform", batchConnectionGeneration);
 	}
 
-	// Ship the spatial correction field, or canonically clear it. A disabled
-	// message carries no anchors and nothing derived from the live calibration,
-	// which is what guarantees a bad base can still clear a stale field.
-	bool SendField(const protocol::SetAlignmentField &field, bool enable,
-		uint64_t *batchConnectionGeneration)
-	{
-		protocol::Request req(protocol::RequestSetAlignmentField);
-		protocol::SetAlignmentField &f = req.setAlignmentField;
-		if (enable)
-		{
-			f = field;
-			f.enabled = 1;
-			return SendRequest(req, "applying the alignment field",
-				batchConnectionGeneration);
-		}
-		// Everything except the two shape parameters stays at the wire default:
-		// no anchors, and the count that says so.
-		f.generation = field.generation;
-		f.sigmaMeters = field.sigmaMeters;
-		f.enabled = 0;
-		f.anchorCount = 0;
-		return SendRequest(req, "disabling the alignment field", batchConnectionGeneration);
-	}
-
-	// Put a single, positively identified driver connection into canonical
-	// neutral state. A pipe can reconnect during any request; restart from slot
-	// zero so no generation ever receives only a suffix of the reset pass.
-	// Retries are bounded so a flapping vrserver cannot stall the UI tick
-	// indefinitely.
-	bool NeutralizeConnection(const protocol::SetAlignmentField &field,
-		uint64_t &neutralizedConnectionGeneration)
-	{
-		constexpr int MaxNeutralizationAttempts = 3;
-		neutralizedConnectionGeneration = 0;
-
-		for (int attempt = 0; attempt < MaxNeutralizationAttempts; ++attempt)
-		{
-			uint64_t passConnectionGeneration = 0;
-			protocol::Request handshake(protocol::RequestHandshake);
-			if (!SendRequest(handshake,
-				"checking the driver connection before neutralizing it",
-				&passConnectionGeneration))
-				continue;
-
-			bool complete = SendField(field, false, &passConnectionGeneration);
-			bool generationChanged = lastConnectionGeneration != passConnectionGeneration;
-			for (uint32_t id = 0;
-				id < vr::k_unMaxTrackedDeviceCount && !generationChanged; ++id)
-			{
-				complete = SendDisable(id, &passConnectionGeneration) && complete;
-				generationChanged = lastConnectionGeneration != passConnectionGeneration;
-			}
-
-			// One decision, not two: a reconnect and a refused request are the same
-			// verdict here -- this pass did not converge, so retry it.
-			if (generationChanged || !complete)
-				continue;
-
-			slots.ForgetEverySlot();
-			neutralizedConnectionGeneration = passConnectionGeneration;
-			return true;
-		}
-
-		return false;
-	}
-
 	DriverTransport transport;
 	DriverDeviceEnumerator enumerate;
 	std::function<void(const std::string &)> reportError;
 	std::function<void()> clearError;
 
-	// The slot ledger plus every decision that reads it (DriverSyncPolicy.h).
-	DriverSlotPolicy slots;
-	// The connection the complete desired state was last known to have reached.
-	// A batch that opens on any other generation neutralizes first.
-	uint64_t synchronizedConnectionGeneration = 0;
 	// The transport's generation as of the last request, successful or not. Read
 	// after a send to notice a reconnect the response itself does not announce.
-	uint64_t lastConnectionGeneration = 0;
 	// Error debounce clock, in the caller's tick time. -1e9 means "re-armed":
 	// the next failure reports immediately.
 	double lastErrorTime = -1e9;

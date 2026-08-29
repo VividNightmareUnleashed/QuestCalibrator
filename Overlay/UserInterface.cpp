@@ -3,6 +3,7 @@
 #include "Calibration.h"
 #include "Configuration.h"
 #include "ProfileValidation.h"
+#include "../common/Protocol.h"
 #include "../common/Version.h"
 
 #include <algorithm>
@@ -1454,6 +1455,9 @@ static void BuildMainScreen()
 				case Reason::DriverUnreachable:
 					why = "Driver did not accept the profile -- profile disabled until the next scan";
 					break;
+				case Reason::Synchronizing:
+					why = "Applying the updated profile to the driver...";
+					break;
 				case Reason::InvalidIdentity:
 					why = "The profile's tracking systems are no longer valid -- recalibrate";
 					break;
@@ -1470,7 +1474,10 @@ static void BuildMainScreen()
 			if (PoseChannelDown())
 			{
 				warn.push_back({ IconInfo, Pal::Warn,
-					"Pose channel unavailable -- runtime monitoring is off (universe jumps, drift and continuous calibration)" });
+					FormatString("Pose channel unavailable -- runtime monitoring is off "
+						"(host hooks: 005 %s, 006 %s)",
+						CalCtx.driverPoseHookMask & protocol::PoseHook005 ? "active" : "missing",
+						CalCtx.driverPoseHookMask & protocol::PoseHook006 ? "active" : "missing") });
 			}
 			if (!warn.empty())
 			{
@@ -1647,6 +1654,13 @@ static void BuildMainScreen()
 						CalCtx.lastResult.translationRmsMeters * 100.0,
 						CalCtx.lastResult.timeOffset * 1000.0,
 						CalCtx.lastResult.scale != 1.0 ? ", scaled" : "") });
+				if (CalCtx.solveScale)
+					rows.push_back({ IconGauge,
+						CalCtx.lastResult.scaleIdentifiable ? Pal::Good : Pal::Warn,
+						FormatString("Playspace scale confidence: %s (condition %.4f, uncertainty %.4f)",
+							CalCtx.lastResult.scaleIdentifiable ? "identifiable" : "insufficient",
+							CalCtx.lastResult.scaleCondition,
+							CalCtx.lastResult.scaleStdDev) });
 			}
 
 			if (CalCtx.jumpsCompensated > 0 || CalCtx.referenceGapEvents > 0)
@@ -1793,9 +1807,9 @@ static void BuildSettingsScreen(const VRState &state)
 					const auto &a = CalCtx.fieldAnchors[i];
 					// Delta vs base, evaluated at the anchor's own spot.
 					Eigen::Vector3d targetPt = a.rotation.conjugate() * (a.position - a.translationMeters);
-					Eigen::Vector3d basePos = CalCtx.calibratedRotationQ * targetPt + CalCtx.TranslationMeters();
+					Eigen::Vector3d basePos = CalCtx.transform.rotation * targetPt + CalCtx.transform.translationMeters;
 					double posDeltaCm = (a.position - basePos).norm() * 100.0;
-					double rotDeltaDeg = a.rotation.angularDistance(CalCtx.calibratedRotationQ) * 180.0 / EIGEN_PI;
+					double rotDeltaDeg = a.rotation.angularDistance(CalCtx.transform.rotation) * 180.0 / EIGEN_PI;
 					std::string line = FormatString("Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base",
 						i + 1, a.position.x(), a.position.z(), posDeltaCm, rotDeltaDeg);
 					dl->AddText(g_fontSmall, g_fontSmall->FontSize,
@@ -1872,13 +1886,13 @@ static void BuildSettingsScreen(const VRState &state)
 			ImGui::PopItemWidth();
 		}
 
-		// Continuous calibration: enable + nested tracker pick / hide / latency
+		// Continuous calibration: enable + nested tracker pick / safety options
 		if (CalCtx.validProfile)
 		{
 			ContinuousStatus continuous = ContinuousStatusNow();
 			bool advisory = continuous == ContinuousStatus::NoTracker ||
 				continuous == ContinuousStatus::NeedsMount;
-			const float nestedH = CalCtx.continuousEnabled ? 116.0f : 0.0f;
+			const float nestedH = CalCtx.continuousEnabled ? 148.0f : 0.0f;
 			const float advisoryH = advisory ? 26.0f : 0.0f;
 			RowCard row(kRowHeight + nestedH + advisoryH);
 			const ImVec2 p = row.pos;
@@ -2010,6 +2024,24 @@ static void BuildSettingsScreen(const VRState &state)
 					ImVec2(np.x + 48.0f, np.y + 87.0f - g_fontBody->FontSize * 0.5f),
 					Pal::U32(CalCtx.continuousLatencyReestimation ? Pal::Text : Pal::Dim),
 					"Re-estimate time offset continuously");
+
+				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 106.0f));
+				bool requireTrigger = CalCtx.continuousRequireTrigger;
+				if (QCCheckbox("##contTrigger", &requireTrigger))
+					SaveProfileFieldEdit(CalCtx,
+						[&](questcal::ProfileRecord &candidate) {
+							candidate.continuousRequireTrigger = requireTrigger;
+						});
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip(
+						"Waits for a controller trigger before applying each ready correction.\n"
+						"Useful while diagnosing a mount; leave off for unattended maintenance.");
+				}
+				dl->AddText(g_fontBody, g_fontBody->FontSize,
+					ImVec2(np.x + 48.0f, np.y + 119.0f - g_fontBody->FontSize * 0.5f),
+					Pal::U32(CalCtx.continuousRequireTrigger ? Pal::Text : Pal::Dim),
+					"Require a trigger press before corrections");
 			}
 
 			if (advisory)
@@ -2311,10 +2343,10 @@ static TransformEditorDraft g_transformDraft;
 static void SeedTransformEditorDraft()
 {
 	g_transformDraft = TransformEditorDraft();
-	g_transformDraft.rotationQ = CalCtx.calibratedRotationQ;
-	g_transformDraft.rotationEuler = CalCtx.calibratedRotation;
-	g_transformDraft.translationCm = CalCtx.calibratedTranslation;
-	g_transformDraft.scale = CalCtx.calibratedScale;
+	g_transformDraft.rotationQ = CalCtx.transform.rotation;
+	g_transformDraft.rotationEuler = CalCtx.transform.RotationEulerDegrees();
+	g_transformDraft.translationCm = CalCtx.transform.translationMeters * 100.0;
+	g_transformDraft.scale = CalCtx.transform.scale;
 }
 
 static bool BuildProfileEditor()

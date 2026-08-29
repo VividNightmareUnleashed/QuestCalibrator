@@ -2,5 +2,6 @@
 	"alwaysActivate": true,
 	"name" : "01questcalibrator",
 	"directory" : "",
-	"resourceOnly" : false
+	"resourceOnly" : false,
+	"activateOtherDriversWhenEnabled" : true
 }

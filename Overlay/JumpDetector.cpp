@@ -222,8 +222,8 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	dev.wfdValid = true;
 	dev.lastValidTime = t;
 
-	EvaluatePendingCandidates(t);
-	TryAccept(t);
+	EvaluatePendingCandidates();
+	TryAccept();
 }
 
 void JumpDetector::DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
@@ -295,12 +295,13 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	candidates.push_back(c);
 }
 
-void JumpDetector::EvaluatePendingCandidates(double now)
+void JumpDetector::EvaluatePendingCandidates()
 {
 	for (auto &c : candidates)
 	{
 		if (!c.PendingHeuristic())
 			continue;
+		double now = devices[c.deviceId].lastValidTime;
 		if (now < c.t + config.window)
 			continue;   // post window still filling
 
@@ -335,7 +336,7 @@ void JumpDetector::EvaluatePendingCandidates(double now)
 	}
 }
 
-void JumpDetector::TryAccept(double now)
+void JumpDetector::TryAccept()
 {
 	// Exact path: a worldFromDriver rebase on the HMD is authoritative (the
 	// HMD defines the reference universe). Agreement from other devices is a
@@ -368,24 +369,24 @@ void JumpDetector::TryAccept(double now)
 		}
 
 		accepted.push_back(d);
-		lastAcceptTime = now;
+		lastAcceptTime = c.t;
 		candidates.clear();
 		return;
 	}
 
 	// Hysteresis suppresses heuristic echoes only. Non-HMD exact candidates
 	// inside this window describe the already-applied HMD event and can go too.
-	if (now - lastAcceptTime < config.retriggerHold)
-	{
-		candidates.clear();
-		return;
-	}
-
 	// Heuristic path: windowed multi-device agreement.
 	for (auto &c0 : candidates)
 	{
 		if (!c0.ReadyHeuristic())
 			continue;
+		double now = devices[c0.deviceId].lastValidTime;
+		if (c0.t - lastAcceptTime < config.retriggerHold)
+		{
+			c0.life = Life::Dead;
+			continue;
+		}
 
 		std::vector<const Candidate *> agree;
 		double spread = 0.0;
@@ -428,12 +429,13 @@ void JumpDetector::TryAccept(double now)
 			d.rotation = YawQuat(std::atan2(s, cs));
 
 			accepted.push_back(d);
-			lastAcceptTime = now;
+			lastAcceptTime = c0.t;
 			candidates.clear();
 			return;
 		}
 
-		if (now > c0.t + config.agreeWindow && !bigSolo && agree.size() < 2)
+		if (now > c0.t + config.window + config.agreeWindow &&
+			!bigSolo && agree.size() < 2)
 		{
 			c0.life = Life::Dead;
 			notes.push_back(Format("unconfirmed pose discontinuity on device %u ignored", c0.deviceId));
@@ -443,7 +445,10 @@ void JumpDetector::TryAccept(double now)
 	// Prune stale entries.
 	candidates.erase(
 		std::remove_if(candidates.begin(), candidates.end(),
-			[&](const Candidate &c) { return c.life == Life::Dead || now - c.t > 5.0; }),
+			[&](const Candidate &c) {
+				return c.life == Life::Dead ||
+					devices[c.deviceId].lastValidTime - c.t > 5.0;
+			}),
 		candidates.end());
 }
 

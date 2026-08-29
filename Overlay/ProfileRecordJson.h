@@ -36,7 +36,7 @@ namespace questcal
 inline double GetDouble(const picojson::value &v)
 {
 	if (!v.is<double>())
-		throw std::runtime_error("expected number, got " + v.to_str());
+		throw std::runtime_error("expected number");
 	double value = v.get<double>();
 	if (!std::isfinite(value))
 		throw std::runtime_error("expected finite number");
@@ -68,7 +68,7 @@ inline picojson::array FloatArray(const float *buf, size_t numFloats)
 inline void LoadFloatArray(const picojson::value &obj, float *buf, size_t numFloats)
 {
 	if (!obj.is<picojson::array>())
-		throw std::runtime_error("expected array, got " + obj.to_str());
+		throw std::runtime_error("expected array");
 
 	auto &arr = obj.get<picojson::array>();
 	if (arr.size() != numFloats)
@@ -258,6 +258,12 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 	profile.universeHmdSerial.clear();
 	if (HasTypedValue<bool>(obj, "universe_unsafe"))
 		profile.universeUnsafe = obj.at("universe_unsafe").get<bool>();
+	if (HasTypedValue<std::string>(obj, "hmd_serial"))
+	{
+		profile.universeHmdSerial = obj.at("hmd_serial").get<std::string>();
+		if (profile.universeHmdSerial.empty())
+			throw std::runtime_error("empty profile HMD serial");
+	}
 
 	bool hasUniverseSerial = HasTypedValue<std::string>(obj, "universe_hmd_serial");
 	bool hasUniverseRotation = HasTypedValue<picojson::array>(
@@ -269,7 +275,12 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 		throw std::runtime_error("incomplete profile reference-universe baseline");
 	if (hasUniverseSerial)
 	{
-		profile.universeHmdSerial = obj.at("universe_hmd_serial").get<std::string>();
+		const std::string &baselineSerial =
+			obj.at("universe_hmd_serial").get<std::string>();
+		if (!profile.universeHmdSerial.empty() &&
+			profile.universeHmdSerial != baselineSerial)
+			throw std::runtime_error("conflicting profile HMD serials");
+		profile.universeHmdSerial = baselineSerial;
 		const auto &universeRotation = obj.at(
 			"universe_world_from_driver_rotation_quat").get<picojson::array>();
 		const auto &universeTranslation = obj.at(
@@ -353,6 +364,9 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 	if (HasTypedValue<bool>(obj, "continuous_latency_reestimation"))
 		profile.continuousLatencyReestimation =
 			obj.at("continuous_latency_reestimation").get<bool>();
+	if (HasTypedValue<bool>(obj, "continuous_require_trigger"))
+		profile.continuousRequireTrigger =
+			obj.at("continuous_require_trigger").get<bool>();
 
 	if (HasTypedValue<bool>(obj, "hide_mounted_tracker"))
 		profile.hideMountedTracker = obj.at("hide_mounted_tracker").get<bool>();
@@ -483,6 +497,8 @@ inline void WriteProfile(const ProfileRecord &record,
 	profile["time_offset"].set<double>(record.timeOffset);
 	profile["calibration_time"].set<double>(record.calibrationUnixTime);
 	profile["universe_unsafe"].set<bool>(record.universeUnsafe);
+	if (!record.universeHmdSerial.empty())
+		profile["hmd_serial"].set<std::string>(record.universeHmdSerial);
 	if (record.universeValid)
 	{
 		profile["universe_hmd_serial"].set<std::string>(record.universeHmdSerial);
@@ -510,6 +526,7 @@ inline void WriteProfile(const ProfileRecord &record,
 	if (!record.continuousTrackerSerial.empty())
 		profile["continuous_tracker_serial"].set<std::string>(record.continuousTrackerSerial);
 	profile["continuous_latency_reestimation"].set<bool>(record.continuousLatencyReestimation);
+	profile["continuous_require_trigger"].set<bool>(record.continuousRequireTrigger);
 	profile["hide_mounted_tracker"].set<bool>(record.hideMountedTracker);
 
 	if (record.mountExtrinsic.valid)

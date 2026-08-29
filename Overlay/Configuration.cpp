@@ -122,10 +122,10 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.valid = ctx.validProfile;
 	record.referenceTrackingSystem = ctx.referenceTrackingSystem;
 	record.targetTrackingSystem = ctx.targetTrackingSystem;
-	record.rotation = ctx.calibratedRotationQ;
-	record.translationMeters = ctx.TranslationMeters();
-	record.scale = ctx.calibratedScale;
-	record.timeOffset = ctx.calibratedTimeOffset;
+	record.rotation = ctx.transform.rotation;
+	record.translationMeters = ctx.transform.translationMeters;
+	record.scale = ctx.transform.scale;
+	record.timeOffset = ctx.transform.timeOffset;
 	record.calibrationUnixTime = ctx.calibrationUnixTime;
 	record.universeUnsafe = ctx.profileUniverseUnsafe;
 	record.universeValid = ctx.profileUniverseValid;
@@ -139,6 +139,7 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.continuousEnabled = ctx.continuousEnabled;
 	record.continuousTrackerSerial = ctx.continuousTrackerSerial;
 	record.continuousLatencyReestimation = ctx.continuousLatencyReestimation;
+	record.continuousRequireTrigger = ctx.continuousRequireTrigger;
 	record.hideMountedTracker = ctx.hideMountedTracker;
 	record.mountExtrinsic.valid = ctx.mountExtrinsic.valid;
 	record.mountExtrinsic.rotation = ctx.mountExtrinsic.rot;
@@ -203,6 +204,7 @@ static void ApplyProfilePreferences(
 	ctx.continuousEnabled = record.continuousEnabled;
 	ctx.continuousTrackerSerial = record.continuousTrackerSerial;
 	ctx.continuousLatencyReestimation = record.continuousLatencyReestimation;
+	ctx.continuousRequireTrigger = record.continuousRequireTrigger;
 	ctx.hideMountedTracker = record.hideMountedTracker;
 	// Only the members the record carries. MountExtrinsic::pairs is a runtime
 	// derivation statistic with no persisted counterpart, so it is not this
@@ -220,7 +222,7 @@ static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
 	ctx.referenceTrackingSystem = std::move(record.referenceTrackingSystem);
 	ctx.targetTrackingSystem = std::move(record.targetTrackingSystem);
 	ctx.SetCalibration(record.rotation, record.translationMeters, record.scale);
-	ctx.calibratedTimeOffset = record.timeOffset;
+	ctx.transform.timeOffset = record.timeOffset;
 	ctx.calibrationUnixTime = record.calibrationUnixTime;
 	ctx.profileUniverseUnsafe = record.universeUnsafe;
 	ctx.profileUniverseValid = record.universeValid;
@@ -671,7 +673,7 @@ void LoadProfile(CalibrationContext &ctx)
 				if (parsed.suspiciousLegacyScale)
 				{
 					ctx.Log("The stored playspace scale (" +
-						std::to_string(ctx.calibratedScale).substr(0, 5) +
+						std::to_string(ctx.transform.scale).substr(0, 5) +
 						"x) likely came from streamed-pose smoothing -- recalibrate to clear it\n");
 				}
 			}
@@ -949,8 +951,8 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 	{
 		// Do not normalize or otherwise rewrite the quaternion when only the
 		// translation/scale changed: its persisted bits remain the source truth.
-		ctx.calibratedTranslation = candidate.translationMeters * 100.0;
-		ctx.calibratedScale = candidate.scale;
+		ctx.transform.translationMeters = candidate.translationMeters;
+		ctx.transform.scale = candidate.scale;
 		ctx.baseGeneration++;
 	}
 	if (!ctx.fieldAnchors.empty())

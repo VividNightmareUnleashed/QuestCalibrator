@@ -57,6 +57,7 @@
       <Optimization>Disabled</Optimization>
       <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;_DEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>..\lib;..\lib\openvr;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -105,12 +106,15 @@
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\Overlay\CalibrationEngine.h" />
+    <ClInclude Include="..\Overlay\CalibrationRun.h" />
     <ClInclude Include="..\Overlay\ChaperoneMath.h" />
     <ClInclude Include="..\Overlay\FieldMath.h" />
     <ClInclude Include="..\Overlay\ContinuousAlignment.h" />
+    <ClInclude Include="..\Overlay\ContinuousCorrectionGate.h" />
     <ClInclude Include="..\Overlay\DriftMonitor.h" />
     <ClInclude Include="..\Overlay\DriverSession.h" />
     <ClInclude Include="..\Overlay\DriverSyncPolicy.h" />
+    <ClInclude Include="..\Overlay\DriverSyncWorker.h" />
     <ClInclude Include="..\Overlay\JumpDetector.h" />
     <ClInclude Include="..\Overlay\ProfileRecordJson.h" />
     <ClInclude Include="..\Overlay\PersistenceState.h" />

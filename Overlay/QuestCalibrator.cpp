@@ -149,6 +149,102 @@ static void CliReport(const char *message, bool isError)
 		MB_OK | (isError ? MB_ICONERROR : MB_ICONINFORMATION));
 }
 
+struct ManifestInstallResult
+{
+	bool success = false;
+	bool changed = false;
+	std::string message;
+};
+
+// One rollback-safe registration path for the installer and for startup
+// self-repair. OpenVR rejects duplicate application keys, so replacement must
+// temporarily remove the old manifest; every failure after that restores it.
+static ManifestInstallResult EnsureManifestRegistration()
+{
+	ManifestInstallResult result;
+	const std::string manifestPath = AppFile("manifest.vrmanifest");
+	if (GetFileAttributesA(manifestPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+	{
+		result.message = "QuestCalibrator's application manifest is missing. The existing SteamVR registration was left unchanged.\n\n" + manifestPath;
+		return result;
+	}
+
+	std::string oldManifest;
+	bool oldAutoLaunch = false;
+	if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
+	{
+		oldAutoLaunch = vr::VRApplications()->GetApplicationAutoLaunch(
+			OPENVR_APPLICATION_KEY);
+		char oldDirectory[MAX_PATH] = {};
+		auto error = vr::VRApplicationError_None;
+		vr::VRApplications()->GetApplicationPropertyString(OPENVR_APPLICATION_KEY,
+			vr::VRApplicationProperty_WorkingDirectory_String, oldDirectory,
+			MAX_PATH, &error);
+		if (error != vr::VRApplicationError_None)
+		{
+			result.message = "Failed to locate the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" +
+				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error));
+			return result;
+		}
+		oldManifest = std::string(oldDirectory) + "\\manifest.vrmanifest";
+	}
+
+	const bool replacing = !oldManifest.empty() &&
+		_stricmp(oldManifest.c_str(), manifestPath.c_str()) != 0;
+	const bool adding = replacing || oldManifest.empty();
+	auto restoreOld = [&]()
+	{
+		if (oldManifest.empty())
+			return true;
+		auto error = vr::VRApplications()->AddApplicationManifest(oldManifest.c_str());
+		return error == vr::VRApplicationError_None &&
+			vr::VRApplications()->SetApplicationAutoLaunch(
+				OPENVR_APPLICATION_KEY, oldAutoLaunch) == vr::VRApplicationError_None;
+	};
+	auto failed = [&](const std::string &message, bool restore)
+	{
+		result.message = message;
+		if (restore)
+			result.message += restoreOld()
+				? "\n\nThe previous registration was restored."
+				: "\n\nSteamVR also refused to restore the previous registration.";
+		return result;
+	};
+
+	if (replacing)
+	{
+		auto error = vr::VRApplications()->RemoveApplicationManifest(oldManifest.c_str());
+		if (error != vr::VRApplicationError_None)
+			return failed("Failed to remove the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
+				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), false);
+	}
+
+	if (adding)
+	{
+		auto error = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
+		if (error != vr::VRApplicationError_None)
+			return failed("Failed to register the application manifest with SteamVR.\n\n" +
+				manifestPath + "\n\n" +
+				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), replacing);
+	}
+
+	auto error = vr::VRApplications()->SetApplicationAutoLaunch(
+		OPENVR_APPLICATION_KEY, true);
+	if (error != vr::VRApplicationError_None)
+	{
+		if (adding)
+			vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
+		return failed("SteamVR could not enable QuestCalibrator auto-launch.\n\n" +
+			std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error)),
+			replacing);
+	}
+
+	result.success = true;
+	result.changed = adding || !oldAutoLaunch;
+	result.message = "QuestCalibrator registered with SteamVR.\n\n" + manifestPath;
+	return result;
+}
+
 void CreateGLFWWindow()
 {
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -276,7 +372,7 @@ void ActivateMultipleDrivers()
 void InitVR(bool &initialized)
 {
 	auto initError = vr::VRInitError_None;
-	vr::VR_Init(&initError, vr::VRApplication_Other);
+	vr::VR_Init(&initError, vr::VRApplication_Overlay);
 	if (initError != vr::VRInitError_None)
 	{
 		auto error = vr::VR_GetVRInitErrorAsEnglishDescription(initError);
@@ -360,11 +456,12 @@ void RunLoop()
 					buf[0x3ff] = 0;
 					uint32_t unFlags = 0; // EKeyboardFlags
 
-					vr::VROverlay()->ShowKeyboardForOverlay(
+					vr::EVROverlayError error = vr::VROverlay()->ShowKeyboardForOverlay(
 						overlayMainHandle, vr::k_EGamepadTextInputModeNormal, vr::k_EGamepadTextInputLineModeSingleLine,
 						unFlags, "QuestCalibrator Overlay", sizeof buf, buf, 0
 					);
-					keyboardPhase = KeyboardPhase::Open;
+					if (error == vr::VROverlayError_None)
+						keyboardPhase = KeyboardPhase::Open;
 				}
 				break;
 			}
@@ -388,9 +485,14 @@ void RunLoop()
 					io.MouseWheel += vrEvent.data.scroll.ydelta * 360.0f * 8.0f;
 					break;
 				case vr::VREvent_KeyboardDone: {
-					char buf[0x400];
-					vr::VROverlay()->GetKeyboardText(buf, sizeof buf);
-					ImGui::SetActiveText(buf, sizeof buf);
+					char buf[0x400] = {};
+					uint32_t bytes = vr::VROverlay()->GetKeyboardText(buf, sizeof buf);
+					if (bytes > 0)
+					{
+						buf[sizeof buf - 1] = 0;
+						ImGui::SetActiveText(buf,
+							static_cast<int>(strnlen(buf, sizeof buf)));
+					}
 					// A Done for a keyboard we no longer consider open has no
 					// widget to clear; only settle.
 					keyboardPhase = keyboardPhase == KeyboardPhase::Open
@@ -516,7 +618,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	if (!glfwInit())
 	{
 		MessageBox(nullptr, L"Failed to initialize GLFW", L"", 0);
-		return 0;
+		return -1;
 	}
 
 	glfwSetErrorCallback(GLFWErrorCallback);
@@ -575,6 +677,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		if (!g_uiPreviewMode)
 		{
 			InitVR(vrInitialized);
+			ManifestInstallResult registration = EnsureManifestRegistration();
+			if (!registration.success)
+				AppendSessionLog("SteamVR manifest self-repair failed: " + registration.message);
+			else if (registration.changed)
+				AppendSessionLog("SteamVR application manifest/auto-launch registration repaired");
 			// Take the single-instance guard (the dashboard overlay key) BEFORE
 			// anything opens the driver's pose ring. Two overlay readers on one
 			// ring split the sample stream between them with no loss marker, so
@@ -657,7 +764,7 @@ static void SetupPreviewState()
 	CalCtx.lastResult.translationRmsMeters = 0.010;
 	CalCtx.lastResult.timeOffset = 0.0038;
 	CalCtx.lastResult.scale = 1.002;
-	CalCtx.calibratedScale = 1.002;
+	CalCtx.transform.scale = 1.002;
 
 	CalCtx.calibrationUnixTime = static_cast<double>(std::time(nullptr)) - 180.0;
 	CalCtx.alignment = CalibrationContext::AlignmentHealth::Stale;
@@ -846,51 +953,8 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	else if (cmd == L"-installmanifest")
 	{
 		InitVRUtilityOrExit();
-
-		if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
-		{
-			char oldWd[MAX_PATH] = { 0 };
-			auto vrAppErr = vr::VRApplicationError_None;
-			vr::VRApplications()->GetApplicationPropertyString(OPENVR_APPLICATION_KEY, vr::VRApplicationProperty_WorkingDirectory_String, oldWd, MAX_PATH, &vrAppErr);
-			if (vrAppErr != vr::VRApplicationError_None)
-			{
-				CliExit("Failed to locate the previously registered QuestCalibrator manifest. "
-					"The old registration was left unchanged.\n\n" +
-					std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr)), true);
-			}
-			else
-			{
-				std::string oldManifest = oldWd;
-				oldManifest += "\\manifest.vrmanifest";
-				std::cout << "Removing old manifest path: " << oldManifest << std::endl;
-				vrAppErr = vr::VRApplications()->RemoveApplicationManifest(
-					oldManifest.c_str());
-				if (vrAppErr != vr::VRApplicationError_None)
-				{
-					CliExit("Failed to remove the previously registered QuestCalibrator manifest. "
-						"The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
-						vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
-				}
-			}
-		}
-
-		std::string manifestPath = AppFile("manifest.vrmanifest");
-
-		auto vrAppErr = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
-		if (vrAppErr != vr::VRApplicationError_None)
-		{
-			CliExit("Failed to register the application manifest with SteamVR.\n\n"
-				+ manifestPath + "\n\n"
-				+ vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
-		}
-		vrAppErr = vr::VRApplications()->SetApplicationAutoLaunch(
-			OPENVR_APPLICATION_KEY, true);
-		if (vrAppErr != vr::VRApplicationError_None)
-		{
-			CliExit("QuestCalibrator was registered, but SteamVR could not enable auto-launch.\n\n" +
-				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr)), true);
-		}
-		CliExit("QuestCalibrator registered with SteamVR.\n\n" + manifestPath, false);
+		ManifestInstallResult install = EnsureManifestRegistration();
+		CliExit(install.message, !install.success);
 	}
 	else if (cmd == L"-removemanifest")
 	{

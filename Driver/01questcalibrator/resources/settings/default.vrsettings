@@ -1,4 +1,5 @@
 ﻿{
 	"driver_01questcalibrator" : {
+		"loadPriority": 9999
 	}
 }

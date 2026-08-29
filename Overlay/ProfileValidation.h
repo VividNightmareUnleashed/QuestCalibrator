@@ -145,6 +145,12 @@ inline bool IsValidUniverseBaseline(
 		IsBoundedVector(translation, protocol::limits::MaxAbsTranslationMeters);
 }
 
+inline bool ProfileHmdIdentityMatches(
+	const std::string &profileSerial, const std::string &currentSerial)
+{
+	return !profileSerial.empty() && profileSerial == currentSerial;
+}
+
 // A raw-space snapshot belongs to the headset/universe that produced it.
 // Asked in three places - the load path disarms a snapshot without it, the
 // writer refuses to persist one, and the restore path will not apply one - so
@@ -229,6 +235,7 @@ struct ProfileRecord
 	bool continuousEnabled = false;
 	std::string continuousTrackerSerial;
 	bool continuousLatencyReestimation = false;
+	bool continuousRequireTrigger = false;
 	bool hideMountedTracker = true;
 	MountExtrinsicRecord mountExtrinsic;
 };

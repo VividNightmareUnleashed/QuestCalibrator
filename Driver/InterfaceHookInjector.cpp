@@ -498,12 +498,17 @@ bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 
 bool IsPoseUpdateHookInstalled()
 {
-	for (const PoseHookBinding &binding : PoseHookBindings)
-	{
-		if (binding.ready->load(std::memory_order_acquire))
-			return true;
-	}
-	return false;
+	return PoseUpdateHookMask() != 0;
+}
+
+uint32_t PoseUpdateHookMask()
+{
+	uint32_t mask = 0;
+	if (PoseHook005Ready.load(std::memory_order_acquire))
+		mask |= protocol::PoseHook005;
+	if (PoseHook006Ready.load(std::memory_order_acquire))
+		mask |= protocol::PoseHook006;
+	return mask;
 }
 
 bool DisableHooks()

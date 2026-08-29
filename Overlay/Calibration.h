@@ -1,7 +1,9 @@
 #pragma once
 
 #include "CalibrationEngine.h"
+#include "CalibrationRun.h"
 #include "ContinuousAlignment.h"
+#include "ContinuousCorrectionGate.h"
 #include "PersistenceState.h"
 #include "ProfileValidation.h"
 
@@ -23,6 +25,22 @@ enum class CalibrationState
 	Editing,
 };
 
+// Canonical live transform. Runtime, persistence, field math, and continuous
+// calibration all consume this value directly; centimeters and Euler angles
+// exist only at the UI boundary.
+struct CalibrationTransform
+{
+	Eigen::Quaterniond rotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d translationMeters{ 0, 0, 0 };
+	double scale = 1.0;
+	double timeOffset = 0.0;
+
+	Eigen::Vector3d RotationEulerDegrees() const
+	{
+		return rotation.toRotationMatrix().eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+	}
+};
+
 // Session log file (%LOCALAPPDATA%\QuestCalibrator\QuestCalibrator.log): the
 // in-app message pane persisted for bug reports — the Release build is a GUI
 // binary, so stderr goes nowhere. One fresh file per session; the previous
@@ -35,42 +53,11 @@ struct CalibrationContext
 {
 	CalibrationState state = CalibrationState::None;
 	uint32_t referenceID = 0xFFFFFFFF, targetID = 0xFFFFFFFF;
-	// Frozen with the tracking-system names when a collection starts. The UI's
-	// live device panes may refresh/reselect while the modal is open, but an
-	// in-flight solve must continue consuming the exact pair the user started.
-	// The ids alone cannot promise that: SteamVR may free an index and hand it
-	// to a different physical device inside the collection window, so the
-	// serials are frozen with them and re-checked at 1 Hz during Collecting.
-	// Empty means the serial could not be read at Begin, which proves nothing
-	// and therefore never aborts.
-	uint32_t calibrationReferenceID = 0xFFFFFFFF;
-	uint32_t calibrationTargetID = 0xFFFFFFFF;
-	std::string calibrationReferenceSerial;
-	std::string calibrationTargetSerial;
+	// Every transient input and temporary mutation belongs to one run. Keeping
+	// these together makes abort, solve failure, and shutdown share one cleanup.
+	questcal::CalibrationRun run;
 
-	// The quaternion is the source of truth for the calibrated rotation, and
-	// calibratedRotation (Euler, degrees, [roll, yaw, pitch] to match the
-	// (2,1,0) decomposition) is a genuine display/editing copy: nothing reads
-	// it back into state. The profile editor seeds its own draft from it and
-	// converts that draft with RebuildRotationFromEuler, which is the single
-	// sanctioned Euler -> quaternion path.
-	//
-	// calibratedTranslation is NOT the same kind of member despite sitting next
-	// to it. There is no meters-valued field, so the centimeter vector is the
-	// actual storage and every meters value in the app round-trips
-	// m -> cm -> m through TranslationMeters(): driver sends, continuous
-	// corrections, field anchoring and persistence all do. The numeric cost is
-	// ~1e-16 relative, but the structural cost is real — the profile editor's
-	// translation-only branch writes this member directly and must, so treating
-	// it as genuinely derived (recomputing it, or skipping it on a fast path)
-	// would zero the live translation. Storing meters and deriving the
-	// centimeter copy for display is what would make "quaternion plus meters
-	// are the truth" checkable.
-	Eigen::Quaterniond calibratedRotationQ{ 1, 0, 0, 0 };
-	Eigen::Vector3d calibratedRotation{ 0, 0, 0 };
-	Eigen::Vector3d calibratedTranslation{ 0, 0, 0 };
-	double calibratedScale = 1.0;
-	double calibratedTimeOffset = 0.0;   // seconds; solved inter-system offset
+	CalibrationTransform transform;
 
 	// Runtime latency re-prediction: when enabled, the solved time offset is
 	// applied to target devices via ComputeAppliedTimeOffset. The manual
@@ -113,7 +100,6 @@ struct CalibrationContext
 	std::vector<FieldAnchor> fieldAnchors;
 	bool fieldEnabled = true;
 	uint32_t fieldGeneration = 0;      // driver-side smoothing snaps when this changes
-	bool collectAsAnchor = false;      // next solve stores an anchor instead of replacing base
 
 	// Base-transform snap/slew discriminator (protocol v5, runtime only).
 	// Bumped by SetCalibration so every intentional change snaps by default;
@@ -126,6 +112,8 @@ struct CalibrationContext
 	bool continuousEnabled = false;              // persisted
 	std::string continuousTrackerSerial;         // persisted
 	bool continuousLatencyReestimation = false;  // persisted; opt-in, default off
+	bool continuousRequireTrigger = false;       // persisted; confirm corrections manually
+	questcal::ContinuousCorrectionGate continuousCorrectionGate;
 	bool hideMountedTracker = true;              // persisted; displace from games
 	questcal::MountExtrinsic mountExtrinsic;     // persisted while valid
 	uint32_t continuousTrackerId = 0xFFFFFFFF;   // runtime
@@ -158,6 +146,7 @@ struct CalibrationContext
 	// runtime poses — all of it silently, so the UI reports it as a first-class
 	// status instead of the overlay looking healthy with its monitors off.
 	bool poseRingOpen = false;
+	uint32_t driverPoseHookMask = 0;
 
 	// Runtime alignment monitoring. The device masks mark reference/target
 	// system devices (refreshed by the profile scan); the counters feed drift
@@ -194,8 +183,6 @@ struct CalibrationContext
 	// browsing another tracking system cannot apply the old transform to it.
 	std::string pendingReferenceTrackingSystem;
 	std::string pendingTargetTrackingSystem;
-	std::string calibrationReferenceTrackingSystem;
-	std::string calibrationTargetTrackingSystem;
 
 	bool enabled = false;
 
@@ -212,6 +199,7 @@ struct CalibrationContext
 		InvalidTransform,   // the calibration's numerics failed validation
 		HmdMismatch,        // the live HMD belongs to another tracking system
 		DriverUnreachable,  // the transform batch did not complete
+		Synchronizing,      // a changed desired state is queued off the UI thread
 		UniverseUnsafe,     // reference universe moved; relation unknown
 	};
 	DisableReason disableReason = DisableReason::None;
@@ -240,14 +228,6 @@ struct CalibrationContext
 		VERY_SLOW = 2
 	};
 	Speed calibrationSpeed = FAST;
-
-	// Collection buffers, owned here and cleared on every start/abort so an
-	// aborted run can never leak samples into the next one.
-	std::vector<questcal::PoseSample> refSamples;
-	std::vector<questcal::PoseSample> targetSamples;
-	double collectionStart = 0.0;
-	double lastRefSampleTime = 0.0;
-	double lastTargetSampleTime = 0.0;
 
 	questcal::EngineResult lastResult;
 
@@ -307,10 +287,9 @@ struct CalibrationContext
 	// small auto-applied continuous-calibration corrections.
 	void SetCalibrationContinuous(const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translationMeters, double scale)
 	{
-		calibratedRotationQ = rotation.normalized();
-		calibratedRotation = calibratedRotationQ.toRotationMatrix().eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
-		calibratedTranslation = translationMeters * 100.0;
-		calibratedScale = scale;
+		transform.rotation = rotation.normalized();
+		transform.translationMeters = translationMeters;
+		transform.scale = scale;
 	}
 
 	// The one sanctioned Euler -> quaternion conversion: an explicit user edit
@@ -326,11 +305,6 @@ struct CalibrationContext
 			Eigen::AngleAxisd(e(2), Eigen::Vector3d::UnitX());
 	}
 
-	Eigen::Vector3d TranslationMeters() const
-	{
-		return calibratedTranslation * 0.01;
-	}
-
 	// Persisted profile mutations are transactions owned by Configuration.cpp
 	// (SaveProfileFieldEdit / SaveProfileTransformEdit), never by this struct:
 	// they persist a candidate record and only then apply it, so a refused write
@@ -338,14 +312,6 @@ struct CalibrationContext
 	// roll back on failure, and no rollback held by a caller can undo what a
 	// failed write leaves behind in the persistence layer — which is why there
 	// is deliberately no such helper to add the next toggle to.
-
-	void ClearSampleBuffers()
-	{
-		refSamples.clear();
-		refSamples.shrink_to_fit();
-		targetSamples.clear();
-		targetSamples.shrink_to_fit();
-	}
 
 	void Clear()
 	{
@@ -359,7 +325,8 @@ struct CalibrationContext
 		//     calibrationSpeed, solveScale, applyTimeOffset and the manual
 		//     override, hideMountedTracker);
 		//   - the continuous-calibration pick (continuousEnabled,
-		//     continuousTrackerSerial, continuousLatencyReestimation) — only
+		//     continuousTrackerSerial, continuousLatencyReestimation,
+		//     continuousRequireTrigger) — only
 		//     the derived extrinsic goes, below;
 		//   - baseGeneration, which is a monotonic snap/slew discriminator the
 		//     driver compares across sends; resetting it could let the next
@@ -368,19 +335,15 @@ struct CalibrationContext
 		// Everything else that describes the calibration being discarded is
 		// reset here; anything added to this struct that describes one has to
 		// be added below too.
-		calibratedRotationQ = Eigen::Quaterniond(1, 0, 0, 0);
-		calibratedRotation = Eigen::Vector3d();
-		calibratedTranslation = Eigen::Vector3d();
-		calibratedScale = 1.0;
-		calibratedTimeOffset = 0.0;
+		transform = CalibrationTransform();
 		fieldAnchors.clear();
 		fieldGeneration++;
-		collectAsAnchor = false;
 		// The mount extrinsic was derived from the calibration being cleared;
 		// the enable/hide preferences and tracker pick survive like uiAdvanced.
 		mountExtrinsic = questcal::MountExtrinsic();
 		lastAutoCorrectionUnixTime = 0.0;
 		autoCorrectionsApplied = 0;
+		continuousCorrectionGate.Clear();
 		continuousState = questcal::ContinuousAlignment::State::Inactive;
 		continuousDeviation = questcal::ContinuousAlignment::Deviation();
 		continuousScatterRotDeg = 0.0;
@@ -409,7 +372,7 @@ struct CalibrationContext
 		profileWorldFromDriverTranslation = Eigen::Vector3d::Zero();
 		persistence.OnProfileDiscarded();
 		timeLastScan = -1e9;
-		ClearSampleBuffers();
+		run.Reset();
 	}
 
 	double CollectionSeconds()
@@ -452,6 +415,7 @@ struct CalibrationContext
 	// calibration modal does not render.
 	static constexpr size_t MessageEntryMaxBytes = 8 * 1024;
 	static constexpr size_t MessagePaneMaxBytes = 256 * 1024;
+	static constexpr size_t UiErrorMaxBytes = 8 * 1024;
 	// Persistent banner for failures that occur outside the calibration modal
 	// (registry/chaperone operations in the settings screen).
 	enum class ErrorSource
@@ -475,12 +439,19 @@ struct CalibrationContext
 
 	void Log(const std::string &msg)
 	{
-		if (messages.empty() || messages.back().type == Message::Progress ||
-			messages.back().str.size() >= MessageEntryMaxBytes)
-			messages.push_back(Message(Message::String));
+		size_t offset = 0;
+		while (offset < msg.size())
+		{
+			if (messages.empty() || messages.back().type == Message::Progress ||
+				messages.back().str.size() >= MessageEntryMaxBytes)
+				messages.push_back(Message(Message::String));
 
-		messages.back().str += msg;
-		messageBytes += msg.size();
+			size_t count = (std::min)(MessageEntryMaxBytes - messages.back().str.size(),
+				msg.size() - offset);
+			messages.back().str.append(msg, offset, count);
+			messageBytes += count;
+			offset += count;
+		}
 		// Never drop the entry being appended to: the newest lines are the ones
 		// a bug report is about.
 		while (messageBytes > MessagePaneMaxBytes && messages.size() > 1)
@@ -495,7 +466,7 @@ struct CalibrationContext
 
 	void ReportError(const std::string &msg, ErrorSource source = ErrorSource::General)
 	{
-		uiError = msg;
+		uiError.assign(msg, 0, (std::min)(msg.size(), UiErrorMaxBytes));
 		uiErrorSource = source;
 		while (!uiError.empty() && (uiError.back() == '\n' || uiError.back() == '\r'))
 			uiError.pop_back();
