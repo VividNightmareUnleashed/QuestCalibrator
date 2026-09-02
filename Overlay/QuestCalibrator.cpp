@@ -490,8 +490,10 @@ void RunLoop()
 					if (bytes > 0)
 					{
 						buf[sizeof buf - 1] = 0;
-						ImGui::SetActiveText(buf,
-							static_cast<int>(strnlen(buf, sizeof buf)));
+						// buf_size is the capacity: the decoder writes at most
+						// buf_size - 1 characters, so passing the string length
+						// drops the last one typed.
+						ImGui::SetActiveText(buf, static_cast<int>(sizeof buf));
 					}
 					// A Done for a keyboard we no longer consider open has no
 					// widget to clear; only settle.
