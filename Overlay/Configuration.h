@@ -37,6 +37,10 @@ questcal::PersistedFieldAnchor PersistedAnchor(
 // never overtake it. A malformed-but-recoverable profile is never overwritten.
 bool SaveSettings(CalibrationContext &ctx);
 
+// Flushes whichever persisted records are dirty while preserving the coupled
+// Config-before-Settings ordering owned by SaveSettings.
+bool SavePendingChanges(CalibrationContext &ctx);
+
 // A pending Config write with no valid profile to write is the same fault
 // wherever it is noticed, so both flush paths say the same thing about it.
 inline constexpr const char *PendingProfileWithoutValidProfileMessage =

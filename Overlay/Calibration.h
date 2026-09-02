@@ -21,6 +21,7 @@ enum class CalibrationState
 {
 	None,
 	Begin,
+	Neutralizing,
 	Collecting,   // both device streams recorded; solve runs at the end
 	Editing,
 };
@@ -41,6 +42,72 @@ struct CalibrationTransform
 	}
 };
 
+// Everything invalidated when the active calibration profile is discarded.
+// CalibrationContext keeps preferences, device choices, chaperone protection,
+// persistence scheduling, and monotonic driver generations outside this value.
+struct CalibrationProfileState
+{
+	CalibrationTransform transform;
+	// The target-device timeline shift most recently requested from the driver.
+	double appliedTimeOffset = 0.0;
+
+	// Absolute local solves; driver deltas are derived against `transform`.
+	struct FieldAnchor
+	{
+		Eigen::Vector3d position{ 0, 0, 0 };        // target centroid in reference space
+		Eigen::Quaterniond rotation{ 1, 0, 0, 0 };  // absolute solve at this position
+		Eigen::Vector3d translationMeters{ 0, 0, 0 };
+	};
+	std::vector<FieldAnchor> fieldAnchors;
+
+	questcal::MountExtrinsic mountExtrinsic;
+	// Runtime mirrors and evidence derived from this profile.
+	questcal::ContinuousCorrectionGate continuousCorrectionGate;
+	uint32_t continuousTrackerId = 0xFFFFFFFF;
+	double lastAutoCorrectionUnixTime = 0.0;
+	uint32_t autoCorrectionsApplied = 0;
+	questcal::ContinuousAlignment::State continuousState =
+		questcal::ContinuousAlignment::State::Inactive;
+	questcal::ContinuousAlignment::Deviation continuousDeviation;
+	double continuousScatterRotDeg = 0.0;
+	double continuousScatterPosM = 0.0;
+
+	uint32_t jumpsCompensated = 0;
+	uint32_t referenceGapEvents = 0;
+	double calibrationUnixTime = 0.0;
+	uint32_t driftSlideEvents = 0;
+	double driftMaxSlideM = 0.0;
+	uint32_t discontinuousLossEvents = 0;
+	double driftScore = 0.0;
+	enum class AlignmentHealth { Fresh, Aging, Stale };
+	AlignmentHealth alignment = AlignmentHealth::Fresh;
+
+	std::string referenceTrackingSystem;
+	std::string targetTrackingSystem;
+	bool enabled = false;
+	enum class DisableReason
+	{
+		None,
+		InvalidIdentity,
+		InvalidTransform,
+		HmdMismatch,
+		DriverUnreachable,
+		Synchronizing,
+		UniverseUnsafe,
+	};
+	DisableReason disableReason = DisableReason::None;
+	bool validProfile = false;
+	// Physical HMD and raw universe in which `transform` was solved.
+	bool profileUniverseUnsafe = false;
+	bool profileUniverseValid = false;
+	std::string profileHmdSerial;
+	Eigen::Quaterniond profileWorldFromDriverRotation{ 1, 0, 0, 0 };
+	Eigen::Vector3d profileWorldFromDriverTranslation{ 0, 0, 0 };
+	questcal::EngineResult lastResult;
+
+	void ResetProfile() { *this = CalibrationProfileState{}; }
+};
+
 // Session log file (%LOCALAPPDATA%\QuestCalibrator\QuestCalibrator.log): the
 // in-app message pane persisted for bug reports — the Release build is a GUI
 // binary, so stderr goes nowhere. One fresh file per session; the previous
@@ -49,15 +116,13 @@ struct CalibrationTransform
 void InitSessionLog();
 void AppendSessionLog(const std::string &msg);
 
-struct CalibrationContext
+struct CalibrationContext : CalibrationProfileState
 {
 	CalibrationState state = CalibrationState::None;
 	uint32_t referenceID = 0xFFFFFFFF, targetID = 0xFFFFFFFF;
 	// Every transient input and temporary mutation belongs to one run. Keeping
 	// these together makes abort, solve failure, and shutdown share one cleanup.
 	questcal::CalibrationRun run;
-
-	CalibrationTransform transform;
 
 	// Runtime latency re-prediction: when enabled, the solved time offset is
 	// applied to target devices via ComputeAppliedTimeOffset. The manual
@@ -66,9 +131,6 @@ struct CalibrationContext
 	bool applyTimeOffset = true;
 	bool useManualTimeOffset = false;
 	double manualTimeOffsetMs = 0.0;
-
-	// The shift (seconds) most recently sent to the driver for target devices.
-	double appliedTimeOffset = 0.0;
 
 	// Playspace scale solving is opt-in: streamed reference poses are motion-
 	// smoothed, which under-reports calibration motion and biases the solved
@@ -86,20 +148,14 @@ struct CalibrationContext
 	// after the snapshot is discarded.
 	bool chaperoneWarningAck = false;
 
-	// Spatial correction field: per-spot absolute solves. The
-	// per-anchor deltas the driver blends are derived against the base
-	// calibration at send time, so a universe jump only has to transform the
-	// absolute anchors by D — the conjugated deltas (D delta D^-1) fall out on
-	// the next send.
-	struct FieldAnchor
-	{
-		Eigen::Vector3d position{ 0, 0, 0 };        // target-path centroid, reference space
-		Eigen::Quaterniond rotation{ 1, 0, 0, 0 };  // absolute calibration solved at this spot
-		Eigen::Vector3d translationMeters{ 0, 0, 0 };
-	};
-	std::vector<FieldAnchor> fieldAnchors;
 	bool fieldEnabled = true;
 	uint32_t fieldGeneration = 0;      // driver-side smoothing snaps when this changes
+
+	const std::vector<FieldAnchor> &ActiveFieldAnchors() const
+	{
+		static const std::vector<FieldAnchor> none;
+		return fieldEnabled ? fieldAnchors : none;
+	}
 
 	// Base-transform snap/slew discriminator (protocol v5, runtime only).
 	// Bumped by SetCalibration so every intentional change snaps by default;
@@ -113,21 +169,7 @@ struct CalibrationContext
 	std::string continuousTrackerSerial;         // persisted
 	bool continuousLatencyReestimation = false;  // persisted; opt-in, default off
 	bool continuousRequireTrigger = false;       // persisted; confirm corrections manually
-	questcal::ContinuousCorrectionGate continuousCorrectionGate;
 	bool hideMountedTracker = true;              // persisted; displace from games
-	questcal::MountExtrinsic mountExtrinsic;     // persisted while valid
-	uint32_t continuousTrackerId = 0xFFFFFFFF;   // runtime
-	double lastAutoCorrectionUnixTime = 0.0;     // runtime; feeds the drift age
-	uint32_t autoCorrectionsApplied = 0;         // runtime
-	// UI status mirror, refreshed every continuous tick.
-	// The enum itself, not an int mirror of it: this header already depends on
-	// ContinuousAlignment.h, so the only thing the int bought was a cast at
-	// every one of the nine read sites.
-	questcal::ContinuousAlignment::State continuousState =
-		questcal::ContinuousAlignment::State::Inactive;
-	questcal::ContinuousAlignment::Deviation continuousDeviation;
-	double continuousScatterRotDeg = 0.0;
-	double continuousScatterPosM = 0.0;
 
 	// The feature is armed only when the tracker pick and the mount offset
 	// learned for that tracker are both present — picking a tracker in the
@@ -153,19 +195,6 @@ struct CalibrationContext
 	// staleness and the UI.
 	bool referenceDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	bool targetDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
-	uint32_t jumpsCompensated = 0;
-	uint32_t referenceGapEvents = 0;     // hard reference-stream gaps (no compensation possible)
-
-	// Drift staleness (detect + notify only; never auto-corrects). Counters
-	// reset on every successful calibration.
-	double calibrationUnixTime = 0.0;    // persisted; 0 = unknown (old profile)
-	uint32_t driftSlideEvents = 0;
-	double driftMaxSlideM = 0.0;
-	uint32_t discontinuousLossEvents = 0;
-	double driftScore = 0.0;             // 0..1
-	enum class AlignmentHealth { Fresh, Aging, Stale };
-	AlignmentHealth alignment = AlignmentHealth::Fresh;
-
 	// Debounced persistence for runtime compensation updates: dirty records save
 	// after a quiet period and always on shutdown. See PersistenceState.h — the
 	// rules live with the data rather than as loose fields here.
@@ -176,48 +205,12 @@ struct CalibrationContext
 	questcal::RecordLoadState profileLoadState = questcal::RecordLoadState::Missing;
 	questcal::RecordLoadState settingsLoadState = questcal::RecordLoadState::Missing;
 
-	std::string referenceTrackingSystem;
-	std::string targetTrackingSystem;
 	// Device-pane choices are candidates for the next base calibration.  They
 	// deliberately stay separate from the active profile identity above so
 	// browsing another tracking system cannot apply the old transform to it.
 	std::string pendingReferenceTrackingSystem;
 	std::string pendingTargetTrackingSystem;
 
-	bool enabled = false;
-
-	// Why the last driver synchronization cleared `enabled`. Six distinct
-	// conditions disable a profile, and the UI reported one cause for all of
-	// them - it told a user their headset was not detected when the real
-	// problem was a dead pipe or a universe rebase, sending them to check
-	// hardware that was fine. Recorded where the decision is made, because
-	// nothing downstream can reconstruct it.
-	enum class DisableReason
-	{
-		None,
-		InvalidIdentity,    // the profile's tracking-system pair is unusable
-		InvalidTransform,   // the calibration's numerics failed validation
-		HmdMismatch,        // the live HMD belongs to another tracking system
-		DriverUnreachable,  // the transform batch did not complete
-		Synchronizing,      // a changed desired state is queued off the UI thread
-		UniverseUnsafe,     // reference universe moved; relation unknown
-	};
-	DisableReason disableReason = DisableReason::None;
-	bool validProfile = false;
-	// Fail-closed latch (persisted with the profile): the profile's HMD universe
-	// baseline changed while normal multi-device monitoring had no continuity.
-	// Only a fresh base calibration can safely re-enable this profile, so the
-	// latch must survive a restart — a session-only latch simply hands the
-	// corrupted profile back at the next launch.
-	bool profileUniverseUnsafe = false;
-	// The reference universe the calibration was solved in: the headset that
-	// owns it plus that headset's raw worldFromDriver, persisted with the
-	// profile. The protected chaperone snapshot used to be the only carrier of
-	// this, so a user who never protected a room got no continuity check at all.
-	bool profileUniverseValid = false;
-	std::string profileHmdSerial;
-	Eigen::Quaterniond profileWorldFromDriverRotation{ 1, 0, 0, 0 };
-	Eigen::Vector3d profileWorldFromDriverTranslation{ 0, 0, 0 };
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
 
@@ -228,8 +221,6 @@ struct CalibrationContext
 		VERY_SLOW = 2
 	};
 	Speed calibrationSpeed = FAST;
-
-	questcal::EngineResult lastResult;
 
 	vr::TrackedDevicePose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
 
@@ -315,61 +306,8 @@ struct CalibrationContext
 
 	void Clear()
 	{
-		// Chaperone protection and global preferences are independent settings;
-		// clearing a calibration must not silently disarm the room boundary.
-		//
-		// This is a hand-maintained partial reset, so the survivor list is
-		// stated rather than implied by omission. Deliberately kept:
-		//   - the chaperone snapshot and its autoApply/warning ack;
-		//   - global preferences (uiAdvanced, notifyPoorCalibration,
-		//     calibrationSpeed, solveScale, applyTimeOffset and the manual
-		//     override, hideMountedTracker);
-		//   - the continuous-calibration pick (continuousEnabled,
-		//     continuousTrackerSerial, continuousLatencyReestimation,
-		//     continuousRequireTrigger) — only
-		//     the derived extrinsic goes, below;
-		//   - baseGeneration, which is a monotonic snap/slew discriminator the
-		//     driver compares across sends; resetting it could let the next
-		//     calibration reuse a generation the driver already applied and
-		//     therefore slew a full recalibration.
-		// Everything else that describes the calibration being discarded is
-		// reset here; anything added to this struct that describes one has to
-		// be added below too.
-		transform = CalibrationTransform();
-		fieldAnchors.clear();
+		ResetProfile();
 		fieldGeneration++;
-		// The mount extrinsic was derived from the calibration being cleared;
-		// the enable/hide preferences and tracker pick survive like uiAdvanced.
-		mountExtrinsic = questcal::MountExtrinsic();
-		lastAutoCorrectionUnixTime = 0.0;
-		autoCorrectionsApplied = 0;
-		continuousCorrectionGate.Clear();
-		continuousState = questcal::ContinuousAlignment::State::Inactive;
-		continuousDeviation = questcal::ContinuousAlignment::Deviation();
-		continuousScatterRotDeg = 0.0;
-		continuousScatterPosM = 0.0;
-		calibrationUnixTime = 0.0;
-		driftSlideEvents = 0;
-		driftMaxSlideM = 0.0;
-		discontinuousLossEvents = 0;
-		driftScore = 0.0;
-		alignment = AlignmentHealth::Fresh;
-		// Both counters are evidence gathered against the universe of the
-		// calibration being discarded, and the settings screen renders them as
-		// advice to recalibrate. Surviving Clear() made a fresh profile inherit
-		// the previous one's jump/gap history.
-		jumpsCompensated = 0;
-		referenceGapEvents = 0;
-		lastResult = questcal::EngineResult();
-		referenceTrackingSystem = "";
-		targetTrackingSystem = "";
-		enabled = false;
-		validProfile = false;
-		profileUniverseUnsafe = false;
-		profileUniverseValid = false;
-		profileHmdSerial.clear();
-		profileWorldFromDriverRotation = Eigen::Quaterniond(1, 0, 0, 0);
-		profileWorldFromDriverTranslation = Eigen::Vector3d::Zero();
 		persistence.OnProfileDiscarded();
 		timeLastScan = -1e9;
 		run.Reset();

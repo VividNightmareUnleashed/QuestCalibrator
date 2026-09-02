@@ -8,19 +8,9 @@
 #include <cstdint>
 #include <string>
 
-// Derive one driver's complete slot state from a calibration and an enumerated
-// OpenVR device.
-//
-// This is the decision half of SynchronizeDriverState, lifted out of
-// Calibration.cpp so the harness can drive it. It is the only place
-// baseGeneration reaches a wire message. Nothing here performs I/O:
-// Calibration.cpp enumerates OpenVR, calls this, and sends the resulting masks
-// in one atomic runtime-state request.
-//
-// Deliberately free of openvr.h. Protocol.h already picks openvr.h or
-// openvr_driver.h from whichever the including translation unit carries (the
-// two conflict, and the harness carries the driver one), and the device facts
-// arrive as a plain enum plus strings so no OpenVR type crosses the seam.
+// Pure per-slot policy for deriving a complete driver state from an enumerated
+// device and validated calibration. OpenVR facts cross this boundary as values;
+// no I/O or runtime header dependency is required.
 namespace questcal
 {
 
@@ -69,11 +59,18 @@ struct SyncDevice
 	std::string trackingSystem;
 	bool serialKnown = false;
 	std::string serial;
+
+	bool operator==(const SyncDevice &other) const
+	{
+		return id == other.id && deviceClass == other.deviceClass &&
+			trackingSystemKnown == other.trackingSystemKnown &&
+			trackingSystem == other.trackingSystem &&
+			serialKnown == other.serialKnown && serial == other.serial;
+	}
 };
 
-// The live calibration, reduced to what a slot decision reads. Assembled by
-// SynchronizeDriverState after its own validity gates have run, so by the time
-// this is built the transform is already known finite and in range.
+// The live calibration reduced to what a slot decision reads. Its transform is
+// finite and bounded before this value reaches the policy.
 struct DriverSyncDesired
 {
 	std::string referenceTrackingSystem;
@@ -96,6 +93,19 @@ struct DriverSyncDesired
 	// The HMD-mounted tracker's persisted identity. Ids are not stable across
 	// sessions, so the tracker is re-resolved by serial on every scan.
 	std::string continuousTrackerSerial;
+
+	bool operator==(const DriverSyncDesired &other) const
+	{
+		return referenceTrackingSystem == other.referenceTrackingSystem &&
+			targetTrackingSystem == other.targetTrackingSystem &&
+			rotation.coeffs() == other.rotation.coeffs() &&
+			translationMeters == other.translationMeters &&
+			scale == other.scale && timeShift == other.timeShift &&
+			baseGeneration == other.baseGeneration &&
+			continuousArmed == other.continuousArmed &&
+			hideMountedTracker == other.hideMountedTracker &&
+			continuousTrackerSerial == other.continuousTrackerSerial;
+	}
 };
 
 enum class SlotAction { None, ApplyTransform };
@@ -166,9 +176,8 @@ inline SlotDecision DecideSlot(const DriverSyncDesired &desired,
 		WireVector(desired.translationMeters), WireQuaternion(desired.rotation),
 		desired.scale, desired.timeShift);
 	decision.transform.generation = desired.baseGeneration;
-	// Only the mounted tracker is displaced out of games' reach, and only
-	// while the feature is actually armed: gating on the weaker half used to
-	// hide the tracker while nothing maintained the alignment.
+	// An unarmed tracker must remain visible because nothing is maintaining its
+	// displaced alignment.
 	decision.transform.hidden = desired.continuousArmed &&
 		desired.hideMountedTracker && decision.continuousTracker;
 	return decision;

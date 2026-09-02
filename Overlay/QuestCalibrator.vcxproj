@@ -97,6 +97,8 @@
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\common\Version.h" />
     <ClInclude Include="Calibration.h" />
+    <ClInclude Include="CalibrationDriver.h" />
+    <ClInclude Include="CalibrationSpace.h" />
     <ClInclude Include="CalibrationEngine.h" />
     <ClInclude Include="CalibrationRun.h" />
     <ClInclude Include="ChaperoneMath.h" />
@@ -109,7 +111,7 @@
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
-    <ClInclude Include="DriverSyncWorker.h" />
+    <ClInclude Include="DriverWorker.h" />
     <ClInclude Include="EmbeddedFiles.h" />
     <ClInclude Include="FieldMath.h" />
     <ClInclude Include="IPCClient.h" />
@@ -145,6 +147,8 @@
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="Calibration.cpp" />
+    <ClCompile Include="CalibrationDriver.cpp" />
+    <ClCompile Include="CalibrationSpace.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

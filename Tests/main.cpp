@@ -28,7 +28,7 @@
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/DriverSession.h"
 #include "../Overlay/DriverSyncPolicy.h"
-#include "../Overlay/DriverSyncWorker.h"
+#include "../Overlay/DriverWorker.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/PersistenceState.h"
 #include "../Overlay/ProfileValidation.h"
@@ -52,6 +52,8 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+bool CalibrationContextResetScenario();
 
 using namespace questcal;
 
@@ -910,8 +912,8 @@ void RunDriverProtocolValidationScenarios()
 // ---------------------------------------------------------------------------
 // Overlay -> driver slot reconciliation (Overlay/DriverSyncPolicy.h)
 //
-// SynchronizeDriverState's pure decision half: which slots receive the
-// calibration and how their complete masks are derived.
+// Pure policy for which slots receive the calibration and how their complete
+// masks are derived.
 
 // A device table indexed by OpenVR id. A slot nobody filled in enumerates as
 // TrackedDeviceClass_Invalid, which is exactly what OpenVR reports for an id it
@@ -1029,12 +1031,9 @@ void RunDriverSyncScenarios()
 // ---------------------------------------------------------------------------
 // Overlay -> driver session sequencing (Overlay/DriverSession.h)
 //
-// The transport half of the same reconciliation: not which slot gets what, but
-// the order the requests go out in and what the overlay is allowed to believe
-// afterwards. Every rule below only ever fails against a pipe that refuses,
-// dies or reconnects mid-batch, which is exactly what no test could produce
-// while the sends were fused to a live IPCClient. Both of the session's seams
-// are driven here; everything between them is the production sequencing.
+// Session sequencing determines request order and what the overlay may believe
+// afterward. Fault injection drives refusals, disconnects, and reconnects
+// through the production transport seams.
 
 enum class LinkFault
 {
@@ -1173,8 +1172,7 @@ struct SessionFixture
 questcal::DriverApplyResult RunSessionScan(questcal::DriverSession &session,
 	const questcal::DriverApplyRequest &request, double now)
 {
-	questcal::DriverBatch batch = session.Begin(now);
-	return session.Apply(batch, request, now);
+	return session.Apply(request, now);
 }
 
 questcal::DriverApplyRequest MakeSessionRequest(bool enabled, bool fieldWanted)
@@ -1468,13 +1466,19 @@ void RunDriverSessionScenarios()
 	}
 }
 
-void RunDriverSyncWorkerScenario()
+void RunDriverWorkerScenario()
 {
 	std::atomic<int> requests{ 0 };
-	questcal::DriverSyncWorker worker;
+	std::atomic<int> stateRequests{ 0 };
+	std::atomic<int> disableRequests{ 0 };
+	questcal::DriverWorker worker;
 	worker.Start([&](const protocol::Request &request)
 	{
 		++requests;
+		if (request.type == protocol::RequestSetRuntimeState)
+			++stateRequests;
+		else if (request.type == protocol::RequestSetDeviceTransform)
+			++disableRequests;
 		questcal::DriverTransportResult result;
 		result.completed = true;
 		result.connectionGeneration = 1;
@@ -1484,33 +1488,81 @@ void RunDriverSyncWorkerScenario()
 		return result;
 	});
 
-	questcal::DriverSyncJob job;
+	questcal::DriverStateJob job;
 	job.request.enabled = false;
 	auto first = worker.Submit(job);
 	auto duplicate = worker.Submit(job);
 	job.request.desired.scale = 1.01;
 	auto changed = worker.Submit(job);
+	job.request.field.generation = 1;
+	auto fieldChanged = worker.Submit(job);
+	job.devices[4].id = 4;
+	job.devices[4].deviceClass = questcal::SyncDeviceClass::Other;
+	auto deviceChanged = worker.Submit(job);
 
-	questcal::DriverSyncCompletion completion;
+	questcal::DriverCompletion completion;
 	bool gotLatest = false;
 	for (int attempt = 0; attempt < 1000 && !gotLatest; ++attempt)
 	{
-		if (worker.Poll(completion) && completion.sequence == changed.sequence)
+		if (worker.Poll(completion) && completion.sequence == deviceChanged.sequence)
 			gotLatest = true;
 		else
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
+
+	const uint64_t neutralization = worker.Neutralize({ 7, 9 }, 1.0);
+	job.request.desired.scale = 1.02;
+	auto heldState = worker.Submit(job);
+	bool gotNeutralization = false;
+	for (int attempt = 0; attempt < 1000 && !gotNeutralization; ++attempt)
+	{
+		if (worker.Poll(completion) &&
+			completion.kind == questcal::DriverWorkKind::Neutralize &&
+			completion.sequence == neutralization)
+		{
+			gotNeutralization = completion.succeeded;
+		}
+		else
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+	const int stateCountWhileHeld = stateRequests.load();
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	const bool stateStayedHeld = stateRequests.load() == stateCountWhileHeld;
+
+	worker.ReleaseNeutralization();
+	bool gotReleasedState = false;
+	for (int attempt = 0; attempt < 1000 && !gotReleasedState; ++attempt)
+	{
+		if (worker.Poll(completion) &&
+			completion.kind == questcal::DriverWorkKind::Synchronize &&
+			completion.sequence == heldState.sequence)
+		{
+			gotReleasedState = completion.result.synchronized;
+		}
+		else
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
 	worker.Stop();
 
-	Check("driver worker: coalesced background sync",
+	Check("driver worker: coalesced and serialized background work",
 		first.stateChanged && !duplicate.stateChanged && changed.stateChanged &&
+		fieldChanged.stateChanged && deviceChanged.stateChanged &&
 		gotLatest && completion.result.synchronized &&
-		completion.result.poseHookMask == protocol::PoseHook006 && requests >= 2,
-		"same-state submissions coalesce; latest completion carries handshake health");
+		completion.result.poseHookMask == protocol::PoseHook006 && requests >= 2 &&
+		gotNeutralization && disableRequests == 2 && stateStayedHeld &&
+		heldState.stateChanged && gotReleasedState,
+		"same states coalesce; pair neutralization holds ordinary state until release");
 }
 
 void RunPoseSampleScenarios()
 {
+	Check("calibration context: profile reset boundary",
+		CalibrationContextResetScenario(),
+		"profile-derived state resets as one value; preferences and chaperone survive");
 	{
 		CalibrationRun run;
 		run.referenceId = 1;
@@ -1522,14 +1574,13 @@ void RunPoseSampleScenarios()
 			!run.AcceptUniverse(2, identity, Eigen::Vector3d(1.01, 0.0, 0.0));
 		run.referenceSamples.reserve(8);
 		run.referenceSamples.push_back(PoseSample());
-		run.driverNeutralized = true;
+		run.neutralizationSequence = 7;
 		run.Reset();
 		Check("calibration run: universe continuity and complete reset",
 			accepted && run.referenceId == UINT32_MAX &&
 			!run.referenceUniverse.valid && !run.targetUniverse.valid &&
-			!run.driverNeutralized && run.referenceSamples.empty() &&
-			run.referenceSamples.capacity() >= 8,
-			"stable epochs accepted, changed epoch rejected, reset clears ownership and retains buffers");
+			run.neutralizationSequence == 0 && run.referenceSamples.empty(),
+			"stable epochs accepted, changed epoch rejected, reset restores run defaults");
 	}
 	Check("profile identity: physical HMD ownership",
 		ProfileHmdIdentityMatches("quest-pro-A", "quest-pro-A") &&
@@ -7704,7 +7755,7 @@ int main(int argc, char **argv)
 	RunDriverProtocolValidationScenarios();
 	RunDriverSyncScenarios();
 	RunDriverSessionScenarios();
-	RunDriverSyncWorkerScenario();
+	RunDriverWorkerScenario();
 	RunPoseChannelScenarios();
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();

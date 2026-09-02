@@ -30,6 +30,15 @@
     <ClInclude Include="Calibration.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="CalibrationDriver.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CalibrationSpace.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CalibrationRun.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ChaperoneMath.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -60,7 +69,19 @@
     <ClInclude Include="ContinuousAlignment.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ContinuousCorrectionGate.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="DriftMonitor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DriverSession.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DriverSyncPolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="DriverWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="FieldMath.h">
@@ -75,6 +96,9 @@
     <ClInclude Include="ProfileValidation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="PersistenceState.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="RingPoseMath.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -84,6 +108,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Calibration.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CalibrationDriver.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="CalibrationSpace.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\lib\imgui\imgui.cpp">

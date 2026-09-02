@@ -12,9 +12,8 @@ namespace questcal
 	// compile it — as loose fields on the context these rules had no direct
 	// coverage at all, because Calibration.h cannot be compiled by the tests.
 	//
-	// What the callers own, and this type does not: performing the writes,
-	// their ordering (Settings first, see SaveDirtyPersistence), and the
-	// decision that a failed write should Retry.
+	// What the callers own, and this type does not: performing the ordered
+	// writes (see SavePendingChanges) and deciding that a failure should Retry.
 	struct PersistenceState
 	{
 		// A registry write per continuous correction would be one write every

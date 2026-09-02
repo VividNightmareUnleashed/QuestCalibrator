@@ -8,26 +8,9 @@
 #include <string>
 #include <utility>
 
-// The overlay's side of one driver conversation: one handshake, one atomic
-// desired-state request, and error debouncing.
-//
-// This is the transport half of what SynchronizeDriverState used to be. The
-// decision half already lives in DriverSyncPolicy.h; what stayed unreachable
-// was the connection sequencing and fail-closed behavior. Both seams are
-// injected instead:
-//
-//   - the transport, so a refusal, a dead pipe and a silent reconnect are
-//     scriptable values;
-//   - the device enumerator, because the enumeration is lazy and the laziness
-//     is load-bearing: the neutral path performs none at all, and the live loop
-//     stops paying for OpenVR property reads the moment a send fails.
-//
-// Deliberately free of openvr.h, windows.h and CalibrationContext. Protocol.h
-// already picks openvr.h or openvr_driver.h from whichever translation unit
-// includes it (the two conflict, and the harness carries the driver one), the
-// IPC client stays behind the transport function so this header never needs a
-// Windows type, and everything the caller owns crosses the seam as a plain
-// value.
+// One driver conversation: handshake, complete state application, targeted
+// neutralization, and error debouncing. Injected transport and enumeration keep
+// connection handling testable without Windows or CalibrationContext.
 namespace questcal
 {
 
@@ -59,15 +42,6 @@ using DriverTransport = std::function<DriverTransportResult(const protocol::Requ
 using DriverDeviceEnumerator =
 	std::function<SyncDevice(uint32_t id, const DriverSyncDesired &desired)>;
 
-// The handshake that opens one reconciliation batch, and the connection
-// generation it landed on. Produced by Begin() and consumed by Apply().
-struct DriverBatch
-{
-	bool connectionReady = false;
-	uint64_t connectionGeneration = 0;
-	uint32_t poseHookMask = 0;
-};
-
 // Everything one reconciliation needs, as plain values.
 struct DriverApplyRequest
 {
@@ -82,6 +56,12 @@ struct DriverApplyRequest
 	// builds the canonical disable itself, so a bad base can still clear a stale
 	// field.
 	protocol::SetAlignmentField field;
+
+	bool operator==(const DriverApplyRequest &other) const
+	{
+		return enabled == other.enabled && desired == other.desired &&
+			field == other.field;
+	}
 };
 
 // Why the session stopped applying the profile. Distinct causes rather than one
@@ -115,15 +95,20 @@ struct DriverApplyResult
 
 class DriverSession
 {
+	struct Batch
+	{
+		bool connectionReady = false;
+		uint64_t connectionGeneration = 0;
+		uint32_t poseHookMask = 0;
+	};
+
 public:
 	void SetTransport(DriverTransport newTransport) { transport = std::move(newTransport); }
 	void SetDeviceEnumerator(DriverDeviceEnumerator newEnumerator)
 	{
 		enumerate = std::move(newEnumerator);
 	}
-	// Where a driver failure surfaces, and where a recovered batch withdraws it.
-	// Both are the caller's, because "an error banner" is a UI concept and this
-	// class must not name the context that owns one.
+	// Error presentation belongs to the caller rather than the transport layer.
 	void SetErrorSink(std::function<void(const std::string &)> report,
 		std::function<void()> clear)
 	{
@@ -131,31 +116,11 @@ public:
 		clearError = std::move(clear);
 	}
 
-	// Open a batch: one handshake, whose reply stamps the connection generation
-	// every later request in this batch is checked against.
-	//
-	// Separate from Apply on purpose. The caller runs its own validity gates
-	// between the two and can report its own error there, and error banners are
-	// last-writer-wins — so this handshake's failure has to be reported before
-	// those gates run, exactly as it was when one function owned both halves.
-	DriverBatch Begin(double atTime)
-	{
-		now = atTime;
-		DriverBatch batch;
-		protocol::Request handshake(protocol::RequestHandshake);
-		protocol::Response response;
-		batch.connectionReady = SendRequest(handshake, "checking the driver connection",
-			&batch.connectionGeneration, &response);
-		if (batch.connectionReady)
-			batch.poseHookMask = response.poseHookMask;
-		return batch;
-	}
-
 	// Drive the driver to `request`, and report what the caller may now believe.
-	DriverApplyResult Apply(const DriverBatch &batch, const DriverApplyRequest &request,
-		double atTime)
+	DriverApplyResult Apply(const DriverApplyRequest &request, double atTime)
 	{
 		now = atTime;
+		const Batch batch = Begin();
 		DriverApplyResult result;
 		result.enabled = request.enabled;
 		result.poseHookMask = batch.poseHookMask;
@@ -252,6 +217,18 @@ public:
 	}
 
 private:
+	Batch Begin()
+	{
+		Batch batch;
+		protocol::Request handshake(protocol::RequestHandshake);
+		protocol::Response response;
+		batch.connectionReady = SendRequest(handshake, "checking the driver connection",
+			&batch.connectionGeneration, &response);
+		if (batch.connectionReady)
+			batch.poseHookMask = response.poseHookMask;
+		return batch;
+	}
+
 	// Every request in this file goes through here. A refused response and a
 	// failed transport are one verdict — the requested state was not applied —
 	// and share one 30 s debounce, so a dead pipe cannot rewrite the user's

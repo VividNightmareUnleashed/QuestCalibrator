@@ -101,6 +101,20 @@ namespace protocol
 		double position[3] = { 0.0, 0.0, 0.0 };
 		vr::HmdQuaternion_t rotationDelta{ 1.0, 0.0, 0.0, 0.0 };
 		double translationDelta[3] = { 0.0, 0.0, 0.0 };
+
+		bool operator==(const FieldAnchor &other) const noexcept
+		{
+			return position[0] == other.position[0] &&
+				position[1] == other.position[1] &&
+				position[2] == other.position[2] &&
+				rotationDelta.w == other.rotationDelta.w &&
+				rotationDelta.x == other.rotationDelta.x &&
+				rotationDelta.y == other.rotationDelta.y &&
+				rotationDelta.z == other.rotationDelta.z &&
+				translationDelta[0] == other.translationDelta[0] &&
+				translationDelta[1] == other.translationDelta[1] &&
+				translationDelta[2] == other.translationDelta[2];
+		}
 	};
 
 	// Spatial correction field. The driver blends the anchor deltas
@@ -117,6 +131,17 @@ namespace protocol
 		uint32_t anchorCount = 0;
 		double sigmaMeters = 1.5;         // RBF falloff in the horizontal plane
 		FieldAnchor anchors[MaxAnchors];
+
+		bool operator==(const SetAlignmentField &other) const noexcept
+		{
+			if (enabled != other.enabled || generation != other.generation ||
+				anchorCount != other.anchorCount || sigmaMeters != other.sigmaMeters)
+				return false;
+			for (uint32_t i = 0; i < MaxAnchors; ++i)
+				if (!(anchors[i] == other.anchors[i]))
+					return false;
+			return true;
+		}
 	};
 
 	struct SetRuntimeState

@@ -11,11 +11,8 @@ public:
 	protocol::Response SendBlocking(const protocol::Request &request);
 	uint64_t ConnectionGeneration() const { return connectionGeneration; }
 
-	// Every transaction runs on the UI thread, and one driver scan is up to 65
-	// of them, so an unbounded wait here is a frozen window the user cannot
-	// close. A stalled vrserver IPC thread - or any local process that owns the
-	// pipe name first - must surface as the same failure a disconnect already
-	// produces, not as a hang.
+	// A stalled vrserver IPC thread, or another process holding the pipe name,
+	// must fail in bounded time so shutdown can join the driver worker.
 	static const DWORD TransactionTimeoutMs = 2000;
 
 private:

@@ -42,7 +42,7 @@ struct CalibrationRun
 	std::string hmdSerial;
 	bool anchor = false;
 	bool usesPoseRing = false;
-	bool driverNeutralized = false;
+	uint64_t neutralizationSequence = 0;
 	Universe referenceUniverse;
 	Universe targetUniverse;
 	std::vector<PoseSample> referenceSamples;
@@ -54,24 +54,7 @@ struct CalibrationRun
 
 	void Reset()
 	{
-		referenceId = UINT32_MAX;
-		targetId = UINT32_MAX;
-		referenceSystem.clear();
-		targetSystem.clear();
-		referenceSerial.clear();
-		targetSerial.clear();
-		hmdSerial.clear();
-		anchor = false;
-		usesPoseRing = false;
-		driverNeutralized = false;
-		referenceUniverse = Universe();
-		targetUniverse = Universe();
-		referenceSamples.clear();
-		targetSamples.clear();
-		collectionStart = 0.0;
-		lastReferenceSample = 0.0;
-		lastTargetSample = 0.0;
-		lastIdentityCheck = -1e9;
+		*this = CalibrationRun{};
 	}
 
 	bool AcceptUniverse(uint32_t deviceId, const Eigen::Quaterniond &rotation,

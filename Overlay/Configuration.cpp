@@ -1073,3 +1073,22 @@ bool SaveSettings(CalibrationContext &ctx)
 		ctx.persistence.coupled = false;
 	return profileSaved && settingsSaved;
 }
+
+bool SavePendingChanges(CalibrationContext &ctx)
+{
+	if (ctx.persistence.settingsDirty)
+		return SaveSettings(ctx);
+	if (ctx.persistence.profileDirty)
+	{
+		if (!ctx.validProfile)
+		{
+			ctx.ReportError(PendingProfileWithoutValidProfileMessage,
+				CalibrationContext::ErrorSource::ProfilePersistence);
+			return false;
+		}
+		if (!SaveProfile(ctx))
+			return false;
+	}
+	ctx.persistence.coupled = false;
+	return true;
+}

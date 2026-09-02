@@ -86,6 +86,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="CalibrationContextTests.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\Driver\AlignmentField.cpp" />
     <ClCompile Include="..\Driver\IPCServer.cpp" />
@@ -114,7 +115,7 @@
     <ClInclude Include="..\Overlay\DriftMonitor.h" />
     <ClInclude Include="..\Overlay\DriverSession.h" />
     <ClInclude Include="..\Overlay\DriverSyncPolicy.h" />
-    <ClInclude Include="..\Overlay\DriverSyncWorker.h" />
+    <ClInclude Include="..\Overlay\DriverWorker.h" />
     <ClInclude Include="..\Overlay\JumpDetector.h" />
     <ClInclude Include="..\Overlay\ProfileRecordJson.h" />
     <ClInclude Include="..\Overlay\PersistenceState.h" />
