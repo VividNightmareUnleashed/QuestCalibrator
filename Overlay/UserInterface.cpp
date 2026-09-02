@@ -1453,10 +1453,7 @@ static void BuildMainScreen()
 						FriendlySystemName(CalCtx.referenceTrackingSystem).c_str());
 					break;
 				case Reason::DriverUnreachable:
-					why = "Driver did not accept the profile -- profile disabled until the next scan";
-					break;
-				case Reason::Synchronizing:
-					why = "Applying the updated profile to the driver...";
+					why = "Driver did not accept the profile -- profile disabled until the driver accepts it";
 					break;
 				case Reason::InvalidIdentity:
 					why = "The profile's tracking systems are no longer valid -- recalibrate";

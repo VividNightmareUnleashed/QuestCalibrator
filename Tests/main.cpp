@@ -28,6 +28,7 @@
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/DriverSession.h"
 #include "../Overlay/DriverSyncPolicy.h"
+#include "../Overlay/DriverSyncTracker.h"
 #include "../Overlay/DriverWorker.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/PersistenceState.h"
@@ -1556,6 +1557,173 @@ void RunDriverWorkerScenario()
 		gotNeutralization && disableRequests == 2 && stateStayedHeld &&
 		heldState.stateChanged && gotReleasedState,
 		"same states coalesce; pair neutralization holds ordinary state until release");
+}
+
+// ---------------------------------------------------------------------------
+// The synchronous half of the asynchronous driver sync: the slot identities the
+// submitting thread derives (Overlay/DriverSession.h DeriveDriverSlotState) and
+// the refusal bookkeeping it keeps across round trips
+// (Overlay/DriverSyncTracker.h).
+
+void RunDriverSyncStateScenarios()
+{
+	// The identities derived at submission are the ones the session ships on
+	// the wire and reports back, so nothing about a sync in flight is unknown
+	// to the monitors: a live profile with an armed, hidden mounted tracker,
+	// then a foreign headset that withdraws the profile.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		fx.table.Place(1, questcal::SyncDeviceClass::Other, "lighthouse");
+		fx.table.Place(2, questcal::SyncDeviceClass::Other, "oculus", "MOUNT-1");
+		fx.table.Place(3, questcal::SyncDeviceClass::Other, "oculus", "FOOT-1");
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, false);
+		request.desired.continuousTrackerSerial = "MOUNT-1";
+		request.desired.continuousArmed = true;
+		request.desired.hideMountedTracker = true;
+
+		auto enumerate = [&fx](uint32_t id, const questcal::DriverSyncDesired &)
+		{
+			return fx.table.devices[id];
+		};
+		auto sameIdentities = [](const questcal::DriverSlotState &derived,
+			const questcal::DriverApplyResult &applied)
+		{
+			if (derived.continuousTrackerId != applied.continuousTrackerId)
+				return false;
+			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+			{
+				if (derived.referenceDeviceMask[id] != applied.referenceDeviceMask[id] ||
+					derived.targetDeviceMask[id] != applied.targetDeviceMask[id])
+					return false;
+			}
+			return true;
+		};
+		auto lastWire = [&fx]() -> const protocol::SetRuntimeState &
+		{
+			return fx.link.sent.back().setRuntimeState;
+		};
+
+		questcal::DriverSlotState derived =
+			questcal::DeriveDriverSlotState(request.desired, enumerate);
+		questcal::DriverApplyResult applied = RunSessionScan(fx.session, request, 0.0);
+		const bool liveShipped = fx.link.sent.back().type == protocol::RequestSetRuntimeState &&
+			applied.enabled && applied.synchronized && !derived.hmdMismatch;
+		const bool liveParity = sameIdentities(derived, applied) &&
+			derived.enabledMask == lastWire().enabledMask &&
+			derived.hiddenMask == lastWire().hiddenMask;
+		const bool liveSlots =
+			derived.enabledMask == ((uint64_t{ 1 } << 2) | (uint64_t{ 1 } << 3)) &&
+			derived.hiddenMask == (uint64_t{ 1 } << 2) &&
+			derived.continuousTrackerId == 2 &&
+			derived.referenceDeviceMask[1] && derived.targetDeviceMask[3];
+
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "oculus");
+		derived = questcal::DeriveDriverSlotState(request.desired, enumerate);
+		applied = RunSessionScan(fx.session, request, 1.0);
+		const bool foreign = derived.hmdMismatch && !applied.enabled &&
+			applied.cause == questcal::DriverDisableCause::HmdMismatch &&
+			applied.synchronized &&
+			fx.link.sent.back().type == protocol::RequestSetRuntimeState &&
+			lastWire().enabledMask == 0 && lastWire().hiddenMask == 0;
+
+		const std::string detail = "liveShipped=" + std::to_string(liveShipped) +
+			" liveParity=" + std::to_string(liveParity) +
+			" liveSlots=" + std::to_string(liveSlots) +
+			" foreign=" + std::to_string(foreign) +
+			" enabledMask=" + std::to_string(derived.enabledMask) +
+			" trackerId=" + std::to_string(derived.continuousTrackerId);
+		Check("driver sync state: submit-time identities match the session",
+			liveShipped && liveParity && liveSlots && foreign, detail.c_str());
+	}
+
+	// A first submission is applied optimistically. The refusal that answers it
+	// holds an identical resubmission, survives a stale verdict for an older
+	// sequence, lifts for a changed state (a question the driver has not
+	// answered), and only returns once that changed state is itself refused.
+	{
+		questcal::DriverSyncTracker tracker;
+		const bool fresh = !tracker.NoteSubmission(1, true) && tracker.IsLatest(1) &&
+			!tracker.HoldsRefusal();
+		const bool refused = tracker.NoteVerdict(1, false) && tracker.HoldsRefusal();
+		const bool heldSame = tracker.NoteSubmission(2, false) && tracker.IsLatest(2);
+		const bool staleIgnored = !tracker.NoteVerdict(1, true) && tracker.HoldsRefusal();
+		const bool liftedByChange = !tracker.NoteSubmission(3, true);
+		const bool pendingSame = !tracker.NoteSubmission(4, false);
+		const bool confirmed = tracker.NoteVerdict(4, true) && !tracker.HoldsRefusal() &&
+			!tracker.NoteSubmission(5, false);
+		const bool refusedAgain = tracker.NoteVerdict(5, false) &&
+			tracker.NoteSubmission(6, false);
+		const std::string detail = "fresh=" + std::to_string(fresh) +
+			" refused=" + std::to_string(refused) +
+			" heldSame=" + std::to_string(heldSame) +
+			" staleIgnored=" + std::to_string(staleIgnored) +
+			" liftedByChange=" + std::to_string(liftedByChange) +
+			" pendingSame=" + std::to_string(pendingSame) +
+			" confirmed=" + std::to_string(confirmed) +
+			" refusedAgain=" + std::to_string(refusedAgain);
+		Check("driver sync state: a refusal holds across identical resubmissions",
+			fresh && refused && heldSame && staleIgnored && liftedByChange &&
+				pendingSame && confirmed && refusedAgain, detail.c_str());
+	}
+
+	// Liveness of that hold: an unchanged resubmission is still dispatched to
+	// the driver and completes under its own sequence, so a refused profile is
+	// re-asked every scan and comes back the moment the driver accepts it.
+	{
+		std::atomic<bool> refuse{ true };
+		questcal::DriverWorker worker;
+		worker.Start([&refuse](const protocol::Request &request)
+		{
+			questcal::DriverTransportResult result;
+			result.completed = true;
+			result.connectionGeneration = 1;
+			result.response = protocol::Response(
+				request.type == protocol::RequestHandshake ? protocol::ResponseHandshake :
+				refuse ? protocol::ResponseInvalid : protocol::ResponseSuccess);
+			return result;
+		});
+		auto await = [&worker](uint64_t sequence, questcal::DriverCompletion &out)
+		{
+			for (int i = 0; i < 400; ++i)
+			{
+				if (worker.Poll(out) && out.sequence == sequence)
+					return true;
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			}
+			return false;
+		};
+
+		questcal::DriverSyncTracker tracker;
+		questcal::DriverStateJob job;
+		job.request.enabled = true;
+		job.request.desired = MakeDriverSyncDesired();
+		questcal::DriverCompletion completion;
+
+		const auto first = worker.Submit(job);
+		const bool firstOpen = !tracker.NoteSubmission(first.sequence, first.stateChanged);
+		const bool firstRefused = await(first.sequence, completion) &&
+			!completion.result.synchronized &&
+			tracker.NoteVerdict(completion.sequence, completion.result.synchronized) &&
+			tracker.HoldsRefusal();
+
+		refuse = false;
+		const auto again = worker.Submit(job);
+		const bool held = !again.stateChanged &&
+			tracker.NoteSubmission(again.sequence, again.stateChanged);
+		const bool lifted = await(again.sequence, completion) &&
+			completion.kind == questcal::DriverWorkKind::Synchronize &&
+			completion.result.synchronized &&
+			tracker.NoteVerdict(completion.sequence, completion.result.synchronized) &&
+			!tracker.HoldsRefusal();
+		worker.Stop();
+
+		const std::string detail = "firstOpen=" + std::to_string(firstOpen) +
+			" firstRefused=" + std::to_string(firstRefused) +
+			" held=" + std::to_string(held) + " lifted=" + std::to_string(lifted);
+		Check("driver sync state: an unchanged resubmission lifts the hold when accepted",
+			firstOpen && firstRefused && held && lifted, detail.c_str());
+	}
 }
 
 void RunPoseSampleScenarios()
@@ -7756,6 +7924,7 @@ int main(int argc, char **argv)
 	RunDriverSyncScenarios();
 	RunDriverSessionScenarios();
 	RunDriverWorkerScenario();
+	RunDriverSyncStateScenarios();
 	RunPoseChannelScenarios();
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();

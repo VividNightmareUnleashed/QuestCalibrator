@@ -92,7 +92,6 @@ struct CalibrationProfileState
 		InvalidTransform,
 		HmdMismatch,
 		DriverUnreachable,
-		Synchronizing,
 		UniverseUnsafe,
 	};
 	DisableReason disableReason = DisableReason::None;

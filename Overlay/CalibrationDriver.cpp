@@ -2,6 +2,7 @@
 #include "CalibrationDriver.h"
 
 #include "Calibration.h"
+#include "DriverSyncTracker.h"
 #include "DriverWorker.h"
 #include "FieldMath.h"
 #include "IPCClient.h"
@@ -17,7 +18,7 @@ namespace
 
 IPCClient Client;
 DriverWorker Worker;
-uint64_t LatestStateSequence = 0;
+DriverSyncTracker Tracker;
 std::optional<DriverNeutralizationResult> NeutralizationCompletion;
 
 protocol::SetAlignmentField BuildAlignmentField(const CalibrationContext &ctx)
@@ -81,6 +82,24 @@ SyncDevice EnumerateDevice(uint32_t id, const DriverSyncDesired &desired)
 	return device;
 }
 
+void AssignDeviceIdentities(CalibrationContext &ctx, uint32_t continuousTrackerId,
+	const bool (&referenceDeviceMask)[vr::k_unMaxTrackedDeviceCount],
+	const bool (&targetDeviceMask)[vr::k_unMaxTrackedDeviceCount])
+{
+	ctx.continuousTrackerId = continuousTrackerId;
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		ctx.referenceDeviceMask[id] = referenceDeviceMask[id];
+		ctx.targetDeviceMask[id] = targetDeviceMask[id];
+	}
+}
+
+void ClearDeviceIdentities(CalibrationContext &ctx)
+{
+	static const bool none[vr::k_unMaxTrackedDeviceCount] = {};
+	AssignDeviceIdentities(ctx, vr::k_unTrackedDeviceIndexInvalid, none, none);
+}
+
 void ApplyCompletion(CalibrationContext &ctx,
 	const DriverCompletion &completion)
 {
@@ -105,12 +124,8 @@ void ApplyCompletion(CalibrationContext &ctx,
 			ctx.disableReason = CalibrationContext::DisableReason::None;
 		break;
 	}
-	ctx.continuousTrackerId = result.continuousTrackerId;
-	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
-	{
-		ctx.referenceDeviceMask[id] = result.referenceDeviceMask[id];
-		ctx.targetDeviceMask[id] = result.targetDeviceMask[id];
-	}
+	AssignDeviceIdentities(ctx, result.continuousTrackerId,
+		result.referenceDeviceMask, result.targetDeviceMask);
 }
 
 } // namespace
@@ -147,7 +162,7 @@ bool ReadCurrentHmdIdentity(std::string &trackingSystem, std::string &serial)
 
 void StartCalibrationDriver()
 {
-	LatestStateSequence = 0;
+	Tracker = DriverSyncTracker{};
 	NeutralizationCompletion.reset();
 	Worker.Start([](const protocol::Request &request)
 	{
@@ -240,18 +255,42 @@ void SynchronizeCalibrationDriver(CalibrationContext &ctx)
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 			job.devices[id] = EnumerateDevice(id, desired);
 
-	const DriverStateSubmission submission = Worker.Submit(job);
-	LatestStateSequence = submission.sequence;
-	if (!submission.stateChanged || !job.request.enabled)
-		return;
-
-	ctx.enabled = false;
-	ctx.disableReason = CalibrationContext::DisableReason::Synchronizing;
-	ctx.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
-	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	// The identities the monitors steer by are read off the enumerated devices,
+	// not off the driver's answer: derive them now, from the very devices the
+	// worker ships, so a sync in flight never reads as a disabled profile and
+	// the jump/drift/continuous monitors keep their history across the round
+	// trip. The completion re-applies the same identities -- the same function
+	// of the same devices -- and adds only the driver's verdict.
+	ClearDeviceIdentities(ctx);
+	if (job.request.enabled)
 	{
-		ctx.referenceDeviceMask[id] = false;
-		ctx.targetDeviceMask[id] = false;
+		const DriverSlotState slots = DeriveDriverSlotState(desired,
+			[&job](uint32_t id, const DriverSyncDesired &)
+			{
+				return id < job.devices.size() ? job.devices[id] : SyncDevice();
+			});
+		if (slots.hmdMismatch)
+		{
+			ctx.enabled = false;
+			ctx.disableReason = CalibrationContext::DisableReason::HmdMismatch;
+		}
+		else
+		{
+			AssignDeviceIdentities(ctx, slots.continuousTrackerId,
+				slots.referenceDeviceMask, slots.targetDeviceMask);
+		}
+	}
+
+	const DriverStateSubmission submission = Worker.Submit(job);
+	if (Tracker.NoteSubmission(submission.sequence, submission.stateChanged) &&
+		ctx.enabled)
+	{
+		// The driver refused this exact state and has not been asked anything
+		// different since: stay disabled rather than flip the profile back on
+		// for the length of a round trip on every scan.
+		ctx.enabled = false;
+		ctx.disableReason = CalibrationContext::DisableReason::DriverUnreachable;
+		ClearDeviceIdentities(ctx);
 	}
 }
 
@@ -270,8 +309,11 @@ void PollCalibrationDriver(CalibrationContext &ctx)
 			NeutralizationCompletion = DriverNeutralizationResult{
 				completion.sequence, completion.succeeded };
 		}
-		else if (completion.sequence == LatestStateSequence)
+		else if (Tracker.NoteVerdict(completion.sequence,
+			completion.result.synchronized))
 		{
+			// Only the latest submission's verdict is taken; an older one
+			// answers a state that is no longer on the wire.
 			ApplyCompletion(ctx, completion);
 		}
 	}

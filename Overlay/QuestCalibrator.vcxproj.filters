@@ -81,6 +81,9 @@
     <ClInclude Include="DriverSyncPolicy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="DriverSyncTracker.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="DriverWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>

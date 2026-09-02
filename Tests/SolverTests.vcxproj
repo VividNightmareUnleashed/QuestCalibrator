@@ -115,6 +115,7 @@
     <ClInclude Include="..\Overlay\DriftMonitor.h" />
     <ClInclude Include="..\Overlay\DriverSession.h" />
     <ClInclude Include="..\Overlay\DriverSyncPolicy.h" />
+    <ClInclude Include="..\Overlay\DriverSyncTracker.h" />
     <ClInclude Include="..\Overlay\DriverWorker.h" />
     <ClInclude Include="..\Overlay\JumpDetector.h" />
     <ClInclude Include="..\Overlay\ProfileRecordJson.h" />

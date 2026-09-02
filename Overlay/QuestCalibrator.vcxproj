@@ -111,6 +111,7 @@
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
+    <ClInclude Include="DriverSyncTracker.h" />
     <ClInclude Include="DriverWorker.h" />
     <ClInclude Include="EmbeddedFiles.h" />
     <ClInclude Include="FieldMath.h" />

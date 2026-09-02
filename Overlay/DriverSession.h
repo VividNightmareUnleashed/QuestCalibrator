@@ -93,6 +93,49 @@ struct DriverApplyResult
 	uint32_t poseHookMask = 0;
 };
 
+// The per-slot half of one reconciliation, read off the enumerated devices
+// alone: which slots carry the transform and which of those are hidden, which
+// devices the monitors treat as reference and target, where the mounted
+// tracker is, and whether the live headset withdraws the profile. Pure, so the
+// thread that submits a state derives the identities it steers by from the
+// same devices the session later ships, and the two cannot disagree.
+struct DriverSlotState
+{
+	uint64_t enabledMask = 0;
+	uint64_t hiddenMask = 0;
+	bool hmdMismatch = false;
+	bool referenceDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
+	bool targetDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
+	uint32_t continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+};
+
+inline DriverSlotState DeriveDriverSlotState(const DriverSyncDesired &desired,
+	const DriverDeviceEnumerator &enumerate)
+{
+	DriverSlotState state;
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		SyncDevice device;
+		device.id = id;
+		if (enumerate)
+			device = enumerate(id, desired);
+
+		const SlotDecision decision = DecideSlot(desired, device);
+		state.referenceDeviceMask[id] = decision.referenceDevice;
+		state.targetDeviceMask[id] = decision.targetDevice;
+		if (decision.continuousTracker)
+			state.continuousTrackerId = id;
+		if (decision.disableProfile)
+			state.hmdMismatch = true;
+		if (decision.action != SlotAction::ApplyTransform)
+			continue;
+		state.enabledMask |= uint64_t{ 1 } << id;
+		if (decision.transform.hidden)
+			state.hiddenMask |= uint64_t{ 1 } << id;
+	}
+	return state;
+}
+
 class DriverSession
 {
 	struct Batch
@@ -136,28 +179,19 @@ public:
 
 		if (result.enabled)
 		{
+			const DriverSlotState slots = DeriveDriverSlotState(request.desired, enumerate);
 			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 			{
-				SyncDevice device;
-				device.id = id;
-				if (enumerate)
-					device = enumerate(id, request.desired);
-
-				SlotDecision decision = DecideSlot(request.desired, device);
-				result.referenceDeviceMask[id] = decision.referenceDevice;
-				result.targetDeviceMask[id] = decision.targetDevice;
-				if (decision.continuousTracker)
-					result.continuousTrackerId = id;
-				if (decision.disableProfile)
-				{
-					result.enabled = false;
-					result.cause = DriverDisableCause::HmdMismatch;
-				}
-				if (decision.action != SlotAction::ApplyTransform)
-					continue;
-				desiredState.enabledMask |= uint64_t{ 1 } << id;
-				if (decision.transform.hidden)
-					desiredState.hiddenMask |= uint64_t{ 1 } << id;
+				result.referenceDeviceMask[id] = slots.referenceDeviceMask[id];
+				result.targetDeviceMask[id] = slots.targetDeviceMask[id];
+			}
+			result.continuousTrackerId = slots.continuousTrackerId;
+			desiredState.enabledMask = slots.enabledMask;
+			desiredState.hiddenMask = slots.hiddenMask;
+			if (slots.hmdMismatch)
+			{
+				result.enabled = false;
+				result.cause = DriverDisableCause::HmdMismatch;
 			}
 		}
 
