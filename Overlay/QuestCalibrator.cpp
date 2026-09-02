@@ -159,7 +159,14 @@ struct ManifestInstallResult
 // One rollback-safe registration path for the installer and for startup
 // self-repair. OpenVR rejects duplicate application keys, so replacement must
 // temporarily remove the old manifest; every failure after that restores it.
-static ManifestInstallResult EnsureManifestRegistration()
+//
+// Auto-launch is the user's setting once the app is registered: only the
+// installer (`forceAutoLaunch`) and a first-ever registration turn it on. A
+// moved install carries the previous choice across its re-registration, and a
+// registration that already points here is left exactly as SteamVR has it, so
+// a user who switched auto-launch off does not get it switched back on by
+// every launch.
+static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 {
 	ManifestInstallResult result;
 	const std::string manifestPath = AppFile("manifest.vrmanifest");
@@ -228,19 +235,27 @@ static ManifestInstallResult EnsureManifestRegistration()
 				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), replacing);
 	}
 
-	auto error = vr::VRApplications()->SetApplicationAutoLaunch(
-		OPENVR_APPLICATION_KEY, true);
-	if (error != vr::VRApplicationError_None)
+	// A freshly added manifest gets its auto-launch set explicitly: on for a
+	// first registration, the carried-over choice for a moved install. An
+	// existing registration is only touched when the installer asks.
+	const bool wantAutoLaunch = forceAutoLaunch || oldManifest.empty() || oldAutoLaunch;
+	const bool settingAutoLaunch = adding || (forceAutoLaunch && !oldAutoLaunch);
+	if (settingAutoLaunch)
 	{
-		if (adding)
-			vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-		return failed("SteamVR could not enable QuestCalibrator auto-launch.\n\n" +
-			std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error)),
-			replacing);
+		auto error = vr::VRApplications()->SetApplicationAutoLaunch(
+			OPENVR_APPLICATION_KEY, wantAutoLaunch);
+		if (error != vr::VRApplicationError_None)
+		{
+			if (adding)
+				vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
+			return failed("SteamVR could not set QuestCalibrator auto-launch.\n\n" +
+				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error)),
+				replacing);
+		}
 	}
 
 	result.success = true;
-	result.changed = adding || !oldAutoLaunch;
+	result.changed = adding || (settingAutoLaunch && wantAutoLaunch != oldAutoLaunch);
 	result.message = "QuestCalibrator registered with SteamVR.\n\n" + manifestPath;
 	return result;
 }
@@ -679,7 +694,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		if (!g_uiPreviewMode)
 		{
 			InitVR(vrInitialized);
-			ManifestInstallResult registration = EnsureManifestRegistration();
+			ManifestInstallResult registration = EnsureManifestRegistration(false);
 			if (!registration.success)
 				AppendSessionLog("SteamVR manifest self-repair failed: " + registration.message);
 			else if (registration.changed)
@@ -955,7 +970,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	else if (cmd == L"-installmanifest")
 	{
 		InitVRUtilityOrExit();
-		ManifestInstallResult install = EnsureManifestRegistration();
+		ManifestInstallResult install = EnsureManifestRegistration(true);
 		CliExit(install.message, !install.success);
 	}
 	else if (cmd == L"-removemanifest")
