@@ -100,6 +100,10 @@
     <ClInclude Include="CalibrationDriver.h" />
     <ClInclude Include="CalibrationSpace.h" />
     <ClInclude Include="CalibrationEngine.h" />
+    <ClInclude Include="CalibrationGuide.h" />
+    <ClInclude Include="UiInternal.h" />
+    <ClInclude Include="Diagnostics.h" />
+    <ClInclude Include="LegacyContinuous.h" />
     <ClInclude Include="CalibrationRun.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
@@ -150,6 +154,8 @@
     <ClCompile Include="Calibration.cpp" />
     <ClCompile Include="CalibrationDriver.cpp" />
     <ClCompile Include="CalibrationSpace.cpp" />
+    <ClCompile Include="Diagnostics.cpp" />
+    <ClCompile Include="LegacyContinuous.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -175,6 +181,12 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="UserInterface.cpp" />
+    <ClCompile Include="UiWidgets.cpp" />
+    <ClCompile Include="UiMainScreen.cpp" />
+    <ClCompile Include="UiDevices.cpp" />
+    <ClCompile Include="UiGuide.cpp" />
+    <ClCompile Include="UiSettings.cpp" />
+    <ClCompile Include="UiPreview.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="QuestCalibrator.ico" />

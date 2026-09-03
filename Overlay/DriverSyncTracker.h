@@ -20,6 +20,8 @@ namespace questcal
 struct DriverSyncTracker
 {
 	uint64_t latestSequence = 0;
+	uint64_t latestStateChangeSequence = 0;
+	uint64_t lastAcceptedVerdictSequence = 0;
 	bool lastVerdictRefused = false;
 	bool stateChangedSinceVerdict = false;
 
@@ -30,7 +32,10 @@ struct DriverSyncTracker
 	{
 		latestSequence = sequence;
 		if (stateChanged)
+		{
+			latestStateChangeSequence = sequence;
 			stateChangedSinceVerdict = true;
+		}
 		return HoldsRefusal();
 	}
 
@@ -39,13 +44,19 @@ struct DriverSyncTracker
 		return sequence == latestSequence;
 	}
 
-	// Records the driver's verdict. A verdict for anything but the latest
-	// submission is stale (a newer state is already on the wire) and is
-	// ignored; returns whether the verdict was taken.
+	// Records the driver's verdict. Periodic retries of the same desired state
+	// do not make an older completion stale: a slow or timing-out transport can
+	// take longer than the retry interval, and rejecting every such completion
+	// would prevent the caller from ever observing the driver's verdict. Only a
+	// completion older than the latest actual state change, a duplicate, or a
+	// future sequence is ignored.
 	bool NoteVerdict(uint64_t sequence, bool synchronized)
 	{
-		if (!IsLatest(sequence))
+		if (sequence > latestSequence ||
+			sequence < latestStateChangeSequence ||
+			sequence <= lastAcceptedVerdictSequence)
 			return false;
+		lastAcceptedVerdictSequence = sequence;
 		lastVerdictRefused = !synchronized;
 		stateChangedSinceVerdict = false;
 		return true;

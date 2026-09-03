@@ -803,6 +803,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	result.samplesUsed = samples.size();
 	if (const char *configError = ConfigError(config))
 	{
+		result.failure = EngineFailure::Config;
 		result.message = "Invalid calibration engine configuration: " +
 			std::string(configError) + ".";
 		return result;
@@ -810,11 +811,13 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 
 	if (samples.size() < 8)
 	{
+		result.failure = EngineFailure::NotEnoughSamples;
 		result.message = "Not enough samples collected.";
 		return result;
 	}
 	if (validateInputs && !IsValidAlignedSamples(samples))
 	{
+		result.failure = EngineFailure::InvalidSamples;
 		result.message = "Pose samples contain an invalid or out-of-range value, or non-increasing timestamps.";
 		return result;
 	}
@@ -869,7 +872,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 
 	if (pairs.size() < config.minPairs)
 	{
-		result.message = "Not enough rotation — rotate the devices together, at least a quarter turn at a time.";
+		result.failure = EngineFailure::NotEnoughRotation;
+		result.message = "Not enough rotation -- rotate the devices together, at least a quarter turn at a time.";
 		return result;
 	}
 
@@ -1217,6 +1221,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	    !std::isfinite(result.axisSpread) ||
 	    !std::isfinite(result.transEigRatio))
 	{
+		result.failure = EngineFailure::NonFinite;
 		result.message = "Calibration solve produced non-finite values.";
 		return result;
 	}
@@ -1225,32 +1230,37 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		result.scale < protocol::limits::MinScale ||
 		result.scale > protocol::limits::MaxScale)
 	{
+		result.failure = EngineFailure::OutOfRange;
 		result.message = "Calibration solve produced a transform outside the supported range.";
 		return result;
 	}
 	if (result.axisSpread < config.minAxisSpread)
 	{
-		result.message = "Rotation happened around only one axis — tilt and roll are unconstrained. "
+		result.failure = EngineFailure::SingleAxis;
+		result.message = "Rotation happened around only one axis -- tilt and roll are unconstrained. "
 		                 "Rotate the devices together around two different axes and recalibrate.";
 		return result;
 	}
 	if (result.transEigRatio < config.minTransEigRatio)
 	{
-		result.message = "Not enough varied rotation to pin the position along every direction — "
+		result.failure = EngineFailure::TranslationUnobservable;
+		result.message = "Not enough varied rotation to pin the position along every direction -- "
 		                 "rotate the devices together around at least two different axes and recalibrate.";
 		return result;
 	}
 	if (result.rotationRmsDeg > config.maxRotationRms)
 	{
+		result.failure = EngineFailure::RotationResidual;
 		result.message = "Rotation residual too high (" + std::to_string(result.rotationRmsDeg).substr(0, 4) +
-		                 " deg) — tracking is jittery or the devices are not rigidly attached.";
+		                 " deg) -- tracking is jittery or the devices are not rigidly attached.";
 		return result;
 	}
 	if (result.translationRmsMeters > config.maxTranslationRms)
 	{
+		result.failure = EngineFailure::PositionResidual;
 		result.message = "Position residual too high (" +
 		                 std::to_string(result.translationRmsMeters * 100.0).substr(0, 4) +
-		                 " cm) — tracking is jittery, or motion was too fast for the sample rate.";
+		                 " cm) -- tracking is jittery, or motion was too fast for the sample rate.";
 		return result;
 	}
 
@@ -1266,6 +1276,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	EngineResult failure;
 	if (const char *configError = ConfigError(config))
 	{
+		failure.failure = EngineFailure::Config;
 		failure.message = "Invalid calibration engine configuration: " +
 			std::string(configError) + ".";
 		return failure;
@@ -1273,11 +1284,13 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 
 	if (refStream.size() < 8 || targetStream.size() < 8)
 	{
+		failure.failure = EngineFailure::NotEnoughSamples;
 		failure.message = "Not enough samples collected.";
 		return failure;
 	}
 	if (!IsValidStream(refStream) || !IsValidStream(targetStream))
 	{
+		failure.failure = EngineFailure::InvalidSamples;
 		failure.message = "Pose streams contain an invalid or out-of-range value, or non-increasing timestamps.";
 		return failure;
 	}
@@ -1293,6 +1306,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 			&offsetScore, &offsetPeakMargin, false);
 		if (!offsetKnown)
 		{
+			failure.failure = EngineFailure::TimeOffset;
 			failure.message = "Time offset could not be measured reliably. Keep both devices visible and rotate them together with varied motion.";
 			return failure;
 		}
@@ -1402,6 +1416,8 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 		{
 			// Never silently fall back to the contaminated free-scale fit.
 			result.valid = false;
+			result.failure = r2.failure != EngineFailure::None
+				? r2.failure : EngineFailure::ScaleNotIdentifiable;
 			result.message = std::string(scaleNotIdentifiable
 					? "Playspace scale could not be identified from this motion"
 					: "Frequency-dependent motion gain was detected") +
@@ -1411,6 +1427,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	else if (result.valid && config.solveScale && !result.scaleIdentifiable)
 	{
 		result.valid = false;
+		result.failure = EngineFailure::ScaleNotIdentifiable;
 		result.message = "Playspace scale is not identifiable from this motion; move both devices across a larger volume and recalibrate.";
 	}
 

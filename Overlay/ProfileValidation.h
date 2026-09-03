@@ -237,6 +237,7 @@ struct ProfileRecord
 	bool continuousLatencyReestimation = false;
 	bool continuousRequireTrigger = false;
 	bool hideMountedTracker = true;
+	int continuousMode = 0;   // 0 = QuestCalibrator's loop, 1 = legacy port
 	MountExtrinsicRecord mountExtrinsic;
 };
 

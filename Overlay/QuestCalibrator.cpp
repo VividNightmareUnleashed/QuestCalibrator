@@ -41,7 +41,6 @@ void GLFWErrorCallback(int error, const char* description)
 }
 
 static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved);
-static void SetupPreviewState();
 
 static GLFWwindow *glfwWindow = nullptr;
 static vr::VROverlayHandle_t overlayMainHandle = 0, overlayThumbnailHandle = 0;
@@ -338,11 +337,13 @@ void TryCreateVROverlay()
 
 	if (error == vr::VROverlayError_KeyInUse)
 	{
-		throw std::runtime_error("Another instance of QuestCalibrator is already running");
+		throw std::runtime_error("QuestCalibrator is already running.");
 	}
 	else if (error != vr::VROverlayError_None)
 	{
-		throw std::runtime_error("Error creating VR overlay: " + std::string(vr::VROverlay()->GetOverlayErrorNameFromEnum(error)));
+		throw std::runtime_error("SteamVR refused QuestCalibrator's overlay (" +
+			std::string(vr::VROverlay()->GetOverlayErrorNameFromEnum(error)) +
+			").\n\nRestart SteamVR and try again.");
 	}
 
 	vr::VROverlay()->SetOverlayWidthInMeters(overlayMainHandle, 3.0f);
@@ -359,8 +360,9 @@ void ActivateMultipleDrivers()
 
 	if (vrSettingsError != vr::VRSettingsError_None)
 	{
-		std::string err = "Could not read \"" + std::string(vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool) + "\" setting: "
-			+ vr::VRSettings()->GetSettingsErrorNameFromEnum(vrSettingsError);
+		std::string err = "Couldn't read SteamVR's \"" + std::string(vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool) +
+			"\" setting (" + vr::VRSettings()->GetSettingsErrorNameFromEnum(vrSettingsError) +
+			").\n\nRestart SteamVR and try again.";
 
 		throw std::runtime_error(err);
 	}
@@ -370,8 +372,10 @@ void ActivateMultipleDrivers()
 		vr::VRSettings()->SetBool(vr::k_pch_SteamVR_Section, vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool, true, &vrSettingsError);
 		if (vrSettingsError != vr::VRSettingsError_None)
 		{
-			std::string err = "Could not set \"" + std::string(vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool) + "\" setting: "
-				+ vr::VRSettings()->GetSettingsErrorNameFromEnum(vrSettingsError);
+			std::string err = "Couldn't turn on SteamVR's \"" + std::string(vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool) +
+				"\" setting (" + vr::VRSettings()->GetSettingsErrorNameFromEnum(vrSettingsError) +
+				").\n\nQuestCalibrator needs it to see both tracking systems. "
+				"Set it to true in steamvr.vrsettings, then restart SteamVR.";
 
 			throw std::runtime_error(err);
 		}
@@ -391,24 +395,20 @@ void InitVR(bool &initialized)
 	if (initError != vr::VRInitError_None)
 	{
 		auto error = vr::VR_GetVRInitErrorAsEnglishDescription(initError);
-		throw std::runtime_error("OpenVR error:" + std::string(error));
+		throw std::runtime_error("SteamVR couldn't start: " + std::string(error) +
+			".\n\nMake sure SteamVR is installed and your headset is connected, then start QuestCalibrator again.");
 	}
 	// Publish successful OpenVR ownership immediately. Interface validation and
 	// settings setup below can still throw; the caller must then shut this
 	// session down even though InitVR itself did not return normally.
 	initialized = true;
 
-	if (!vr::VR_IsInterfaceVersionValid(vr::IVRSystem_Version))
+	if (!vr::VR_IsInterfaceVersionValid(vr::IVRSystem_Version) ||
+		!vr::VR_IsInterfaceVersionValid(vr::IVRSettings_Version) ||
+		!vr::VR_IsInterfaceVersionValid(vr::IVROverlay_Version))
 	{
-		throw std::runtime_error("OpenVR error: Outdated IVRSystem_Version");
-	}
-	else if (!vr::VR_IsInterfaceVersionValid(vr::IVRSettings_Version))
-	{
-		throw std::runtime_error("OpenVR error: Outdated IVRSettings_Version");
-	}
-	else if (!vr::VR_IsInterfaceVersionValid(vr::IVROverlay_Version))
-	{
-		throw std::runtime_error("OpenVR error: Outdated IVROverlay_Version");
+		throw std::runtime_error("Your SteamVR is too old for this version of QuestCalibrator.\n\n"
+			"Update SteamVR, then start QuestCalibrator again.");
 	}
 
 	ActivateMultipleDrivers();
@@ -634,7 +634,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 
 	if (!glfwInit())
 	{
-		MessageBox(nullptr, L"Failed to initialize GLFW", L"", 0);
+		MessageBox(nullptr,
+			L"QuestCalibrator couldn't create its window.\n\n"
+			L"Update your graphics driver and start it again.",
+			L"QuestCalibrator", MB_OK | MB_ICONERROR);
 		return -1;
 	}
 
@@ -723,7 +726,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	}
 	catch (const std::exception &e)
 	{
-		fatal = std::string("Runtime error: ") + e.what();
+		fatal = e.what();
 	}
 	catch (...)
 	{
@@ -756,7 +759,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		AppendSessionLog(fatal);
 		wchar_t message[1024];
 		swprintf(message, 1024, L"%hs", fatal.c_str());
-		MessageBox(nullptr, message, L"Runtime Error", MB_OK | MB_ICONERROR);
+		MessageBox(nullptr, message, L"QuestCalibrator", MB_OK | MB_ICONERROR);
 	}
 
 	if (glfwWindow)
@@ -766,66 +769,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	return fatal.empty() ? 0 : -1;
 }
 
-// UI preview (-uipreview): plausible fake state so every part of the interface
-// renders without SteamVR. Fake devices come from LoadVRState; profile saves
-// are disabled while previewing.
-static void SetupPreviewState()
-{
-	CalCtx.validProfile = true;
-	CalCtx.enabled = true;
-	CalCtx.referenceTrackingSystem = "oculus";
-	CalCtx.targetTrackingSystem = "lighthouse";
-
-	CalCtx.lastResult.valid = true;
-	CalCtx.lastResult.rotationRmsDeg = 2.53;
-	CalCtx.lastResult.translationRmsMeters = 0.010;
-	CalCtx.lastResult.timeOffset = 0.0038;
-	CalCtx.lastResult.scale = 1.002;
-	CalCtx.transform.scale = 1.002;
-
-	CalCtx.calibrationUnixTime = static_cast<double>(std::time(nullptr)) - 180.0;
-	CalCtx.alignment = CalibrationContext::AlignmentHealth::Stale;
-	CalCtx.driftScore = 0.70;
-	CalCtx.driftSlideEvents = 21;
-	CalCtx.driftMaxSlideM = 0.08;
-	CalCtx.discontinuousLossEvents = 0;
-
-	CalCtx.appliedTimeOffset = -0.0038;
-	CalCtx.applyTimeOffset = true;
-	CalCtx.fieldEnabled = true;
-	CalCtx.chaperone.valid = true;
-	CalCtx.chaperone.geometry.resize(26);
-	CalCtx.chaperone.playSpaceSize.v[0] = 2.1f;
-	CalCtx.chaperone.playSpaceSize.v[1] = 2.4f;
-	CalCtx.chaperone.copyUnixTime = static_cast<double>(std::time(nullptr)) - 840.0;
-
-	CalibrationContext::FieldAnchor anchor;
-	anchor.position = Eigen::Vector3d(1.2, 1.1, -0.8);
-	anchor.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(0.004, Eigen::Vector3d::UnitY()));
-	anchor.translationMeters = Eigen::Vector3d(0.02, 0.0, -0.01);
-	CalCtx.fieldAnchors.push_back(anchor);
-
-	// Continuous calibration in its healthy maintaining state (the tracker
-	// serial matches the first fake VIVE tracker in -uipreview-many).
-	CalCtx.continuousEnabled = true;
-	CalCtx.continuousTrackerSerial = "LHR-77E5A211";
-	CalCtx.hideMountedTracker = true;
-	CalCtx.mountExtrinsic.valid = true;
-	CalCtx.mountExtrinsic.rot = Eigen::Quaterniond(
-		Eigen::AngleAxisd(2.7, Eigen::Vector3d(0.2, 0.7, -0.3).normalized()));
-	CalCtx.mountExtrinsic.pos = Eigen::Vector3d(0.05, -0.08, 0.03);
-	CalCtx.mountExtrinsic.rotRmsDeg = 0.21;
-	CalCtx.mountExtrinsic.posRmsM = 0.004;
-	CalCtx.continuousState = questcal::ContinuousAlignment::State::Tracking;
-	CalCtx.continuousDeviation.valid = true;
-	CalCtx.continuousDeviation.yawDeg = 0.08;
-	CalCtx.continuousDeviation.tiltDeg = 0.11;
-	CalCtx.continuousDeviation.posM = 0.004;
-	CalCtx.continuousScatterRotDeg = 0.19;
-	CalCtx.continuousScatterPosM = 0.006;
-	CalCtx.autoCorrectionsApplied = 14;
-	CalCtx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr)) - 42.0;
-}
 
 // Shared exit path for the CLI commands: report, shut OpenVR down, and exit with
 // a code the installer can act on.
@@ -926,6 +869,13 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	{
 		g_uiPreviewMode = true;
 		g_uiPreviewMany = true;
+	}
+	else if (cmd == L"-uipreview-frozen" || cmd == L"-uipreview-failed" || cmd == L"-uipreview-empty")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = cmd == L"-uipreview-frozen" ? PreviewScenario::Frozen
+			: cmd == L"-uipreview-failed" ? PreviewScenario::Failed : PreviewScenario::Empty;
 	}
 	else if (cmd == L"-openvrpath")
 	{

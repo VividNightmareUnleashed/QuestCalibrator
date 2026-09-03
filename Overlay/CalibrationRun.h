@@ -39,6 +39,10 @@ struct CalibrationRun
 	std::string targetSystem;
 	std::string referenceSerial;
 	std::string targetSerial;
+	// Model names, read once at Begin: the player knows "VIVE Tracker 3.0",
+	// not "the target device", so every stop reason names the hardware.
+	std::string referenceModel;
+	std::string targetModel;
 	std::string hmdSerial;
 	bool anchor = false;
 	bool usesPoseRing = false;

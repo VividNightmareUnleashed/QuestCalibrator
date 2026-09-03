@@ -3,6 +3,7 @@
 #include "CalibrationDriver.h"
 #include "CalibrationEngine.h"
 #include "CalibrationSpace.h"
+#include "LegacyContinuous.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
 #include "FieldMath.h"
@@ -83,7 +84,19 @@ static bool ContinuousActive = false;
 
 CalibrationContext CalCtx;
 
-static void AbortCalibration(CalibrationContext &ctx, const std::string &reason);
+// Why a run stopped, in the player's words: what happened (naming what they
+// can see) and one thing to do. `detail` is the engineer's reason, kept
+// verbatim for the session log and the modal's details toggle.
+struct StopReason
+{
+	std::string body;
+	std::string action;
+	std::string detail;
+	// The picture the modal shows with it; None for environmental stops.
+	CalibrationContext::GuideHint hint = CalibrationContext::GuideHint::None;
+};
+
+static void AbortCalibration(CalibrationContext &ctx, const StopReason &reason);
 using questcal::ReadCurrentHmdIdentity;
 using questcal::ReadTrackedDeviceString;
 using questcal::SynchronizeCalibrationDriver;
@@ -264,8 +277,10 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 	uint64_t dropped = PoseHub.Drain(CollectorConsumer, CollectorScratch);
 	if (dropped > 0)
 	{
-		AbortCalibration(ctx,
-			"Pose stream overran during collection; retry calibration so no samples are missing");
+		AbortCalibration(ctx, {
+			"Some tracking data was dropped: the PC couldn't keep up.",
+			"Try again; close capture or recording software if it repeats.",
+			"Pose stream overran during collection; retry calibration so no samples are missing" });
 		return false;
 	}
 	for (const auto &s : CollectorScratch)
@@ -276,8 +291,11 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 			auto parts = UnpackRingSample(s);
 			if (!run.AcceptUniverse(s.deviceId, parts.wfdRot, parts.wfdTrans))
 			{
-				AbortCalibration(ctx,
-					"A selected tracking universe changed during collection; restart calibration after tracking stabilizes");
+				AbortCalibration(ctx, {
+					"The headset re-centred during the measurement.",
+					"Let tracking settle for a few seconds, then start again.",
+					"A selected tracking universe changed during collection",
+					CalibrationContext::GuideHint::WaitForTracking });
 				return false;
 			}
 		}
@@ -359,9 +377,11 @@ void SetToastSink(std::function<void(const char *)> sink)
 	ToastSink = std::move(sink);
 }
 
-// One-shot log + optional VR toast; each caller owns its re-arm flag.
-static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logLine,
-	const char *toast, bool showToast = true)
+// One-shot player-facing line + optional VR toast; each caller owns its
+// re-arm flag. The line goes through Tell so it reaches the main screen's
+// activity feed as well as the log.
+static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *line,
+	CalibrationContext::Tone tone, const char *toast, bool showToast)
 {
 	if (notified)
 		return;
@@ -370,7 +390,7 @@ static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logL
 	// Unconditional and first: "the user turned toasts off" and "there is
 	// nowhere to toast" must both still leave the episode in the session log,
 	// which is the bug-report surface for a GUI binary.
-	ctx.Log(std::string(logLine) + "\n");
+	ctx.Tell(std::string(line) + "\n", tone);
 
 	if (showToast && ToastSink)
 		ToastSink(toast);
@@ -385,8 +405,9 @@ static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *logL
 static void NotifyStaleAlignment(CalibrationContext &ctx)
 {
 	NotifyOnce(ctx, Monitors.staleNotified,
-		"Calibration quality looks poor -- recalibrating is recommended",
-		"QuestCalibrator: calibration quality looks poor. Recalibrating is recommended.",
+		"Your calibration looks off. Run a new calibration.",
+		CalibrationContext::Tone::Warn,
+		"QuestCalibrator: your calibration looks off. Run a new calibration.",
 		ctx.notifyPoorCalibration);
 }
 
@@ -569,6 +590,250 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 // ---------------------------------------------------------------------------
 // Continuous calibration (HMD-mounted tracker)
 
+// ---- Legacy loop: hyblocker's calculator driven the way its overlay drove
+// it. The latest reference and tracker poses are paired at 20 Hz, the window
+// is the calibration duration's sample count (100 / 250 / 500), every full
+// window is re-solved, and a tenth of it is dropped afterwards. An accepted
+// solve is applied as a delta over the current calibration through the same
+// slewing path as the QuestCalibrator loop's corrections.
+static questcal::legacy::CalibrationCalc LegacyCalc;
+static double LegacyLastSampleTime = -1e9;
+static bool LegacyHaveRef = false, LegacyHaveTarget = false;
+static bool LegacyRefFresh = false, LegacyTargetFresh = false;
+static double LegacyLastRefArrival = -1e9, LegacyLastTargetArrival = -1e9;
+static questcal::PoseSample LegacyRef, LegacyTarget;
+static Eigen::Vector3d LegacyPrevHmdPos = Eigen::Vector3d::Zero();
+static Eigen::Quaterniond LegacyPrevHmdRot{ 1, 0, 0, 0 };
+static bool LegacyHavePrevHmd = false;
+static bool LegacyWaitingTrigger = false;
+static ContinuousMode LastContinuousMode = ContinuousMode::Quest;
+static bool LegacyBindingValid = false;
+static uint32_t LegacyBoundTrackerId = vr::k_unTrackedDeviceIndexInvalid;
+static uint32_t LegacyBoundBaseGeneration = 0;
+static std::string LegacyBoundTrackerSerial;
+static constexpr double LegacyPoseStaleSeconds = 0.5;
+static constexpr double LegacyMaxPairSkewSeconds = 0.1;
+
+static size_t LegacySampleWindow(const CalibrationContext &ctx)
+{
+	switch (ctx.calibrationSpeed)
+	{
+	case CalibrationContext::FAST: return 100;
+	case CalibrationContext::SLOW: return 250;
+	default: return 500;
+	}
+}
+
+static void LegacyReset()
+{
+	LegacyCalc.Clear();
+	LegacyHaveRef = LegacyHaveTarget = false;
+	LegacyRefFresh = LegacyTargetFresh = false;
+	LegacyLastRefArrival = LegacyLastTargetArrival = -1e9;
+	LegacyLastSampleTime = -1e9;
+	LegacyPrevHmdPos = Eigen::Vector3d::Zero();
+	LegacyPrevHmdRot = Eigen::Quaterniond::Identity();
+	LegacyHavePrevHmd = false;
+	LegacyWaitingTrigger = false;
+	LegacyBindingValid = false;
+}
+
+static bool AnyControllerTriggerPressed();
+
+static void LegacyContinuousTick(CalibrationContext &ctx, double now)
+{
+	auto bindCurrentProfile = [&]()
+	{
+		LegacyBoundTrackerId = ctx.continuousTrackerId;
+		LegacyBoundBaseGeneration = ctx.baseGeneration;
+		LegacyBoundTrackerSerial = ctx.continuousTrackerSerial;
+		LegacyBindingValid = true;
+	};
+	if (!LegacyBindingValid ||
+		LegacyBoundTrackerId != ctx.continuousTrackerId ||
+		LegacyBoundBaseGeneration != ctx.baseGeneration ||
+		LegacyBoundTrackerSerial != ctx.continuousTrackerSerial)
+	{
+		LegacyReset();
+		ctx.continuousCorrectionGate.Clear();
+		bindCurrentProfile();
+	}
+
+	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch);
+	if (dropped > 0)
+	{
+		LegacyReset();
+		ctx.continuousCorrectionGate.Clear();
+		bindCurrentProfile();
+	}
+	for (const auto &s : ContinuousScratch)
+	{
+		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
+			continue;
+		questcal::PoseSample sample;
+		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
+		{
+			if (TryComposeRingSample(s, QpcToSeconds, sample))
+			{
+				LegacyRef = sample;
+				LegacyHaveRef = true;
+				LegacyRefFresh = true;
+				LegacyLastRefArrival = now;
+			}
+		}
+		else if (s.deviceId == ctx.continuousTrackerId)
+		{
+			if (TryComposeRingSample(s, QpcToSeconds, sample))
+			{
+				LegacyTarget = sample;
+				LegacyHaveTarget = true;
+				LegacyTargetFresh = true;
+				LegacyLastTargetArrival = now;
+			}
+		}
+	}
+	if (!LegacyHaveRef || !LegacyHaveTarget ||
+		now - LegacyLastRefArrival > LegacyPoseStaleSeconds ||
+		now - LegacyLastTargetArrival > LegacyPoseStaleSeconds)
+	{
+		if (LegacyHaveRef || LegacyHaveTarget)
+		{
+			LegacyReset();
+			ctx.continuousCorrectionGate.Clear();
+			bindCurrentProfile();
+		}
+		ctx.continuousState = questcal::ContinuousAlignment::State::Inactive;
+		return;
+	}
+
+	auto applyCorrection = [&](const questcal::ContinuousAlignment::Correction &correction)
+	{
+		if (!questcal::ApplyCalibrationDelta(ctx, correction.rotation,
+			correction.translation, /*snap=*/false, now))
+		{
+			ctx.ReportError("A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.\n");
+			return;
+		}
+		ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
+		ctx.autoCorrectionsApplied++;
+		ctx.driftSlideEvents = 0;
+		ctx.driftMaxSlideM = 0.0;
+		ctx.discontinuousLossEvents = 0;
+	};
+
+	const bool triggerPressed = ctx.continuousRequireTrigger &&
+		AnyControllerTriggerPressed();
+	questcal::ContinuousAlignment::Correction correction;
+	if (ctx.continuousCorrectionGate.HasPending())
+	{
+		if (!ctx.continuousCorrectionGate.Take(
+			ctx.continuousRequireTrigger, triggerPressed, correction))
+		{
+			if (!LegacyWaitingTrigger)
+				ctx.Tell("Correction ready. Pull a trigger to apply it.\n");
+			LegacyWaitingTrigger = true;
+			return;
+		}
+		if (ctx.continuousRequireTrigger)
+			ctx.Tell("Trigger pulled; applying the correction.\n");
+		LegacyWaitingTrigger = false;
+		applyCorrection(correction);
+		return;
+	}
+
+	if (!LegacyRefFresh || !LegacyTargetFresh)
+		return;
+
+	const double pairSkew = LegacyRef.time - LegacyTarget.time;
+	if (std::abs(pairSkew) > LegacyMaxPairSkewSeconds)
+	{
+		// Keep the newer observation and wait for the lagging device to catch up.
+		if (pairSkew < 0.0)
+			LegacyRefFresh = false;
+		else
+			LegacyTargetFresh = false;
+		return;
+	}
+
+	if (now - LegacyLastSampleTime < 0.05)
+		return;
+	LegacyLastSampleTime = now;
+	LegacyRefFresh = LegacyTargetFresh = false;
+
+	// The original skipped a tick whose headset pose had not moved at all. Check
+	// the complete pose so rotation-only calibration motion is not discarded.
+	if (LegacyHavePrevHmd && LegacyRef.pos == LegacyPrevHmdPos &&
+		LegacyRef.rot.coeffs() == LegacyPrevHmdRot.coeffs())
+		return;
+	LegacyPrevHmdPos = LegacyRef.pos;
+	LegacyPrevHmdRot = LegacyRef.rot;
+	LegacyHavePrevHmd = true;
+
+	// Target positions pre-scaled, as everywhere else the calibration is
+	// composed with a solved scale; the original had no scale.
+	LegacyCalc.PushSample(questcal::legacy::Sample(
+		questcal::legacy::Pose(LegacyRef.rot, LegacyRef.pos),
+		questcal::legacy::Pose(LegacyTarget.rot, LegacyTarget.pos * ctx.transform.scale),
+		now));
+
+	const size_t window = LegacySampleWindow(ctx);
+	if (LegacyCalc.SampleCount() < window)
+	{
+		ctx.continuousState = LegacyCalc.isValid()
+			? questcal::ContinuousAlignment::State::Tracking
+			: questcal::ContinuousAlignment::State::Inactive;
+		return;
+	}
+	while (LegacyCalc.SampleCount() > window)
+		LegacyCalc.ShiftSample();
+
+	bool lerp = false;
+	LegacyCalc.enableStaticRecalibration = false;   // the original's default
+	LegacyCalc.lockRelativePosition = false;
+	const bool updated = LegacyCalc.ComputeIncremental(lerp, 1.5, 0.005, false);
+
+	if (updated && LegacyCalc.isValid())
+	{
+		const Eigen::AffineCompact3d est = LegacyCalc.Transformation();
+		const Eigen::Quaterniond newRotation(est.rotation());
+		const Eigen::Vector3d newTranslation = est.translation();
+		Eigen::Quaterniond deltaRotation;
+		Eigen::Vector3d deltaTranslation;
+		questcal::legacy::DeltaBetweenCalibrations(
+			ctx.transform.rotation, ctx.transform.translationMeters,
+			newRotation, newTranslation, deltaRotation, deltaTranslation);
+		correction.rotation = deltaRotation;
+		correction.translation = deltaTranslation;
+		ctx.continuousCorrectionGate.Offer(correction, triggerPressed);
+		if (!ctx.continuousCorrectionGate.Take(
+			ctx.continuousRequireTrigger, triggerPressed, correction))
+		{
+			if (!LegacyWaitingTrigger)
+				ctx.Tell("Correction ready. Pull a trigger to apply it.\n");
+			LegacyWaitingTrigger = true;
+		}
+		else
+		{
+			if (ctx.continuousRequireTrigger)
+				ctx.Tell("Trigger pulled; applying the correction.\n");
+			LegacyWaitingTrigger = false;
+			applyCorrection(correction);
+		}
+	}
+	ctx.continuousState = LegacyCalc.isValid()
+		? questcal::ContinuousAlignment::State::Tracking
+		: questcal::ContinuousAlignment::State::Inactive;
+
+	char buf[192];
+	snprintf(buf, sizeof buf, "legacy loop: %zu samples, solve %s, error %.1f cm, %u corrections",
+		LegacyCalc.SampleCount(), updated ? "accepted" : "kept", LegacyCalc.m_lastError * 100.0,
+		ctx.autoCorrectionsApplied);
+	ctx.Diag(buf);
+
+	for (size_t i = 0; i < window / 10; ++i)
+		LegacyCalc.ShiftSample();
+}
+
 static bool AnyControllerTriggerPressed()
 {
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
@@ -598,11 +863,13 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		if (ContinuousActive)
 		{
 			Continuous->Reset();
+			LegacyReset();
 			ContinuousActive = false;
 		}
 		PoseHub.DiscardBacklog(ContinuousConsumer);
 		ctx.continuousCorrectionGate.Clear();
-		ctx.continuousState = Continuous->GetState();
+		ctx.continuousState = ctx.continuousMode == ContinuousMode::Legacy
+			? questcal::ContinuousAlignment::State::Inactive : Continuous->GetState();
 		return;
 	}
 
@@ -610,6 +877,21 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	{
 		PoseHub.DiscardBacklog(ContinuousConsumer);
 		ContinuousActive = true;
+	}
+
+	// A method switch starts the other loop from nothing: their windows and
+	// baselines mean different things.
+	if (ctx.continuousMode != LastContinuousMode)
+	{
+		Continuous->Reset();
+		LegacyReset();
+		ctx.continuousCorrectionGate.Clear();
+		LastContinuousMode = ctx.continuousMode;
+	}
+	if (ctx.continuousMode == ContinuousMode::Legacy)
+	{
+		LegacyContinuousTick(ctx, now);
+		return;
 	}
 
 	// Cheap unconditional sync: the extrinsic changes only on recalibration
@@ -697,16 +979,16 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			ctx.continuousRequireTrigger, triggerPressed, corr))
 		{
 			if (!hadPendingCorrection)
-				ctx.Log("Continuous correction ready -- squeeze a controller trigger to apply it\n");
+				ctx.Tell("Correction ready. Pull a trigger to apply it.\n");
 		}
 		else
 		{
 			if (ctx.continuousRequireTrigger)
-				ctx.Log("Controller confirmation received -- applying the continuous correction\n");
+				ctx.Tell("Trigger pulled; applying the correction.\n");
 			if (!questcal::ApplyCalibrationDelta(ctx, corr.rotation, corr.translation,
 				/*snap=*/false, now))
 			{
-				ctx.ReportError("A continuous-calibration correction exceeded the safe transform bounds and was ignored\n");
+				ctx.ReportError("A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.\n");
 			}
 			else
 			{
@@ -719,8 +1001,28 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				ctx.driftSlideEvents = 0;
 				ctx.driftMaxSlideM = 0.0;
 				ctx.discontinuousLossEvents = 0;
+				char buf[128];
+				snprintf(buf, sizeof buf, "correction applied: yaw %.3f deg, position %.1f mm",
+					2.0 * std::asin(std::min(1.0, std::abs(corr.rotation.y()))) * 180.0 / EIGEN_PI,
+					corr.translation.norm() * 1000.0);
+				ctx.Diag(buf);
 			}
 		}
+	}
+
+	// The loop's decision inputs, once every evaluate interval: what a bug
+	// report about "it keeps pausing" needs and the pane does not.
+	static double lastDiagTime = -1e9;
+	if (ctx.detailedLogging && now - lastDiagTime >= 2.0)
+	{
+		lastDiagTime = now;
+		char buf[256];
+		snprintf(buf, sizeof buf,
+			"continuous: state %d, deviation yaw %.2f deg tilt %.2f deg pos %.1f cm, scatter %.2f deg / %.1f cm, %u corrections",
+			static_cast<int>(ctx.continuousState),
+			ctx.continuousDeviation.yawDeg, ctx.continuousDeviation.tiltDeg, ctx.continuousDeviation.posM * 100.0,
+			ctx.continuousScatterRotDeg, ctx.continuousScatterPosM * 100.0, ctx.autoCorrectionsApplied);
+		ctx.Diag(buf);
 	}
 
 	questcal::ContinuousAlignment::Event ev;
@@ -729,25 +1031,34 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		char buf[256];
 		switch (ev.type)
 		{
+		// Both freeze causes keep their evidence in the detail line. What the
+		// player reads is the fact (the readings disagree with the calibration
+		// by more than the loop will correct on its own), not a diagnosis: a
+		// strapped tracker does not move, and blaming it sent people to check
+		// hardware that was fine.
 		case questcal::ContinuousAlignment::Event::FrozenLargeDeviation:
 			snprintf(buf, sizeof buf,
 				"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm\n",
 				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
 			ctx.Log(buf);
 			NotifyOnce(ctx, Monitors.freezeNotified,
-				"The headset-mounted tracker moved or lost tracking -- alignment updates are on hold",
-				"QuestCalibrator: the headset-mounted tracker moved or lost tracking. Alignment updates are on hold -- recalibrate to re-learn the mount.");
+				"Continuous calibration paused: readings drifted too far from the calibration to correct safely.",
+				CalibrationContext::Tone::Warn,
+				"QuestCalibrator: continuous calibration paused; readings drifted too far to correct safely. Recalibrate with the headset tracker to resume.",
+				ctx.notifyPoorCalibration);
 			break;
 		case questcal::ContinuousAlignment::Event::FrozenMountScatter:
 			// The event now carries the scatter it froze on, so this no longer
 			// re-reads live accessors that have moved on since it was raised.
 			snprintf(buf, sizeof buf,
-				"Continuous calibration frozen: observation scatter %.2f deg / %.1f cm stays far above the tracking noise -- mount fault signature\n",
+				"Continuous calibration frozen: observation scatter %.2f deg / %.1f cm stays far above the tracking noise -- structured scatter\n",
 				ev.scatterRotDeg, ev.scatterPosM * 100.0);
 			ctx.Log(buf);
 			NotifyOnce(ctx, Monitors.freezeNotified,
-				"The headset-mounted tracker moved or lost tracking -- alignment updates are on hold",
-				"QuestCalibrator: the headset-mounted tracker moved or lost tracking. Alignment updates are on hold -- recalibrate to re-learn the mount.");
+				"Continuous calibration paused: readings are inconsistent with the headset tracker measurement.",
+				CalibrationContext::Tone::Warn,
+				"QuestCalibrator: continuous calibration paused; readings are inconsistent. Recalibrate with the headset tracker to resume.",
+				ctx.notifyPoorCalibration);
 			break;
 		case questcal::ContinuousAlignment::Event::ObservationsUnstable:
 			snprintf(buf, sizeof buf,
@@ -755,18 +1066,20 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				Continuous->ScatterRotRmsDeg(), Continuous->ScatterPosRmsM() * 100.0);
 			ctx.Log(buf);
 			NotifyOnce(ctx, Monitors.unstableNotified,
-				"Mounted tracker tracking is unstable -- alignment updates paused until it settles",
-				"QuestCalibrator: the headset-mounted tracker's tracking looks unstable here. Alignment updates are paused and will resume on their own.");
+				"Tracking is noisy here; continuous calibration is waiting and resumes on its own.",
+				CalibrationContext::Tone::Warn,
+				"QuestCalibrator: tracking is noisy here. Continuous calibration is waiting and resumes on its own.",
+				ctx.notifyPoorCalibration);
 			break;
 		case questcal::ContinuousAlignment::Event::Resumed:
-			ctx.Log("Continuous calibration resumed\n");
+			ctx.Tell("Continuous calibration resumed.\n", CalibrationContext::Tone::Good);
 			Monitors.freezeNotified = false;
 			break;
 		case questcal::ContinuousAlignment::Event::TrackerLost:
-			ctx.Log("Mounted tracker not tracking -- continuous calibration holding\n");
+			ctx.Tell("Headset tracker not tracking; continuous calibration waiting.\n");
 			break;
 		case questcal::ContinuousAlignment::Event::TrackerRecovered:
-			ctx.Log("Mounted tracker recovered -- continuous calibration gathering\n");
+			ctx.Tell("Headset tracker back; continuous calibration warming up.\n");
 			break;
 		}
 	}
@@ -810,12 +1123,89 @@ static bool EndCalibrationRun(CalibrationContext &ctx)
 	return heldDriver;
 }
 
-static void AbortCalibration(CalibrationContext &ctx, const std::string &reason)
+static void AbortCalibration(CalibrationContext &ctx, const StopReason &reason)
 {
-	AppendSessionLog("Calibration aborted: " + reason + "\n");
-	ctx.Log("Calibration aborted: " + reason + "\n");
+	ctx.lastRunHint = reason.hint;
+	ctx.Outcome("Calibration stopped", reason.body, reason.action, reason.detail,
+		CalibrationContext::Tone::Warn);
 	if (EndCalibrationRun(ctx) && vr::VRSystem())
 		SynchronizeCalibrationDriver(ctx);
+}
+
+// The player's own name for the device when they gave it one, else the model
+// when it could be read, else the role the pane gave it.
+static std::string DeviceName(const CalibrationContext &ctx, const std::string &model,
+                              const std::string &serial, bool reference)
+{
+	auto named = ctx.deviceNames.find(serial);
+	if (!serial.empty() && named != ctx.deviceNames.end() && !named->second.empty())
+		return named->second;
+	if (!model.empty())
+		return model;
+	return reference ? "The reference device" : "The target device";
+}
+
+// Reading of a refused solve for the modal: what went wrong and what to
+// change, one line each. The engine's own sentence stays in `message` for the
+// log and the details toggle.
+static StopReason DescribeSolveFailure(const questcal::EngineResult &result)
+{
+	using questcal::EngineFailure;
+	using Hint = CalibrationContext::GuideHint;
+	StopReason reason;
+	reason.detail = result.message;
+	switch (result.failure)
+	{
+	case EngineFailure::NotEnoughRotation:
+		reason.body = "Not enough rotation.";
+		reason.action = "Turn the pair further: at least a quarter turn each time.";
+		reason.hint = Hint::RotateMore;
+		break;
+	case EngineFailure::SingleAxis:
+	case EngineFailure::TranslationUnobservable:
+		reason.body = "Rotation was around a single axis.";
+		reason.action = "Rotate around more than one axis: twist, tilt and roll.";
+		reason.hint = Hint::TwoAxes;
+		break;
+	case EngineFailure::RotationResidual:
+		reason.body = "The two devices didn't move as one rigid pair.";
+		reason.action = "Hold them firmly together and try again.";
+		reason.hint = Hint::HoldTogether;
+		break;
+	case EngineFailure::PositionResidual:
+		reason.body = "Motion was too fast, or tracking too jittery.";
+		reason.action = "Move more slowly and try again.";
+		reason.hint = Hint::SlowDown;
+		break;
+	case EngineFailure::TimeOffset:
+		reason.body = "Couldn't measure the latency between the two systems.";
+		reason.action = "Keep both devices tracking and keep rotating for the full countdown.";
+		reason.hint = Hint::KeepTracking;
+		break;
+	case EngineFailure::NotEnoughSamples:
+		reason.body = "Almost no tracking data arrived.";
+		reason.action = "Check that both devices are tracking, then try again.";
+		break;
+	case EngineFailure::InvalidSamples:
+		reason.body = "Some tracking data was corrupt.";
+		reason.action = "Try again; restart SteamVR if it repeats.";
+		break;
+	case EngineFailure::ScaleNotIdentifiable:
+		reason.body = "Playspace scale couldn't be determined from this motion.";
+		reason.action = "Cover a larger area, or turn off Solve playspace scale in Settings.";
+		break;
+	case EngineFailure::Config:
+		reason.body = "Internal configuration error.";
+		reason.action = "Please report this.";
+		break;
+	case EngineFailure::NonFinite:
+	case EngineFailure::OutOfRange:
+	default:
+		reason.body = "The solve produced an unusable result.";
+		reason.action = "Try again with smooth motion around the room.";
+		break;
+	}
+	return reason;
 }
 
 // Store an anchor solve into the field. The anchor keeps the absolute solved
@@ -838,9 +1228,11 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	if (rotDeltaDeg > 8.0 || posDeltaM > 0.30)
 	{
 		snprintf(buf, sizeof buf,
-			"Anchor rejected: %.1f deg / %.1f cm from the base calibration -- recalibrate the base instead\n",
+			"Anchor rejected: %.1f deg / %.1f cm from the base calibration",
 			rotDeltaDeg, posDeltaM * 100.0);
-		ctx.Log(buf);
+		ctx.Outcome("Anchor not added",
+			"This spot is too far off from your calibration for a small correction.",
+			"Run a full calibration instead.", buf, CalibrationContext::Tone::Warn);
 		return;
 	}
 
@@ -863,7 +1255,9 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	bool append = slot == ctx.fieldAnchors.size();
 	if (append && ctx.fieldAnchors.size() >= protocol::SetAlignmentField::MaxAnchors)
 	{
-		ctx.Log("Anchor limit reached (8): collect within 1 m of an existing anchor to replace it, or clear the field\n");
+		ctx.Outcome("Anchor not added", "You already have 8 anchors.",
+			"Add this one within 1 m of an existing anchor to replace it, or clear the anchors in Settings.",
+			"Anchor limit reached (8)", CalibrationContext::Tone::Warn);
 		return;
 	}
 
@@ -876,7 +1270,10 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 		},
 		true))
 	{
-		ctx.Log("Field anchor was not applied because the updated profile could not be saved\n");
+		ctx.Outcome("Anchor not added", "It couldn't be saved.",
+			"Restart QuestCalibrator and try again.",
+			"Field anchor was not applied because the updated profile could not be saved",
+			CalibrationContext::Tone::Warn);
 		return;
 	}
 	SynchronizeCalibrationDriver(ctx);
@@ -884,6 +1281,9 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	snprintf(buf, sizeof buf, "Field anchor %zu stored at (%.2f, %.2f): %.2f deg / %.1f cm from base\n",
 		slot + 1, centroidRef.x(), centroidRef.z(), rotDeltaDeg, posDeltaM * 100.0);
 	ctx.Log(buf);
+	ctx.Outcome("Anchor added",
+		"This spot now has its own correction, blended in as you walk around.",
+		"", "", CalibrationContext::Tone::Good);
 }
 
 static void FinishCalibration(CalibrationContext &ctx)
@@ -927,12 +1327,24 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// hand-held calibration from arming continuous mode; on failure any
 	// previously learned mount (which did not move just because this solve
 	// happened without the tracker) is kept.
+	// What the headset-tracker half of the run achieved. It is folded into the
+	// run's single outcome below: a line emitted here would sit above the
+	// headline, and the result stage only reads from the headline down.
+	struct
+	{
+		bool attempted = false;
+		bool measured = false;
+		bool tooFast = false;  // the failure was motion, so the modal shows the slow-down picture
+		std::string note;
+		std::string action;
+	} mount;
 	if (result.valid && !asAnchor && run.referenceId == vr::k_unTrackedDeviceIndex_Hmd)
 	{
 		questcal::MountExtrinsic extrinsic;
 		if (questcal::ContinuousAlignment::DeriveMountExtrinsic(
 			run.referenceSamples, run.targetSamples, result, extrinsic))
 		{
+			mount.attempted = true;
 			std::string serial;
 			if (ReadTrackedDeviceString(run.targetId,
 				vr::Prop_SerialNumber_String, serial))
@@ -945,25 +1357,40 @@ static void FinishCalibration(CalibrationContext &ctx)
 					"Mount offset learned for continuous calibration (%.2f deg / %.1f mm spread, %zu pairs)\n",
 					extrinsic.rotRmsDeg, extrinsic.posRmsM * 1000.0, extrinsic.pairs);
 				ctx.Log(buf);
+				mount.measured = true;
+				mount.note = ctx.continuousEnabled
+					? "Headset tracker measured, so continuous calibration can keep it that way."
+					: "Headset tracker measured. Turn on continuous calibration in Settings to use it.";
 			}
 			else
 			{
-				ctx.Log("The mounted target's serial could not be read safely -- keeping the previous mount offset\n");
+				mount.note = "The tracker's identity couldn't be verified, so the previous headset tracker measurement is kept.";
+				mount.action = "Try again. If it repeats, restart SteamVR.";
 			}
 		}
-		else if (ctx.continuousEnabled)
+		else if (ctx.continuousEnabled || run.targetSerial == ctx.continuousTrackerSerial)
 		{
-			ctx.Log(ctx.mountExtrinsic.valid
-				? "The target device was not rigid on the headset -- keeping the previous mount offset\n"
-				: "The target device was not rigid on the headset -- continuous calibration needs a mounted tracker\n");
+			// Said whenever the pick or the feature says this tracker is meant
+			// to be on the headset: staying silent here is how "not set up yet"
+			// became a permanent status for users who had done exactly that.
+			// A strapped tracker does not move; an inconsistent measurement
+			// means the motion was too fast for the two systems' latency.
+			mount.attempted = true;
+			mount.tooFast = true;
+			mount.note = ctx.mountExtrinsic.valid
+				? "The headset tracker's position couldn't be measured consistently, so the previous measurement is kept."
+				: "The headset tracker's position couldn't be measured consistently.";
+			mount.action = "Run the setup again and look around more slowly.";
 		}
 	}
 
 	ctx.state = CalibrationState::None;
 	if (!result.valid)
 	{
-		AppendSessionLog("Calibration failed: " + result.message + "\n");
-		ctx.Log("Calibration failed: " + result.message + "\n");
+		const StopReason reason = DescribeSolveFailure(result);
+		ctx.lastRunHint = reason.hint;
+		ctx.Outcome("That didn't work", reason.body, reason.action, reason.detail,
+			CalibrationContext::Tone::Warn);
 		if (EndCalibrationRun(ctx) && vr::VRSystem())
 			SynchronizeCalibrationDriver(ctx);
 		return;
@@ -1019,6 +1446,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 	if (asAnchor)
 	{
 		EndCalibrationRun(ctx);
+		ctx.lastRunHint = CalibrationContext::GuideHint::Success;
 		StoreFieldAnchor(ctx, result, targetCentroid);
 		return;
 	}
@@ -1067,14 +1495,47 @@ static void FinishCalibration(CalibrationContext &ctx)
 	bool saved = SavePendingChanges(ctx);
 	EndCalibrationRun(ctx);
 	SynchronizeCalibrationDriver(ctx);
-	ctx.Log(saved ? "Finished calibration, profile and settings saved\n"
-		: "Finished calibration and applied it for this session, but all persistence writes did not complete\n");
 
 	if (result.scale != 1.0)
 	{
 		snprintf(buf, sizeof buf, "Playspace scale: %.4f\n", result.scale);
 		ctx.Log(buf);
 	}
+
+	// One plain sentence on the quality band the rating uses; the residuals
+	// behind it went to the detail lines above.
+	ctx.lastRunHint = CalibrationContext::GuideHint::Success;
+	const double rotDeg = result.rotationRmsDeg;
+	const double posCm = result.translationRmsMeters * 100.0;
+	// The same rating word the main screen uses, and nothing else: "Quality:"
+	// in front of it only added a second colon to the activity line.
+	std::string quality = rotDeg <= 3.0 && posCm <= 1.5 ? "Good."
+		: rotDeg <= 6.0 && posCm <= 3.0 ? "Usable." : "Rough.";
+	std::string action = quality == "Good." ? ""
+		: quality == "Usable." ? "Redo it with more rotation if anything looks off in game."
+		: "Redo it with more rotation and slower motion.";
+	CalibrationContext::Tone tone = quality == "Rough." ? CalibrationContext::Tone::Warn
+		: CalibrationContext::Tone::Good;
+	if (mount.attempted)
+	{
+		// A headset-tracker run is judged on what it was for. Its result is
+		// folded into the one outcome the modal shows, instead of a line
+		// that would have landed above the headline and gone unread.
+		if (mount.measured)
+			ctx.Outcome("Calibration done", quality + " " + mount.note, action, "", tone);
+		else
+		{
+			if (mount.tooFast)
+				ctx.lastRunHint = CalibrationContext::GuideHint::SlowDown;
+			ctx.Outcome("Done, but the headset tracker wasn't measured",
+				quality + " " + mount.note, mount.action, "", CalibrationContext::Tone::Warn);
+		}
+	}
+	else
+		ctx.Outcome("Calibration done", quality, action, "", tone);
+	if (!saved)
+		ctx.Tell("Applied for this session, but it couldn't be saved; redo it after restarting.",
+			CalibrationContext::Tone::Warn);
 }
 
 bool StartCalibration()
@@ -1083,7 +1544,7 @@ bool StartCalibration()
 		CalCtx.pendingReferenceTrackingSystem,
 		CalCtx.pendingTargetTrackingSystem))
 	{
-		CalCtx.ReportError("Choose two different tracking systems before starting calibration\n");
+		CalCtx.ReportError("Pick a reference and a target from two different tracking systems.\n");
 		return false;
 	}
 
@@ -1103,7 +1564,7 @@ bool StartAnchorCalibration()
 	if (CalCtx.pendingReferenceTrackingSystem != CalCtx.referenceTrackingSystem ||
 		CalCtx.pendingTargetTrackingSystem != CalCtx.targetTrackingSystem)
 	{
-		CalCtx.ReportError("Select the active profile's tracking systems before collecting a field anchor\n");
+		CalCtx.ReportError("Anchors need the same reference and target systems as the current calibration. Pick those devices first.\n");
 		return false;
 	}
 	if (!StartCalibration())
@@ -1120,8 +1581,18 @@ static void BeginCollection(CalibrationContext &ctx, double time)
 	run.lastTargetSample = time;
 	ctx.state = CalibrationState::Collecting;
 	ctx.wantedUpdateInterval = 0.0;
-	ctx.Log("Keep the selected devices rigidly together.\n"
-		"Move them through wide, varied rotations around at least two different axes and across the play area.\n");
+	if (run.referenceId == vr::k_unTrackedDeviceIndex_Hmd)
+	{
+		// A head-referenced run: the tracker is strapped to the headset, so
+		// the motion is the head's.
+		ctx.Instruct("Look around slowly.");
+		ctx.Note("Side to side, up and down, and tilt your head. Keep the tracker tracking the whole time.");
+	}
+	else
+	{
+		ctx.Instruct("Hold them together and keep rotating.");
+		ctx.Note("Rotate around more than one axis and move around a little. Keep both devices tracking.");
+	}
 }
 
 void CalibrationTick(double time)
@@ -1197,8 +1668,10 @@ void CalibrationTick(double time)
 			return;
 		if (!result->succeeded)
 		{
-			AbortCalibration(ctx,
-				"Raw pose traffic is unavailable and the selected device transforms could not be neutralized");
+			AbortCalibration(ctx, {
+				"QuestCalibrator can't talk to SteamVR.",
+				"Restart SteamVR. If it repeats, re-run the installer.",
+				"Raw pose traffic is unavailable and the selected device transforms could not be neutralized" });
 			return;
 		}
 
@@ -1212,36 +1685,64 @@ void CalibrationTick(double time)
 	if (ctx.state == CalibrationState::Begin)
 	{
 		auto &run = ctx.run;
-		bool ok = true;
 
+		// Names first: every stop reason below names the hardware the player
+		// picked (by their own name for it when they gave one), not "the
+		// reference device". A failed read falls back to the pane the pick
+		// came from; the serials are re-read strictly below, where a failure
+		// is its own stop reason.
+		if (run.referenceId < vr::k_unMaxTrackedDeviceCount)
+		{
+			ReadTrackedDeviceString(run.referenceId, vr::Prop_ModelNumber_String, run.referenceModel);
+			ReadTrackedDeviceString(run.referenceId, vr::Prop_SerialNumber_String, run.referenceSerial);
+		}
+		if (run.targetId < vr::k_unMaxTrackedDeviceCount)
+		{
+			ReadTrackedDeviceString(run.targetId, vr::Prop_ModelNumber_String, run.targetModel);
+			ReadTrackedDeviceString(run.targetId, vr::Prop_SerialNumber_String, run.targetSerial);
+		}
+
+		// One stop reason per cause, so the player learns which device and
+		// what to do rather than "both devices must report Running_OK".
+		auto trackingOk = [&](uint32_t id)
+		{
+			return ctx.devicePoses[id].bPoseIsValid &&
+				ctx.devicePoses[id].eTrackingResult == vr::TrackingResult_Running_OK;
+		};
 		if (run.referenceId >= vr::k_unMaxTrackedDeviceCount)
 		{
-			ctx.Log("Missing reference device\n");
-			ok = false;
+			AbortCalibration(ctx, {
+				"Missing reference device.",
+				"Pick a device that's switched on.",
+				"Missing reference device",
+				CalibrationContext::GuideHint::WrongPick });
+			return;
 		}
-		else if (!ctx.devicePoses[run.referenceId].bPoseIsValid ||
-			ctx.devicePoses[run.referenceId].eTrackingResult != vr::TrackingResult_Running_OK)
-		{
-			ctx.Log("Reference device is not tracking\n");
-			ok = false;
-		}
-
 		if (run.targetId >= vr::k_unMaxTrackedDeviceCount)
 		{
-			ctx.Log("Missing target device\n");
-			ok = false;
+			AbortCalibration(ctx, {
+				"Missing target device.",
+				"Pick a device that's switched on.",
+				"Missing target device",
+				CalibrationContext::GuideHint::WrongPick });
+			return;
 		}
-		else if (!ctx.devicePoses[run.targetId].bPoseIsValid ||
-			ctx.devicePoses[run.targetId].eTrackingResult != vr::TrackingResult_Running_OK)
+		if (!trackingOk(run.referenceId))
 		{
-			ctx.Log("Target device is not tracking\n");
-			ok = false;
+			AbortCalibration(ctx, {
+				DeviceName(ctx, run.referenceModel, run.referenceSerial, true) + " isn't tracking.",
+				"Check it's awake and visible to its base stations, then try again.",
+				"Reference device is not Running_OK",
+				CalibrationContext::GuideHint::TrackingLost });
+			return;
 		}
-
-		if (!ok)
+		if (!trackingOk(run.targetId))
 		{
-			AbortCalibration(ctx,
-				"Both selected devices must report Running_OK before collection starts");
+			AbortCalibration(ctx, {
+				DeviceName(ctx, run.targetModel, run.targetSerial, false) + " isn't tracking.",
+				"Check it's awake and visible to its base stations, then try again.",
+				"Target device is not Running_OK",
+				CalibrationContext::GuideHint::TrackingLost });
 			return;
 		}
 
@@ -1254,8 +1755,10 @@ void CalibrationTick(double time)
 		if (!matchesCapturedSystem(run.referenceId, run.referenceSystem) ||
 			!matchesCapturedSystem(run.targetId, run.targetSystem))
 		{
-			AbortCalibration(ctx,
-				"Selected devices no longer belong to the chosen tracking systems");
+			AbortCalibration(ctx, {
+				"A device changed tracking system as the run started.",
+				"Re-pick both devices and start again.",
+				"Selected devices no longer belong to the chosen tracking systems" });
 			return;
 		}
 
@@ -1268,8 +1771,10 @@ void CalibrationTick(double time)
 			!ReadTrackedDeviceString(run.targetId,
 				vr::Prop_SerialNumber_String, run.targetSerial))
 		{
-			AbortCalibration(ctx,
-				"Could not verify both selected device serials; reconnect them and try again");
+			AbortCalibration(ctx, {
+				"SteamVR stopped reporting one of the devices.",
+				"Wake or reconnect it, then try again.",
+				"Could not verify both selected device serials" });
 			return;
 		}
 		run.lastIdentityCheck = time;
@@ -1277,8 +1782,11 @@ void CalibrationTick(double time)
 		if (!ReadCurrentHmdIdentity(hmdSystem, run.hmdSerial) ||
 			hmdSystem != run.referenceSystem)
 		{
-			AbortCalibration(ctx,
-				"Could not verify that the current HMD owns the selected reference tracking system");
+			AbortCalibration(ctx, {
+				"The reference device must be on the headset's tracking system.",
+				"Pick the headset or one of its controllers as the reference.",
+				"Could not verify that the current HMD owns the selected reference tracking system",
+				CalibrationContext::GuideHint::WrongPick });
 			return;
 		}
 
@@ -1323,8 +1831,10 @@ void CalibrationTick(double time)
 	auto &run = ctx.run;
 	if (run.usesPoseRing && !PoseHub.RingOpen())
 	{
-		AbortCalibration(ctx,
-			"The driver pose channel closed mid-collection; the remaining samples would carry a different clock");
+		AbortCalibration(ctx, {
+			"Lost contact with SteamVR mid-run.",
+			"Restart SteamVR and try again.",
+			"The driver pose channel closed mid-collection; the remaining samples would carry a different clock" });
 		return;
 	}
 
@@ -1345,8 +1855,10 @@ void CalibrationTick(double time)
 		if (deviceReplaced(run.referenceId, run.referenceSerial) ||
 			deviceReplaced(run.targetId, run.targetSerial))
 		{
-			AbortCalibration(ctx,
-				"A selected device was replaced in its slot mid-collection");
+			AbortCalibration(ctx, {
+				"A device dropped out mid-run and another took its slot.",
+				"Keep both devices powered and try again.",
+				"A selected device was replaced in its slot mid-collection" });
 			return;
 		}
 	}
@@ -1359,18 +1871,26 @@ void CalibrationTick(double time)
 	else
 		CollectFromRuntimePoses(ctx, time);
 
+	// The ring-vs-runtime distinction is invisible to the player; it stays in
+	// the detail line.
 	if (time - run.lastReferenceSample > 2.0)
 	{
-		AbortCalibration(ctx,
+		AbortCalibration(ctx, {
+			DeviceName(ctx, run.referenceModel, run.referenceSerial, true) + " stopped tracking mid-run.",
+			"Keep it tracking for the whole countdown.",
 			run.usesPoseRing ? "No trusted Running_OK raw poses arrived for the reference device"
-				: "Reference device stopped reporting Running_OK runtime poses");
+				: "Reference device stopped reporting Running_OK runtime poses",
+			CalibrationContext::GuideHint::TrackingLost });
 		return;
 	}
 	if (time - run.lastTargetSample > 2.0)
 	{
-		AbortCalibration(ctx,
+		AbortCalibration(ctx, {
+			DeviceName(ctx, run.targetModel, run.targetSerial, false) + " stopped tracking mid-run.",
+			"Keep it in view of its base stations for the whole countdown.",
 			run.usesPoseRing ? "No trusted Running_OK raw poses arrived for the target device"
-				: "Target device stopped reporting Running_OK runtime poses");
+				: "Target device stopped reporting Running_OK runtime poses",
+			CalibrationContext::GuideHint::TrackingLost });
 		return;
 	}
 
@@ -1380,4 +1900,16 @@ void CalibrationTick(double time)
 
 	if (elapsed >= duration)
 		FinishCalibration(ctx);
+}
+
+void CancelCalibration()
+{
+	auto &ctx = CalCtx;
+	if (ctx.state != CalibrationState::Begin && ctx.state != CalibrationState::Neutralizing &&
+		ctx.state != CalibrationState::Collecting)
+		return;
+	ctx.lastRunHint = CalibrationContext::GuideHint::None;
+	ctx.Outcome("Calibration cancelled", "", "", "");
+	if (EndCalibrationRun(ctx) && vr::VRSystem())
+		SynchronizeCalibrationDriver(ctx);
 }

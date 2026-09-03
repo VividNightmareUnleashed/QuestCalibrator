@@ -93,6 +93,7 @@
     <ClCompile Include="..\Driver\Logging.cpp" />
     <ClCompile Include="..\Overlay\CalibrationEngine.cpp" />
     <ClCompile Include="..\Overlay\ContinuousAlignment.cpp" />
+    <ClCompile Include="..\Overlay\LegacyContinuous.cpp" />
     <ClCompile Include="..\Overlay\DriftMonitor.cpp" />
     <ClCompile Include="..\Overlay\JumpDetector.cpp" />
     <ClCompile Include="..\Overlay\PoseStreamHub.cpp" />
@@ -107,6 +108,7 @@
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\Overlay\CalibrationEngine.h" />
+    <ClInclude Include="..\Overlay\CalibrationGuide.h" />
     <ClInclude Include="..\Overlay\CalibrationRun.h" />
     <ClInclude Include="..\Overlay\ChaperoneMath.h" />
     <ClInclude Include="..\Overlay\FieldMath.h" />

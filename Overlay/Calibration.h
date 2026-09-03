@@ -11,8 +11,11 @@
 #include <Eigen/Geometry>
 #include <openvr.h>
 
+#include <ctime>
+#include <deque>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -115,6 +118,12 @@ struct CalibrationProfileState
 void InitSessionLog();
 void AppendSessionLog(const std::string &msg);
 
+// Which loop keeps the calibration true during play. Quest is
+// QuestCalibrator's own model (a measured mount offset, corrections from
+// every pose); Legacy is the verbatim port of OpenVR-SpaceCalibrator's, which
+// re-solves from motion. Persisted with the profile.
+enum class ContinuousMode { Quest = 0, Legacy = 1 };
+
 struct CalibrationContext : CalibrationProfileState
 {
 	CalibrationState state = CalibrationState::None;
@@ -141,6 +150,23 @@ struct CalibrationContext : CalibrationProfileState
 	// plain-language calibration rating.
 	bool uiAdvanced = false;
 	bool notifyPoorCalibration = true;
+
+	// Extra detail for bug reports (continuous-loop decisions, solve numbers),
+	// written to the session log only while on. Off by default: the log is
+	// bounded and the detail is per second.
+	bool detailedLogging = false;  // persisted setting
+
+	void Diag(const std::string &msg)
+	{
+		if (detailedLogging)
+			AppendSessionLog("diag: " + msg);
+	}
+
+	// Player-given device names keyed by serial (persisted in Settings): six
+	// identical "VIVE Tracker 3.0" rows are told apart by hex serial otherwise.
+	static constexpr size_t DeviceNameMaxBytes = 32;
+	static constexpr size_t DeviceNameMaxCount = 64;
+	std::map<std::string, std::string> deviceNames;
 
 	// One-time drift warning shown before the first chaperone protect.
 	// Top-level (not in Chaperone) so it survives Clear() and persists even
@@ -169,6 +195,7 @@ struct CalibrationContext : CalibrationProfileState
 	bool continuousLatencyReestimation = false;  // persisted; opt-in, default off
 	bool continuousRequireTrigger = false;       // persisted; confirm corrections manually
 	bool hideMountedTracker = true;              // persisted; displace from games
+	ContinuousMode continuousMode = ContinuousMode::Quest;  // persisted; which loop runs
 
 	// The feature is armed only when the tracker pick and the mount offset
 	// learned for that tracker are both present — picking a tracker in the
@@ -176,9 +203,15 @@ struct CalibrationContext : CalibrationProfileState
 	// halves are routinely out of step. Every consumer must ask the same
 	// question: gating the driver-side hide on the weaker half displaced the
 	// tracker out of every game while nothing maintained the alignment.
+	// The legacy loop measures its own tracker offset, so for it the pick
+	// alone arms the feature.
 	bool ContinuousArmed() const
 	{
-		return continuousEnabled && mountExtrinsic.valid;
+		if (!continuousEnabled)
+			return false;
+		if (continuousMode == ContinuousMode::Legacy)
+			return !continuousTrackerSerial.empty();
+		return mountExtrinsic.valid;
 	}
 
 	// Driver pose-channel health, refreshed every tick. Losing the ring parks
@@ -312,7 +345,7 @@ struct CalibrationContext : CalibrationProfileState
 		run.Reset();
 	}
 
-	double CollectionSeconds()
+	double CollectionSeconds() const
 	{
 		switch (calibrationSpeed)
 		{
@@ -326,22 +359,62 @@ struct CalibrationContext : CalibrationProfileState
 		return 10.0;
 	}
 
+	// One entry in the calibration pane. The kind separates what a player must
+	// read from what a bug report needs: the modal always renders Instruction,
+	// Info, Headline and Action, shows Detail only behind its details toggle,
+	// and the session log receives every kind.
 	struct Message
 	{
-		enum Type
+		enum Kind
 		{
-			String,
+			Detail,       // engineer text: ids, serials, residuals; log-first
+			Info,         // a sentence written for the player
+			Instruction,  // what to do right now, rendered large
+			Headline,     // outcome headline ("Calibration stopped.")
+			Action,       // what to do next, in the action colour
 			Progress
-		} type = String;
+		} kind = Detail;
 
-		Message(Type type) : type(type) { }
+		explicit Message(Kind kind) : kind(kind) { }
 
 		std::string str;
-		int progress, target;
+		int progress = 0, target = 0;
 	};
 
 	std::vector<Message> messages;
 	size_t messageBytes = 0;
+
+	// The main screen's activity feed: the last few player-facing lines from
+	// the runtime monitors, so a freeze, a resume or a pending correction can
+	// reach someone who is not inside the calibration modal (which is the only
+	// place the pane itself renders).
+	enum class Tone { Neutral, Good, Warn, Bad };
+	struct ActivityEntry
+	{
+		double unixTime = 0.0;
+		Tone tone = Tone::Neutral;
+		std::string text;
+	};
+	static constexpr size_t ActivityMax = 6;
+	std::deque<ActivityEntry> activity;
+
+	// What the modal should show a picture of after a run: the user error the
+	// refused solve or the stop reason points at, or success. None for
+	// environmental stops and cancellations, which get no picture.
+	enum class GuideHint
+	{
+		None,
+		Success,
+		RotateMore,       // not enough rotation
+		TwoAxes,          // rotation about a single axis
+		HoldTogether,     // the pair did not move as one
+		SlowDown,         // motion too fast for the sample rate
+		KeepTracking,     // latency could not be measured
+		TrackingLost,     // a device stopped tracking
+		WrongPick,        // the reference must be on the headset's system
+		WaitForTracking,  // the headset re-centred mid-run
+	};
+	GuideHint lastRunHint = GuideHint::None;
 	// The pane is the bug-report surface for a GUI binary with no stderr, so it
 	// keeps recent history — but the runtime monitors log for the whole session
 	// and a driver that rebases at pose rate grows it at MB/minute. Bound it the
@@ -374,14 +447,16 @@ struct CalibrationContext : CalibrationProfileState
 		messageBytes = 0;
 	}
 
+	// Technical line: ids, serials, residuals, monitor evidence. Coalesces into
+	// the pane's current Detail entry and always reaches the session log.
 	void Log(const std::string &msg)
 	{
 		size_t offset = 0;
 		while (offset < msg.size())
 		{
-			if (messages.empty() || messages.back().type == Message::Progress ||
+			if (messages.empty() || messages.back().kind != Message::Detail ||
 				messages.back().str.size() >= MessageEntryMaxBytes)
-				messages.push_back(Message(Message::String));
+				messages.push_back(Message(Message::Detail));
 
 			size_t count = (std::min)(MessageEntryMaxBytes - messages.back().str.size(),
 				msg.size() - offset);
@@ -389,16 +464,95 @@ struct CalibrationContext : CalibrationProfileState
 			messageBytes += count;
 			offset += count;
 		}
-		// Never drop the entry being appended to: the newest lines are the ones
-		// a bug report is about.
+		TrimPane();
+
+		AppendSessionLog(msg);
+		std::cerr << msg;
+	}
+
+	// A sentence for the player: its own pane entry, the activity feed on the
+	// main screen, and the session log.
+	void Tell(const std::string &msg, Tone tone = Tone::Neutral)
+	{
+		PushEntry(Message::Info, msg);
+		PushActivity(msg, tone);
+		AppendSessionLog(msg);
+		std::cerr << msg;
+	}
+
+	// What to do right now (rendered large in the modal).
+	void Instruct(const std::string &msg)
+	{
+		PushEntry(Message::Instruction, msg);
+		AppendSessionLog(msg);
+	}
+
+	// A player-facing sentence for the pane only: guidance that belongs next
+	// to the instruction, not in the main screen's activity feed.
+	void Note(const std::string &msg)
+	{
+		PushEntry(Message::Info, msg);
+		AppendSessionLog(msg);
+	}
+
+	// How a run ended: a headline everyone reads, what happened in the
+	// player's words, an action line when there is something to do, and the
+	// engineer's reason behind the details toggle.
+	void Outcome(const std::string &headline, const std::string &body,
+		const std::string &action, const std::string &detail, Tone tone = Tone::Neutral)
+	{
+		PushEntry(Message::Headline, headline);
+		if (!body.empty())
+			PushEntry(Message::Info, body);
+		if (!action.empty())
+			PushEntry(Message::Action, action);
+		if (!detail.empty())
+			PushEntry(Message::Detail, detail);
+		PushActivity(body.empty() ? headline : headline + ": " + body, tone);
+		std::string line = headline;
+		if (!body.empty())
+			line += ": " + body;
+		if (!action.empty())
+			line += " " + action;
+		if (!detail.empty())
+			line += " [" + detail + "]";
+		AppendSessionLog(line);
+		std::cerr << line << "\n";
+	}
+
+	void PushActivity(const std::string &text, Tone tone)
+	{
+		ActivityEntry entry;
+		entry.unixTime = static_cast<double>(std::time(nullptr));
+		entry.tone = tone;
+		entry.text = text;
+		while (!entry.text.empty() && (entry.text.back() == '\n' || entry.text.back() == '\r'))
+			entry.text.pop_back();
+		activity.push_back(std::move(entry));
+		while (activity.size() > ActivityMax)
+			activity.pop_front();
+	}
+
+	void PushEntry(Message::Kind kind, const std::string &text)
+	{
+		Message entry(kind);
+		entry.str.assign(text, 0, (std::min)(text.size(), MessageEntryMaxBytes));
+		while (!entry.str.empty() && (entry.str.back() == '\n' || entry.str.back() == '\r'))
+			entry.str.pop_back();
+		messageBytes += entry.str.size();
+		messages.push_back(std::move(entry));
+		TrimPane();
+	}
+
+	// Never drop the entry being appended to: the newest lines are the ones a
+	// bug report is about.
+	void TrimPane()
+	{
 		while (messageBytes > MessagePaneMaxBytes && messages.size() > 1)
 		{
 			messageBytes -= messages.front().str.size();
 			messages.erase(messages.begin());
 		}
-
-		AppendSessionLog(msg);
-		std::cerr << msg;
 	}
 
 	void ReportError(const std::string &msg, ErrorSource source = ErrorSource::General)
@@ -420,7 +574,7 @@ struct CalibrationContext : CalibrationProfileState
 
 	void Progress(int current, int target)
 	{
-		if (messages.empty() || messages.back().type == Message::String)
+		if (messages.empty() || messages.back().kind != Message::Progress)
 			messages.push_back(Message(Message::Progress));
 
 		messages.back().progress = current;
@@ -435,6 +589,8 @@ void ShutdownCalibrator(bool cleanExit = true);
 void CalibrationTick(double time);
 bool StartCalibration();
 bool StartAnchorCalibration();     // same collection; result becomes a field anchor
+// Stops a run the user no longer wants. Not a failure: the outcome says so.
+void CancelCalibration();
 bool LoadChaperoneBounds();
 bool ApplyChaperoneBounds(bool logSuccess = true);
 

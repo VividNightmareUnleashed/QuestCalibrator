@@ -65,6 +65,8 @@ struct SettingsRecord
 	CalibrationContext::Speed calibrationSpeed = CalibrationContext::FAST;
 	bool solveScale = false;
 	bool applyTimeOffset = true;
+	bool detailedLogging = false;
+	std::map<std::string, std::string> deviceNames;
 	ChaperoneRecord chaperone;
 };
 
@@ -97,6 +99,8 @@ static SettingsRecord CaptureSettingsRecord(const CalibrationContext &ctx)
 	record.calibrationSpeed = ctx.calibrationSpeed;
 	record.solveScale = ctx.solveScale;
 	record.applyTimeOffset = ctx.applyTimeOffset;
+	record.detailedLogging = ctx.detailedLogging;
+	record.deviceNames = ctx.deviceNames;
 	record.chaperone = CaptureChaperoneRecord(ctx.chaperone);
 	return record;
 }
@@ -140,6 +144,7 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.continuousTrackerSerial = ctx.continuousTrackerSerial;
 	record.continuousLatencyReestimation = ctx.continuousLatencyReestimation;
 	record.continuousRequireTrigger = ctx.continuousRequireTrigger;
+	record.continuousMode = static_cast<int>(ctx.continuousMode);
 	record.hideMountedTracker = ctx.hideMountedTracker;
 	record.mountExtrinsic.valid = ctx.mountExtrinsic.valid;
 	record.mountExtrinsic.rotation = ctx.mountExtrinsic.rot;
@@ -177,6 +182,8 @@ static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 	ctx.calibrationSpeed = record.calibrationSpeed;
 	ctx.solveScale = record.solveScale;
 	ctx.applyTimeOffset = record.applyTimeOffset;
+	ctx.detailedLogging = record.detailedLogging;
+	ctx.deviceNames = record.deviceNames;
 	ApplyChaperoneRecord(ctx, std::move(record.chaperone));
 }
 
@@ -205,6 +212,7 @@ static void ApplyProfilePreferences(
 	ctx.continuousTrackerSerial = record.continuousTrackerSerial;
 	ctx.continuousLatencyReestimation = record.continuousLatencyReestimation;
 	ctx.continuousRequireTrigger = record.continuousRequireTrigger;
+	ctx.continuousMode = record.continuousMode == 1 ? ContinuousMode::Legacy : ContinuousMode::Quest;
 	ctx.hideMountedTracker = record.hideMountedTracker;
 	// Only the members the record carries. MountExtrinsic::pairs is a runtime
 	// derivation statistic with no persisted counterpart, so it is not this
@@ -472,6 +480,14 @@ static void WriteSettings(const SettingsRecord &record,
 	settings["calibration_speed"].set<double>(calibrationSpeed);
 	settings["solve_scale"].set<bool>(record.solveScale);
 	settings["apply_time_offset"].set<bool>(record.applyTimeOffset);
+	settings["detailed_logging"].set<bool>(record.detailedLogging);
+	if (!record.deviceNames.empty())
+	{
+		picojson::object names;
+		for (const auto &entry : record.deviceNames)
+			names[entry.first].set<std::string>(entry.second);
+		settings["device_names"].set<picojson::object>(std::move(names));
+	}
 	WriteChaperone(record, settings);
 
 	picojson::value value;
@@ -506,6 +522,24 @@ static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &s
 		settings.solveScale = obj.at("solve_scale").get<bool>();
 	if (HasTypedValue<bool>(obj, "apply_time_offset"))
 		settings.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
+	if (HasTypedValue<bool>(obj, "detailed_logging"))
+		settings.detailedLogging = obj.at("detailed_logging").get<bool>();
+	if (HasTypedValue<picojson::object>(obj, "device_names"))
+	{
+		// Bounded on read as on write: a hand-edited record cannot grow the
+		// map or a name past what the UI is built for.
+		for (const auto &entry : obj.at("device_names").get<picojson::object>())
+		{
+			if (!entry.second.is<std::string>() || entry.first.empty())
+				continue;
+			std::string name = entry.second.get<std::string>();
+			if (name.empty() || name.size() > CalibrationContext::DeviceNameMaxBytes)
+				continue;
+			if (settings.deviceNames.size() >= CalibrationContext::DeviceNameMaxCount)
+				break;
+			settings.deviceNames[entry.first] = name;
+		}
+	}
 	if (HasTypedValue<double>(obj, "calibration_speed"))
 	{
 		double speed = GetDouble(obj.at("calibration_speed"));

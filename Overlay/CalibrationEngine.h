@@ -138,9 +138,30 @@ enum class ScaleGuard
 	NeutralizedForSmoothing,  // no trustworthy band; guard used unity
 };
 
+// Why a solve was refused, as a code the UI can turn into player-facing
+// guidance (and the right illustration) without parsing `message`, which stays
+// the engineer's sentence for the log and the tests.
+enum class EngineFailure
+{
+	None,
+	Config,                  // engine misconfigured; a bug, not a user error
+	NotEnoughSamples,
+	InvalidSamples,
+	NotEnoughRotation,       // too few usable pairs: the devices barely turned
+	NonFinite,
+	OutOfRange,
+	SingleAxis,              // rotation around one axis only
+	TranslationUnobservable, // not enough varied rotation to pin the position
+	RotationResidual,        // the two devices did not move as one rigid body
+	PositionResidual,        // jittery tracking or motion too fast
+	TimeOffset,              // latency could not be measured
+	ScaleNotIdentifiable,
+};
+
 struct EngineResult
 {
 	bool valid = false;
+	EngineFailure failure = EngineFailure::None;
 
 	Eigen::Quaterniond rotation{ 1, 0, 0, 0 };  // maps target universe into reference universe
 	Eigen::Vector3d translation{ 0, 0, 0 };     // meters

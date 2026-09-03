@@ -29,6 +29,8 @@
 #include "../Overlay/DriverSession.h"
 #include "../Overlay/DriverSyncPolicy.h"
 #include "../Overlay/DriverSyncTracker.h"
+#include "../Overlay/CalibrationGuide.h"
+#include "../Overlay/LegacyContinuous.h"
 #include "../Overlay/DriverWorker.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/PersistenceState.h"
@@ -1665,6 +1667,29 @@ void RunDriverSyncStateScenarios()
 		Check("driver sync state: a refusal holds across identical resubmissions",
 			fresh && refused && heldSame && staleIgnored && liftedByChange &&
 				pendingSame && confirmed && refusedAgain, detail.c_str());
+	}
+
+	// The periodic one-second scan may submit an identical retry while a pipe
+	// request is still inside its two-second timeout. The older completion still
+	// answers the current desired state and must be accepted; otherwise every
+	// slow completion can be starved forever by the next retry.
+	{
+		questcal::DriverSyncTracker tracker;
+		const bool firstOpen = !tracker.NoteSubmission(1, true);
+		const bool retryOpen = !tracker.NoteSubmission(2, false);
+		const bool slowRefusalAccepted = tracker.NoteVerdict(1, false) &&
+			tracker.HoldsRefusal();
+		const bool heldRetry = tracker.NoteSubmission(3, false);
+		const bool recoveryAccepted = tracker.NoteVerdict(2, true) &&
+			!tracker.HoldsRefusal();
+		const std::string detail = "firstOpen=" + std::to_string(firstOpen) +
+			" retryOpen=" + std::to_string(retryOpen) +
+			" slowRefusalAccepted=" + std::to_string(slowRefusalAccepted) +
+			" heldRetry=" + std::to_string(heldRetry) +
+			" recoveryAccepted=" + std::to_string(recoveryAccepted);
+		Check("driver sync state: equivalent slow completions remain applicable",
+			firstOpen && retryOpen && slowRefusalAccepted && heldRetry &&
+				recoveryAccepted, detail.c_str());
 	}
 
 	// Liveness of that hold: an unchanged resubmission is still dispatched to
@@ -7800,6 +7825,247 @@ void RunPersistenceScenarios()
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Calibration guide: the live feedback the modal shows during collection.
+// ---------------------------------------------------------------------------
+
+static std::vector<PoseSample> GuideStream(double seconds, double rate,
+	const std::function<Eigen::Quaterniond(double)> &rotAt,
+	const std::function<Eigen::Vector3d(double)> &posAt,
+	std::mt19937 &rng, double noiseDeg)
+{
+	std::normal_distribution<double> noise(0.0, noiseDeg * EIGEN_PI / 180.0);
+	std::vector<PoseSample> out;
+	const double dt = 1.0 / rate;
+	for (double t = 0.0; t < seconds; t += dt)
+	{
+		PoseSample s;
+		s.time = t;
+		Eigen::Vector3d jitter(noise(rng), noise(rng), noise(rng));
+		const double a = jitter.norm();
+		Eigen::Quaterniond q = rotAt(t);
+		if (a > 1e-12)
+			q = (q * Eigen::Quaterniond(Eigen::AngleAxisd(a, jitter / a))).normalized();
+		s.rot = q;
+		s.pos = posAt(t);
+		s.vel = (posAt(t + dt) - posAt(t)) / dt;
+		Eigen::Quaterniond dq = (rotAt(t).conjugate() * rotAt(t + dt)).normalized();
+		if (dq.w() < 0.0)
+			dq.coeffs() = -dq.coeffs();
+		const double ang = 2.0 * std::acos(std::min(1.0, dq.w()));
+		Eigen::Vector3d axis = dq.vec().norm() > 1e-12 ? dq.vec().normalized() : Eigen::Vector3d::UnitY();
+		s.angVel = axis * (ang / dt);
+		out.push_back(s);
+	}
+	return out;
+}
+
+// The legacy continuous method (hyblocker's CalibrationCalc port): the loop
+// as the overlay drives it, on synthetic poses with a known calibration C and
+// a known tracker pose S on the head.
+void RunLegacyScenarios()
+{
+	using namespace questcal::legacy;
+	char detail[256];
+	std::mt19937 rng(777);
+
+	const Eigen::Quaterniond Rc(Eigen::AngleAxisd(37.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+	const Eigen::Vector3d tc(0.8, 0.1, -0.5);
+	const Eigen::Quaterniond Srot(Eigen::AngleAxisd(0.3, Eigen::Vector3d(0.2, 0.7, -0.3).normalized()));
+	const Eigen::Vector3d Spos(0.05, -0.08, 0.03);
+
+	auto headAt = [](double t, Eigen::Quaterniond &rot, Eigen::Vector3d &pos) {
+		rot = Eigen::Quaterniond(
+			Eigen::AngleAxisd(0.9 * std::sin(0.5 * t), Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(0.45 * std::sin(0.9 * t + 1.0), Eigen::Vector3d::UnitX()));
+		pos = Eigen::Vector3d(0.4 * std::sin(0.3 * t), 1.6, 0.4 * std::cos(0.2 * t));
+	};
+	// reference = C * target, and the tracker rides the head at S.
+	auto makeSample = [&](double t, bool moving, double posNoiseM, double rotNoiseDeg) {
+		std::normal_distribution<double> pn(0.0, posNoiseM);
+		std::normal_distribution<double> rn(0.0, rotNoiseDeg * EIGEN_PI / 180.0);
+		Eigen::Quaterniond hr;
+		Eigen::Vector3d hp;
+		headAt(moving ? t : 0.0, hr, hp);
+		Eigen::Quaterniond refRot = hr * Srot;
+		Eigen::Vector3d refPos = hr * Spos + hp;
+		Eigen::Quaterniond tgtRot = Rc.conjugate() * refRot;
+		Eigen::Vector3d tgtPos = Rc.conjugate() * (refPos - tc);
+		Eigen::Vector3d axis = Eigen::Vector3d(pn(rng) + 1e-6, pn(rng), pn(rng) - 1e-6).normalized();
+		tgtRot = (Eigen::Quaterniond(Eigen::AngleAxisd(rn(rng), axis)) * tgtRot).normalized();
+		tgtPos += Eigen::Vector3d(pn(rng), pn(rng), pn(rng));
+		return Sample(Pose(hr, hp), Pose(tgtRot, tgtPos), t);
+	};
+	auto yawErrorDeg = [&](const Eigen::AffineCompact3d &est) {
+		Eigen::Quaterniond q(est.rotation());
+		return q.angularDistance(Rc) * 180.0 / EIGEN_PI;
+	};
+
+	// 1. Motion: window of 100 at 20 Hz, re-solve on every full window, drop
+	// a tenth afterwards, as the overlay does.
+	{
+		CalibrationCalc calc;
+		calc.enableStaticRecalibration = false;
+		bool lerp = false;
+		int accepted = 0;
+		for (int i = 0; i < 600; ++i)
+		{
+			calc.PushSample(makeSample(i * 0.05, true, 0.002, 0.2));
+			if (calc.SampleCount() < 100)
+				continue;
+			while (calc.SampleCount() > 100)
+				calc.ShiftSample();
+			if (calc.ComputeIncremental(lerp, 1.5, 0.005, false))
+				++accepted;
+			for (int k = 0; k < 10; ++k)
+				calc.ShiftSample();
+		}
+		double yawErr = calc.isValid() ? yawErrorDeg(calc.Transformation()) : 999.0;
+		double posErr = calc.isValid() ? (calc.Transformation().translation() - tc).norm() : 999.0;
+		snprintf(detail, sizeof detail, "accepted %d, yaw error %.2f deg, position error %.1f cm",
+			accepted, yawErr, posErr * 100.0);
+		Check("legacy: motion re-solve recovers the calibration",
+			calc.isValid() && accepted > 0 && yawErr < 1.0 && posErr < 0.03, detail);
+	}
+
+	// 2. A one-axis window cannot identify the cross-universe rotation. The
+	// first solve has no prior variance baseline, so it must still fail closed
+	// instead of accepting an arbitrary finite transform from the position fit.
+	{
+		CalibrationCalc calc;
+		calc.enableStaticRecalibration = false;
+		std::normal_distribution<double> pn(0.0, 0.0005);
+		for (int i = 0; i < 100; ++i)
+		{
+			const double t = i * 0.05;
+			const Eigen::Quaterniond hr(
+				Eigen::AngleAxisd(0.9 * std::sin(0.7 * t), Eigen::Vector3d::UnitY()));
+			const Eigen::Vector3d hp(0.25 * std::sin(0.4 * t) + pn(rng),
+				1.6 + pn(rng), 0.25 * std::cos(0.4 * t) + pn(rng));
+			const Eigen::Quaterniond refRot = (hr * Srot).normalized();
+			const Eigen::Vector3d refPos = hr * Spos + hp;
+			const Eigen::Quaterniond tgtRot = (Rc.conjugate() * refRot).normalized();
+			const Eigen::Vector3d tgtPos = Rc.conjugate() * (refPos - tc);
+			calc.PushSample(Sample(Pose(hr, hp), Pose(tgtRot, tgtPos), t));
+		}
+		bool lerp = false;
+		const bool ok = calc.ComputeIncremental(lerp, 1.5, 0.005, false);
+		snprintf(detail, sizeof detail, "accepted %d, valid %d, axis variance %.3e",
+			ok ? 1 : 0, calc.isValid() ? 1 : 0, calc.m_axisVariance);
+		Check("legacy: low-diversity initial solve fails closed",
+			!ok && !calc.isValid(), detail);
+	}
+
+	// 3. Static: no motion at all, the relative pose known; the re-solve
+	// comes from the averaged relative pose.
+	{
+		CalibrationCalc calc;
+		calc.enableStaticRecalibration = true;
+		Eigen::AffineCompact3d S = Eigen::Translation3d(Spos) * Srot;
+		calc.setRelativeTransformation(S, true);
+		for (int i = 0; i < 100; ++i)
+			calc.PushSample(makeSample(i * 0.05, false, 0.001, 0.1));
+		bool lerp = false;
+		bool ok = calc.ComputeIncremental(lerp, 1.5, 0.005, false);
+		double yawErr = calc.isValid() ? yawErrorDeg(calc.Transformation()) : 999.0;
+		double posErr = calc.isValid() ? (calc.Transformation().translation() - tc).norm() : 999.0;
+		snprintf(detail, sizeof detail, "accepted %d, yaw error %.2f deg, position error %.1f cm",
+			ok ? 1 : 0, yawErr, posErr * 100.0);
+		Check("legacy: static re-solve from the relative pose",
+			ok && calc.isValid() && yawErr < 0.5 && posErr < 0.02, detail);
+	}
+
+	// 4. The delta the overlay applies reproduces the re-solved calibration.
+	{
+		Eigen::Quaterniond oldR(Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitY()));
+		Eigen::Vector3d oldT(0.2, 0.0, -0.1);
+		Eigen::Quaterniond dR;
+		Eigen::Vector3d dT;
+		DeltaBetweenCalibrations(oldR, oldT, Rc, tc, dR, dT);
+		Eigen::Quaterniond back = (dR * oldR).normalized();
+		Eigen::Vector3d backT = dR * oldT + dT;
+		snprintf(detail, sizeof detail, "rotation error %.2e rad, translation error %.2e m",
+			back.angularDistance(Rc), (backT - tc).norm());
+		Check("legacy: delta reproduces the new calibration",
+			back.angularDistance(Rc) < 1e-9 && (backT - tc).norm() < 1e-9, detail);
+	}
+}
+
+void RunGuideScenarios()
+{
+	char detail[256];
+	std::mt19937 rng(4242);
+	auto still = [](double) { return Eigen::Vector3d(0.0, 1.2, 0.0); };
+
+	// 1. Coverage: rotation about one axis stays near empty however long it
+	// runs; rotation about two axes fills the ring.
+	{
+		auto yawOnly = [](double t) {
+			return Eigen::Quaterniond(Eigen::AngleAxisd(1.2 * std::sin(0.8 * t), Eigen::Vector3d::UnitY()));
+		};
+		auto twoAxis = [](double t) {
+			return Eigen::Quaterniond(
+				Eigen::AngleAxisd(1.2 * std::sin(0.8 * t), Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(0.9 * std::sin(1.3 * t + 0.7), Eigen::Vector3d::UnitX()));
+		};
+		auto single = GuideStream(10.0, 90.0, yawOnly, still, rng, 0.2);
+		auto varied = GuideStream(10.0, 90.0, twoAxis, still, rng, 0.2);
+		GuideMetrics a = ComputeGuideMetrics(single, single);
+		GuideMetrics b = ComputeGuideMetrics(varied, varied);
+		snprintf(detail, sizeof detail, "single-axis %.2f  two-axis %.2f", a.coverage, b.coverage);
+		Check("guide: coverage tells one axis from two",
+			a.valid && b.valid && a.coverage < 0.25 && b.coverage > 0.8, detail);
+	}
+
+	// 2. Speed: the share of the last second's samples over the engine's gates.
+	{
+		auto slowRot = [](double t) {
+			return Eigen::Quaterniond(Eigen::AngleAxisd(0.3 * std::sin(t), Eigen::Vector3d::UnitY()));
+		};
+		// 3 m/s for the last half second only.
+		auto fastMove = [](double t) {
+			return Eigen::Vector3d(t < 9.5 ? 0.0 : 3.0 * (t - 9.5), 1.2, 0.0);
+		};
+		auto stream = GuideStream(10.0, 90.0, slowRot, fastMove, rng, 0.1);
+		GuideMetrics m = ComputeGuideMetrics(stream, stream);
+		snprintf(detail, sizeof detail, "gated fraction %.2f (expect ~0.5)", m.gatedFraction);
+		Check("guide: speed gate fraction",
+			m.valid && m.gatedFraction > 0.35 && m.gatedFraction < 0.65, detail);
+	}
+
+	// 3. Rigidity: a fixed relative rotation reads tight; a wobbling one loose.
+	{
+		auto rot = [](double t) {
+			return Eigen::Quaterniond(
+				Eigen::AngleAxisd(0.8 * std::sin(0.9 * t), Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(0.5 * std::sin(1.4 * t), Eigen::Vector3d::UnitX()));
+		};
+		const Eigen::Quaterniond mount(Eigen::AngleAxisd(0.6, Eigen::Vector3d(0.3, 0.8, 0.2).normalized()));
+		auto rigid = [&](double t) { return (rot(t) * mount).normalized(); };
+		auto loose = [&](double t) {
+			return (rot(t) * mount *
+				Eigen::Quaterniond(Eigen::AngleAxisd(0.25 * std::sin(6.0 * t), Eigen::Vector3d::UnitZ()))).normalized();
+		};
+		auto ref = GuideStream(4.0, 90.0, rot, still, rng, 0.1);
+		auto tightPair = GuideStream(4.0, 72.0, rigid, still, rng, 0.1);
+		auto loosePair = GuideStream(4.0, 72.0, loose, still, rng, 0.1);
+		auto crossUniversePair = tightPair;
+		const Eigen::Quaterniond targetToReference(
+			Eigen::AngleAxisd(0.7, Eigen::Vector3d(0.2, 0.9, -0.3).normalized()));
+		for (auto &sample : crossUniversePair)
+			sample.rot = (targetToReference.conjugate() * sample.rot).normalized();
+		GuideMetrics a = ComputeGuideMetrics(ref, tightPair);
+		GuideMetrics b = ComputeGuideMetrics(ref, loosePair);
+		GuideMetrics c = ComputeGuideMetrics(ref, crossUniversePair);
+		snprintf(detail, sizeof detail, "rigid %.2f deg  loose %.2f deg  cross-universe %.2f deg",
+			a.rigidityDeg, b.rigidityDeg, c.rigidityDeg);
+		Check("guide: rigidity spread",
+			a.rigidityValid && b.rigidityValid && c.rigidityValid &&
+			a.rigidityDeg < 1.5 && b.rigidityDeg > 5.0 && c.rigidityDeg < 1.5,
+			detail);
+	}
+}
+
 int main(int argc, char **argv)
 {
 	// Unbuffered: an abort discards a buffered stdout, so a harness that dies
@@ -8468,6 +8734,8 @@ int main(int argc, char **argv)
 
 	// ---- Continuous calibration (HMD-mounted tracker) ----
 	RunContinuousScenarios();
+	RunGuideScenarios();
+	RunLegacyScenarios();
 
 	// ---- Profile persistence: codec, write gates, load plan ----
 	RunPersistenceScenarios();
