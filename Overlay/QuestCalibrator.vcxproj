@@ -104,6 +104,8 @@
     <ClInclude Include="UiInternal.h" />
     <ClInclude Include="Diagnostics.h" />
     <ClInclude Include="LegacyContinuous.h" />
+    <ClInclude Include="UpdatePolicy.h" />
+    <ClInclude Include="Updater.h" />
     <ClInclude Include="CalibrationRun.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
@@ -156,6 +158,7 @@
     <ClCompile Include="CalibrationSpace.cpp" />
     <ClCompile Include="Diagnostics.cpp" />
     <ClCompile Include="LegacyContinuous.cpp" />
+    <ClCompile Include="Updater.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -197,4 +200,12 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Target Name="CopyRuntimeFiles" AfterTargets="Build">
+    <ItemGroup>
+      <QuestCalRuntimeFile Include="$(ProjectDir)..\lib\openvr\lib\win64\openvr_api.dll" />
+      <QuestCalRuntimeFile Include="$(ProjectDir)manifest.vrmanifest" />
+      <QuestCalRuntimeFile Include="$(ProjectDir)icon.png" />
+    </ItemGroup>
+    <Copy SourceFiles="@(QuestCalRuntimeFile)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

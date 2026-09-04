@@ -170,7 +170,7 @@ inline RingSampleParts UnpackRingSample(const protocol::DevicePoseSample &s)
 inline bool IsTrustedRingSample(
 	const protocol::DevicePoseSample &s, double qpcToSeconds)
 {
-	return s.poseIsValid &&
+	return s.deviceIsConnected && s.poseIsValid &&
 		s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK) &&
 		IsUsableRingSample(s, qpcToSeconds);
 }

@@ -211,45 +211,50 @@ Eigen::Matrix3d WeightedKabsch(const std::vector<AxisPair> &pairs, double gravit
 	return svd.matrixV() * d * svd.matrixU().transpose();
 }
 
-// Angular speed at every sample of a stream, derived once.
-//
-// The driver's reported angular velocity is used where it exists. Where it does
-// not, the speed comes from a forward finite difference — which is a property of
-// the INTERVAL [i, i+1], not of sample i — so the last sample has no interval of
-// its own and holds the previous speed instead of reading zero.
-//
-// That tail rule is a deliberate decision, not a detail. Zero at the end makes
-// the profile ramp linearly to zero across the stream's final inter-sample
-// interval, and EstimateTimeOffset slides a window over this profile once per
-// candidate lag: a fake decay sitting at a fixed absolute time lands against
-// different target content at every lag, which is a lag-dependent artifact
-// inside the one function whose entire job is to compare lags. Holding the last
-// measured speed states what the data actually supports (the device did not
-// stop; the stream did) and leaves nothing that moves with the lag.
-std::vector<double> BuildSpeedProfile(const std::vector<PoseSample> &stream)
+struct SpeedSample
 {
-	std::vector<double> speed(stream.size(), 0.0);
+	double time = 0.0;
+	double value = 0.0;
+	bool valid = false;
+};
+
+// OpenVR has no angular-velocity availability flag. Preserve reported nonzero
+// speeds; otherwise derive an interval average and timestamp it at its midpoint.
+// Assigning that average to the left endpoint biases lag by half a sample period.
+std::vector<SpeedSample> BuildSpeedProfile(const std::vector<PoseSample> &stream, double maxGap)
+{
+	std::vector<SpeedSample> speed(stream.size());
 	for (size_t i = 0; i < stream.size(); ++i)
 	{
+		auto &sample = speed[i];
+		sample.time = stream[i].time;
 		double reported = stream[i].angVel.norm();
 		if (reported > 1e-6)
 		{
-			speed[i] = reported;
+			sample.value = reported;
+			sample.valid = true;
 			continue;
 		}
 		if (i + 1 >= stream.size())
 		{
-			speed[i] = (i > 0) ? speed[i - 1] : 0.0;   // hold; see above
+			// No final interval: hold the last measured speed, not a fake zero.
+			if (i > 0)
+			{
+				sample.value = speed[i - 1].value;
+				sample.valid = speed[i - 1].valid;
+			}
 			continue;
 		}
 		double dt = stream[i + 1].time - stream[i].time;
-		if (dt <= 1e-6)
+		if (dt <= 1e-6 || dt > maxGap)
 			continue;
 		Eigen::Quaterniond dq = stream[i + 1].rot * stream[i].rot.conjugate();
 		dq.normalize();
 		if (dq.w() < 0.0)
 			dq.coeffs() = -dq.coeffs();
-		speed[i] = 2.0 * std::atan2(dq.vec().norm(), dq.w()) / dt;
+		sample.time += 0.5 * dt;
+		sample.value = 2.0 * std::atan2(dq.vec().norm(), dq.w()) / dt;
+		sample.valid = true;
 	}
 	return speed;
 }
@@ -260,52 +265,46 @@ struct ResampledSpeed
 	std::vector<uint8_t> valid;
 };
 
-// Piecewise-linear resample of a per-sample speed profile onto a uniform grid.
-// `speed` is the stream's own BuildSpeedProfile output, so the two are indexed
-// together. It is passed in rather than derived here because it is a property of
-// the stream alone: the correlator below resamples one shared grid that every
-// candidate lag slices, instead of rebuilding the profile per lag.
-ResampledSpeed ResampleSpeed(const std::vector<PoseSample> &stream,
-	const std::vector<double> &speed, double t0, double dt, size_t count,
-	double maxGap)
+// Resample once per stream; every candidate lag slices the same uniform grid.
+ResampledSpeed ResampleSpeed(const std::vector<SpeedSample> &speed,
+	double t0, double dt, size_t count, double maxGap)
 {
 	ResampledSpeed out;
 	out.values.resize(count, 0.0);
 	out.valid.resize(count, 0);
-	if (stream.size() < 2)
+	if (speed.size() < 2)
 		return out;
 
 	size_t j = 0;
 	for (size_t i = 0; i < count; ++i)
 	{
 		double t = t0 + dt * static_cast<double>(i);
-		while (j + 1 < stream.size() && stream[j + 1].time < t)
+		while (j + 1 < speed.size() && speed[j + 1].time < t)
 			++j;
-		if (j + 1 >= stream.size())
+		if (j + 1 >= speed.size())
 			break;
-		double ta = stream[j].time, tb = stream[j + 1].time;
-		if (std::abs(t - ta) <= 1e-9)
+		const auto &a = speed[j];
+		const auto &b = speed[j + 1];
+		if (std::abs(t - a.time) <= 1e-9)
 		{
-			out.values[i] = speed[j];
-			out.valid[i] = 1;
+			out.values[i] = a.value;
+			out.valid[i] = a.valid;
 			continue;
 		}
-		if (std::abs(t - tb) <= 1e-9)
+		if (std::abs(t - b.time) <= 1e-9)
 		{
-			out.values[i] = speed[j + 1];
-			out.valid[i] = 1;
+			out.values[i] = b.value;
+			out.valid[i] = b.valid;
 			continue;
 		}
-		if (tb - ta > maxGap)
+		if (!a.valid || !b.valid || t < a.time || b.time - a.time > maxGap)
 			continue;
-		double f = (tb - ta > 1e-9) ? (t - ta) / (tb - ta) : 0.0;
-		f = std::min(1.0, std::max(0.0, f));
-		out.values[i] = speed[j] + f * (speed[j + 1] - speed[j]);
+		double f = (t - a.time) / (b.time - a.time);
+		out.values[i] = a.value + f * (b.value - a.value);
 		out.valid[i] = 1;
 	}
 	return out;
 }
-
 // Frequency-split amplitude gain of the reference stream's position track
 // relative to the target's, over a time-aligned uniform resampling. The
 // comparison track is the SOLVED MODEL's prediction of the reference device's
@@ -688,8 +687,8 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 		return false;
 	size_t gridCount = static_cast<size_t>(gridPointCount);
 
-	ResampledSpeed targetSpeed = ResampleSpeed(targetStream,
-		BuildSpeedProfile(targetStream), start, dt, count,
+	ResampledSpeed targetSpeed = ResampleSpeed(
+		BuildSpeedProfile(targetStream, config.maxInterpolationGap), start, dt, count,
 		config.maxInterpolationGap);
 
 	// The reference profile over that shared grid. Lag k's window starts at
@@ -700,13 +699,12 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	// The grid also stays inside both streams: gridStart >= max(front times)
 	// because steps*step <= timeOffsetRange, and the last grid point sits at
 	// start + steps*step + dt*(count - 1) <= min(back times) - dt. So every
-	// point interpolates between two real samples, the past-the-end zeros
-	// ResampleSpeed would otherwise emit are unreachable, and the only stream
-	// boundary the grid can touch is the final inter-sample interval — which is
-	// exactly where BuildSpeedProfile's hold rule applies.
+	// point is within the pose support. Derived speeds begin half an interval
+	// later; ResampleSpeed marks that unsupported leading edge invalid and holds
+	// the final speed through the last pose timestamp.
 	const double gridStart = start - static_cast<double>(steps) * config.timeOffsetStep;
-	const ResampledSpeed refGrid = ResampleSpeed(refStream,
-		BuildSpeedProfile(refStream), gridStart, dt, gridCount,
+	const ResampledSpeed refGrid = ResampleSpeed(
+		BuildSpeedProfile(refStream, config.maxInterpolationGap), gridStart, dt, gridCount,
 		config.maxInterpolationGap);
 
 	// Physical event at time T shows up in the reference stream at T and in the
@@ -776,10 +774,9 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 		return false;
 
 	// Parabolic refinement around the discrete peak.
-	int bestIdx = static_cast<int>((bestOffset + config.timeOffsetRange) / config.timeOffsetStep + 0.5);
-	if (bestIdx > 0 && bestIdx + 1 < static_cast<int>(scores.size()))
+	if (bestGridIndex > 0 && bestGridIndex + 1 < static_cast<int>(scores.size()))
 	{
-		double y0 = scores[bestIdx - 1], y1 = scores[bestIdx], y2 = scores[bestIdx + 1];
+		double y0 = scores[bestGridIndex - 1], y1 = scores[bestGridIndex], y2 = scores[bestGridIndex + 1];
 		double denom = y0 - 2.0 * y1 + y2;
 		if (std::abs(denom) > 1e-12)
 		{

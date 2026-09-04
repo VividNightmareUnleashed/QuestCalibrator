@@ -10,6 +10,7 @@
 #include "CalibrationGuide.h"
 #include "Configuration.h"
 #include "ProfileValidation.h"
+#include "Updater.h"
 #include "../common/Protocol.h"
 #include "../common/Version.h"
 
@@ -59,7 +60,7 @@ static const float kLowBattery = 0.15f;
 template<typename T>
 static void SaveSettingOrRestore(T &value, const T &previous)
 {
-	if (!SaveSettings(CalCtx))
+	if (!SaveSettingsWithResult(CalCtx).settingsSaved)
 		value = previous;
 }
 
@@ -229,6 +230,7 @@ void IconCopy(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconCrosshair(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconCheck(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconClock(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
+void IconDownload(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconInfo(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconPin(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconScale(ImDrawList *dl, ImVec2 c, float s, ImU32 col);

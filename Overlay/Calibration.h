@@ -156,6 +156,11 @@ struct CalibrationContext : CalibrationProfileState
 	// bounded and the detail is per second.
 	bool detailedLogging = false;  // persisted setting
 
+	// Network access and package downloads are opt-in. Installation remains an
+	// explicit action because Steam must be closed and Windows must approve the
+	// elevated package installer.
+	bool automaticUpdates = false;  // persisted setting
+
 	void Diag(const std::string &msg)
 	{
 		if (detailedLogging)
@@ -245,6 +250,23 @@ struct CalibrationContext : CalibrationProfileState
 
 	double timeLastTick = 0, timeLastScan = 0;
 	double wantedUpdateInterval = 1.0;
+	static constexpr double ContinuousInputInterval = 0.05;
+
+	bool ContinuousShouldRun() const
+	{
+		return state == CalibrationState::None && enabled && validProfile &&
+			poseRingOpen && ContinuousArmed() &&
+			continuousTrackerId < vr::k_unMaxTrackedDeviceCount &&
+			referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd];
+	}
+
+	double IdleUpdateInterval() const
+	{
+		// The dashboard's visibility must not throttle jump/drift detection or
+		// protected-boundary rebasing. Device scans retain their one-second gate.
+		return (enabled && validProfile) || (chaperone.valid && chaperone.autoApply)
+			? ContinuousInputInterval : 1.0;
+	}
 
 	enum Speed
 	{
@@ -310,6 +332,8 @@ struct CalibrationContext : CalibrationProfileState
 	// small auto-applied continuous-calibration corrections.
 	void SetCalibrationContinuous(const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translationMeters, double scale)
 	{
+		// Queued deltas were measured against the previous transform.
+		continuousCorrectionGate.Clear();
 		transform.rotation = rotation.normalized();
 		transform.translationMeters = translationMeters;
 		transform.scale = scale;

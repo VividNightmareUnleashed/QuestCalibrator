@@ -31,6 +31,7 @@
 #include "../Overlay/DriverSyncTracker.h"
 #include "../Overlay/CalibrationGuide.h"
 #include "../Overlay/LegacyContinuous.h"
+#include "../Overlay/UpdatePolicy.h"
 #include "../Overlay/DriverWorker.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/PersistenceState.h"
@@ -57,6 +58,10 @@
 #include <vector>
 
 bool CalibrationContextResetScenario();
+bool ControllerTriggerAxisScenario();
+bool CalibrationContextCadenceScenario();
+bool CalibrationContextCorrectionBasisScenario();
+void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
 
@@ -1756,6 +1761,15 @@ void RunPoseSampleScenarios()
 	Check("calibration context: profile reset boundary",
 		CalibrationContextResetScenario(),
 		"profile-derived state resets as one value; preferences and chaperone survive");
+	Check("controller input: trigger axis metadata",
+		ControllerTriggerAxisScenario(),
+		"trigger slots and threshold are respected; joystick motion and unknown types cannot confirm");
+	Check("calibration context: background continuous cadence",
+		CalibrationContextCadenceScenario(),
+		"legacy sampling and pending confirmation wake at 20 Hz; inactive loops keep the idle interval");
+	Check("calibration context: queued correction basis",
+		CalibrationContextCorrectionBasisScenario(),
+		"replacing the transform discards pending deltas without changing snap/slew generation semantics");
 	{
 		CalibrationRun run;
 		run.referenceId = 1;
@@ -3307,14 +3321,8 @@ void RunSolverPrimitiveScenarios()
 		Check("solver: offset signs + bounds", pass, detail);
 	}
 
-	// The same recovery, pinned to a TENTH of the correlation step. The 4 ms
-	// band above cannot carry that: clearing the reported angular velocity puts
-	// the correlator on its finite-difference fallback, which assigns each
-	// interval's AVERAGE speed to that interval's left endpoint and so advances
-	// each profile by half of its own sample spacing. The two systems run at
-	// deliberately different rates, so the two halves differ and the estimate
-	// inherits a systematic ~1 ms bias -- a property of the fallback, not of the
-	// search. On the reported-velocity path the profile is instantaneous and the
+	// The same recovery, pinned to a TENTH of the correlation step. On the
+	// reported-velocity path the profile is instantaneous and the
 	// correlation is an autocorrelation peaking on the true latency, which is
 	// what makes a sub-step band meaningful: the correlator resamples the
 	// reference profile once and slices that shared grid per lag, so a
@@ -4778,7 +4786,7 @@ protocol::SetAlignmentField BuildField(const FieldTransform &base,
 //   w_i   = exp(-(r_i / sigma)^2 / 2),  r_i = horizontal |query - anchor_i|
 //   w_0   = the identity floor; its delta is the identity transform
 //   rot   = normalize(sum_j w_j q_j)    (each q_j in identity's hemisphere)
-//   trans = sum_j w_j t_j / sum_j w_j
+//   trans = sum_j w_j (R_j pos + t_j) / sum_j w_j - rot * pos
 //
 // Every constant is spelled out as its own literal on purpose. Reading
 // alignfield::IdentityFloorWeight (or the protocol's sigma default) would move
@@ -4832,13 +4840,13 @@ void ReferenceBlend(const protocol::SetAlignmentField &f, uint32_t anchorCount,
 		double sign = c.rotation.w() < 0.0 ? -1.0 : 1.0;
 		qSum += (c.weight * sign) * Eigen::Vector4d(c.rotation.w(), c.rotation.x(),
 			c.rotation.y(), c.rotation.z());
-		tSum += c.weight * c.translation;
+		tSum += c.weight * (c.rotation.toRotationMatrix() * pos + c.translation);
 		weightSum += c.weight;
 	}
 
 	qSum.normalize();
 	rotOut = Eigen::Quaterniond(qSum(0), qSum(1), qSum(2), qSum(3));
-	transOut = tSum / weightSum;
+	transOut = tSum / weightSum - rotOut.toRotationMatrix() * pos;
 }
 
 // The driver's effective transform at a base-calibrated position: delta o base.
@@ -5098,9 +5106,7 @@ void RunFieldScenarios()
 
 	// F. Universe-jump invariance: shifting base and anchors by D (what
 	// ApplyUniverseDelta does) and re-deriving the deltas must move every
-	// corrected world pose by exactly D. Exact for rotation; translation holds
-	// to second order in the delta angles (linear quat blend vs matrix
-	// average), far below anything a sign or composition-order bug produces.
+	// corrected world pose by exactly D, for both rotation and translation.
 	{
 		const FieldTransform D{
 			Eigen::Quaterniond(Eigen::AngleAxisd(25.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())),
@@ -5131,7 +5137,7 @@ void RunFieldScenarios()
 			worstRot = std::max(worstRot, rotErrDeg);
 		}
 		snprintf(detail, sizeof detail, "worst pos %.4f mm  worst rot %.5f deg", worst * 1000.0, worstRot);
-		Check("field: jump invariance", worst < 0.001 && worstRot < 0.001, detail);
+		Check("field: jump invariance", worst < 1e-10 && worstRot < 1e-10, detail);
 	}
 }
 
@@ -8066,6 +8072,116 @@ void RunGuideScenarios()
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Update feed policy: network and installation stay outside this harness, while
+// every rule that decides whether a remote asset is executable input is pure.
+// ---------------------------------------------------------------------------
+
+picojson::value UpdateReleaseValue(const std::string &tag, bool draft,
+	bool prerelease, const std::string &assetName, const std::string &digest,
+	bool duplicate = false)
+{
+	picojson::object asset;
+	asset["name"] = picojson::value(assetName);
+	asset["size"] = picojson::value(1329433.0);
+	asset["digest"] = picojson::value(digest);
+	asset["browser_download_url"] = picojson::value(
+		"https://github.com/VividNightmareUnleashed/QuestCalibrator/releases/download/" +
+		tag + "/" + assetName);
+	picojson::value assetValue(asset);
+	picojson::array assets;
+	assets.push_back(assetValue);
+	if (duplicate)
+		assets.push_back(assetValue);
+
+	picojson::object release;
+	release["tag_name"] = picojson::value(tag);
+	release["draft"] = picojson::value(draft);
+	release["prerelease"] = picojson::value(prerelease);
+	release["html_url"] = picojson::value(
+		"https://github.com/VividNightmareUnleashed/QuestCalibrator/releases/tag/" + tag);
+	release["assets"] = picojson::value(assets);
+	return picojson::value(release);
+}
+
+void RunUpdatePolicyScenarios()
+{
+	using namespace questcal::update;
+	const std::string digest =
+		"sha256:d768f19e0724ef00432d694bf6e5ad23c9010de5a32b087d56e0c6bd094d8072";
+	Version parsed;
+	const bool validTag = ParseReleaseTag("questcalibrator-v12.34.56", parsed);
+	Check("updates: only canonical stable tags parse",
+		validTag && parsed.major == 12 && parsed.minor == 34 && parsed.patch == 56 &&
+		!ParseReleaseTag("v12.34.56", parsed) &&
+		!ParseReleaseTag("questcalibrator-v12.34.56-alpha.1", parsed) &&
+		!ParseReleaseTag("questcalibrator-v12.034.56", parsed) &&
+		!ParseReleaseTag("questcalibrator-v42949672960.0.0", parsed), "");
+
+	std::array<unsigned char, 32> digestBytes{};
+	Check("updates: SHA-256 metadata is strict",
+		ParseSha256Digest(digest, digestBytes) && digestBytes[0] == 0xd7 &&
+		digestBytes[31] == 0x72 &&
+		!ParseSha256Digest("sha256:d768", digestBytes) &&
+		!ParseSha256Digest(
+			"sha256:z768f19e0724ef00432d694bf6e5ad23c9010de5a32b087d56e0c6bd094d8072",
+			digestBytes), "");
+
+	picojson::array releases;
+	releases.push_back(UpdateReleaseValue("questcalibrator-v9.0.0", true, false,
+		"QuestCalibrator-9.0.0.zip", digest));
+	releases.push_back(UpdateReleaseValue("questcalibrator-v8.0.0", false, true,
+		"QuestCalibrator-8.0.0.zip", digest));
+	releases.push_back(UpdateReleaseValue("v99.0.0", false, false,
+		"QuestCalibrator-99.0.0.zip", digest));
+	releases.push_back(UpdateReleaseValue("questcalibrator-v1.2.0", false, false,
+		"QuestCalibrator-1.2.0.zip", digest));
+	picojson::value feed;
+	feed.set<picojson::array>(std::move(releases));
+	ReleaseCandidate candidate;
+	bool available = false;
+	std::string error;
+	const bool selected = SelectReleaseCandidate(feed.serialize(),
+		Version{ 1, 1, 0 }, candidate, available, error);
+	Check("updates: newest eligible stable release wins",
+		selected && available && error.empty() &&
+		VersionString(candidate.version) == "1.2.0" &&
+		candidate.packageName == "QuestCalibrator-1.2.0.zip" &&
+		candidate.size == 1329433, error.c_str());
+
+	ReleaseCandidate none;
+	bool newerAvailable = true;
+	error.clear();
+	const bool current = SelectReleaseCandidate(feed.serialize(),
+		Version{ 1, 2, 0 }, none, newerAvailable, error);
+	Check("updates: current version does not redownload",
+		current && !newerAvailable && error.empty(), error.c_str());
+
+	picojson::array missingDigest;
+	missingDigest.push_back(UpdateReleaseValue("questcalibrator-v2.0.0", false,
+		false, "QuestCalibrator-2.0.0.zip", ""));
+	picojson::value missingDigestFeed;
+	missingDigestFeed.set<picojson::array>(std::move(missingDigest));
+	available = false;
+	error.clear();
+	const bool acceptedMissingDigest = SelectReleaseCandidate(
+		missingDigestFeed.serialize(), Version{ 1, 1, 0 }, candidate, available, error);
+	Check("updates: package without digest fails closed",
+		!acceptedMissingDigest && available && !error.empty(), error.c_str());
+
+	picojson::array duplicate;
+	duplicate.push_back(UpdateReleaseValue("questcalibrator-v2.0.0", false,
+		false, "QuestCalibrator-2.0.0.zip", digest, true));
+	picojson::value duplicateFeed;
+	duplicateFeed.set<picojson::array>(std::move(duplicate));
+	available = false;
+	error.clear();
+	const bool acceptedDuplicate = SelectReleaseCandidate(duplicateFeed.serialize(),
+		Version{ 1, 1, 0 }, candidate, available, error);
+	Check("updates: duplicate canonical packages fail closed",
+		!acceptedDuplicate && available && !error.empty(), error.c_str());
+}
+
 int main(int argc, char **argv)
 {
 	// Unbuffered: an abort discards a buffered stdout, so a harness that dies
@@ -8736,6 +8852,8 @@ int main(int argc, char **argv)
 	RunContinuousScenarios();
 	RunGuideScenarios();
 	RunLegacyScenarios();
+	RunUpdatePolicyScenarios();
+	RunReviewRegressionScenarios(Check);
 
 	// ---- Profile persistence: codec, write gates, load plan ----
 	RunPersistenceScenarios();

@@ -13,7 +13,7 @@
 // against delta_blend o base keeps continuous corrections orthogonal to the
 // field: only genuinely global movement of the universe produces a deviation.
 //
-// Applying a resulting correction D through ApplyAlignmentDelta stays exact:
+// Applying a yaw/translation correction D through ApplyAlignmentDelta stays exact:
 // it shifts the base AND the absolute anchors by D, so the blended expectation
 // itself moves by exactly D (delta' = D delta D^-1, expected' = D o expected).
 //
@@ -76,7 +76,7 @@ inline void BlendedFieldCalibration(const AnchorVec &anchors,
 {
 	double wSum = FieldBlendIdentityFloor;
 	Eigen::Vector4d q(0.0, 0.0, 0.0, FieldBlendIdentityFloor);   // (x, y, z, w)
-	Eigen::Vector3d t = Eigen::Vector3d::Zero();
+	Eigen::Vector3d p = FieldBlendIdentityFloor * queryBasePos;
 
 	// Mirrors the driver's clamp (AlignmentField.cpp): a non-positive or
 	// absurd sigma must not divide by ~zero here either.
@@ -100,13 +100,13 @@ inline void BlendedFieldCalibration(const AnchorVec &anchors,
 			qa = -qa;
 
 		q += w * qa;
-		t += w * dT;
+		p += w * (dR * queryBasePos + dT);
 		wSum += w;
 	}
 
 	q.normalize();
 	Eigen::Quaterniond dBlend(q(3), q(0), q(1), q(2));
-	Eigen::Vector3d tBlend = t / wSum;
+	Eigen::Vector3d tBlend = p / wSum - dBlend * queryBasePos;
 
 	rotOut = (dBlend * baseRot).normalized();
 	transOut = dBlend * baseTrans + tBlend;

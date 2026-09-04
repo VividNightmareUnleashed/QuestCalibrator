@@ -4,6 +4,13 @@
 
 namespace questcal
 {
+	struct SettingsSaveResult
+	{
+		bool profileSaved;
+		bool settingsSaved;
+		bool AllSaved() const { return profileSaved && settingsSaved; }
+	};
+
 	// When the two registry records get written, and which of them. This was
 	// eight loose fields plus their methods on CalibrationContext, reachable by
 	// every file that touched the context; it is one closed state machine
@@ -63,6 +70,20 @@ namespace questcal
 		bool HasDirty() const
 		{
 			return profileDirty || settingsDirty;
+		}
+
+		// An independent Settings commit can succeed while Config still needs
+		// a retry. Its caller must retain the committed preference in that case.
+		template<typename P, typename S>
+		SettingsSaveResult SaveSettings(P saveProfile, S saveSettings)
+		{
+			bool profileSaved = !profileDirty || saveProfile();
+			if (!profileSaved && coupled)
+				return { false, false };
+			bool settingsSaved = saveSettings();
+			if (!HasDirty())
+				coupled = false;
+			return { profileSaved, settingsSaved };
 		}
 
 		// Starts the maximum-age clock only on the clean -> dirty transition, so

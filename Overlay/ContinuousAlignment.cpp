@@ -386,6 +386,8 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
                                  const Eigen::Vector3d &calTranslationMeters,
                                  const ExpectedCalibrationAt &expectedAt)
 {
+	correctionEligible = false;
+	pendingCorrection.reset();
 	WindowEstimate est;
 	if (!EstimateWindow(calRotation, calTranslationMeters, expectedAt, est))
 	{
@@ -567,10 +569,8 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	if (deviation.yawDeg < config.deadbandYawDeg && dEffYaw < config.deadbandPosM)
 		return;
 
-	// Yaw + translation correction only (see header). The translation is
-	// chosen so a full step lands the calibration's translation exactly on the
-	// windowed estimate; a clamped fractional step is second-order accurate
-	// and the next cycle corrects the remainder.
+	// Clamp displacement at the head together with yaw. Scaling translation
+	// coefficients alone breaks the pivot cancellation of a fractional yaw.
 	double f = 1.0;
 	if (deviation.yawDeg > config.maxStepYawDeg)
 		f = std::min(f, config.maxStepYawDeg / deviation.yawDeg);
@@ -580,8 +580,10 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	Correction correction;
 	correction.rotation = Eigen::Quaterniond(
 		Eigen::AngleAxisd(f * yawAngle, Eigen::Vector3d::UnitY()));
-	correction.translation = f * tPrime;
+	const Eigen::Vector3d headStep = rYaw * headPos + tPrime - headPos;
+	correction.translation = headPos + f * headStep - correction.rotation * headPos;
 	pendingCorrection = correction;
+	correctionEligible = true;
 }
 
 // One owner for the freeze hysteresis' paired sentinels: entering either end
@@ -589,6 +591,11 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 // site has to remember which mark its own transition invalidates.
 void ContinuousAlignment::EnterState(State s)
 {
+	if (s != State::Tracking)
+	{
+		correctionEligible = false;
+		pendingCorrection.reset();
+	}
 	if (s == State::Frozen || s == State::Tracking)
 	{
 		freezeExceededSince = -1.0;
@@ -607,6 +614,8 @@ void ContinuousAlignment::EnterState(State s)
 // evidence, and re-arming it would spam one toast per occlusion.
 void ContinuousAlignment::ClearConfirmMarks()
 {
+	correctionEligible = false;
+	pendingCorrection.reset();
 	freezeExceededSince = -1.0;
 	resumeBelowSince = -1.0;
 	scatterSince = -1.0;

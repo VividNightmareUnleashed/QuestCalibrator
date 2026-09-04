@@ -36,6 +36,9 @@ questcal::PersistedFieldAnchor PersistedAnchor(
 // but first flushes an already-dirty coupled Config revision so Settings can
 // never overtake it. A malformed-but-recoverable profile is never overwritten.
 bool SaveSettings(CalibrationContext &ctx);
+// UI rollback depends only on settingsSaved; a pending independent Config
+// failure remains an error/retry without undoing a committed preference.
+questcal::SettingsSaveResult SaveSettingsWithResult(CalibrationContext &ctx);
 
 // Flushes whichever persisted records are dirty while preserving the coupled
 // Config-before-Settings ordering owned by SaveSettings.

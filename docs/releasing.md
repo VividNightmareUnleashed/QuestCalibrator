@@ -46,6 +46,9 @@ packaging sources and outputs must not be committed to the repository.
 - Build the package from the exact tagged source commit using the private/local
   installer tooling. Record the installer script revision or SHA-256 because that
   tooling is intentionally outside Git history.
+  The default `install\build-package.ps1` command names the ZIP
+  `QuestCalibrator-MAJOR.MINOR.PATCH.zip` from the executable's version resource.
+  Do not override `PackageName` for stable releases; custom names are for test builds.
 - Record the tag, full commit ID, MSVC toolset, Windows SDK, build command, package
   command, UTC build time, and operator in the private release record.
 - Record SHA-256 hashes for the final archive/installer and the included overlay,
@@ -70,3 +73,21 @@ packaging sources and outputs must not be committed to the repository.
 - Download the ZIP from the published release and verify its SHA-256 once more. Never
   replace an asset on an existing release; publish a new patch version if an artifact
   must change.
+
+### Automatic-update contract
+
+The overlay's opt-in updater reads the public GitHub Releases API without a token.
+Keep these names exact or the release deliberately fails closed:
+
+- Stable tag: `questcalibrator-vMAJOR.MINOR.PATCH` with no suffix.
+- Package asset: `QuestCalibrator-MAJOR.MINOR.PATCH.zip`.
+- Exactly one asset with that name, containing the normal single-folder package with
+  `Install.ps1`, `Uninstall.ps1`, `app/QuestCalibrator.exe`, and the driver DLL.
+- The published asset must expose GitHub's `sha256:` digest. Verify that digest against
+  the provenance record before publishing.
+
+Drafts, prereleases, inherited `v*` tags, packages without a SHA-256 digest, duplicate
+canonical assets, and download URLs outside this repository are not eligible. The
+updater checks and downloads only after the user opts in; applying the package remains
+an explicit action because Steam must be fully closed and Windows must approve the
+elevated installer.

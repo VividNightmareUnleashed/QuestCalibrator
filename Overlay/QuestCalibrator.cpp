@@ -2,6 +2,7 @@
 #include "Calibration.h"
 #include "Configuration.h"
 #include "EmbeddedFiles.h"
+#include "Updater.h"
 #include "UserInterface.h"
 
 #include <imgui/imgui.h>
@@ -23,6 +24,7 @@
 #include <shellapi.h>
 #include <openvr.h>
 #include <ctime>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -47,6 +49,12 @@ static vr::VROverlayHandle_t overlayMainHandle = 0, overlayThumbnailHandle = 0;
 static bool imguiContextInitialized = false;
 static bool imguiGlfwInitialized = false;
 static bool imguiOpenGLInitialized = false;
+
+void RequestApplicationExit()
+{
+	if (glfwWindow)
+		glfwSetWindowShouldClose(glfwWindow, GLFW_TRUE);
+}
 
 // The shell's half of the calibration layer's toast policy. The handle is read
 // at call time, not captured: TryCreateVROverlay runs before InitCalibrator on
@@ -169,7 +177,8 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 {
 	ManifestInstallResult result;
 	const std::string manifestPath = AppFile("manifest.vrmanifest");
-	if (GetFileAttributesA(manifestPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+	std::error_code fileError;
+	if (!std::filesystem::is_regular_file(std::filesystem::u8path(manifestPath), fileError))
 	{
 		result.message = "QuestCalibrator's application manifest is missing. The existing SteamVR registration was left unchanged.\n\n" + manifestPath;
 		return result;
@@ -630,7 +639,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	// log; skipped for UI preview so a dev preview never rotates a real
 	// session's log away.
 	if (!g_uiPreviewMode)
+	{
 		InitSessionLog();
+		questcal::update::AppUpdater.SetLogSink([](const std::string &message) {
+			AppendSessionLog("updater: " + message);
+		});
+	}
 
 	if (!glfwInit())
 	{
@@ -721,6 +735,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 			InitCalibrator();
 			calibratorInitialized = true;
 			LoadProfile(CalCtx);
+			questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 		}
 		RunLoop();
 	}
@@ -732,6 +747,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	{
 		fatal = "QuestCalibrator stopped because of an unknown fatal error.";
 	}
+
+	questcal::update::AppUpdater.Shutdown();
 
 	// One shutdown pair for every path, and before the modal dialog below can
 	// block this process indefinitely: ShutdownCalibrator flushes debounced

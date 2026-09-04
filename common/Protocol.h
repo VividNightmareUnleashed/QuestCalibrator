@@ -36,7 +36,9 @@ namespace protocol
 	// not up to 65 blocking requests with partial-state recovery bookkeeping.
 	// v8: handshake replies expose which supported server-host bindings have
 	// actually been hooked, so setup/load-order failures are diagnosable.
-	const uint32_t Version = 8;
+	// v9 blends field-transformed query positions. Both peers must use the same
+	// field semantics when continuous calibration predicts the driver output.
+	const uint32_t Version = 9;
 	const uint32_t PoseHook005 = 1u << 0;
 	const uint32_t PoseHook006 = 1u << 1;
 

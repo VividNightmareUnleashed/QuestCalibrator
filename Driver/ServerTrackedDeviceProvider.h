@@ -45,6 +45,10 @@ public:
 	bool TrySetRuntimeState(const protocol::SetRuntimeState &newState);
 	bool HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 
+#ifdef QUESTCAL_DRIVER_PROVIDER_TEST_SEAM
+	void SetPoseTimeForTest(double seconds) { poseTimeForTest = seconds; }
+#endif
+
 private:
 	// The one unwind path shared by Cleanup and every Init failure. Init must not
 	// leave detours enabled behind a failure return, and the ring must not be
@@ -77,13 +81,11 @@ private:
 		protocol::SetDeviceTransform calibration;
 	};
 
-	// Seqlock-protected slot: the IPC pipe thread writes, vrserver's pose thread
-	// reads on every pose update. Sequence is even when stable, odd mid-write.
+	// Protected by runtimeSequence: the IPC thread writes, pose callbacks read.
 	// Payload scalars are individually lock-free atomic so a discarded mixed
 	// generation is still race-free under the C++ memory model.
 	struct TransformSlot
 	{
-		std::atomic<uint32_t> sequence{ 0 };
 		// Envelope - always stored, always loaded.
 		std::atomic<uint32_t> enabled{ 0 };
 		std::atomic<uint32_t> hidden{ 0 };
@@ -138,10 +140,13 @@ private:
 			"and place it in DeviceControl or the calibration payload");
 	};
 
-	// Returns false if a consistent snapshot could not be taken (racing writes);
-	// `out` then holds the last consistent snapshot instead.
-	bool ReadDeviceTransform(uint32_t openVRID, DeviceTransform &out);
+	// Bounded reads fall back to the last consistent base/field pair.
+	void ReadRuntimeState(uint32_t openVRID, DeviceTransform &transform,
+		protocol::SetAlignmentField &field);
 
+	// One IPC transaction publishes the base and field together. A reader must
+	// never compose a base from one transaction with a field from another.
+	std::atomic<uint32_t> runtimeSequence{ 0 };
 	TransformSlot transforms[vr::k_unMaxTrackedDeviceCount];
 	// Different devices remain fully concurrent. Same-device callbacks share
 	// lastGood and both slew states, so serialize that narrow ownership domain.
@@ -151,6 +156,7 @@ private:
 	// mutex makes this a true single-writer value even if a driver dispatches
 	// concurrent callbacks for one OpenVR slot.
 	DeviceTransform lastGood[vr::k_unMaxTrackedDeviceCount];
+	protocol::SetAlignmentField lastGoodField[vr::k_unMaxTrackedDeviceCount];
 
 	struct AtomicFieldAnchor
 	{
@@ -212,18 +218,7 @@ private:
 		}
 	};
 
-	// Spatial correction field (protocol v4). Stored under its own seqlock;
-	// the pose path blends the anchor deltas per device (see AlignmentField.h).
-	struct AlignmentFieldSlot
-	{
-		std::atomic<uint32_t> sequence{ 0 };
-		AtomicAlignmentField field;
-	};
-	AlignmentFieldSlot alignmentField;
-
-	// Returns false if a consistent snapshot could not be taken; the caller
-	// then keeps the device's previously applied delta for this frame.
-	bool ReadAlignmentField(protocol::SetAlignmentField &out);
+	AtomicAlignmentField alignmentField;
 
 	// Per-device blend/slew state, under the matching pose mutex.
 	alignfield::EvalState fieldState[vr::k_unMaxTrackedDeviceCount];
@@ -235,6 +230,9 @@ private:
 	alignfield::EvalState baseState[vr::k_unMaxTrackedDeviceCount];
 
 	double qpcToSeconds = 0.0;
+#ifdef QUESTCAL_DRIVER_PROVIDER_TEST_SEAM
+	double poseTimeForTest = -1.0;
+#endif
 
 	// Publishes every raw (pre-transform) pose for the overlay's solver.
 	protocol::PoseRingWriter poseRing;

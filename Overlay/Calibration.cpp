@@ -20,6 +20,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -82,6 +83,12 @@ static int ContinuousConsumer = -1;
 static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
 
+static void ResetContinuousObservations(CalibrationContext &ctx)
+{
+	Continuous->Reset();
+	ctx.continuousCorrectionGate.Clear();
+}
+
 CalibrationContext CalCtx;
 
 // Why a run stopped, in the player's words: what happened (naming what they
@@ -97,6 +104,8 @@ struct StopReason
 };
 
 static void AbortCalibration(CalibrationContext &ctx, const StopReason &reason);
+static std::string DeviceName(const CalibrationContext &ctx, const std::string &model,
+                              const std::string &serial, bool reference);
 using questcal::ReadCurrentHmdIdentity;
 using questcal::ReadTrackedDeviceString;
 using questcal::SynchronizeCalibrationDriver;
@@ -116,11 +125,13 @@ static void PersistenceTick(CalibrationContext &ctx, double now)
 
 static std::ofstream SessionLog;
 static size_t SessionLogBytes = 0;
+static std::mutex SessionLogMutex;
 // Hard cap so a pathological log loop can never eat a user's disk.
 static constexpr size_t SessionLogMaxBytes = 4 * 1024 * 1024;
 
 void InitSessionLog()
 {
+	std::lock_guard<std::mutex> lock(SessionLogMutex);
 	wchar_t base[MAX_PATH];
 	DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
 	if (len == 0 || len >= MAX_PATH)
@@ -153,6 +164,7 @@ void InitSessionLog()
 
 void AppendSessionLog(const std::string &msg)
 {
+	std::lock_guard<std::mutex> lock(SessionLogMutex);
 	if (!SessionLog.is_open() || msg.empty() || SessionLogBytes >= SessionLogMaxBytes)
 		return;
 
@@ -291,10 +303,14 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 			auto parts = UnpackRingSample(s);
 			if (!run.AcceptUniverse(s.deviceId, parts.wfdRot, parts.wfdTrans))
 			{
+				bool reference = s.deviceId == run.referenceId;
+				std::string name = DeviceName(ctx,
+					reference ? run.referenceModel : run.targetModel,
+					reference ? run.referenceSerial : run.targetSerial, reference);
 				AbortCalibration(ctx, {
-					"The headset re-centred during the measurement.",
+					name + " changed tracking space during the measurement.",
 					"Let tracking settle for a few seconds, then start again.",
-					"A selected tracking universe changed during collection",
+					std::string(reference ? "Reference" : "Target") + " world-from-driver changed during collection",
 					CalibrationContext::GuideHint::WaitForTracking });
 				return false;
 			}
@@ -560,7 +576,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	if (jumped)
 	{
 		Drift->Reset();
-		Continuous->Reset();
+		ResetContinuousObservations(ctx);
 	}
 
 	DriftMonitor::Event drift;
@@ -755,7 +771,7 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 		return;
 	}
 
-	if (now - LegacyLastSampleTime < 0.05)
+	if (now - LegacyLastSampleTime < CalibrationContext::ContinuousInputInterval)
 		return;
 	LegacyLastSampleTime = now;
 	LegacyRefFresh = LegacyTargetFresh = false;
@@ -836,15 +852,21 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 
 static bool AnyControllerTriggerPressed()
 {
+	auto system = vr::VRSystem();
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
-		if (vr::VRSystem()->GetTrackedDeviceClass(id) !=
+		if (system->GetTrackedDeviceClass(id) !=
 			vr::TrackedDeviceClass_Controller)
 			continue;
 		vr::VRControllerState_t state{};
-		if (!vr::VRSystem()->GetControllerState(id, &state, sizeof state))
+		if (!system->GetControllerState(id, &state, sizeof state))
 			continue;
-		if (state.rAxis[vr::k_eControllerAxis_Trigger].x > 0.75f)
+		if (questcal::ControllerTriggerPressed(state, [&](vr::ETrackedDeviceProperty property)
+		{
+			vr::ETrackedPropertyError error = vr::TrackedProp_Success;
+			const int32_t type = system->GetInt32TrackedDeviceProperty(id, property, &error);
+			return error == vr::TrackedProp_Success ? type : vr::k_eControllerAxis_None;
+		}))
 			return true;
 	}
 	return false;
@@ -852,17 +874,11 @@ static bool AnyControllerTriggerPressed()
 
 static void ContinuousTick(CalibrationContext &ctx, double now)
 {
-	bool shouldRun = ctx.state == CalibrationState::None &&
-		ctx.enabled && ctx.validProfile && PoseHub.RingOpen() &&
-		ctx.ContinuousArmed() &&
-		ctx.continuousTrackerId < vr::k_unMaxTrackedDeviceCount &&
-		ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd];
-
-	if (!shouldRun)
+	if (!ctx.ContinuousShouldRun())
 	{
 		if (ContinuousActive)
 		{
-			Continuous->Reset();
+			ResetContinuousObservations(ctx);
 			LegacyReset();
 			ContinuousActive = false;
 		}
@@ -883,9 +899,8 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	// baselines mean different things.
 	if (ctx.continuousMode != LastContinuousMode)
 	{
-		Continuous->Reset();
+		ResetContinuousObservations(ctx);
 		LegacyReset();
-		ctx.continuousCorrectionGate.Clear();
 		LastContinuousMode = ctx.continuousMode;
 	}
 	if (ctx.continuousMode == ContinuousMode::Legacy)
@@ -903,7 +918,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	if (dropped > 0)
 	{
 		// A drain hole could fake a discontinuity; baselines across it are unsafe.
-		Continuous->Reset();
+		ResetContinuousObservations(ctx);
 	}
 
 	for (const auto &s : ContinuousScratch)
@@ -967,6 +982,12 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	bool receivedCorrection = false;
 	while (Continuous->PollCorrection(corr))
 		receivedCorrection = true;
+	if (!Continuous->CorrectionEligible())
+	{
+		ctx.continuousCorrectionGate.Clear();
+		hadPendingCorrection = false;
+		receivedCorrection = false;
+	}
 
 	bool triggerPressed = ctx.continuousRequireTrigger &&
 		(hadPendingCorrection || receivedCorrection) && AnyControllerTriggerPressed();
@@ -1634,20 +1655,19 @@ void CalibrationTick(double time)
 
 	if (ctx.state == CalibrationState::None)
 	{
-		ctx.wantedUpdateInterval = 1.0;
-
 		if ((time - ctx.timeLastScan) >= 1.0)
 		{
 			SynchronizeCalibrationDriver(ctx);
 			questcal::CheckProtectedChaperone(ctx);
 			ctx.timeLastScan = time;
 		}
+		ctx.wantedUpdateInterval = ctx.IdleUpdateInterval();
 		return;
 	}
 
 	if (ctx.state == CalibrationState::Editing)
 	{
-		ctx.wantedUpdateInterval = 1.0;
+		ctx.wantedUpdateInterval = ctx.IdleUpdateInterval();
 
 		if ((time - ctx.timeLastScan) >= 1.0)
 		{
@@ -1841,26 +1861,30 @@ void CalibrationTick(double time)
 	// The frozen pair is an OpenVR index. Re-read the two serials at 1 Hz --
 	// never per sample, these are expensive property reads -- so a device that
 	// power-cycled into another device's slot cannot have its poses concatenated
-	// into one buffer and fitted as a single rigid body. A serial that cannot be
-	// read proves nothing; the no-sample timeouts below stay the liveness check.
+	// into one buffer and fitted as a single rigid body. An unreadable identity
+	// also stops collection, but is not evidence that the device was replaced.
 	if (time - run.lastIdentityCheck >= 1.0)
 	{
 		run.lastIdentityCheck = time;
-		std::string serial;
-		auto deviceReplaced = [&](uint32_t id, const std::string &frozen)
+		auto identityMatches = [&](uint32_t id, const std::string &frozen,
+			const std::string &model, bool reference)
 		{
-			return !ReadTrackedDeviceString(
-				id, vr::Prop_SerialNumber_String, serial) || serial != frozen;
-		};
-		if (deviceReplaced(run.referenceId, run.referenceSerial) ||
-			deviceReplaced(run.targetId, run.targetSerial))
-		{
+			std::string serial;
+			bool readable = ReadTrackedDeviceString(id, vr::Prop_SerialNumber_String, serial);
+			if (readable && serial == frozen)
+				return true;
+			std::string name = DeviceName(ctx, model, frozen, reference);
 			AbortCalibration(ctx, {
-				"A device dropped out mid-run and another took its slot.",
+				readable ? name + " was replaced by another device during the measurement."
+					: "Could not verify the identity of " + name + " during the measurement.",
 				"Keep both devices powered and try again.",
-				"A selected device was replaced in its slot mid-collection" });
+				std::string(reference ? "Reference" : "Target") +
+					(readable ? " serial changed mid-collection" : " serial could not be read mid-collection") });
+			return false;
+		};
+		if (!identityMatches(run.referenceId, run.referenceSerial, run.referenceModel, true) ||
+			!identityMatches(run.targetId, run.targetSerial, run.targetModel, false))
 			return;
-		}
 	}
 
 	if (run.usesPoseRing)

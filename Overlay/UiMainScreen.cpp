@@ -560,6 +560,14 @@ void BuildMainScreen(const VRState &state)
 						CalCtx.driverPoseHookMask & protocol::PoseHook006 ? "active" : "missing");
 				warn.push_back({ IconInfo, Pal::Warn, why });
 			}
+			const questcal::update::Snapshot update =
+				questcal::update::AppUpdater.GetSnapshot();
+			if (update.state == questcal::update::State::Ready)
+			{
+				warn.push_back({ IconDownload, Pal::Good,
+					"QuestCalibrator " + update.version +
+					" is ready. Open Settings to install it." });
+			}
 			if (!warn.empty())
 			{
 				DrawStatusCard(warn);

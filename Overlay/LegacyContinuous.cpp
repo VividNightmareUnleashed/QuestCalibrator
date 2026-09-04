@@ -229,7 +229,7 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const
 Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) const
 {
 	std::vector<DSample> deltas;
-	std::vector<bool> valids = DetectOutliers();
+	std::vector<bool> valids = ignoreOutliers ? DetectOutliers() : std::vector<bool>();
 
 	for (size_t i = 0; i < m_samples.size(); i++)
 	{
@@ -289,48 +289,41 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 
 Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation) const
 {
-	std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> deltas;
-
-	for (size_t i = 0; i < m_samples.size(); i++)
+	const size_t count = m_samples.size();
+	if (count < 2)
+		return Eigen::Vector3d::Zero();
+	Eigen::VectorXd constants(count * 6);
+	Eigen::MatrixXd coefficients(count * 6, 3);
+	for (int family = 0; family < 2; ++family)
 	{
-		Sample s_i = m_samples[i];
-		s_i.target.rot = rotation * s_i.target.rot;
-		s_i.target.trans = rotation * s_i.target.trans;
-
-		for (size_t j = 0; j < i; j++)
+		Eigen::Matrix3d meanQ = Eigen::Matrix3d::Zero();
+		Eigen::Vector3d meanB = Eigen::Vector3d::Zero();
+		for (size_t i = 0; i < count; ++i)
 		{
-			Sample s_j = m_samples[j];
-			s_j.target.rot = rotation * s_j.target.rot;
-			s_j.target.trans = rotation * s_j.target.trans;
-
-			auto QAi = s_i.ref.rot.transpose();
-			auto QAj = s_j.ref.rot.transpose();
-			auto dQA = QAj - QAi;
-			auto CA = QAj * (s_j.ref.trans - s_j.target.trans) - QAi * (s_i.ref.trans - s_i.target.trans);
-			deltas.push_back(std::make_pair(CA, dQA));
-
-			auto QBi = s_i.target.rot.transpose();
-			auto QBj = s_j.target.rot.transpose();
-			auto dQB = QBj - QBi;
-			auto CB = QBj * (s_j.ref.trans - s_j.target.trans) - QBi * (s_i.ref.trans - s_i.target.trans);
-			deltas.push_back(std::make_pair(CB, dQB));
+			const auto &s = m_samples[i];
+			Eigen::Matrix3d q = family == 0 ? Eigen::Matrix3d(s.ref.rot.transpose())
+				: Eigen::Matrix3d((rotation * s.target.rot).transpose());
+			Eigen::Vector3d b = q * (s.ref.trans - rotation * s.target.trans);
+			const size_t row = (family * count + i) * 3;
+			coefficients.block<3, 3>(row, 0) = q;
+			constants.segment<3>(row) = b;
+			meanQ += q;
+			meanB += b;
+		}
+		meanQ /= static_cast<double>(count);
+		meanB /= static_cast<double>(count);
+		for (size_t i = 0; i < count; ++i)
+		{
+			const size_t row = (family * count + i) * 3;
+			coefficients.block<3, 3>(row, 0) -= meanQ;
+			constants.segment<3>(row) -= meanB;
 		}
 	}
-
-	Eigen::VectorXd constants(deltas.size() * 3);
-	Eigen::MatrixXd coefficients(deltas.size() * 3, 3);
-
-	for (size_t i = 0; i < deltas.size(); i++)
-	{
-		for (int axis = 0; axis < 3; axis++)
-		{
-			constants(i * 3 + axis) = deltas[i].first(axis);
-			coefficients.row(i * 3 + axis) = deltas[i].second.row(axis);
-		}
-	}
-
-	Eigen::Vector3d trans = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
-	return trans;
+	// sum(i<j) ||e_i-e_j||^2 = n * sum(i) ||e_i-mean(e)||^2.
+	// Center each frame family separately: this is the same least-squares
+	// problem with 6n rows instead of 3n(n-1), without squaring its condition
+	// number by forming normal equations.
+	return coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
 }
 
 Eigen::AffineCompact3d CalibrationCalc::ComputeCalibration(const bool ignoreOutliers) const

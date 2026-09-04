@@ -25,3 +25,4 @@ extern ImFont *g_fontTitle;
 void ApplyTheme();
 void SetupPreviewState();
 void BuildMainWindow(bool runningInOverlay);
+void RequestApplicationExit();

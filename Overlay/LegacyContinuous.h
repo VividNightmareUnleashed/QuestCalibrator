@@ -1,7 +1,7 @@
 #pragma once
 
 // The "legacy" continuous-calibration method: hyblocker's CalibrationCalc from
-// OpenVR-SpaceCalibrator (branch legacy-1-5-1), ported verbatim in its math.
+// OpenVR-SpaceCalibrator (branch legacy-1-5-1), preserving its solve objective.
 // It re-solves the whole calibration from a rolling window of reference and
 // target poses (yaw-only Kabsch on rotation deltas, least-squares
 // translation), validates it by retargeting error, and optionally refreshes
@@ -9,9 +9,9 @@
 // QuestCalibrator's own model so a player whose setup worked with the
 // original can choose it, and so the two can be compared on the same data.
 //
-// Differences from the source, all outside the math: no OpenVR types (poses
-// come in as quaternion + position), the metrics sink is gone, and log lines
-// go to an optional callback instead of a global context.
+// The translation solve uses the equivalent centered system instead of all
+// pairwise differences. Poses have no OpenVR types, the metrics sink is gone,
+// and log lines go to an optional callback instead of a global context.
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>

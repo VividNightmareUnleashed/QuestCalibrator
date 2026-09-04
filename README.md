@@ -47,15 +47,15 @@ Solver (new `CalibrationEngine`, covered by synthetic tests in `Tests/`):
 
 Driver and IPC:
 
-- Transform slots are seqlock-protected against the IPC-thread/pose-thread race, with
+- Base transforms and their field share one seqlock publication, with
   identity-quaternion / scale = 1 defaults instead of a zeroing `memset`.
 - Device ids arriving over the pipe are bounds-checked; short pipe messages are rejected;
-  the wire protocol (v6) requires a same-version per-connection handshake and only ever
+  the wire protocol (v9) requires a same-version per-connection handshake and only ever
   carries complete, transactionally validated transforms/fields.
 - Race-free bounded multi-producer pose ring in shared memory (vrserver invokes pose
   updates from each device driver's own thread), with fail-fast contention handling,
   exact positional loss markers, and clean recovery across vrserver restarts. Its named
-  mapping is layout-versioned separately from the v6 pipe protocol so an older overlay
+  mapping is layout-versioned separately from the pipe protocol so an older overlay
   cannot pin an incompatible mapping across an upgrade.
 - The driver log lands next to the driver DLL instead of vrserver's working directory.
 
@@ -79,8 +79,8 @@ them build on the timestamped pose ring and the solver above:
   aligns the two timelines during live motion, not just at calibration time.
 - **Universe-jump compensation** — pose discontinuities inconsistent with the
   device's reported velocity (headset recenter / SLAM re-localization) are detected
-  and the inverse delta is folded into the calibration instantly, so a recenter no
-  longer breaks the alignment.
+  and the inverse delta is folded into the calibration. Active alignment monitoring
+  runs every 50 ms even with the dashboard closed.
 - **Drift detection** — alignment staleness is scored from calibration age plus
   stationary-slide and tracking-loss evidence, shown in the overlay, and raised as
   a one-shot notification instead of letting the alignment degrade silently.
@@ -93,11 +93,23 @@ them build on the timestamped pose ring and the solver above:
   head-referenced calibration learns the mount offset (with a rigidity gate), after
   which every time-aligned HMD+tracker pose pair directly measures the universe
   transform with no motion required. Small yaw+translation corrections are
-  auto-applied and slewed sub-perceptually by the driver; large or tilted deviations
+  auto-applied and smoothed by the driver; large or tilted deviations
   (a bumped mount, a tracking fault) freeze auto-apply and notify instead. The
   mounted tracker can be hidden from games so full-body setups never mistake it for
   a body tracker. Optional (off by default): online re-estimation of the
   inter-system time offset from the same rigid pair.
+
+Quest continuous mode smooths rotation and translation together at each device's
+position, so a yaw correction about that device does not temporarily push it
+sideways. Derived angular speeds are timestamped at their interval midpoints to
+avoid introducing latency when the two devices report at different rates.
+
+A frozen Quest loop does not correct its way out of a large disagreement. Automatic
+resume requires stable readings below 1° yaw, 0.75° tilt and 2.5 cm for five seconds
+with the default configuration. If tracking is clean but alignment stays wrong,
+use **Recalibrate with the headset tracker**. Waiting in a particular posture is
+not a calibration step. Manual profile editing changes the base transform; it does
+not relearn the mounted tracker relationship.
 
 Not planned: trackerless continuous alignment (without a rigid cross-universe pair
 there is nothing sound to measure during play).
@@ -109,6 +121,16 @@ Every calibration, correction, freeze, and jump compensation is logged to
 as `QuestCalibrator.prev.log`; nothing older accumulates). Attach both files to a
 bug report — they carry the timeline and the numbers behind whatever the overlay
 decided to do.
+
+## Updates
+
+Automatic updates are off by default. Turn them on in Settings to let
+QuestCalibrator check its public GitHub Releases and download a newer stable package.
+Every package must match GitHub's published SHA-256 digest before it can be offered.
+Installation still starts only when you choose it: QuestCalibrator closes, waits for
+Steam to be fully stopped, and then runs the same elevated installer shipped in the
+release package. Checks, versions, verified downloads, installer handoffs, and update
+failures are recorded in the session log without download paths or progress spam.
 
 ## Building
 
@@ -124,7 +146,7 @@ Solver tests (build and run; exit code = failed scenarios):
 
 ```
 MSBuild Tests\SolverTests.vcxproj /p:Configuration=Release /p:Platform=x64
-Tests\x64\Release\SolverTests.exe
+x64\Release\SolverTests.exe
 ```
 
 The deterministic harness includes fixed regression scenarios plus randomized

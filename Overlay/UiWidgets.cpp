@@ -228,6 +228,18 @@ void IconClock(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	dl->AddLine(c, ImVec2(c.x + s * 0.40f, c.y + s * 0.14f), col, 2.0f);
 }
 
+void IconDownload(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
+{
+	dl->AddLine(ImVec2(c.x, c.y - s * 0.72f),
+		ImVec2(c.x, c.y + s * 0.30f), col, 2.2f);
+	dl->AddLine(ImVec2(c.x - s * 0.42f, c.y - s * 0.02f),
+		ImVec2(c.x, c.y + s * 0.38f), col, 2.2f);
+	dl->AddLine(ImVec2(c.x + s * 0.42f, c.y - s * 0.02f),
+		ImVec2(c.x, c.y + s * 0.38f), col, 2.2f);
+	dl->AddLine(ImVec2(c.x - s * 0.66f, c.y + s * 0.68f),
+		ImVec2(c.x + s * 0.66f, c.y + s * 0.68f), col, 2.2f);
+}
+
 void IconInfo(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	dl->AddCircle(c, s * 0.85f, col, 20, 2.0f);

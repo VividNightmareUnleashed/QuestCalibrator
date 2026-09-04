@@ -66,6 +66,7 @@ struct SettingsRecord
 	bool solveScale = false;
 	bool applyTimeOffset = true;
 	bool detailedLogging = false;
+	bool automaticUpdates = false;
 	std::map<std::string, std::string> deviceNames;
 	ChaperoneRecord chaperone;
 };
@@ -100,6 +101,7 @@ static SettingsRecord CaptureSettingsRecord(const CalibrationContext &ctx)
 	record.solveScale = ctx.solveScale;
 	record.applyTimeOffset = ctx.applyTimeOffset;
 	record.detailedLogging = ctx.detailedLogging;
+	record.automaticUpdates = ctx.automaticUpdates;
 	record.deviceNames = ctx.deviceNames;
 	record.chaperone = CaptureChaperoneRecord(ctx.chaperone);
 	return record;
@@ -183,6 +185,7 @@ static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 	ctx.solveScale = record.solveScale;
 	ctx.applyTimeOffset = record.applyTimeOffset;
 	ctx.detailedLogging = record.detailedLogging;
+	ctx.automaticUpdates = record.automaticUpdates;
 	ctx.deviceNames = record.deviceNames;
 	ApplyChaperoneRecord(ctx, std::move(record.chaperone));
 }
@@ -481,6 +484,7 @@ static void WriteSettings(const SettingsRecord &record,
 	settings["solve_scale"].set<bool>(record.solveScale);
 	settings["apply_time_offset"].set<bool>(record.applyTimeOffset);
 	settings["detailed_logging"].set<bool>(record.detailedLogging);
+	settings["automatic_updates"].set<bool>(record.automaticUpdates);
 	if (!record.deviceNames.empty())
 	{
 		picojson::object names;
@@ -524,6 +528,8 @@ static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &s
 		settings.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
 	if (HasTypedValue<bool>(obj, "detailed_logging"))
 		settings.detailedLogging = obj.at("detailed_logging").get<bool>();
+	if (HasTypedValue<bool>(obj, "automatic_updates"))
+		settings.automaticUpdates = obj.at("automatic_updates").get<bool>();
 	if (HasTypedValue<picojson::object>(obj, "device_names"))
 	{
 		// Bounded on read as on write: a hand-edited record cannot grow the
@@ -1080,32 +1086,22 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 
 bool SaveSettings(CalibrationContext &ctx)
 {
-	// A caller may directly save a setting while Config is waiting to be
-	// persisted (including after a universe-revision bump). Never let Settings
-	// overtake it: commit Config first, then leave only unfinished stages dirty.
-	bool profileSaved = true;
-	if (ctx.persistence.profileDirty)
-	{
-		if (!ctx.validProfile)
-		{
-			ctx.ReportError(PendingProfileWithoutValidProfileMessage,
-				CalibrationContext::ErrorSource::ProfilePersistence);
-			profileSaved = false;
-		}
-		else
-			profileSaved = SaveProfile(ctx);
-	}
-	// Only a coupled rebase — both records carrying the same revision bump —
-	// makes the Settings half wait for the Config half. Otherwise one Config
-	// failure would also swallow the fail-closed chaperone disarms, which live
-	// in Settings, and the next launch would auto-restore a stale armed
-	// snapshot. An uncoupled mismatch is detected and failed closed at load.
-	if (!profileSaved && ctx.persistence.coupled)
-		return false;
-	bool settingsSaved = WriteSettingsRecord(ctx);
-	if (!ctx.persistence.HasDirty())
-		ctx.persistence.coupled = false;
-	return profileSaved && settingsSaved;
+	return SaveSettingsWithResult(ctx).AllSaved();
+}
+
+questcal::SettingsSaveResult SaveSettingsWithResult(CalibrationContext &ctx)
+{
+	return ctx.persistence.SaveSettings(
+		[&]() {
+			if (!ctx.validProfile)
+			{
+				ctx.ReportError(PendingProfileWithoutValidProfileMessage,
+					CalibrationContext::ErrorSource::ProfilePersistence);
+				return false;
+			}
+			return SaveProfile(ctx);
+		},
+		[&]() { return WriteSettingsRecord(ctx); });
 }
 
 bool SavePendingChanges(CalibrationContext &ctx)

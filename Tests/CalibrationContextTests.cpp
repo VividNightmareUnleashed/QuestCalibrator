@@ -1,4 +1,5 @@
 #include "../Overlay/Calibration.h"
+#include "../Overlay/CalibrationDriver.h"
 
 bool CalibrationContextResetScenario()
 {
@@ -31,6 +32,7 @@ bool CalibrationContextResetScenario()
 	ctx.profileUniverseValid = true;
 	ctx.profileHmdSerial = "hmd";
 	ctx.lastResult.valid = true;
+	ctx.continuousCorrectionGate.Offer({}, false);
 
 	ctx.Clear();
 	return !ctx.applyTimeOffset && ctx.solveScale && ctx.uiAdvanced &&
@@ -46,5 +48,107 @@ bool CalibrationContextResetScenario()
 		ctx.driftScore == 0.0 && ctx.referenceTrackingSystem.empty() &&
 		ctx.targetTrackingSystem.empty() && !ctx.enabled && !ctx.validProfile &&
 		!ctx.profileUniverseUnsafe && !ctx.profileUniverseValid &&
-		ctx.profileHmdSerial.empty() && !ctx.lastResult.valid;
+		ctx.profileHmdSerial.empty() && !ctx.lastResult.valid &&
+		!ctx.continuousCorrectionGate.HasPending();
+}
+
+bool ControllerTriggerAxisScenario()
+{
+	vr::VRControllerState_t state{};
+	std::array<int32_t, vr::k_unControllerStateAxisCount> types{};
+	types[1] = vr::k_eControllerAxis_Trigger;
+	types[3] = vr::k_eControllerAxis_Joystick;
+	unsigned reads = 0;
+	auto readAxisType = [&](vr::ETrackedDeviceProperty property)
+	{
+		++reads;
+		return types.at(property - vr::Prop_Axis0Type_Int32);
+	};
+	if (questcal::ControllerTriggerPressed(state, readAxisType) || reads != 0)
+		return false;
+
+	state.rAxis[1].x = 1.0f;
+	if (!questcal::ControllerTriggerPressed(state, readAxisType))
+		return false;
+	state.rAxis[1].x = 0.75f;
+	state.rAxis[3].x = 1.0f;
+	if (questcal::ControllerTriggerPressed(state, readAxisType))
+		return false;
+
+	types[1] = vr::k_eControllerAxis_None;
+	types[4] = vr::k_eControllerAxis_Trigger;
+	state.rAxis[4].x = 0.751f;
+	if (!questcal::ControllerTriggerPressed(state, readAxisType))
+		return false;
+
+	return !questcal::ControllerTriggerPressed(state,
+		[](vr::ETrackedDeviceProperty) { return vr::k_eControllerAxis_None; });
+}
+
+bool CalibrationContextCadenceScenario()
+{
+	CalibrationContext ctx;
+	if (ctx.IdleUpdateInterval() != 1.0)
+		return false;
+	ctx.enabled = ctx.validProfile = ctx.poseRingOpen = true;
+	ctx.continuousEnabled = true;
+	ctx.continuousTrackerSerial = "tracker";
+	ctx.continuousTrackerId = 3;
+	ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd] = true;
+	ctx.continuousMode = ContinuousMode::Legacy;
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.poseRingOpen = false;
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.poseRingOpen = true;
+	ctx.continuousTrackerSerial.clear();
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+
+	ctx.continuousMode = ContinuousMode::Quest;
+	ctx.mountExtrinsic.valid = true;
+	ctx.continuousRequireTrigger = true;
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.continuousCorrectionGate.Offer({}, false);
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.continuousRequireTrigger = false;
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.continuousRequireTrigger = true;
+	ctx.state = CalibrationState::Editing;
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.state = CalibrationState::None;
+	ctx.continuousCorrectionGate.Clear();
+	ctx.continuousEnabled = false;
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.enabled = false;
+	if (ctx.IdleUpdateInterval() != 1.0)
+		return false;
+	ctx.chaperone.valid = true;
+	if (ctx.IdleUpdateInterval() != 0.05)
+		return false;
+	ctx.chaperone.autoApply = false;
+	return ctx.IdleUpdateInterval() == 1.0;
+}
+
+bool CalibrationContextCorrectionBasisScenario()
+{
+	CalibrationContext ctx;
+	questcal::ContinuousAlignment::Correction correction;
+	correction.translation = Eigen::Vector3d(0.01, 0, 0);
+	ctx.continuousCorrectionGate.Offer(correction, false);
+	ctx.SetCalibration(Eigen::Quaterniond::Identity(), Eigen::Vector3d(1, 0, 0), 1.0);
+	if (ctx.continuousCorrectionGate.HasPending() ||
+		ctx.continuousCorrectionGate.Take(true, true, correction) || ctx.baseGeneration != 1)
+		return false;
+
+	ctx.continuousCorrectionGate.Offer(correction, false);
+	ctx.SetCalibrationContinuous(Eigen::Quaterniond::Identity(), Eigen::Vector3d(2, 0, 0), 1.0);
+	return !ctx.continuousCorrectionGate.HasPending() &&
+		!ctx.continuousCorrectionGate.Take(true, true, correction) && ctx.baseGeneration == 1;
 }

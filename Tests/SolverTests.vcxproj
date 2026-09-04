@@ -55,7 +55,7 @@
       <WarningLevel>Level3</WarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;_DEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;_DEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>..\lib;..\lib\openvr;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -74,7 +74,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;NDEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;NDEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalIncludeDirectories>..\lib;..\lib\openvr;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -87,7 +87,9 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CalibrationContextTests.cpp" />
+    <ClCompile Include="ReviewRegressionTests.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="..\Driver\ServerTrackedDeviceProvider.cpp" />
     <ClCompile Include="..\Driver\AlignmentField.cpp" />
     <ClCompile Include="..\Driver\IPCServer.cpp" />
     <ClCompile Include="..\Driver\Logging.cpp" />
@@ -97,6 +99,7 @@
     <ClCompile Include="..\Overlay\DriftMonitor.cpp" />
     <ClCompile Include="..\Overlay\JumpDetector.cpp" />
     <ClCompile Include="..\Overlay\PoseStreamHub.cpp" />
+    <ClCompile Include="..\Overlay\Updater.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Driver\AlignmentField.h" />
@@ -108,6 +111,8 @@
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\Overlay\CalibrationEngine.h" />
+    <ClInclude Include="..\Overlay\Calibration.h" />
+    <ClInclude Include="..\Overlay\CalibrationDriver.h" />
     <ClInclude Include="..\Overlay\CalibrationGuide.h" />
     <ClInclude Include="..\Overlay\CalibrationRun.h" />
     <ClInclude Include="..\Overlay\ChaperoneMath.h" />
@@ -124,6 +129,7 @@
     <ClInclude Include="..\Overlay\PersistenceState.h" />
     <ClInclude Include="..\Overlay\ProfileValidation.h" />
     <ClInclude Include="..\Overlay\RingPoseMath.h" />
+    <ClInclude Include="..\Overlay\UpdatePolicy.h" />
     <ClInclude Include="..\Overlay\PoseStreamHub.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -398,6 +398,99 @@ void BuildSettingsScreen(const VRState &state)
 				ApplyChaperoneBounds();
 		}
 
+		// Updates never touch the network until this persisted opt-in is on.
+		// Checking and downloading are automatic; applying the verified package
+		// remains explicit because Steam must close and Windows must elevate the
+		// existing installer.
+		{
+			questcal::update::Snapshot update = questcal::update::AppUpdater.GetSnapshot();
+			const bool expanded = CalCtx.automaticUpdates;
+			RowCard row(kRowHeight + kRowSubLineH + (expanded ? 46.0f : 0.0f));
+			const ImVec2 p = row.pos;
+			ImDrawList *dl = ImGui::GetWindowDrawList();
+
+			ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
+			const bool previous = CalCtx.automaticUpdates;
+			if (QCCheckbox("##automaticUpdates", &CalCtx.automaticUpdates))
+			{
+				SaveSettingOrRestore(CalCtx.automaticUpdates, previous);
+				if (CalCtx.automaticUpdates != previous && !g_uiPreviewMode)
+					questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
+			}
+			RowIconLabel(p, IconDownload, "Automatic updates");
+			RowSubLine(p, "Checks and downloads verified releases. Installing waits until Steam is closed.");
+
+			if (expanded)
+			{
+				const float actionY = p.y + kRowHeight + kRowSubLineH + 6.0f;
+				std::string status;
+				ImVec4 color = Pal::Dim;
+				switch (update.state)
+				{
+				case questcal::update::State::Checking:
+					status = "Checking GitHub";
+					break;
+				case questcal::update::State::Downloading:
+				{
+					const unsigned percent = update.totalBytes == 0 ? 0 :
+						static_cast<unsigned>((update.downloadedBytes * 100) / update.totalBytes);
+					status = FormatString("Downloading %s  %u%%", update.version.c_str(), percent);
+					break;
+				}
+				case questcal::update::State::UpToDate:
+					status = "Version " + update.version + " is current";
+					color = Pal::Good;
+					break;
+				case questcal::update::State::Ready:
+					status = "Version " + update.version + " is downloaded and verified";
+					color = Pal::Good;
+					break;
+				case questcal::update::State::Failed:
+					status = "Update check failed";
+					color = Pal::Bad;
+					break;
+				default:
+					status = "Ready to check";
+					break;
+				}
+				dl->AddText(g_fontSmall, g_fontSmall->FontSize,
+					ImVec2(p.x + 92.0f, actionY + 10.0f), Pal::U32(color), status.c_str());
+
+				const bool installReady = update.state == questcal::update::State::Ready;
+				const bool canRetry = update.state == questcal::update::State::Failed ||
+					update.state == questcal::update::State::UpToDate ||
+					update.state == questcal::update::State::Idle;
+				if (installReady || canRetry)
+				{
+					const float buttonW = 180.0f;
+					ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - buttonW, actionY));
+					const std::string label = installReady ?
+						("Install " + update.version) : "Check again";
+					if (IconButton("updateAction", label.c_str(),
+						installReady ? IconDownload : nullptr,
+						ImVec2(buttonW, 34.0f), installReady ? BtnKind::Primary : BtnKind::Ghost))
+					{
+						if (installReady)
+						{
+							std::string error;
+							if (questcal::update::AppUpdater.LaunchInstaller(error))
+								RequestApplicationExit();
+							else
+								CalCtx.ReportError(error + "\n");
+						}
+						else
+						{
+							questcal::update::AppUpdater.CheckNow();
+						}
+					}
+				}
+				if (update.state == questcal::update::State::Failed &&
+					ImGui::IsMouseHoveringRect(ImVec2(p.x, actionY),
+						ImVec2(p.x + cw, actionY + 40.0f)))
+					ShowTip(update.message.c_str());
+			}
+		}
+
 		// Bug reports: extra detail in the session log while on, and one file
 		// to send, written on request with personal folders taken out.
 		{

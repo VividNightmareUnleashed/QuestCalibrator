@@ -204,6 +204,10 @@ public:
 	            const ExpectedCalibrationAt &expectedAt = ExpectedCalibrationAt());
 
 	bool PollCorrection(Correction &out);
+	// The most recent decision still permits a correction. Unlike the one-shot
+	// output, this remains true between evaluations and revokes queued approval
+	// immediately when a later decision settles or starts confirming a fault.
+	bool CorrectionEligible() const { return correctionEligible; }
 	bool PollEvent(Event &out);
 
 	// Freshly measured inter-system latency (seconds, positive = target lags
@@ -329,6 +333,7 @@ private:
 	std::optional<Observation> pendingObs;
 
 	std::optional<Correction> pendingCorrection;
+	bool correctionEligible = false;
 	std::deque<Event> events;
 
 	double lastLatencyEstimateTime = 0.0;
