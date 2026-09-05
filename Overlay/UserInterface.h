@@ -9,11 +9,8 @@ struct ImFont;
 extern bool g_uiPreviewMode;
 extern bool g_uiPreviewMany;
 
-// The states the preview cannot reach through the interface itself, so a
-// review can see them without hardware: -uipreview-frozen (continuous
-// calibration paused with the drift buttons in the band), -uipreview-failed
-// (a guided run that ends in a refused solve), -uipreview-empty (first launch,
-// nothing calibrated). Each implies -uipreview-many.
+// Preview scenarios cover frozen alignment, a failed solve, an empty profile,
+// guide setup, and a completed result. Each implies -uipreview-many.
 enum class PreviewScenario { Healthy, Frozen, Failed, Empty, Guide, Result };
 extern PreviewScenario g_uiPreviewScenario;
 

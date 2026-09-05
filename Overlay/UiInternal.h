@@ -1,8 +1,6 @@
 #pragma once
 
-// Internal to the overlay UI: shared types, palette, widgets and the
-// screen builders, split across the Ui*.cpp files. Nothing here is an
-// API for the rest of the program; that is UserInterface.h.
+// Shared UI internals. The public interface is declared in UserInterface.h.
 
 #include "stdafx.h"
 #include "UserInterface.h"
@@ -207,9 +205,7 @@ struct GuideState
 
 static const float kCountdownSeconds = 3.0f;
 
-// How many trackers -uipreview-many fabricates. The only statement of the
-// count: enough to push a tracking system's device list past BuildDeviceList's
-// four-row scroll threshold, with room to fan out across battery levels.
+// Exceed the four-row scroll threshold and exercise several battery states.
 static const int kPreviewManyTrackerCount = 6;
 
 // Shared state, each owned by one file.

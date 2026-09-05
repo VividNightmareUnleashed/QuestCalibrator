@@ -2,25 +2,13 @@
 #include "stdafx.h"
 #include "UiInternal.h"
 
-// ---------------------------------------------------------------------------
-// Main menu (default state)
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Guided calibration
-//
-// The modal walks the player through four stages: get set (what to hold and
-// how, with the two picks' tracking state), a short countdown, the run with
-// live feedback from CalibrationGuide.h, and the outcome with a picture of
-// what to change. Presentation state only; the run itself is the context's.
-// ---------------------------------------------------------------------------
+// The guide owns presentation state; CalibrationContext owns the measurement.
 
 GuideState s_guide;
 static GLuint s_guideTexture = 0;
 static int s_guideTextureKind = -1;
 
-// Whether the modal shows the engineer lines (ids, serials, residuals). Opens
-// the way advanced mode is set; the toggle at the bottom of the modal flips it.
+// Initialize diagnostic detail visibility from the advanced-mode preference.
 bool s_modalDetails = false;
 
 void OpenGuide(bool anchor, bool mountRun)
@@ -39,9 +27,7 @@ void OpenGuide(bool anchor, bool mountRun)
 		s_guide.animationTime = 3.3;
 }
 
-// Continuous calibration needs one run with the headset as the reference and
-// the headset tracker as the target. Nobody should have to know that: this
-// makes both picks and starts the guided run.
+// Mount measurement uses the headset as reference and its tracker as target.
 void StartMountSetup(const VRState &state)
 {
 	const VRDevice *hmd = nullptr;
@@ -71,8 +57,7 @@ void StartMountSetup(const VRState &state)
 	OpenGuide(false, true);
 }
 
-// The countdown ended: start the real run, or fake one for the preview so
-// the running stage can be styled without a runtime.
+// Preview mode simulates a run without a SteamVR connection.
 bool BeginGuidedRun()
 {
 	s_guide.metrics = questcal::GuideMetrics();
@@ -498,8 +483,6 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				ImGui::PopFont();
 			}
 			ImGui::Spacing();
-			// Otherwise captive: Escape and clicking outside do nothing to a
-			// modal, and the run only ends on its own timer.
 			if (IconButton("cancelprogress", "Cancel", nullptr, ImVec2(mw - 202.0f, 46.0f), BtnKind::Ghost) || EscapePressed())
 			{
 				if (g_uiPreviewMode)

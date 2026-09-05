@@ -91,9 +91,7 @@ float LetterSpacedWidth(ImFont *font, const char *text, float spacing)
 	return w > 0.0f ? w - spacing : 0.0f;
 }
 
-// Byte-wise on purpose: every label that comes through here is ASCII. The
-// unsigned cast keeps a stray high byte from turning into a huge code point
-// on MSVC's signed char; a real non-ASCII label would still need a decoder.
+// Labels must be ASCII; non-ASCII text needs UTF-8 decoding before glyph lookup.
 void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, const char *text, float spacing)
 {
 	float x = pos.x;

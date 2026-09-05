@@ -35,15 +35,15 @@ Solver (new `CalibrationEngine`, covered by synthetic tests in `Tests/`):
 - **Robust numerics.** Reflection-checked Kabsch, quaternion-based axis extraction (stable
   near 180 degrees), IRLS/Huber reweighting against jitter and glitches, sign-invariant
   axis conditioning check, and per-pair rigid-angle consistency rejection.
-- **Honest validation.** Rotation RMS, translation RMS, and axis-diversity gates; the
+- **Fit validation.** Rotation RMS, translation RMS, and axis-diversity gates; the
   solver refuses (with a plain-language reason) rather than save a bad calibration.
 - **Playspace scale** is an experimental, opt-in solve. A gross/fine motion-gain
   diagnostic distinguishes a frequency-flat metric difference from streamed-pose
   smoothing. When smoothing is detected, scale is fixed from a clean gross band or
   held at neutral 1.0 if gross motion is attenuated too; a contaminated free-scale
   fit is never applied.
-- Calibration collects both streams for a fixed duration and solves once — the two-stage
-  rotation-then-translation dance (and its partial-transform IPC updates) is gone.
+- Calibration collects both streams for a fixed duration, solves once, and publishes
+  the complete transform.
 
 Driver and IPC:
 
@@ -71,23 +71,21 @@ Profiles:
 
 ## Runtime alignment maintenance
 
-Calibrating once is the easy part; these keep the alignment true during play. All of
-them build on the timestamped pose ring and the solver above:
+Runtime alignment maintenance uses the timestamped pose ring and calibration solver:
 
 - **Runtime latency re-prediction** — the driver shifts the lighthouse devices'
   prediction time by the solved inter-system offset, so vrserver's own predictor
   aligns the two timelines during live motion, not just at calibration time.
 - **Universe-jump compensation** — pose discontinuities inconsistent with the
   device's reported velocity (headset recenter / SLAM re-localization) are detected
-  and the inverse delta is folded into the calibration. Active alignment monitoring
+  and the detected universe delta is applied to the calibration. Active alignment monitoring
   runs every 50 ms even with the dashboard closed.
 - **Drift detection** — alignment staleness is scored from calibration age plus
   stationary-slide and tracking-loss evidence, shown in the overlay, and raised as
   a one-shot notification instead of letting the alignment degrade silently.
 - **Spatial correction field** — multi-point calibration interpolated by each
   device's own position (Gaussian RBF blending in the driver), correcting SLAM map
-  deformation across the room instead of pretending one rigid transform fits
-  everywhere.
+  deformation that a single rigid transform cannot represent.
 - **Continuous calibration** — with a spare lighthouse tracker mounted firmly on the
   headset, a background loop keeps the alignment maintained during play. A
   head-referenced calibration learns the mount offset (with a rigidity gate), after

@@ -542,10 +542,8 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 			Monitors.hmdRawTime = composedTime;
 		}
 
-		// Feed-selection policy (HMD-only on the reference side, mounted-tracker
-		// exclusion, worn-device proximity) lives in ringpose::AnchorsUniverse
-		// so it is one pure predicate a test can drive; see its comment for why
-		// all three rules are load-bearing.
+		// AnchorsUniverse excludes devices whose normal movement could be
+		// mistaken for playspace drift, including the mounted tracker.
 		ringpose::DriftFeedCandidate candidate;
 		candidate.deviceId = s.deviceId;
 		candidate.referenceSide = ctx.referenceDeviceMask[s.deviceId];
