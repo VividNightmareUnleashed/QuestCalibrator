@@ -7,6 +7,7 @@
 #include "ChaperoneMath.h"
 
 #include <algorithm>
+#include <bitset>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -357,6 +358,8 @@ void JumpDetector::TryAccept()
 		d.residualTiltRad = c.residualTiltRad;
 		d.worldFromDriverRotation = c.endpoint.rotation;
 		d.worldFromDriverTranslation = c.endpoint.translation;
+		std::bitset<vr::k_unMaxTrackedDeviceCount> counted;
+		counted.set(c.deviceId);
 
 		for (const auto &o : candidates)
 		{
@@ -364,8 +367,11 @@ void JumpDetector::TryAccept()
 				continue;
 			double spread = (o.trans - c.trans).norm();
 			d.residualSpread = std::max(d.residualSpread, spread);
-			if (spread < config.agreePosTol)
+			if (spread < config.agreePosTol && !counted.test(o.deviceId))
+			{
+				counted.set(o.deviceId);
 				d.devicesAgreeing++;
+			}
 		}
 
 		accepted.push_back(d);
@@ -388,16 +394,22 @@ void JumpDetector::TryAccept()
 			continue;
 		}
 
-		std::vector<const Candidate *> agree;
+		// Candidates from one device can coexist across adjacent fit windows.
+		// Each device gets one vote and one contribution to the averaged delta.
+		std::vector<const Candidate *> agree{ &c0 };
+		std::bitset<vr::k_unMaxTrackedDeviceCount> counted;
+		counted.set(c0.deviceId);
 		double spread = 0.0;
 		for (const auto &o : candidates)
 		{
-			if (!o.ReadyHeuristic() || std::abs(o.t - c0.t) > config.agreeWindow)
+			if (!o.ReadyHeuristic() || counted.test(o.deviceId) ||
+				std::abs(o.t - c0.t) > config.agreeWindow)
 				continue;
 			double dPos = (o.trans - c0.trans).norm();
 			double dYaw = std::abs(WrapAngle(YawOf(o.rot) - YawOf(c0.rot)));
 			if (dPos < config.agreePosTol && dYaw < config.agreeYawTolRad)
 			{
+				counted.set(o.deviceId);
 				agree.push_back(&o);
 				spread = std::max(spread, dPos);
 			}

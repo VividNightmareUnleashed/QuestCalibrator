@@ -4161,6 +4161,58 @@ void RunJumpScenarios()
 			"a delayed agreeing device survives the full fit + agreement window");
 	}
 
+	// Two discontinuities from one device can fit inside the agreement window
+	// even though their post-fit windows do not overlap. They are not two votes.
+	for (bool peerActive : { false, true })
+	{
+		JumpDetector jd(TestQpcToSeconds);
+		JumpRun result;
+		for (int step = 0; step <= 300; ++step)
+		{
+			const double t = step / 100.0;
+			const int jumps = (step >= 150 ? 1 : 0) + (step >= 172 ? 1 : 0);
+			for (uint32_t id = 0; id < (peerActive ? 2u : 1u); ++id)
+			{
+				const double yaw = id == 0 ? jumps * 6.0 * EIGEN_PI / 180.0 : 0.0;
+				jd.Push(RingSample(id, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
+					Eigen::Quaterniond(Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitY())),
+					Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
+			}
+			JumpDetector::UniverseDelta delta;
+			while (jd.PollDelta(delta)) { ++result.deltas; result.last = delta; }
+		}
+		snprintf(detail, sizeof detail, "deltas %d, reported devices %d",
+			result.deltas, result.last.devicesAgreeing);
+		Check(peerActive ? "jump: one device cannot corroborate itself"
+			: "jump: repeated small solo events stay unconfirmed", result.deltas == 0, detail);
+	}
+
+	// Repeated exact observations from a non-HMD device are one corroborating
+	// device; the HMD's authoritative endpoint still determines the correction.
+	{
+		JumpDetector jd(TestQpcToSeconds);
+		JumpRun result;
+		for (int step = 0; step <= 250; ++step)
+		{
+			for (uint32_t id : { 1u, 0u })
+			{
+				const double shift = id == 1
+					? (step >= 150 ? 0.01 : 0.0) + (step >= 155 ? 0.01 : 0.0)
+					: (step >= 160 ? 0.02 : 0.0);
+				jd.Push(RingSample(id, step / 100.0, Eigen::Quaterniond::Identity(),
+					Eigen::Vector3d(shift, 0.0, 0.0), Eigen::Quaterniond::Identity(),
+					Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
+			}
+			JumpDetector::UniverseDelta delta;
+			while (jd.PollDelta(delta)) { ++result.deltas; result.last = delta; }
+		}
+		snprintf(detail, sizeof detail, "deltas %d, reported devices %d, shift %.3f m",
+			result.deltas, result.last.devicesAgreeing, result.last.translation.x());
+		Check("jump: exact corroboration counts unique devices", result.deltas == 1 &&
+			result.last.exact && result.last.devicesAgreeing == 2 &&
+			result.TransErr(Eigen::Vector3d(0.02, 0.0, 0.0)) < 1e-9, detail);
+	}
+
 	// C. Fast continuous motion, no jump: no false positives.
 	{
 		JumpDetector jd(TestQpcToSeconds);
