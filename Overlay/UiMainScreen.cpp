@@ -595,7 +595,7 @@ void BuildMainScreen(const VRState &state)
 		bool haveProfile = CalCtx.validProfile;
 		const float bh = 56.0f;
 		const float clearW = 190.0f;
-		const float segItemW = 80.0f;
+		const float segItemW = 112.0f;
 		const float segW = segItemW * 3.0f + 8.0f;
 		float startW = cw - segW - gap - (haveProfile ? clearW + gap : 0.0f);
 
@@ -605,10 +605,8 @@ void BuildMainScreen(const VRState &state)
 			recovering ? BtnKind::Ghost : BtnKind::Primary))
 			OpenGuide(false, false);
 
-		// Measurement length. A duration, not a speed: "Fast" read as the good
-		// choice and fought the instruction to move slowly.
 		{
-			const char *speeds[] = { "10 s", "20 s", "35 s" };
+			const char *speeds[] = { "Fast", "Slow", "Very slow" };
 			ImVec2 sp = ImVec2(rowA.x + startW + gap, rowA.y);
 			ImGui::SetCursorScreenPos(ImVec2(sp.x, sp.y + (bh - 46.0f) * 0.5f));
 			auto previousSpeed = CalCtx.calibrationSpeed;
@@ -617,7 +615,7 @@ void BuildMainScreen(const VRState &state)
 			if (CalCtx.calibrationSpeed != previousSpeed)
 				SaveSettingOrRestore(CalCtx.calibrationSpeed, previousSpeed);
 			if (ImGui::IsMouseHoveringRect(sp, ImVec2(sp.x + segW, sp.y + bh)) && !ImGui::IsAnyItemActive())
-				ShowTip("How long to measure. Longer is more accurate.");
+				ShowTip("Slower calibration collects more tracking data. Move gently at every setting.");
 		}
 
 		if (haveProfile)
