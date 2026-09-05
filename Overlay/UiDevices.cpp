@@ -320,7 +320,7 @@ void BuildDeviceList(const VRState &state, uint32_t &selected, const std::string
 		ImVec2 b = ImVec2(origin.x + paneW, origin.y + rowH);
 		dl->AddRectFilled(origin, b, Pal::U32(Pal::Card), 12.0f);
 		dl->AddRect(origin, b, Pal::U32(Pal::Border), 12.0f);
-		const char *msg = "Nothing switched on here yet";
+		const char *msg = "No devices connected";
 		ImVec2 ts = ImGui::CalcTextSize(msg);
 		dl->AddText(g_fontBody, g_fontBody->FontSize,
 			ImVec2(origin.x + (paneW - ts.x) * 0.5f, origin.y + (rowH - ts.y) * 0.5f),
@@ -432,7 +432,7 @@ void BuildSpacesSection(const VRState &state)
 		ImVec2 p = BeginRowCard(h);
 		ImDrawList *dl = ImGui::GetWindowDrawList();
 		float cw = ImGui::GetWindowContentRegionWidth();
-		const char *msg = "No tracked devices are present";
+		const char *msg = "No tracked devices found";
 		ImVec2 ts = ImGui::CalcTextSize(msg);
 		IconHMD(dl, ImVec2(p.x + cw * 0.5f, p.y + 42.0f), 16.0f, Pal::U32(Pal::Faint));
 		dl->AddText(g_fontBody, g_fontBody->FontSize,
@@ -521,7 +521,7 @@ void BuildSpacesSection(const VRState &state)
 	ImGui::Spacing();
 	{
 		std::string hint = FormatString(
-			"You'll hold the two together and rotate them for %.0f seconds.",
+			"Hold both devices together and rotate them for %.0f seconds.",
 			CalCtx.CollectionSeconds());
 		ImGui::PushFont(g_fontSmall);
 		ImVec2 hs = ImGui::CalcTextSize(hint.c_str());

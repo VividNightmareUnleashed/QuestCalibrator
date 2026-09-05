@@ -18,7 +18,7 @@ void BuildSettingsScreen(const VRState &state)
 		{
 			bool previous = CalCtx.uiAdvanced;
 			if (ToggleRow("##uiAdvanced", IconGauge, "Advanced mode", CalCtx.uiAdvanced,
-				"Adds the numbers behind the rating, the drift monitor and calibration details."))
+				"Shows calibration measurements, drift readings and extra settings."))
 				SaveSettingOrRestore(CalCtx.uiAdvanced, previous);
 		}
 
@@ -55,7 +55,7 @@ void BuildSettingsScreen(const VRState &state)
 					ResyncDriverState();
 			}
 			RowIconLabel(p, IconField, "Spatial correction field");
-			RowSubLine(p, "Per-spot corrections for places where the alignment is visibly off.");
+			RowSubLine(p, "Uses saved field anchors to correct alignment in different parts of the room.");
 
 			if (anchorCount > 0)
 			{
@@ -115,7 +115,7 @@ void BuildSettingsScreen(const VRState &state)
 			if (QCCheckbox("##applyTimeOffset", &CalCtx.applyTimeOffset))
 				SaveSettingOrRestore(CalCtx.applyTimeOffset, previous);
 			RowIconLabel(p, IconClock, "Apply time offset");
-			RowSubLine(p, "Delays the target devices slightly so they don't wobble against the headset in motion.");
+			RowSubLine(p, "Compensates for the tracking delay measured during calibration.");
 
 			// The number is for the advanced reader; the switch is the setting.
 			if (CalCtx.uiAdvanced && CalCtx.validProfile && (CalCtx.applyTimeOffset || CalCtx.useManualTimeOffset))
@@ -184,7 +184,7 @@ void BuildSettingsScreen(const VRState &state)
 						candidate.continuousEnabled = continuousEnabled;
 					});
 			RowIconLabel(p, IconCrosshair, "Continuous calibration");
-			RowSubLine(p, "Uses a spare tracker strapped to the headset to keep the alignment true while you play.");
+			RowSubLine(p, "Uses a tracker attached to your headset to keep devices aligned while you play.");
 
 			if (CalCtx.continuousEnabled)
 			{
@@ -373,7 +373,7 @@ void BuildSettingsScreen(const VRState &state)
 					"Turn off to let the Quest's Guardian import win each session;\n"
 					"the saved chaperone then only applies when you press Restore.");
 			}
-			RowIconLabel(p, IconCopy, "Restore protected chaperone automatically if it changes");
+			RowIconLabel(p, IconCopy, "Automatically restore saved chaperone");
 
 			std::string info;
 			if (CalCtx.chaperone.geometry.empty())
@@ -418,7 +418,7 @@ void BuildSettingsScreen(const VRState &state)
 					questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 			}
 			RowIconLabel(p, IconDownload, "Automatic updates");
-			RowSubLine(p, "Checks and downloads verified releases. Installing waits until Steam is closed.");
+			RowSubLine(p, "Downloads verified updates. Close Steam before installing them.");
 
 			if (expanded)
 			{
@@ -501,7 +501,7 @@ void BuildSettingsScreen(const VRState &state)
 			if (QCCheckbox("##detailedLogging", &CalCtx.detailedLogging))
 				SaveSettingOrRestore(CalCtx.detailedLogging, previous);
 			RowIconLabel(p, IconInfo, "Detailed calibration logging");
-			RowSubLine(p, "Adds loop decisions and solve numbers to the log while on. The saved file has your folders and name removed.");
+			RowSubLine(p, "Records extra tracking and calibration details. Saved diagnostics remove your name and folder paths.");
 
 			const float btnW = 210.0f;
 			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + kRowHeight * 0.5f - 17.0f));
@@ -518,6 +518,10 @@ void BuildSettingsScreen(const VRState &state)
 					CalCtx.ReportError(error + "\n");
 			}
 		}
+
+		ImGui::Spacing();
+		if (ImGui::CollapsingHeader("Motion demo credits"))
+			ImGui::TextWrapped("%s", GuideModelCredits().c_str());
 
 		// Raw transform editor -- power users only.
 		if (CalCtx.validProfile && !CalCtx.profileUniverseUnsafe)

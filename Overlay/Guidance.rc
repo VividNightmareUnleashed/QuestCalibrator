@@ -1,0 +1,5 @@
+GUIDE_HEADSET RCDATA "assets\\guide-headset.png"
+GUIDE_HANDHELD RCDATA "assets\\guide-handheld.png"
+
+GUIDE_CONTACT RCDATA "assets\\guide-contact.png"
+GUIDE_CREDITS RCDATA "assets\\guide-credits.txt"

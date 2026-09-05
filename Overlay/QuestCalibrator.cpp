@@ -579,6 +579,9 @@ void RunLoop()
 		if (dashboardVisible && waitEventsTimeout > dashboardInterval)
 			waitEventsTimeout = dashboardInterval;
 
+		// Rendering and vsync already consumed part of this frame's budget.
+		waitEventsTimeout -= glfwGetTime() - time;
+
 		// A zero interval (calibration collection) must not busy-spin: sample
 		// ingestion happens on the PoseStreamHub thread and CalibrationTick
 		// self-gates to 50 Hz, so nothing needs more than a short wait — and
@@ -590,7 +593,15 @@ void RunLoop()
 		if (g_frameLimit > 0 && ++framesRendered >= g_frameLimit)
 			return;
 
-		glfwWaitEventsTimeout(waitEventsTimeout);
+		// An animated visible window is already paced by SwapBuffers (vsync).
+		// A second timer wait can miss the next refresh and make 60 fps assets
+		// visibly stutter. Hidden/minimized windows still need the idle wait.
+		const bool displayPaced = CalCtx.wantedUpdateInterval <= 1.0 / 60.0 && width && height &&
+			glfwGetWindowAttrib(glfwWindow, GLFW_VISIBLE) && !glfwGetWindowAttrib(glfwWindow, GLFW_ICONIFIED);
+		if (displayPaced)
+			glfwPollEvents();
+		else
+			glfwWaitEventsTimeout(waitEventsTimeout);
 	}
 }
 
@@ -886,6 +897,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	{
 		g_uiPreviewMode = true;
 		g_uiPreviewMany = true;
+	}
+	else if (cmd == L"-uipreview-guide" || cmd == L"-uipreview-result")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = cmd == L"-uipreview-guide" ? PreviewScenario::Guide : PreviewScenario::Result;
 	}
 	else if (cmd == L"-uipreview-frozen" || cmd == L"-uipreview-failed" || cmd == L"-uipreview-empty")
 	{

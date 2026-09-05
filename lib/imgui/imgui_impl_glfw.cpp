@@ -82,6 +82,8 @@ void ImGui_ImplGlfw_ScrollCallback(GLFWwindow*, double xoffset, double yoffset)
 void ImGui_ImplGlfw_KeyCallback(GLFWwindow*, int key, int, int action, int mods)
 {
     ImGuiIO& io = ImGui::GetIO();
+    if (key < 0 || key >= IM_ARRAYSIZE(io.KeysDown))
+        return;
     if (action == GLFW_PRESS)
         io.KeysDown[key] = true;
     if (action == GLFW_RELEASE)
@@ -118,6 +120,7 @@ static bool ImGui_ImplGlfw_Init(GLFWwindow* window, bool install_callbacks, Glfw
 {
     g_Window = window;
     g_Time = 0.0;
+    glfwSetInputMode(window, GLFW_STICKY_KEYS, GLFW_TRUE);
 
     // Setup back-end capabilities flags
     ImGuiIO& io = ImGui::GetIO();
@@ -261,6 +264,18 @@ void ImGui_ImplGlfw_NewFrame()
     double current_time = glfwGetTime();
     io.DeltaTime = g_Time > 0.0 ? (float)(current_time - g_Time) : (float)(1.0f/60.0f);
     g_Time = current_time;
+
+    // Preserve a press/release pair delivered between UI frames.
+    const bool focused = glfwGetWindowAttrib(g_Window, GLFW_FOCUSED) != 0;
+    for (int key = GLFW_KEY_SPACE; key <= GLFW_KEY_LAST && key < IM_ARRAYSIZE(io.KeysDown); ++key)
+    {
+        const bool pressed = glfwGetKey(g_Window, key) == GLFW_PRESS;
+        io.KeysDown[key] = focused && pressed;
+    }
+    io.KeyCtrl = io.KeysDown[GLFW_KEY_LEFT_CONTROL] || io.KeysDown[GLFW_KEY_RIGHT_CONTROL];
+    io.KeyShift = io.KeysDown[GLFW_KEY_LEFT_SHIFT] || io.KeysDown[GLFW_KEY_RIGHT_SHIFT];
+    io.KeyAlt = io.KeysDown[GLFW_KEY_LEFT_ALT] || io.KeysDown[GLFW_KEY_RIGHT_ALT];
+    io.KeySuper = io.KeysDown[GLFW_KEY_LEFT_SUPER] || io.KeysDown[GLFW_KEY_RIGHT_SUPER];
 
     ImGui_ImplGlfw_UpdateMousePosAndButtons();
     ImGui_ImplGlfw_UpdateMouseCursor();

@@ -16,6 +16,8 @@
 // ---------------------------------------------------------------------------
 
 GuideState s_guide;
+static GLuint s_guideTexture = 0;
+static int s_guideTextureKind = -1;
 
 // Whether the modal shows the engineer lines (ids, serials, residuals). Opens
 // the way advanced mode is set; the toggle at the bottom of the modal flips it.
@@ -29,7 +31,12 @@ void OpenGuide(bool anchor, bool mountRun)
 	s_guide.mountRun = mountRun;
 	s_guide.stage = GuideStage::GetSet;
 	CalCtx.ClearMessages();
-	ImGui::OpenPopup("Calibration Progress");
+	s_guide.openRequested = true;
+	BOOL animate = TRUE;
+	if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animate, 0))
+		s_guide.animate = animate != FALSE;
+	if (!s_guide.animate)
+		s_guide.animationTime = 3.3;
 }
 
 // Continuous calibration needs one run with the headset as the reference and
@@ -68,23 +75,24 @@ void StartMountSetup(const VRState &state)
 // the running stage can be styled without a runtime.
 bool BeginGuidedRun()
 {
+	s_guide.metrics = questcal::GuideMetrics();
+	s_guide.lastMetricsTime = 0.0;
 	if (g_uiPreviewMode)
 	{
 		CalCtx.ClearMessages();
-		CalCtx.Log("Reference device ID: 0, serial: 1PASH5D1P17365\n"
-			"Target device ID: 3, serial: LHR-77E5A211\n"
-			"Sampling raw driver poses (timestamped)\n");
-		if (s_guide.mountRun)
+		CalCtx.Log(FormatString("Preview run: reference device %u, target device %u\n",
+			CalCtx.referenceID, CalCtx.targetID));
+		if (s_guide.demo != GuideDemo::Wrist)
 		{
 			CalCtx.Instruct("Look around slowly.");
-			CalCtx.Note("Side to side, up and down, and tilt your head. Keep the tracker tracking the whole time.");
+			CalCtx.Note("Look left and right, then up and down. Gently tilt your head to each side. Keep the tracker in view of the base stations.");
 		}
 		else
 		{
-			CalCtx.Instruct("Hold them together and keep rotating.");
-			CalCtx.Note("Rotate around more than one axis and move around a little. Keep both devices tracking.");
+			CalCtx.Instruct("Keep both devices firmly together.");
+			CalCtx.Note("Move both devices in a figure eight, gently turning and tilting as you go. Keep them firmly together and in view of their tracking cameras or base stations.");
 		}
-		CalCtx.Progress(650, 1000);
+		CalCtx.Progress(0, static_cast<int>(CalCtx.CollectionSeconds() * 100.0));
 		s_guide.metrics.valid = true;
 		s_guide.metrics.coverage = 0.55;
 		s_guide.metrics.gatedFraction = 0.08;
@@ -95,261 +103,115 @@ bool BeginGuidedRun()
 	return s_guide.anchor ? StartAnchorCalibration() : StartCalibration();
 }
 
-// Procedural art for the guide: line work in the palette, so it reads at
-// overlay scale and needs no assets.
-namespace GuideArt
+// One atlas is resident at a time (at most 112.5 MiB).
+// Resources are embedded so a moved executable cannot lose its instructions.
+void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, GuideDemo demo)
 {
-	// A tracker (rounded square) held against a controller (capsule) as one
-	// rigid pair, rotated by `angle` about `c` and foreshortened by `tilt`.
-	static void Pair(ImDrawList *dl, ImVec2 c, float s, float angle, float tilt, ImU32 col)
+	auto &texture = s_guideTexture;
+	auto &loadedKind = s_guideTextureKind;
+	const int kind = static_cast<int>(demo);
+	if (kind != loadedKind)
 	{
-		const float ca = cosf(angle), sa = sinf(angle), ct = cosf(tilt);
-		auto P = [&](float x, float y) {
-			return ImVec2(c.x + (x * ca - y * sa) * s, c.y + (x * sa + y * ca) * s * ct);
-		};
-		ImVec2 a = P(-0.95f, 0.05f), b = P(0.0f, 0.05f);
-		dl->AddLine(a, b, col, s * 0.32f);
-		dl->AddCircleFilled(a, s * 0.16f, col, 12);
-		dl->AddCircleFilled(b, s * 0.16f, col, 12);
-		dl->AddCircle(P(-0.2f, -0.32f), s * 0.40f, col, 24, 2.2f);
-		ImVec2 quad[4] = { P(0.12f, -0.62f), P(0.82f, -0.62f), P(0.82f, 0.08f), P(0.12f, 0.08f) };
-		dl->AddPolyline(quad, 4, col, true, 2.4f);
-		dl->AddCircleFilled(P(0.47f, -0.27f), s * 0.08f, col, 8);
+		if (texture)
+			glDeleteTextures(1, &texture);
+		texture = 0;
+		LoadGuideTexture(demo, &texture);
+		loadedKind = kind;
 	}
-
-	// Headset with the tracker strapped on top; `yaw` fakes the head turning.
-	static void HeadsetWithTracker(ImDrawList *dl, ImVec2 c, float s, float yaw, ImU32 col, ImU32 accent)
+	if (!texture)
 	{
-		const float shift = sinf(yaw) * s * 0.25f;
-		dl->PathRect(ImVec2(c.x - s, c.y - s * 0.45f), ImVec2(c.x + s, c.y + s * 0.45f), s * 0.3f);
-		dl->PathStroke(col, true, 2.4f);
-		dl->AddCircleFilled(ImVec2(c.x - s * 0.42f + shift, c.y), s * 0.15f, col, 12);
-		dl->AddCircleFilled(ImVec2(c.x + s * 0.42f + shift, c.y), s * 0.15f, col, 12);
-		// Strap up over the head, tracker sitting on it.
-		dl->AddLine(ImVec2(c.x - s * 0.55f, c.y - s * 0.45f), ImVec2(c.x - s * 0.35f, c.y - s * 1.05f), col, 2.0f);
-		dl->AddLine(ImVec2(c.x + s * 0.55f, c.y - s * 0.45f), ImVec2(c.x + s * 0.35f, c.y - s * 1.05f), col, 2.0f);
-		ImVec2 t0(c.x - s * 0.32f + shift * 0.5f, c.y - s * 1.55f);
-		ImVec2 t1(c.x + s * 0.32f + shift * 0.5f, c.y - s * 1.0f);
-		dl->PathRect(t0, t1, s * 0.12f);
-		dl->PathStroke(accent, true, 2.4f);
-		dl->AddCircleFilled(ImVec2((t0.x + t1.x) * 0.5f, (t0.y + t1.y) * 0.5f), s * 0.07f, accent, 8);
-	}
-
-	// Arc with an arrowhead at its end: "rotate this way".
-	static void CurvedArrow(ImDrawList *dl, ImVec2 c, float r, float a0, float a1, ImU32 col, float th = 2.4f)
-	{
-		dl->PathArcTo(c, r, a0, a1, 24);
-		dl->PathStroke(col, false, th);
-		ImVec2 tip(c.x + cosf(a1) * r, c.y + sinf(a1) * r);
-		const float dir = a1 > a0 ? 1.0f : -1.0f;
-		ImVec2 tan(-sinf(a1) * dir, cosf(a1) * dir);
-		ImVec2 nrm(cosf(a1), sinf(a1));
-		const float h = 9.0f;
-		dl->AddTriangleFilled(
-			ImVec2(tip.x + tan.x * h * 0.6f, tip.y + tan.y * h * 0.6f),
-			ImVec2(tip.x - tan.x * h + nrm.x * h * 0.7f, tip.y - tan.y * h + nrm.y * h * 0.7f),
-			ImVec2(tip.x - tan.x * h - nrm.x * h * 0.7f, tip.y - tan.y * h - nrm.y * h * 0.7f), col);
-	}
-
-	static void BaseStation(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
-	{
-		dl->PathRect(ImVec2(c.x - s * 0.5f, c.y - s * 0.5f), ImVec2(c.x + s * 0.5f, c.y + s * 0.5f), s * 0.12f);
-		dl->PathStroke(col, true, 2.2f);
-		dl->AddCircleFilled(c, s * 0.14f, col, 10);
-	}
-}
-
-// The looping "what to do" picture: the pair turning through a figure-eight,
-// or the head turning with the tracker on it.
-void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, bool mountRun)
-{
-	ImVec2 c(origin.x + size.x * 0.5f, origin.y + size.y * 0.5f);
-	dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), Pal::U32(Pal::Inset), 12.0f);
-	const ImU32 ink = Pal::U32(Pal::Text);
-	const float ft = static_cast<float>(t);
-	if (mountRun)
-	{
-		GuideArt::HeadsetWithTracker(dl, ImVec2(c.x, c.y + 12.0f), 34.0f, ft * 1.1f, ink, Pal::U32(Pal::Accent));
-		GuideArt::CurvedArrow(dl, ImVec2(c.x, c.y + 8.0f), 64.0f, IM_PI * 1.15f, IM_PI * 1.85f, Pal::U32(Pal::Dim));
+		dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(origin.x, origin.y + 24.0f),
+			Pal::U32(Pal::Warn), "Motion demos couldn't load. Reinstall QuestCalibrator to restore them.");
 		return;
 	}
-	// Figure-eight drift plus continuous rotation and a slow tilt: the motion
-	// the solver wants, shown rather than described.
-	ImVec2 pc(c.x + cosf(ft * 0.7f) * 26.0f, c.y + sinf(ft * 1.4f) * 12.0f);
-	GuideArt::Pair(dl, pc, 30.0f, ft * 1.3f, sinf(ft * 0.8f) * 0.9f, ink);
-	// Radius plus the +-12 px drift and the arrowhead stays inside the 150 px
-	// panel; at 58 the arc intermittently crossed its top edge.
-	GuideArt::CurvedArrow(dl, pc, 50.0f, ft * 0.5f, ft * 0.5f + IM_PI * 0.9f, Pal::U32(Pal::Dim));
-}
-
-// A still picture of the mistake a refused run points at.
-void DrawGuideHint(ImDrawList *dl, ImVec2 origin, ImVec2 size, CalibrationContext::GuideHint hint)
-{
-	using Hint = CalibrationContext::GuideHint;
-	ImVec2 c(origin.x + size.x * 0.5f, origin.y + size.y * 0.5f);
-	dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), Pal::U32(Pal::Inset), 12.0f);
-	const ImU32 ink = Pal::U32(Pal::Text);
-	const ImU32 accent = Pal::U32(Pal::Violet);
-	const ImU32 bad = Pal::U32(Pal::Bad);
-	switch (hint)
+	const bool wrist = demo == GuideDemo::Wrist;
+	const char *headLabels[] = { "Look left and right", "Look up and down", "Tilt side to side" };
+	const float gap = 16.0f;
+	const float cellW = (size.x - gap * 2.0f) / 3.0f;
+	const float imageH = size.y - 34.0f;
+	const float imageW = imageH * (wrist ? 5.0f / 3.0f : 8.0f / 7.0f);
+	const int columns = wrist ? 16 : 24;
+	const float frameW = wrist ? 320.0f : 192.0f;
+	const float frameH = wrist ? 192.0f : 168.0f;
+	const float atlasW = wrist ? 5120.0f : 4608.0f;
+	const float atlasH = wrist ? 5760.0f : 5880.0f;
+	if (demo == GuideDemo::Mounted)
+		t += 2.3;
+	const float blend = static_cast<float>(std::clamp((t - 2.0) / 0.3, 0.0, 1.0));
+	const float motionAlpha = blend * blend * (3.0f - 2.0f * blend);
+	auto drawFrame = [&](int index, ImVec2 top, float opacity)
 	{
-	case Hint::RotateMore:
-		GuideArt::Pair(dl, c, 26.0f, 0.4f, 0.3f, ink);
-		GuideArt::CurvedArrow(dl, c, 52.0f, -IM_PI * 0.2f, IM_PI * 1.2f, accent, 3.0f);
-		break;
-	case Hint::TwoAxes:
-		GuideArt::Pair(dl, c, 24.0f, 0.4f, 0.3f, ink);
-		GuideArt::CurvedArrow(dl, c, 50.0f, IM_PI * 0.15f, IM_PI * 0.85f, accent, 3.0f);
-		GuideArt::CurvedArrow(dl, c, 50.0f, IM_PI * 1.15f, IM_PI * 1.85f, accent, 3.0f);
-		break;
-	case Hint::HoldTogether:
+		if (!texture || opacity <= 0.0f)
+			return;
+		const int column = index % columns;
+		const int row = index / columns;
+		// Half-texel inset keeps linear filtering inside this frame.
+		const ImVec2 uv0((column * frameW + 0.5f) / atlasW, (row * frameH + 0.5f) / atlasH);
+		const ImVec2 uv1((column * frameW + frameW - 0.5f) / atlasW, (row * frameH + frameH - 0.5f) / atlasH);
+		dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texture)), top,
+			ImVec2(top.x + imageW, top.y + imageH), uv0, uv1,
+			ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, opacity)));
+	};
+	if (wrist)
 	{
-		GuideArt::Pair(dl, c, 26.0f, 0.0f, 0.0f, ink);
-		// Chevrons pressing the pair together.
-		ImVec2 l[3] = { ImVec2(c.x - 62.0f, c.y - 16.0f), ImVec2(c.x - 48.0f, c.y), ImVec2(c.x - 62.0f, c.y + 16.0f) };
-		ImVec2 r[3] = { ImVec2(c.x + 62.0f, c.y - 16.0f), ImVec2(c.x + 48.0f, c.y), ImVec2(c.x + 62.0f, c.y + 16.0f) };
-		dl->AddPolyline(l, 3, accent, false, 3.0f);
-		dl->AddPolyline(r, 3, accent, false, 3.0f);
-		break;
+		const int frame = t < 2.0 ? std::min(119, static_cast<int>(t * 60.0))
+			: 120 + static_cast<int>(std::fmod(t - 2.0, 6.0) * 60.0) % 360;
+		drawFrame(frame, ImVec2(origin.x + (size.x - imageW) * 0.5f, origin.y),
+			static_cast<float>(std::clamp(t / 0.2, 0.0, 1.0)));
+		const char *label = t < 2.0 ? "Bring the controller to the wrist tracker" : "Turn and tilt as you move in a figure eight";
+		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->FontSize, FLT_MAX, 0.0f, label);
+		dl->AddText(g_fontBody, g_fontBody->FontSize,
+			ImVec2(origin.x + (size.x - textSize.x) * 0.5f, origin.y + imageH + 8.0f), Pal::U32(Pal::Text), label);
+		return;
 	}
-	case Hint::SlowDown:
-		GuideArt::Pair(dl, ImVec2(c.x - 34.0f, c.y), 22.0f, 0.3f, 0.2f, ink);
-		IconGauge(dl, ImVec2(c.x + 50.0f, c.y), 22.0f, accent);
-		break;
-	case Hint::KeepTracking:
-	case Hint::TrackingLost:
+	if (motionAlpha < 1.0f)
 	{
-		ImVec2 bs(origin.x + 36.0f, origin.y + 30.0f);
-		GuideArt::BaseStation(dl, bs, 24.0f, ink);
-		// A dashed cone from the base station to the pair.
-		ImVec2 target(c.x + 26.0f, c.y + 18.0f);
-		for (int i = -2; i <= 2; ++i)
-		{
-			float spread = static_cast<float>(i) * 0.12f;
-			ImVec2 dir(target.x - bs.x, target.y - bs.y);
-			float len = sqrtf(dir.x * dir.x + dir.y * dir.y);
-			dir.x /= len; dir.y /= len;
-			ImVec2 side(-dir.y, dir.x);
-			for (float f = 0.2f; f < 0.85f; f += 0.16f)
-			{
-				ImVec2 p0(bs.x + dir.x * len * f + side.x * spread * len * f, bs.y + dir.y * len * f + side.y * spread * len * f);
-				ImVec2 p1(bs.x + dir.x * len * (f + 0.08f) + side.x * spread * len * (f + 0.08f),
-					bs.y + dir.y * len * (f + 0.08f) + side.y * spread * len * (f + 0.08f));
-				dl->AddLine(p0, p1, Pal::U32(Pal::Dim), 1.5f);
-			}
-		}
-		GuideArt::Pair(dl, target, 22.0f, 0.5f, 0.3f, ink);
-		if (hint == Hint::TrackingLost)
-			dl->AddLine(ImVec2(c.x - 30.0f, c.y - 26.0f), ImVec2(c.x - 2.0f, c.y + 10.0f), bad, 4.0f);
-		break;
+		const float opacity = (1.0f - motionAlpha) * static_cast<float>(std::clamp(t / 0.2, 0.0, 1.0));
+		drawFrame(std::min(119, static_cast<int>(t * 60.0)),
+			ImVec2(origin.x + (size.x - imageW) * 0.5f, origin.y), opacity);
+		const char *label = demo == GuideDemo::HeadsetContact ? "Rest the controller against the visor" : "Bring the controller to the wrist tracker";
+		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->FontSize, FLT_MAX, 0.0f, label);
+		ImVec4 color = Pal::Text;
+		color.w *= opacity;
+		dl->AddText(g_fontBody, g_fontBody->FontSize,
+			ImVec2(origin.x + (size.x - textSize.x) * 0.5f, origin.y + imageH + 8.0f), Pal::U32(color), label);
 	}
-	case Hint::WrongPick:
-		IconHMD(dl, ImVec2(c.x - 52.0f, c.y - 6.0f), 24.0f, ink);
-		IconTracker(dl, ImVec2(c.x + 52.0f, c.y - 6.0f), 24.0f, ink);
-		dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(c.x - 86.0f, c.y + 26.0f), Pal::U32(Pal::Dim), "reference");
-		dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(c.x + 30.0f, c.y + 26.0f), Pal::U32(Pal::Dim), "target");
-		break;
-	case Hint::WaitForTracking:
-		dl->PathArcTo(c, 26.0f, 0.0f, IM_PI * 1.5f, 24);
-		dl->PathStroke(accent, false, 3.0f);
-		break;
-	case Hint::Success:
-		dl->AddCircle(c, 30.0f, Pal::U32(Pal::Good), 32, 3.0f);
-		IconCheck(dl, c, 16.0f, Pal::U32(Pal::Good));
-		break;
-	default:
-		break;
+	const int frame = static_cast<int>(std::fmod(std::max(0.0, t - 2.3), 4.0) * 60.0) % 240;
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		const float x = origin.x + (cellW + gap) * static_cast<float>(axis);
+		const ImVec2 top(x + (cellW - imageW) * 0.5f, origin.y);
+		drawFrame(120 + axis * 240 + frame, top, motionAlpha);
+		const char *label = headLabels[axis];
+		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->FontSize, FLT_MAX, 0.0f, label);
+		ImVec4 color = Pal::Text;
+		color.w *= motionAlpha;
+		dl->AddText(g_fontBody, g_fontBody->FontSize,
+			ImVec2(x + (cellW - textSize.x) * 0.5f, origin.y + imageH + 8.0f), Pal::U32(color), label);
 	}
 }
 
-// The modal's eyebrow: which run this is and where in it the player stands.
-// A step count does work a stage name above a stage headline did not.
-std::string GuideStepLabel(bool anchor, bool mountRun, int step)
-{
-	const char *run = anchor ? "FIELD ANCHOR, " : mountRun ? "HEADSET TRACKER, " : "";
-	return FormatString("%sSTEP %d OF 3", run, step);
-}
-
-const char *GuideHintCaption(CalibrationContext::GuideHint hint)
-{
-	using Hint = CalibrationContext::GuideHint;
-	switch (hint)
-	{
-	case Hint::RotateMore:      return "Bigger turns";
-	case Hint::TwoAxes:         return "Twist, tilt and roll";
-	case Hint::HoldTogether:    return "Firmly together, in one hand";
-	case Hint::SlowDown:        return "Walking speed";
-	case Hint::KeepTracking:    return "Keep both devices tracking";
-	case Hint::TrackingLost:    return "Keep both devices tracking";
-	case Hint::WrongPick:       return "Headset side on the left, tracker on the right";
-	case Hint::WaitForTracking: return "Let tracking settle first";
-	case Hint::Success:         return nullptr;  // the tick and the headline already say it
-	default:                    return nullptr;
-	}
-}
-
-// The three live indicators during the run: rotation variety as a ring, pace
-// and rigidity as bars, each with a word the player can act on.
 void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const questcal::GuideMetrics &m, bool mountRun)
 {
-	(void)width;
-	const float rowH = 48.0f;
-	// A word only when there is something to change: a full green meter says
-	// "good" by itself, and the amber words stand out for being the only ones.
-	auto label = [&](float y, const char *name, const char *word, const ImVec4 &col) {
-		// Without a word beneath it the name centres on the meter, as the
-		// two-line block did.
-		const float nameY = word ? y + 2.0f : y + rowH * 0.5f - g_fontBody->FontSize * 0.5f;
-		dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(origin.x + 70.0f, nameY),
-			Pal::U32(Pal::Text), name);
-		if (word)
-			dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(origin.x + 70.0f, y + 26.0f),
-				Pal::U32(col), word);
+	const float cellW = (width - 32.0f) / 3.0f;
+	const char *names[] = { "Motion variety", "Movement speed", mountRun ? "Tracker stability" : "Device stability" };
+	const char *states[] = {
+		!m.valid ? "Measuring..." : m.coverage >= 0.99 ? "Enough variety" : "Keep turning and tilting",
+		!m.valid ? "Measuring..." : m.gatedFraction < 0.15 ? "Good pace" : "Move more slowly",
+		!m.rigidityValid ? "Measuring..." : m.rigidityDeg < 3.0 ? "Moving together" : "Movement doesn't match"
 	};
-	auto bar = [&](float y, float fill, const ImVec4 &col) {
-		ImVec2 b0(origin.x + 10.0f, y + rowH * 0.5f - 5.0f);
-		ImVec2 b1(origin.x + 50.0f, y + rowH * 0.5f + 5.0f);
-		dl->AddRectFilled(b0, b1, Pal::U32(Pal::Border), 4.0f);
-		if (fill > 0.02f)
-			dl->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * fill, b1.y), Pal::U32(col), 4.0f);
-	};
-
-	// 1. Rotation variety: a ring that fills as the delta axes spread out.
+	const double values[] = { m.coverage, m.valid ? 1.0 - m.gatedFraction : 0.0,
+		m.rigidityValid ? std::clamp(1.0 - (m.rigidityDeg - 1.0) / 8.0, 0.0, 1.0) : 0.0 };
+	for (int i = 0; i < 3; ++i)
 	{
-		const float y = origin.y;
-		ImVec2 rc(origin.x + 30.0f, y + rowH * 0.5f);
-		dl->AddCircle(rc, 18.0f, Pal::U32(Pal::Border), 32, 4.0f);
-		const float f = m.valid ? static_cast<float>(m.coverage) : 0.0f;
-		const bool full = f >= 0.99f;
-		const ImVec4 col = !m.valid ? Pal::Dim : full ? Pal::Good : f >= 0.4f ? Pal::Warn : Pal::Accent;
-		if (f > 0.01f)
-		{
-			dl->PathArcTo(rc, 18.0f, -IM_PI * 0.5f, -IM_PI * 0.5f + f * 2.0f * IM_PI, 40);
-			dl->PathStroke(Pal::U32(col), false, 4.0f);
-		}
-		const char *word = !m.valid ? "measuring" : full ? nullptr : f >= 0.4f ? "more directions" : "keep turning";
-		label(y, "Rotation variety", word, !m.valid ? Pal::Dim : full ? Pal::Good : Pal::Warn);
-	}
-	// 2. Pace: how much of the last second the solver would throw away.
-	{
-		const float y = origin.y + rowH;
-		const float g = m.valid ? static_cast<float>(m.gatedFraction) : 0.0f;
-		const ImVec4 col = !m.valid ? Pal::Dim : g < 0.15f ? Pal::Good : g < 0.4f ? Pal::Warn : Pal::Bad;
-		bar(y, m.valid ? 1.0f - g : 0.0f, col);
-		const char *word = !m.valid ? "measuring" : g < 0.15f ? nullptr : g < 0.4f ? "a little slower" : "slow down";
-		label(y, "Pace", word, col);
-	}
-	// 3. Rigidity: whether the pair (or the tracker on the head) moves as one.
-	{
-		const float y = origin.y + rowH * 2.0f;
-		const bool ok = m.rigidityValid;
-		const double r = m.rigidityDeg;
-		const ImVec4 col = !ok ? Pal::Dim : r < 3.0 ? Pal::Good : r < 6.0 ? Pal::Warn : Pal::Bad;
-		const float fill = ok ? static_cast<float>(std::max(0.0, std::min(1.0, 1.0 - (r - 1.0) / 8.0))) : 0.0f;
-		bar(y, fill, col);
-		const char *word = !ok ? "measuring" : r < 3.0 ? nullptr
-			: r < 6.0 ? "loosening" : (mountRun ? "wobbling" : "coming apart");
-		label(y, mountRun ? "Tracker steady" : "Held together", word, col);
+		const float x = origin.x + (cellW + 16.0f) * static_cast<float>(i);
+		dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, origin.y), Pal::U32(Pal::Text), names[i]);
+		dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(x, origin.y + 28.0f), Pal::U32(Pal::Dim), states[i]);
+		const ImVec2 a(x, origin.y + 50.0f), b(x + cellW, origin.y + 54.0f);
+		dl->AddRectFilled(a, b, Pal::U32(Pal::Border), 2.0f);
+		const float fill = static_cast<float>(std::clamp(values[i], 0.0, 1.0));
+		if (fill > 0.0f)
+			dl->AddRectFilled(a, ImVec2(x + cellW * fill, b.y), Pal::U32(Pal::Accent), 2.0f);
 	}
 }
 
@@ -363,6 +225,13 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
 	float cw = ImGui::GetWindowContentRegionWidth();
+	if ((s_guide.stage == GuideStage::Done || s_guide.stage == GuideStage::Idle) && s_guideTexture)
+	{
+		glDeleteTextures(1, &s_guideTexture);
+		s_guideTexture = 0;
+		s_guideTextureKind = -1;
+	}
+
 
 	if (CalCtx.state == CalibrationState::None)
 	{
@@ -415,44 +284,64 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 	}
 
 	// ---- Calibration progress modal ----
-	float modalW = 720.0f;
-	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, 180.0f), ImGuiSetCond_Always);
+	// Popup IDs depend on the current window. The pinned recovery button is
+	// outside this content child, so open its request in the modal's scope.
+	if (s_guide.openRequested)
+	{
+		s_guide.demo = s_guide.mountRun ? GuideDemo::Mounted : GuideDemo::Wrist;
+		bool headsetReference = false;
+		bool controllerTarget = false;
+		for (const auto &device : state.devices)
+		{
+			if (static_cast<uint32_t>(device.id) == CalCtx.referenceID)
+				headsetReference = device.deviceClass == vr::TrackedDeviceClass_HMD;
+			if (static_cast<uint32_t>(device.id) == CalCtx.targetID)
+				controllerTarget = device.deviceClass == vr::TrackedDeviceClass_Controller;
+		}
+		if (!s_guide.mountRun && headsetReference)
+			s_guide.demo = controllerTarget ? GuideDemo::HeadsetContact : GuideDemo::Mounted;
+		ImGui::OpenPopup("Calibration Progress");
+		s_guide.openRequested = false;
+	}
+	const double now = ImGui::GetTime();
+	// Stage transitions the context drives: a run that ended, any way,
+	// moves to the outcome; a finished countdown starts the run.
+	if (s_guide.stage == GuideStage::Running && !g_uiPreviewMode &&
+		CalCtx.state == CalibrationState::None)
+		s_guide.stage = GuideStage::Done;
+	if (s_guide.stage == GuideStage::Running && g_uiPreviewMode &&
+		now - s_guide.countdownStart > kCountdownSeconds + CalCtx.CollectionSeconds())
+	{
+		// Preview: a fake outcome so the result stage can be styled, a
+		// refused solve under -uipreview-failed and a success otherwise.
+		if (g_uiPreviewScenario == PreviewScenario::Failed)
+		{
+			CalCtx.lastRunHint = CalibrationContext::GuideHint::RotateMore;
+			CalCtx.Outcome("Calibration failed", "The devices didn't rotate in enough directions.",
+				"Turn and tilt both devices together, then try again.",
+				"Rotation coverage 0.21 of 1.00 (need 0.60)", CalibrationContext::Tone::Warn);
+		}
+		else
+		{
+			CalCtx.lastRunHint = CalibrationContext::GuideHint::Success;
+			CalCtx.Outcome("Calibration complete", "Check that the tracker positions line up in VR.", "", "", CalibrationContext::Tone::Good);
+		}
+		s_guide.stage = GuideStage::Done;
+	}
+	const bool showingResult = s_guide.stage == GuideStage::Done;
+	float modalW = showingResult ? 660.0f : 940.0f;
+	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, showingResult ? 180.0f : 60.0f), ImGuiSetCond_Always);
 	ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiSetCond_Always);
 	if (ImGui::BeginPopupModal("Calibration Progress", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
 		using Msg = CalibrationContext::Message;
-		const double now = ImGui::GetTime();
 		const float mw = ImGui::GetWindowContentRegionWidth();
 		ImDrawList *mdl = ImGui::GetWindowDrawList();
-		// The animation and the countdown need frames; the idle loop otherwise
-		// waits up to a second between them.
-		CalCtx.wantedUpdateInterval = std::min(CalCtx.wantedUpdateInterval, 1.0 / 60.0);
+		if (s_guide.stage == GuideStage::Countdown || s_guide.stage == GuideStage::Running ||
+			(s_guide.stage == GuideStage::GetSet && s_guide.animate))
+			CalCtx.wantedUpdateInterval = std::min(CalCtx.wantedUpdateInterval, 1.0 / 60.0);
 
-		// Stage transitions the context drives: a run that ended, any way,
-		// moves to the outcome; a finished countdown starts the run.
-		if (s_guide.stage == GuideStage::Running && !g_uiPreviewMode &&
-			CalCtx.state == CalibrationState::None)
-			s_guide.stage = GuideStage::Done;
-		if (s_guide.stage == GuideStage::Running && g_uiPreviewMode &&
-			now - s_guide.countdownStart > kCountdownSeconds + 6.0)
-		{
-			// Preview: a fake outcome so the result stage can be styled, a
-			// refused solve under -uipreview-failed and a success otherwise.
-			if (g_uiPreviewScenario == PreviewScenario::Failed)
-			{
-				CalCtx.lastRunHint = CalibrationContext::GuideHint::RotateMore;
-				CalCtx.Outcome("That didn't work", "Not enough rotation to tell the axes apart.",
-					"Turn the pair through more directions and try again.",
-					"Rotation coverage 0.21 of 1.00 (need 0.60)", CalibrationContext::Tone::Warn);
-			}
-			else
-			{
-				CalCtx.lastRunHint = CalibrationContext::GuideHint::Success;
-				CalCtx.Outcome("Calibration done", "Good.", "", "", CalibrationContext::Tone::Good);
-			}
-			s_guide.stage = GuideStage::Done;
-		}
 		if (s_guide.stage == GuideStage::Countdown && now - s_guide.countdownStart >= kCountdownSeconds)
 		{
 			if (BeginGuidedRun())
@@ -465,41 +354,33 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			}
 		}
 
-		const ImVec2 artSize(240.0f, 150.0f);
+		if (s_guide.animate)
+			s_guide.animationTime += std::min(io.DeltaTime, 0.05f);
+		const ImVec2 artSize(mw, s_guide.demo == GuideDemo::Wrist ? 330.0f : 230.0f);
 		switch (s_guide.stage)
 		{
 		case GuideStage::GetSet:
 		case GuideStage::Countdown:
 		{
-			SectionLabel(GuideStepLabel(s_guide.anchor, s_guide.mountRun, 1).c_str());
+			ImGui::TextColored(Pal::Dim, "Step 1 of 3");
 			ImGui::Spacing();
-			ImVec2 row = ImGui::GetCursorScreenPos();
-			DrawGuideAnimation(mdl, row, artSize, now, s_guide.mountRun);
-
-			// Text column beside the picture: what to hold, how long, and
-			// whether the two picks are tracking right now. ImGui starts every
-			// new line at the window's left edge, so each item re-enters the
-			// column explicitly.
-			const float tx = row.x + artSize.x + 24.0f;
-			auto column = [&]() {
-				ImGui::SetCursorScreenPos(ImVec2(tx, ImGui::GetCursorScreenPos().y));
-			};
-			ImGui::SetCursorScreenPos(ImVec2(tx, row.y));
-			// Wrap positions are window-local; a screen x here would put the
-			// wrap point past the modal's edge and clip the headline instead.
-			ImGui::PushTextWrapPos(row.x + mw - ImGui::GetWindowPos().x);
 			ImGui::PushFont(g_fontTitle);
-			ImGui::TextWrapped("%s", s_guide.mountRun ? "Put the headset on with the tracker strapped to it."
-				: s_guide.anchor ? "Stand at the spot that feels off." : "Hold the two devices together.");
+			ImGui::TextWrapped("%s", s_guide.anchor ? "Stand where the trackers look misaligned."
+				: s_guide.demo == GuideDemo::HeadsetContact ? "Hold the controller against the visor."
+				: s_guide.demo == GuideDemo::Mounted ? "Keep the tracker fixed to your headset."
+				: "Hold the controller against the wrist tracker.");
 			ImGui::PopFont();
-			ImGui::Spacing();
-			column();
-			std::string how = s_guide.mountRun
-				? FormatString("You'll look around slowly for %.0f seconds.", CalCtx.CollectionSeconds())
-				: FormatString("One hand, firmly. You'll rotate them for %.0f seconds.", CalCtx.CollectionSeconds());
+			const std::string how = s_guide.demo == GuideDemo::HeadsetContact
+				? FormatString("Hold the controller upright, with the trigger side against the front of your headset. Keep it in place as you turn and tilt your head for %.0f seconds.", CalCtx.CollectionSeconds())
+				: s_guide.demo == GuideDemo::Mounted
+				? FormatString("Move your head gently for %.0f seconds, keeping your body relaxed. Keep the tracker sensors uncovered.", CalCtx.CollectionSeconds())
+				: FormatString("Hold the controller against the wrist tracker with your other hand. Move both in a figure eight, gently turning and tilting, for %.0f seconds.", CalCtx.CollectionSeconds());
 			ImGui::TextWrapped("%s", how.c_str());
-			ImGui::PopTextWrapPos();
 			ImGui::Spacing();
+			const ImVec2 row = ImGui::GetCursorScreenPos();
+			DrawGuideAnimation(mdl, row, artSize, s_guide.animationTime, s_guide.demo);
+			ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + artSize.y + 12.0f));
+			const ImVec2 readiness = ImGui::GetCursorScreenPos();
 
 			const VRDevice *picks[2] = { nullptr, nullptr };
 			for (const auto &d : state.devices)
@@ -512,21 +393,26 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			bool ready = true;
 			for (int i = 0; i < 2; ++i)
 			{
-				ImVec2 lp = ImGui::GetCursorScreenPos();
-				lp.x = tx;
 				const bool ok = picks[i] && picks[i]->tracking;
 				ready = ready && ok;
-				mdl->AddCircleFilled(ImVec2(lp.x + 7.0f, lp.y + g_fontBody->FontSize * 0.5f), 5.0f,
-					Pal::U32(ok ? Pal::Good : Pal::Bad), 12);
-				std::string who = picks[i] ? DeviceDisplayName(*picks[i])
+				const std::string who = picks[i] ? DeviceDisplayName(*picks[i])
 					: std::string(i == 0 ? "Reference device" : "Target device");
-				// The dot already says "tracking"; words only when it isn't.
-				std::string line = ok ? who : who + " -- not tracking";
-				ImGui::SetCursorScreenPos(ImVec2(lp.x + 22.0f, lp.y));
-				ImGui::TextColored(ok ? Pal::Text : Pal::Bad, "%s", line.c_str());
+				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + mw - 332.0f);
+				ImGui::TextWrapped("%s is %stracking", who.c_str(), ok ? "" : "not ");
+				ImGui::PopTextWrapPos();
 			}
-			float bottom = std::max(ImGui::GetCursorScreenPos().y, row.y + artSize.y);
-			ImGui::SetCursorScreenPos(ImVec2(row.x, bottom + 12.0f));
+			const float readinessBottom = ImGui::GetCursorScreenPos().y;
+			ImGui::SetCursorScreenPos(ImVec2(readiness.x + mw - 312.0f, readiness.y));
+			if (IconButton("motionreplay", "Replay", nullptr, ImVec2(110.0f, 38.0f), BtnKind::Quiet))
+			{
+				s_guide.animationTime = 0.0;
+				s_guide.animate = true;
+			}
+			ImGui::SameLine(0.0f, 12.0f);
+			if (IconButton("motiontoggle", s_guide.animate ? "Pause motion" : "Play motion", nullptr,
+				ImVec2(190.0f, 38.0f), BtnKind::Ghost))
+				s_guide.animate = !s_guide.animate;
+			ImGui::SetCursorScreenPos(ImVec2(row.x, std::max(readinessBottom, readiness.y + 38.0f) + 8.0f));
 
 			if (s_guide.stage == GuideStage::Countdown)
 			{
@@ -562,7 +448,10 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		}
 		case GuideStage::Running:
 		{
-			SectionLabel(GuideStepLabel(s_guide.anchor, s_guide.mountRun, 2).c_str());
+			if (g_uiPreviewMode)
+				CalCtx.Progress(static_cast<int>((now - s_guide.countdownStart - kCountdownSeconds) * 100.0),
+					static_cast<int>(CalCtx.CollectionSeconds() * 100.0));
+			ImGui::TextColored(Pal::Dim, "Step 2 of 3");
 			ImGui::Spacing();
 			// Live feedback from the run's own buffers, at 5 Hz.
 			if (!g_uiPreviewMode && CalCtx.state == CalibrationState::Collecting &&
@@ -585,10 +474,9 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			}
 			ImGui::Spacing();
 			ImVec2 row = ImGui::GetCursorScreenPos();
-			DrawGuideAnimation(mdl, row, artSize, now, s_guide.mountRun);
-			DrawGuideIndicators(mdl, ImVec2(row.x + artSize.x + 24.0f, row.y + 4.0f),
-				mw - artSize.x - 24.0f, s_guide.metrics, s_guide.mountRun);
-			ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + artSize.y + 8.0f));
+			DrawGuideAnimation(mdl, row, artSize, s_guide.animationTime, s_guide.demo);
+			DrawGuideIndicators(mdl, ImVec2(row.x, row.y + artSize.y + 12.0f), mw, s_guide.metrics, s_guide.mountRun);
+			ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + artSize.y + 80.0f));
 			ImGui::Dummy(ImVec2(0, 0));
 			for (auto &message : CalCtx.messages)
 			{
@@ -612,7 +500,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			ImGui::Spacing();
 			// Otherwise captive: Escape and clicking outside do nothing to a
 			// modal, and the run only ends on its own timer.
-			if (IconButton("cancelprogress", "Cancel", nullptr, ImVec2(mw, 46.0f), BtnKind::Ghost) || EscapePressed())
+			if (IconButton("cancelprogress", "Cancel", nullptr, ImVec2(mw - 202.0f, 46.0f), BtnKind::Ghost) || EscapePressed())
 			{
 				if (g_uiPreviewMode)
 				{
@@ -622,13 +510,15 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				else
 					CancelCalibration();
 			}
+			ImGui::SameLine(0.0f, 12.0f);
+			if (IconButton("runningmotion", s_guide.animate ? "Pause motion" : "Play motion", nullptr,
+				ImVec2(190.0f, 46.0f), BtnKind::Ghost))
+				s_guide.animate = !s_guide.animate;
 			break;
 		}
 		case GuideStage::Done:
 		default:
 		{
-			SectionLabel(GuideStepLabel(s_guide.anchor, s_guide.mountRun, 3).c_str());
-			ImGui::Spacing();
 			// The outcome block starts at the last headline; the run's own
 			// instruction and note before it are not part of the result.
 			// Detail lines are shown from anywhere, behind the toggle.
@@ -683,28 +573,8 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				ImGui::PopFont();
 			}
 
-			// The picture of what to change (or the tick), centred.
 			const auto hint = CalCtx.lastRunHint;
-			if (hint != CalibrationContext::GuideHint::None)
-			{
-				ImGui::Spacing();
-				ImVec2 hp = ImGui::GetCursorScreenPos();
-				const ImVec2 hs(220.0f, 120.0f);
-				ImVec2 ho(hp.x + (mw - hs.x) * 0.5f, hp.y);
-				DrawGuideHint(mdl, ho, hs, hint);
-				float captionH = 0.0f;
-				if (const char *cap = GuideHintCaption(hint))
-				{
-					ImGui::PushFont(g_fontSmall);
-					ImVec2 cs = ImGui::CalcTextSize(cap);
-					ImGui::PopFont();
-					mdl->AddText(g_fontSmall, g_fontSmall->FontSize,
-						ImVec2(hp.x + (mw - cs.x) * 0.5f, ho.y + hs.y + 6.0f), Pal::U32(Pal::Dim), cap);
-					captionH = g_fontSmall->FontSize + 10.0f;
-				}
-				ImGui::SetCursorScreenPos(ImVec2(hp.x, ho.y + hs.y + captionH + 6.0f));
-				ImGui::Dummy(ImVec2(0, 0));
-			}
+			ImGui::Dummy(ImVec2(0, 16.0f));
 
 			ImGui::Spacing();
 			const bool failed = hint != CalibrationContext::GuideHint::Success;
@@ -720,7 +590,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			if (failed)
 			{
 				// Back to get-set with the picture still in mind, not to a log.
-				const float closeW = 180.0f;
+				const float closeW = 120.0f;
 				if (IconButton("guideretry", "Try again", IconPlay, ImVec2(remaining - closeW - 12.0f, 46.0f), BtnKind::Primary))
 				{
 					CalCtx.ClearMessages();
@@ -733,10 +603,14 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 					ImGui::CloseCurrentPopup();
 				}
 			}
-			else if (IconButton("closeprogress", "Close", nullptr, ImVec2(remaining, 46.0f), BtnKind::Ghost) || EscapePressed())
+			else
 			{
-				s_guide.stage = GuideStage::Idle;
-				ImGui::CloseCurrentPopup();
+				ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - 150.0f);
+				if (IconButton("closeprogress", "Done", nullptr, ImVec2(150.0f, 46.0f), BtnKind::Primary) || EscapePressed())
+				{
+					s_guide.stage = GuideStage::Idle;
+					ImGui::CloseCurrentPopup();
+				}
 			}
 			break;
 		}
@@ -755,7 +629,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGui::TextUnformatted("Clear this calibration?");
 		ImGui::PopFont();
 		ImGui::Spacing();
-		ImGui::TextWrapped("Field anchors and the headset tracker measurement go with it.");
+		ImGui::TextWrapped("This also removes the saved field anchors and headset tracker setup.");
 		ImGui::Spacing();
 		ImGui::Spacing();
 		float bw = ImGui::GetWindowContentRegionWidth();
@@ -789,26 +663,23 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 	if (ImGui::BeginPopupModal("Chaperone Drift Warning", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
-		SectionLabel("BEFORE YOU RELY ON THIS");
+		ImGui::PushFont(g_fontTitle);
+		ImGui::TextUnformatted("Check your room boundaries");
+		ImGui::PopFont();
 		ImGui::Spacing();
 
 		ImGui::TextWrapped(
-			"Playspace drift is inevitable due to how the Quest tracks your position "
-			"relative to SteamVR devices. It continuously re-adjusts your position within "
-			"the playspace, and although QuestCalibrator substantially improves upon the "
-			"original, small errors will still build up over time, causing your chaperone "
-			"bounds (SteamVR's walls) to become misaligned.");
+			"QuestCalibrator saves and restores your SteamVR chaperone. "
+			"Tracking drift can still move those virtual walls away from the real room boundaries.");
 		ImGui::Spacing();
 		ImGui::TextWrapped(
-			"For the best physical safety, keep the Quest's own Guardian enabled: it is "
-			"anchored to the real room by the headset's cameras and cannot drift out of "
-			"place. The protected chaperone is a fallback for when Guardian is off, and "
-			"the only walls your SteamVR-tracked devices can see.");
+			"Keep the Quest's own boundary enabled too. A saved chaperone "
+			"doesn't guarantee that your play area is clear or correctly aligned.");
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
 		ImGui::TextWrapped(
-			"Always check that your chaperone bounds are aligned with the real room "
-			"before engaging in activities such as dancing.");
+			"Before playing, check that the virtual walls match your room and leave "
+			"enough space to move safely, especially when dancing.");
 		ImGui::PopStyleColor();
 		if (!CalCtx.uiError.empty())
 		{

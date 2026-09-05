@@ -298,11 +298,43 @@ double g_chapWarnOpenedAt = 0.0;
 float s_bottomReserve = 48.0f;
 void BuildStatusBand(const VRState &state)
 {
-	const float gap = 12.0f;
 	// ---- Status ----
 	// The verdict strip renders in both modes; advanced mode adds the
 	// numbers as quiet lines under the verdict instead of replacing it.
 	const ContinuousStatus continuous = ContinuousStatusNow();
+	if (CalCtx.validProfile && continuous == ContinuousStatus::Frozen)
+	{
+		const float width = ImGui::GetWindowContentRegionWidth();
+		const float actionW = 280.0f;
+		const float bandH = CalCtx.uiAdvanced ? 220.0f : 184.0f;
+		s_bottomReserve = bandH;
+		ImGui::SetCursorPosY(ImGui::GetWindowHeight() - bandH + 18.0f);
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		ImGui::PushFont(g_fontTitle);
+		ImGui::TextUnformatted("Continuous calibration paused");
+		ImGui::PopFont();
+		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - actionW - 36.0f);
+		ImGui::TextWrapped("Tracking no longer matches the saved alignment. Recalibrate with the tracker attached to your headset.");
+		ImGui::PopTextWrapPos();
+		ImGui::SetCursorScreenPos(ImVec2(p.x + width - actionW, p.y));
+		if (IconButton("fixmount", "Recalibrate", IconPlay, ImVec2(actionW, 46.0f), BtnKind::Primary))
+			StartMountSetup(state);
+		ImGui::SetCursorScreenPos(ImVec2(p.x + width - actionW, p.y + 54.0f));
+		if (IconButton("stopcont", "Turn off continuous", nullptr, ImVec2(actionW, 38.0f), BtnKind::Ghost))
+			SaveProfileFieldEdit(CalCtx, [](questcal::ProfileRecord &candidate) {
+				candidate.continuousEnabled = false;
+			});
+		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + 108.0f));
+		if (CalCtx.uiAdvanced && CalCtx.continuousDeviation.valid)
+		{
+			ImGui::PushFont(g_fontSmall);
+			ImGui::TextColored(Pal::Dim, "Difference: %.1f deg yaw, %.1f deg tilt, %.1f cm position",
+				CalCtx.continuousDeviation.yawDeg, CalCtx.continuousDeviation.tiltDeg,
+				CalCtx.continuousDeviation.posM * 100.0);
+			ImGui::PopFont();
+		}
+		return;
+	}
 	const CalRating rating = CalCtx.validProfile ? ComputeCalibrationRating(continuous) : Rating_Unknown;
 	const char *nudge = CalCtx.validProfile ? RecalibrationNudge(rating) : nullptr;
 
@@ -386,13 +418,11 @@ void BuildStatusBand(const VRState &state)
 	// nudge.
 	{
 		const bool showContinuous = CalCtx.validProfile && continuous != ContinuousStatus::Off;
-		const bool frozen = continuous == ContinuousStatus::Frozen;
 		const float lineH = g_fontBody->FontSize + 6.0f;
 		const float detailH = g_fontSmall->FontSize + 6.0f;
 		int lines = CalCtx.validProfile ? 1 + (showContinuous ? 1 : 0) + (nudge ? 1 : 0) : 1;
 		float stripH = lineH * (float)lines + (lines > 1 ? 4.0f : 0.0f)
-			+ detailH * (float)details.size() + (details.empty() ? 0.0f : 4.0f)
-			+ (frozen ? 48.0f : 0.0f);
+			+ detailH * (float)details.size() + (details.empty() ? 0.0f : 4.0f);
 
 		// Full-bleed inset surface with a hairline top edge, so the status
 		// text sits on something instead of floating.
@@ -471,21 +501,6 @@ void BuildStatusBand(const VRState &state)
 				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty),
 					Pal::U32(ContinuousStatusColor(continuous)), ContinuousStatusLine(continuous));
 				y += lineH;
-				if (frozen)
-				{
-					ImGui::SetCursorScreenPos(ImVec2(p.x, y + 4.0f));
-					std::string fix = FormatString("Recalibrate with the headset tracker (%.0f s)",
-						CalCtx.CollectionSeconds());
-					if (IconButton("fixmount", fix.c_str(), IconPlay, ImVec2(440.0f, 38.0f), BtnKind::Primary))
-						StartMountSetup(state);
-					ImGui::SameLine(0.0f, gap);
-					if (IconButton("stopcont", "Turn off continuous calibration", nullptr, ImVec2(270.0f, 38.0f), BtnKind::Ghost))
-						SaveProfileFieldEdit(CalCtx,
-							[](questcal::ProfileRecord &candidate) {
-								candidate.continuousEnabled = false;
-							});
-					y += 48.0f;
-				}
 			}
 
 			if (nudge)
@@ -585,7 +600,9 @@ void BuildMainScreen(const VRState &state)
 		float startW = cw - segW - gap - (haveProfile ? clearW + gap : 0.0f);
 
 		ImVec2 rowA = ImGui::GetCursorScreenPos();
-		if (IconButton("start", "Start calibration", IconPlay, ImVec2(startW, bh), BtnKind::Primary))
+		const bool recovering = ContinuousStatusNow() == ContinuousStatus::Frozen;
+		if (IconButton("start", "Start calibration", IconPlay, ImVec2(startW, bh),
+			recovering ? BtnKind::Ghost : BtnKind::Primary))
 			OpenGuide(false, false);
 
 		// Measurement length. A duration, not a speed: "Fast" read as the good
@@ -665,41 +682,29 @@ void BuildMainScreen(const VRState &state)
 			}
 		}
 
-		// ---- Activity: the last few things the monitors told the player ----
-		// The calibration pane only renders inside the modal, so without this
-		// a freeze, a resume or a waiting correction never reached anyone.
-		// Newest three here (two with the advanced lines below); the full
-		// history is in the log.
-		if (!CalCtx.activity.empty())
+		// Current state stays in the pinned band; historical events are optional.
+		ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
+		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Pal::CardHov);
+		ImGui::PushStyleColor(ImGuiCol_HeaderActive, Pal::Inset);
+		const bool showActivity = !CalCtx.activity.empty() && ImGui::CollapsingHeader("Recent activity");
+		ImGui::PopStyleColor(3);
+		if (showActivity)
 		{
-			ImGui::Spacing();
 			const size_t shown = std::min<size_t>(CalCtx.activity.size(), CalCtx.uiAdvanced ? 2 : 3);
-			const float lineH = g_fontSmall->FontSize + 8.0f;
-			const float padY = 10.0f;
-			float h = padY * 2.0f + lineH * (float)shown;
-			ImVec2 p = BeginRowCard(h);
-			ImDrawList *dl = ImGui::GetWindowDrawList();
-			float y = p.y + padY;
 			for (size_t i = CalCtx.activity.size() - shown; i < CalCtx.activity.size(); ++i)
 			{
 				const auto &entry = CalCtx.activity[i];
-				using Tone = CalibrationContext::Tone;
-				ImVec4 col = entry.tone == Tone::Good ? Pal::Good :
-					entry.tone == Tone::Warn ? Pal::Warn :
-					entry.tone == Tone::Bad ? Pal::Bad : Pal::Dim;
 				char stamp[16] = "";
 				std::time_t t = static_cast<std::time_t>(entry.unixTime);
 				std::tm tm;
 				if (localtime_s(&tm, &t) == 0)
 					std::strftime(stamp, sizeof stamp, "%H:%M", &tm);
-				dl->AddCircleFilled(ImVec2(p.x + 22.0f, y + lineH * 0.5f), 3.5f, Pal::U32(col), 10);
-				dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(p.x + 36.0f, y + 4.0f),
-					Pal::U32(Pal::Faint), stamp);
-				dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(p.x + 84.0f, y + 4.0f),
-					Pal::U32(entry.tone == Tone::Neutral ? Pal::Dim : col), entry.text.c_str());
-				y += lineH;
+				ImGui::PushFont(g_fontSmall);
+				ImGui::TextColored(Pal::Dim, "%s", stamp);
+				ImGui::PopFont();
+				ImGui::TextWrapped("%s", entry.text.c_str());
+				ImGui::Spacing();
 			}
-			EndRowCard(p, h);
 		}
 
 	}

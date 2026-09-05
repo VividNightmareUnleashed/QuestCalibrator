@@ -319,28 +319,11 @@ struct ComScoped
 	T *ptr = nullptr;
 };
 
-bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
+static bool DecodeTexture(IWICImagingFactory *factory, IWICBitmapDecoder *decoder,
+                         GLuint *outTex, int *outW, int *outH, bool guide)
 {
-	// One apartment init per process. The original hand-rolled flag ignored the
-	// result and so does this: a failure surfaces as the CoCreateInstance below.
-	static const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-	(void)comInit;
-
-	ComScoped<IWICImagingFactory> factory;
-	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-		IID_PPV_ARGS(factory.Put()))))
-		return false;
-
-	wchar_t wpath[MAX_PATH];
-	MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH);
-
-	ComScoped<IWICBitmapDecoder> dec;
-	if (FAILED(factory->CreateDecoderFromFilename(wpath, nullptr, GENERIC_READ,
-		WICDecodeMetadataCacheOnDemand, dec.Put())))
-		return false;
-
 	ComScoped<IWICBitmapFrameDecode> frame;
-	if (FAILED(dec->GetFrame(0, frame.Put())))
+	if (FAILED(decoder->GetFrame(0, frame.Put())))
 		return false;
 
 	ComScoped<IWICFormatConverter> conv;
@@ -350,11 +333,12 @@ bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
 		WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
 		return false;
 
-	// Device icons are small art; the bound keeps a malformed or hostile file
-	// from allocating unbounded pixel memory on the render thread.
+	// External device icons retain their small allocation bound. The embedded
+	// guides have fixed, bounded atlas layouts for the wrist and head demos.
 	UINT w = 0, h = 0;
-	conv->GetSize(&w, &h);
-	if (w == 0 || h == 0 || w > 1024 || h > 1024)
+	if (FAILED(conv->GetSize(&w, &h)) ||
+		(guide ? !((w == 4608 && h == 5880) || (w == 5120 && h == 5760))
+			: (w == 0 || h == 0 || w > 1024 || h > 1024)))
 		return false;
 
 	std::vector<unsigned char> pixels((size_t)w * h * 4);
@@ -363,14 +347,86 @@ bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
 
 	GLuint tex = 0;
 	glGenTextures(1, &tex);
+	if (!tex)
+		return false;
 	glBindTexture(GL_TEXTURE_2D, tex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	GLint allocatedWidth = 0;
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &allocatedWidth);
+	if (allocatedWidth != static_cast<GLint>(w))
+	{
+		glDeleteTextures(1, &tex);
+		return false;
+	}
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	*outTex = tex;
 	*outW = (int)w;
 	*outH = (int)h;
 	return true;
+}
+
+bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
+{
+	static const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	(void)comInit;
+	ComScoped<IWICImagingFactory> factory;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(factory.Put()))))
+		return false;
+	wchar_t wpath[MAX_PATH];
+	if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH))
+		return false;
+	ComScoped<IWICBitmapDecoder> decoder;
+	if (FAILED(factory->CreateDecoderFromFilename(wpath, nullptr, GENERIC_READ,
+		WICDecodeMetadataCacheOnDemand, decoder.Put())))
+		return false;
+	return DecodeTexture(factory.Get(), decoder.Get(), outTex, outW, outH, false);
+}
+
+bool LoadGuideTexture(GuideDemo demo, GLuint *outTex)
+{
+	const char *name = demo == GuideDemo::Mounted ? "GUIDE_HEADSET"
+		: demo == GuideDemo::HeadsetContact ? "GUIDE_CONTACT" : "GUIDE_HANDHELD";
+	HRSRC resource = FindResourceA(nullptr, name, MAKEINTRESOURCEA(10));
+	if (!resource)
+		return false;
+	HGLOBAL loaded = LoadResource(nullptr, resource);
+	auto bytes = static_cast<BYTE *>(LockResource(loaded));
+	DWORD size = SizeofResource(nullptr, resource);
+	if (!bytes || size == 0)
+		return false;
+	static const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	(void)comInit;
+	ComScoped<IWICImagingFactory> factory;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(factory.Put()))))
+		return false;
+	ComScoped<IWICStream> stream;
+	if (FAILED(factory->CreateStream(stream.Put())) ||
+		FAILED(stream->InitializeFromMemory(bytes, size)))
+		return false;
+	ComScoped<IWICBitmapDecoder> decoder;
+	if (FAILED(factory->CreateDecoderFromStream(stream.Get(), nullptr,
+		WICDecodeMetadataCacheOnDemand, decoder.Put())))
+		return false;
+	int width = 0, height = 0;
+	return DecodeTexture(factory.Get(), decoder.Get(), outTex, &width, &height, true);
+}
+
+const std::string &GuideModelCredits()
+{
+	static const std::string credits = []() -> std::string {
+		HRSRC resource = FindResourceA(nullptr, "GUIDE_CREDITS", MAKEINTRESOURCEA(10));
+		if (resource)
+		{
+			const char *bytes = static_cast<const char *>(LockResource(LoadResource(nullptr, resource)));
+			if (bytes)
+				return std::string(bytes, SizeofResource(nullptr, resource));
+		}
+		return "Motion demo credits couldn't load. Reinstall QuestCalibrator to restore them.";
+	}();
+	return credits;
 }
 
 // Keyed by absolute path; loaded lazily on the render thread (GL context current).

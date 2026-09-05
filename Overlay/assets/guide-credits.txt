@@ -1,0 +1,45 @@
+Calibration motion demos
+
+Meta Quest Pro Headset by VAR Lab (Penn State Behrend)
+https://sketchfab.com/3d-models/meta-quest-pro-headset-66159a79cfb549c1bbaa23f17cb43267
+Creative Commons Attribution 4.0 International
+https://creativecommons.org/licenses/by/4.0/
+Changes: rebuilt side bands, repaired and smoothed scanned surfaces, replaced materials, fitted and animated for the calibration demonstrations.
+
+Infinite, 3D Head Scan by Lee Perry-Smith
+Based on a work at www.triplegangers.com; original information at www.ir-ltd.net.
+https://github.com/mrdoob/three.js/tree/dev/examples/models/gltf/LeePerrySmith
+Creative Commons Attribution 3.0 Unported
+https://creativecommons.org/licenses/by/3.0/
+Changes: scaled, given a neutral material, and rigged for head and neck movement.
+
+VIVE Tracker 3.0 model supplied by HTC
+https://developer.vive.com/us/hardware/tracker3/
+https://dl.vive.com/Tracker/3D_model/VIVE_Tracker_3.0_3D.zip
+Changes: adjusted materials and placement for instructional renders; wrist strap and mounts added.
+
+Touch Pro, Valve Index and hand models from WebXR Input Profiles
+https://github.com/immersive-web/webxr-input-profiles/tree/f4992299601614adbfefd398dc8e281556bb7444/packages/assets
+Changes: materials, hand poses, forearm extension, and placement for instructional renders.
+
+MIT License
+
+Copyright (c) 2019 Amazon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished
+to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice (including the next
+paragraph) shall be included in all copies or substantial portions of the
+Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
+OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF
+OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.

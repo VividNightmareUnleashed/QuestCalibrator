@@ -189,9 +189,15 @@ enum class ContinuousStatus
 
 enum class GuideStage { Idle, GetSet, Countdown, Running, Done };
 
+enum class GuideDemo { Wrist, Mounted, HeadsetContact };
+
 struct GuideState
 {
+	GuideDemo demo = GuideDemo::Wrist;
 	GuideStage stage = GuideStage::Idle;
+	bool openRequested = false;
+	bool animate = true;
+	double animationTime = 0.0;
 	bool anchor = false;       // field-anchor run
 	bool mountRun = false;     // head-referenced run for the headset tracker
 	double countdownStart = 0.0;
@@ -238,6 +244,8 @@ void IconGauge(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconField(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH);
+bool LoadGuideTexture(GuideDemo demo, GLuint *outTex);
+const std::string &GuideModelCredits();
 const DeviceIconTex *GetDeviceIconTex(const std::string &path);
 bool FileExists(const std::string &path);
 std::string Prefer2x(const std::string &path);
@@ -284,10 +292,7 @@ void IdentifyButton(ImVec2 size);
 void OpenGuide(bool anchor, bool mountRun);
 void StartMountSetup(const VRState &state);
 bool BeginGuidedRun();
-void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, bool mountRun);
-void DrawGuideHint(ImDrawList *dl, ImVec2 origin, ImVec2 size, CalibrationContext::GuideHint hint);
-std::string GuideStepLabel(bool anchor, bool mountRun, int step);
-const char *GuideHintCaption(CalibrationContext::GuideHint hint);
+void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, GuideDemo demo);
 void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const questcal::GuideMetrics &m, bool mountRun);
 void BuildMenu(const VRState &state, bool runningInOverlay);
 void BuildSettingsScreen(const VRState &state);

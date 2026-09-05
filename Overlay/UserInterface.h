@@ -14,7 +14,7 @@ extern bool g_uiPreviewMany;
 // calibration paused with the drift buttons in the band), -uipreview-failed
 // (a guided run that ends in a refused solve), -uipreview-empty (first launch,
 // nothing calibrated). Each implies -uipreview-many.
-enum class PreviewScenario { Healthy, Frozen, Failed, Empty };
+enum class PreviewScenario { Healthy, Frozen, Failed, Empty, Guide, Result };
 extern PreviewScenario g_uiPreviewScenario;
 
 // Fonts loaded by QuestCalibrator.cpp at window creation.

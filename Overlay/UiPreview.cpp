@@ -40,6 +40,17 @@ VRState PreviewVRState()
 	hmd.tracking = true;
 	state.devices.push_back(hmd);
 
+	VRDevice touchPro;
+	touchPro.id = 3 + kPreviewManyTrackerCount;
+	touchPro.deviceClass = vr::TrackedDeviceClass_Controller;
+	touchPro.model = "Touch Pro Right";
+	touchPro.serial = "PREVIEW-TOUCH-PRO-RIGHT";
+	touchPro.trackingSystem = "oculus";
+	touchPro.controllerRole = vr::TrackedControllerRole_RightHand;
+	touchPro.battery = 0.75f;
+	touchPro.tracking = true;
+	state.devices.push_back(touchPro);
+
 	VRDevice right;
 	right.id = 1;
 	right.deviceClass = vr::TrackedDeviceClass_Controller;
@@ -163,6 +174,21 @@ void SetupPreviewState()
 
 	switch (g_uiPreviewScenario)
 	{
+	case PreviewScenario::Guide:
+	case PreviewScenario::Result:
+		CalCtx.referenceID = 3 + kPreviewManyTrackerCount;
+		CalCtx.targetID = 3;
+		CalCtx.pendingReferenceTrackingSystem = "oculus";
+		CalCtx.pendingTargetTrackingSystem = "lighthouse";
+		OpenGuide(false, false);
+		if (g_uiPreviewScenario == PreviewScenario::Result)
+		{
+			CalCtx.lastRunHint = CalibrationContext::GuideHint::Success;
+			CalCtx.Outcome("Calibration complete", "Check that the tracker positions line up in VR.",
+				"", "Rotation RMS 2.53 degrees; position RMS 1.0 cm", CalibrationContext::Tone::Good);
+			s_guide.stage = GuideStage::Done;
+		}
+		break;
 	case PreviewScenario::Frozen:
 		// The loop measured a deviation too large to correct and stopped:
 		// the band shows its two actions and the activity card the event.

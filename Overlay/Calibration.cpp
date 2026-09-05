@@ -1178,29 +1178,29 @@ static StopReason DescribeSolveFailure(const questcal::EngineResult &result)
 	switch (result.failure)
 	{
 	case EngineFailure::NotEnoughRotation:
-		reason.body = "Not enough rotation.";
-		reason.action = "Turn the pair further: at least a quarter turn each time.";
+		reason.body = "The devices didn't rotate far enough.";
+		reason.action = "Use wider turns while keeping both devices fixed together.";
 		reason.hint = Hint::RotateMore;
 		break;
 	case EngineFailure::SingleAxis:
 	case EngineFailure::TranslationUnobservable:
-		reason.body = "Rotation was around a single axis.";
-		reason.action = "Rotate around more than one axis: twist, tilt and roll.";
+		reason.body = "The devices only rotated in one direction.";
+		reason.action = "Turn and tilt both devices together in different directions.";
 		reason.hint = Hint::TwoAxes;
 		break;
 	case EngineFailure::RotationResidual:
-		reason.body = "The two devices didn't move as one rigid pair.";
+		reason.body = "The devices' rotation readings didn't match closely enough.";
 		reason.action = "Hold them firmly together and try again.";
 		reason.hint = Hint::HoldTogether;
 		break;
 	case EngineFailure::PositionResidual:
-		reason.body = "Motion was too fast, or tracking too jittery.";
-		reason.action = "Move more slowly and try again.";
+		reason.body = "The devices' position readings didn't match closely enough.";
+		reason.action = "Move slowly and keep both devices in clear view, then try again.";
 		reason.hint = Hint::SlowDown;
 		break;
 	case EngineFailure::TimeOffset:
-		reason.body = "Couldn't measure the latency between the two systems.";
-		reason.action = "Keep both devices tracking and keep rotating for the full countdown.";
+		reason.body = "Couldn't measure the tracking delay between the devices.";
+		reason.action = "Keep turning both devices together until the timer finishes.";
 		reason.hint = Hint::KeepTracking;
 		break;
 	case EngineFailure::NotEnoughSamples:
@@ -1410,7 +1410,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 	{
 		const StopReason reason = DescribeSolveFailure(result);
 		ctx.lastRunHint = reason.hint;
-		ctx.Outcome("That didn't work", reason.body, reason.action, reason.detail,
+		ctx.Outcome("Calibration failed", reason.body, reason.action, reason.detail,
 			CalibrationContext::Tone::Warn);
 		if (EndCalibrationRun(ctx) && vr::VRSystem())
 			SynchronizeCalibrationDriver(ctx);
@@ -1528,14 +1528,14 @@ static void FinishCalibration(CalibrationContext &ctx)
 	ctx.lastRunHint = CalibrationContext::GuideHint::Success;
 	const double rotDeg = result.rotationRmsDeg;
 	const double posCm = result.translationRmsMeters * 100.0;
-	// The same rating word the main screen uses, and nothing else: "Quality:"
-	// in front of it only added a second colon to the activity line.
-	std::string quality = rotDeg <= 3.0 && posCm <= 1.5 ? "Good."
-		: rotDeg <= 6.0 && posCm <= 3.0 ? "Usable." : "Rough.";
-	std::string action = quality == "Good." ? ""
-		: quality == "Usable." ? "Redo it with more rotation if anything looks off in game."
-		: "Redo it with more rotation and slower motion.";
-	CalibrationContext::Tone tone = quality == "Rough." ? CalibrationContext::Tone::Warn
+	const bool good = rotDeg <= 3.0 && posCm <= 1.5;
+	const bool rough = rotDeg > 6.0 || posCm > 3.0;
+	const std::string quality = good ? "Check that the tracker positions line up in VR."
+		: rough ? "The alignment is rough." : "The alignment may need another pass.";
+	const std::string action = good ? ""
+		: rough ? "Try again with slower motion, turning and tilting in different directions."
+		: "Check the tracker positions in VR. Try again if they look off.";
+	const CalibrationContext::Tone tone = rough ? CalibrationContext::Tone::Warn
 		: CalibrationContext::Tone::Good;
 	if (mount.attempted)
 	{
@@ -1543,7 +1543,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		// folded into the one outcome the modal shows, instead of a line
 		// that would have landed above the headline and gone unread.
 		if (mount.measured)
-			ctx.Outcome("Calibration done", quality + " " + mount.note, action, "", tone);
+			ctx.Outcome("Calibration complete", quality + " " + mount.note, action, "", tone);
 		else
 		{
 			if (mount.tooFast)
@@ -1553,7 +1553,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		}
 	}
 	else
-		ctx.Outcome("Calibration done", quality, action, "", tone);
+		ctx.Outcome("Calibration complete", quality, action, "", tone);
 	if (!saved)
 		ctx.Tell("Applied for this session, but it couldn't be saved; redo it after restarting.",
 			CalibrationContext::Tone::Warn);
@@ -1607,12 +1607,12 @@ static void BeginCollection(CalibrationContext &ctx, double time)
 		// A head-referenced run: the tracker is strapped to the headset, so
 		// the motion is the head's.
 		ctx.Instruct("Look around slowly.");
-		ctx.Note("Side to side, up and down, and tilt your head. Keep the tracker tracking the whole time.");
+		ctx.Note("Look left and right, then up and down. Gently tilt your head to each side. Keep the tracker in view of the base stations.");
 	}
 	else
 	{
-		ctx.Instruct("Hold them together and keep rotating.");
-		ctx.Note("Rotate around more than one axis and move around a little. Keep both devices tracking.");
+		ctx.Instruct("Keep both devices firmly together.");
+		ctx.Note("Move both devices in a figure eight, gently turning and tilting as you go. Keep them firmly together and in view of their tracking cameras or base stations.");
 	}
 }
 
