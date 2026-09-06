@@ -369,6 +369,11 @@ std::wstring QuoteArgument(const std::wstring &value)
 
 Updater AppUpdater;
 
+bool HashFileSha256(const std::filesystem::path &path, std::array<unsigned char, 32> &digest)
+{
+	return HashFile(path, digest);
+}
+
 Updater::~Updater()
 {
 	Shutdown();

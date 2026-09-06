@@ -61,6 +61,11 @@ bool CalibrationContextResetScenario();
 bool ControllerTriggerAxisScenario();
 bool CalibrationContextCadenceScenario();
 bool CalibrationContextCorrectionBasisScenario();
+bool ContinuousInputDiagnosticsScenario();
+bool PoseStreamDiagnosticsScenario();
+bool DiagnosticsExportScenario();
+bool ContinuousWindowDiagnosticsScenario();
+bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
@@ -1758,6 +1763,16 @@ void RunDriverSyncStateScenarios()
 
 void RunPoseSampleScenarios()
 {
+	Check("diagnostics: complete exported file", DiagnosticsExportScenario(),
+		"build hash, driver status, scale confidence, mount and raw poses reach the on-disk report");
+	Check("pose stream diagnostics: passive snapshot", PoseStreamDiagnosticsScenario(),
+		"all devices and loss markers are retained without consuming another reader's samples");
+	Check("continuous diagnostics: input and export", ContinuousInputDiagnosticsScenario(),
+		"tracking/numeric failures and stale captures remain distinguishable after profile reset");
+	Check("continuous diagnostics: reset starvation", ContinuousWindowDiagnosticsScenario(),
+		"gap evidence survives window resets; clean input still recovers normally");
+	Check("continuous diagnostics: pairing gates", ContinuousPairingDiagnosticsScenario(),
+		"waiting retains targets; out-of-order and speed rejection have separate counters");
 	Check("calibration context: profile reset boundary",
 		CalibrationContextResetScenario(),
 		"profile-derived state resets as one value; preferences and chaperone survive");

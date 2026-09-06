@@ -186,6 +186,11 @@ void StopCalibrationDriver()
 	Worker.Stop();
 }
 
+DriverSyncTracker CaptureDriverSyncDiagnostics()
+{
+	return Tracker;
+}
+
 void SynchronizeCalibrationDriver(CalibrationContext &ctx)
 {
 	ctx.enabled = ctx.validProfile && !ctx.profileUniverseUnsafe;

@@ -102,6 +102,7 @@
     <ClCompile Include="..\Driver\Logging.cpp" />
     <ClCompile Include="..\Overlay\CalibrationEngine.cpp" />
     <ClCompile Include="..\Overlay\ContinuousAlignment.cpp" />
+    <ClCompile Include="..\Overlay\Diagnostics.cpp" />
     <ClCompile Include="..\Overlay\LegacyContinuous.cpp" />
     <ClCompile Include="..\Overlay\DriftMonitor.cpp" />
     <ClCompile Include="..\Overlay\JumpDetector.cpp" />

@@ -6,6 +6,7 @@
 #include "LegacyContinuous.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
+#include "Diagnostics.h"
 #include "FieldMath.h"
 #include "PoseStreamHub.h"
 #include "ProfileValidation.h"
@@ -83,13 +84,41 @@ static int ContinuousConsumer = -1;
 static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
 
-static void ResetContinuousObservations(CalibrationContext &ctx)
+static void ResetContinuousObservations(CalibrationContext &ctx,
+	questcal::ContinuousAlignment::ResetReason reason)
 {
-	Continuous->Reset();
+	Continuous->Reset(reason);
+	ctx.continuousDiagnostics.engine = Continuous->GetDiagnostics();
 	ctx.continuousCorrectionGate.Clear();
 }
 
+static uint64_t DrainContinuousInput(CalibrationContext &ctx)
+{
+	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch);
+	auto &diagnostics = ctx.continuousDiagnostics;
+	++diagnostics.batches;
+	diagnostics.samples += ContinuousScratch.size();
+	if (dropped > 0)
+	{
+		++diagnostics.gapEvents;
+		diagnostics.reportedLoss += dropped;
+	}
+	return dropped;
+}
+
 CalibrationContext CalCtx;
+
+DiagnosticCapture CaptureCalibrationDiagnostics()
+{
+	DiagnosticCapture capture{ PoseHub.ReadDiagnostics(), questcal::CaptureDriverSyncDiagnostics() };
+	LARGE_INTEGER now{};
+	if (QueryPerformanceCounter(&now))
+		capture.sampleClock = static_cast<double>(now.QuadPart) * QpcToSeconds;
+	if (auto settings = vr::VRSettings())
+		capture.steamVrWorldScale = settings->GetFloat(vr::k_pch_SteamVR_Section,
+			vr::k_pch_SteamVR_WorldScale_Float, &capture.worldScaleError);
+	return capture;
+}
 
 // Why a run stopped, in the player's words: what happened (naming what they
 // can see) and one thing to do. `detail` is the engineer's reason, kept
@@ -212,6 +241,7 @@ void InitCalibrator()
 	questcal::StartCalibrationSpace(PoseHub, QpcToSeconds);
 
 	Continuous = std::make_unique<questcal::ContinuousAlignment>();
+	CalCtx.continuousDiagnostics.engine = Continuous->GetDiagnostics();
 	ContinuousConsumer = PoseHub.CreateConsumer();
 	questcal::StartCalibrationDriver();
 }
@@ -259,7 +289,7 @@ static void DiscardPoseRingBacklog()
 }
 
 static bool PreflightPoseRing(questcal::CalibrationRun &run,
-	const std::vector<protocol::DevicePoseSample> &samples, double qpcNow)
+	const std::vector<protocol::DevicePoseSample> &samples, double qpcNow, const char *&reason)
 {
 	questcal::CalibrationRun::Universe reference;
 	questcal::CalibrationRun::Universe target;
@@ -274,10 +304,18 @@ static bool PreflightPoseRing(questcal::CalibrationRun &run,
 		auto *universe = sample.deviceId == run.referenceId ? &reference :
 			sample.deviceId == run.targetId ? &target : nullptr;
 		if (universe && !universe->Accept(parts.wfdRot, parts.wfdTrans))
+		{
+			reason = "selected device changed world-from-driver during preflight";
 			return false;
+		}
 	}
 	if (!reference.valid || !target.valid)
+	{
+		reason = !reference.valid && !target.valid ? "neither selected device had fresh trusted samples"
+			: !reference.valid ? "reference had no fresh trusted samples" : "target had no fresh trusted samples";
 		return false;
+	}
+	reason = "fresh trusted pair available";
 	run.referenceUniverse = reference;
 	run.targetUniverse = target;
 	return true;
@@ -574,7 +612,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	if (jumped)
 	{
 		Drift->Reset();
-		ResetContinuousObservations(ctx);
+		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::UniverseJump);
 	}
 
 	DriftMonitor::Event drift;
@@ -638,8 +676,11 @@ static size_t LegacySampleWindow(const CalibrationContext &ctx)
 	}
 }
 
-static void LegacyReset()
+static void LegacyReset(CalibrationContext &ctx)
 {
+	++ctx.continuousDiagnostics.legacy.resets;
+	ctx.continuousDiagnostics.legacy.samples = 0;
+	ctx.continuousDiagnostics.legacy.valid = false;
 	LegacyCalc.Clear();
 	LegacyHaveRef = LegacyHaveTarget = false;
 	LegacyRefFresh = LegacyTargetFresh = false;
@@ -668,15 +709,17 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 		LegacyBoundBaseGeneration != ctx.baseGeneration ||
 		LegacyBoundTrackerSerial != ctx.continuousTrackerSerial)
 	{
-		LegacyReset();
+		++ctx.continuousDiagnostics.legacy.bindingResets;
+		LegacyReset(ctx);
 		ctx.continuousCorrectionGate.Clear();
 		bindCurrentProfile();
 	}
 
-	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch);
+	const uint64_t dropped = DrainContinuousInput(ctx);
 	if (dropped > 0)
 	{
-		LegacyReset();
+		++ctx.continuousDiagnostics.legacy.gapResets;
+		LegacyReset(ctx);
 		ctx.continuousCorrectionGate.Clear();
 		bindCurrentProfile();
 	}
@@ -687,7 +730,7 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 		questcal::PoseSample sample;
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
 		{
-			if (TryComposeRingSample(s, QpcToSeconds, sample))
+			if (ctx.continuousDiagnostics.devices[s.deviceId].Compose(s, QpcToSeconds, sample))
 			{
 				LegacyRef = sample;
 				LegacyHaveRef = true;
@@ -697,7 +740,7 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 		}
 		else if (s.deviceId == ctx.continuousTrackerId)
 		{
-			if (TryComposeRingSample(s, QpcToSeconds, sample))
+			if (ctx.continuousDiagnostics.devices[s.deviceId].Compose(s, QpcToSeconds, sample))
 			{
 				LegacyTarget = sample;
 				LegacyHaveTarget = true;
@@ -712,7 +755,8 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 	{
 		if (LegacyHaveRef || LegacyHaveTarget)
 		{
-			LegacyReset();
+			++ctx.continuousDiagnostics.legacy.staleResets;
+			LegacyReset(ctx);
 			ctx.continuousCorrectionGate.Clear();
 			bindCurrentProfile();
 		}
@@ -761,6 +805,7 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 	const double pairSkew = LegacyRef.time - LegacyTarget.time;
 	if (std::abs(pairSkew) > LegacyMaxPairSkewSeconds)
 	{
+		++ctx.continuousDiagnostics.legacy.pairSkewRejected;
 		// Keep the newer observation and wait for the lagging device to catch up.
 		if (pairSkew < 0.0)
 			LegacyRefFresh = false;
@@ -805,9 +850,11 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 	LegacyCalc.enableStaticRecalibration = false;   // the original's default
 	LegacyCalc.lockRelativePosition = false;
 	const bool updated = LegacyCalc.ComputeIncremental(lerp, 1.5, 0.005, false);
+	++ctx.continuousDiagnostics.legacy.solveAttempts;
 
 	if (updated && LegacyCalc.isValid())
 	{
+		++ctx.continuousDiagnostics.legacy.solvesAccepted;
 		const Eigen::AffineCompact3d est = LegacyCalc.Transformation();
 		const Eigen::Quaterniond newRotation(est.rotation());
 		const Eigen::Vector3d newTranslation = est.translation();
@@ -839,8 +886,11 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 		: questcal::ContinuousAlignment::State::Inactive;
 
 	char buf[192];
-	snprintf(buf, sizeof buf, "legacy loop: %zu samples, solve %s, error %.1f cm, %u corrections",
-		LegacyCalc.SampleCount(), updated ? "accepted" : "kept", LegacyCalc.m_lastError * 100.0,
+	char error[48] = "unavailable";
+	if (LegacyCalc.isValid())
+		snprintf(error, sizeof error, "%.1f cm", LegacyCalc.m_lastError * 100.0);
+	snprintf(buf, sizeof buf, "legacy loop: %zu samples, solve %s, error %s, %u corrections",
+		LegacyCalc.SampleCount(), updated ? "accepted" : LegacyCalc.isValid() ? "kept" : "not available", error,
 		ctx.autoCorrectionsApplied);
 	ctx.Diag(buf);
 
@@ -876,8 +926,8 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	{
 		if (ContinuousActive)
 		{
-			ResetContinuousObservations(ctx);
-			LegacyReset();
+			ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::Suspended);
+			LegacyReset(ctx);
 			ContinuousActive = false;
 		}
 		PoseHub.DiscardBacklog(ContinuousConsumer);
@@ -897,13 +947,15 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	// baselines mean different things.
 	if (ctx.continuousMode != LastContinuousMode)
 	{
-		ResetContinuousObservations(ctx);
-		LegacyReset();
+		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::ModeChanged);
+		LegacyReset(ctx);
 		LastContinuousMode = ctx.continuousMode;
 	}
 	if (ctx.continuousMode == ContinuousMode::Legacy)
 	{
 		LegacyContinuousTick(ctx, now);
+		ctx.continuousDiagnostics.legacy.samples = LegacyCalc.SampleCount();
+		ctx.continuousDiagnostics.legacy.valid = LegacyCalc.isValid();
 		return;
 	}
 
@@ -912,11 +964,12 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	Continuous->SetExtrinsic(ctx.mountExtrinsic);
 	Continuous->SetLatencyReestimation(ctx.continuousLatencyReestimation);
 
-	uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch);
+	uint64_t dropped = DrainContinuousInput(ctx);
+	auto &diagnostics = ctx.continuousDiagnostics;
 	if (dropped > 0)
 	{
 		// A drain hole could fake a discontinuity; baselines across it are unsafe.
-		ResetContinuousObservations(ctx);
+		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::StreamGap);
 	}
 
 	for (const auto &s : ContinuousScratch)
@@ -924,19 +977,15 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
 			continue;
 
+		if (s.deviceId != vr::k_unTrackedDeviceIndex_Hmd && s.deviceId != ctx.continuousTrackerId)
+			continue;
 		questcal::PoseSample sample;
+		if (!diagnostics.devices[s.deviceId].Compose(s, QpcToSeconds, sample))
+			continue;
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
-		{
-			if (!TryComposeRingSample(s, QpcToSeconds, sample))
-				continue;
 			Continuous->PushReference(sample);
-		}
-		else if (s.deviceId == ctx.continuousTrackerId)
-		{
-			if (!TryComposeRingSample(s, QpcToSeconds, sample))
-				continue;
+		else
 			Continuous->PushTarget(sample);
-		}
 	}
 
 	// The engine's clock is the ring's (QPC seconds), not the UI clock. Checked
@@ -974,6 +1023,8 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	};
 	Continuous->Update(ringNow, ctx.transform.rotation, ctx.transform.translationMeters,
 		ctx.transform.scale, ctx.transform.timeOffset, expectedAt);
+	diagnostics.lastUpdateTime = ringNow;
+	diagnostics.engine = Continuous->GetDiagnostics();
 
 	questcal::ContinuousAlignment::Correction corr;
 	bool hadPendingCorrection = ctx.continuousCorrectionGate.HasPending();
@@ -1028,6 +1079,11 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			}
 		}
 	}
+
+	ctx.continuousState = Continuous->GetState();
+	ctx.continuousDeviation = Continuous->CurrentDeviation();
+	ctx.continuousScatterRotDeg = Continuous->ScatterRotRmsDeg();
+	ctx.continuousScatterPosM = Continuous->ScatterPosRmsM();
 
 	// The loop's decision inputs, once every evaluate interval: what a bug
 	// report about "it keeps pausing" needs and the pane does not.
@@ -1125,11 +1181,6 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		if (std::abs(appliedAfter - appliedBefore) > 0.0005)
 			SynchronizeCalibrationDriver(ctx);
 	}
-
-	ctx.continuousState = Continuous->GetState();
-	ctx.continuousDeviation = Continuous->CurrentDeviation();
-	ctx.continuousScatterRotDeg = Continuous->ScatterRotRmsDeg();
-	ctx.continuousScatterPosM = Continuous->ScatterPosRmsM();
 }
 
 static bool EndCalibrationRun(CalibrationContext &ctx)
@@ -1639,6 +1690,15 @@ void CalibrationTick(double time)
 	// After the monitors: an accepted jump must land (and reset the continuous
 	// window) before the continuous loop reads the calibration this tick.
 	ContinuousTick(ctx, time);
+	static double lastInputDiagTime = -1e9;
+	if (ctx.detailedLogging && ctx.continuousEnabled && time - lastInputDiagTime >= 10.0)
+	{
+		lastInputDiagTime = time;
+		LARGE_INTEGER qpcNow{};
+		const double sampleClock = QueryPerformanceCounter(&qpcNow)
+			? static_cast<double>(qpcNow.QuadPart) * QpcToSeconds : 0.0;
+		ctx.Diag(DescribeContinuousDiagnostics(ctx, sampleClock));
+	}
 
 	// Runtime poses are only the compatibility collection source. The normal
 	// raw-ring path and all idle monitors already have timestamped samples, so
@@ -1818,12 +1878,16 @@ void CalibrationTick(double time)
 
 		// A mapping alone does not prove that this driver's hook sees the selected
 		// pair. Drain once and require recent trusted traffic from both devices.
-		PoseHub.Drain(CollectorConsumer, CollectorScratch);
+		const uint64_t preflightDropped = PoseHub.Drain(CollectorConsumer, CollectorScratch);
 		LARGE_INTEGER qpcNow{};
 		bool hasClock = QueryPerformanceCounter(&qpcNow) != FALSE;
+		const char *preflightReason = hasClock ? "raw channel closed" : "QPC unavailable";
 		run.usesPoseRing = hasClock && PoseHub.RingOpen() && PreflightPoseRing(
 			run, CollectorScratch,
-			static_cast<double>(qpcNow.QuadPart) * QpcToSeconds);
+			static_cast<double>(qpcNow.QuadPart) * QpcToSeconds, preflightReason);
+		snprintf(buf, sizeof buf, "pose preflight: %s; batch %zu samples, reported loss %llu",
+			preflightReason, CollectorScratch.size(), static_cast<unsigned long long>(preflightDropped));
+		ctx.Diag(buf);
 
 		if (run.usesPoseRing)
 		{

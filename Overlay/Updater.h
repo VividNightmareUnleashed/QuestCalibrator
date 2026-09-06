@@ -3,7 +3,9 @@
 #include "UpdatePolicy.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -14,6 +16,10 @@ namespace questcal
 {
 namespace update
 {
+
+// Shared with diagnostics to identify installed binaries using the same
+// streaming SHA-256 implementation used for verified downloads.
+bool HashFileSha256(const std::filesystem::path &path, std::array<unsigned char, 32> &digest);
 
 enum class State
 {

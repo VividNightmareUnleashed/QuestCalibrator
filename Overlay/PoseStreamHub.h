@@ -3,6 +3,7 @@
 #include "../common/PoseChannel.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
 #include <functional>
@@ -36,6 +37,21 @@ public:
 
 	// Whether the underlying shmem ring is currently open (driver present).
 	bool RingOpen() const { return ringOpen.load(std::memory_order_acquire); }
+
+	struct Diagnostics
+	{
+		struct Device
+		{
+			uint64_t received = 0;
+			uint64_t streamBoundary = 0;
+			protocol::DevicePoseSample latest;
+		};
+		std::array<Device, vr::k_unMaxTrackedDeviceCount> devices{};
+		uint64_t streamBoundaries = 0, gapMarkers = 0, reportedLoss = 0;
+		bool open = false;
+	};
+	// Copies a bounded snapshot without consuming any reader's backlog.
+	Diagnostics ReadDiagnostics();
 
 	// A consumer id is a private cursor. Samples buffered before the consumer
 	// was created are not delivered to it.
@@ -99,6 +115,7 @@ private:
 	std::atomic<bool> ringOpen{ false };
 
 	std::mutex mutex;                                   // guards all fields below
+	Diagnostics diagnostics;
 	std::vector<HistoryEntry> history;                  // ring, HistoryCapacity entries
 	uint64_t head = 0;                                  // absolute index of next write
 	uint64_t sampleCount = 0;                           // actual samples, excluding gap markers

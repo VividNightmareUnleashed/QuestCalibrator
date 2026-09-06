@@ -222,6 +222,32 @@ inline bool TryComposeRingSample(const protocol::DevicePoseSample &s,
 	return true;
 }
 
+struct RingInputDiagnostics
+{
+	uint64_t received = 0, accepted = 0;
+	uint64_t trackingRejected = 0, numericRejected = 0;
+	double lastCaptureTime = 0.0, lastAcceptedCaptureTime = 0.0;
+
+	bool Compose(const protocol::DevicePoseSample &s, double qpcToSeconds,
+		questcal::PoseSample &out)
+	{
+		++received;
+		lastCaptureTime = RingCaptureTime(s, qpcToSeconds);
+		if (TryComposeRingSample(s, qpcToSeconds, out))
+		{
+			++accepted;
+			lastAcceptedCaptureTime = lastCaptureTime;
+			return true;
+		}
+		if (!s.deviceIsConnected || !s.poseIsValid ||
+			s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK))
+			++trackingRejected;
+		else
+			++numericRejected;
+		return false;
+	}
+};
+
 namespace ringpose
 {
 

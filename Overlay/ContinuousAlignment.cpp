@@ -132,14 +132,20 @@ void ContinuousAlignment::PushReference(const PoseSample &s)
 	// Per-device ring order is monotonic; drop the odd inversion rather than
 	// hand InterpolateAt an unsorted stream.
 	if (!refWindow.empty() && s.time <= refWindow.back().time)
+	{
+		++diagnostics.referenceOutOfOrder;
 		return;
+	}
 	refWindow.push_back(s);
 }
 
 void ContinuousAlignment::PushTarget(const PoseSample &s)
 {
 	if (!targetWindow.empty() && s.time <= targetWindow.back().time)
+	{
+		++diagnostics.targetOutOfOrder;
 		return;
+	}
 	targetWindow.push_back(s);
 }
 
@@ -152,7 +158,10 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 		// Speed gates on both sides: residual timing error converts speed
 		// directly into observation error through the mount lever arm.
 		if (t.angVel.norm() > config.maxAngularSpeed || t.vel.norm() > config.maxLinearSpeed)
+		{
+			++diagnostics.targetSpeedRejected;
 			continue;
+		}
 
 		// Same time-alignment convention as the engine: the reference stream
 		// is interpolated at the target's timestamp minus the solved offset.
@@ -168,16 +177,28 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 		const size_t refLive = refWindow.size() - refHead;
 		if (refLive == 0 || refTime > refWindow.back().time ||
 			(refLive < 2 && refTime >= refWindow[refHead].time))
+		{
+			++diagnostics.referenceWaitUpdates;
 			break;
+		}
 		if (refTime < refWindow[refHead].time)
+		{
+			++diagnostics.referenceTooOld;
 			continue;
+		}
 
 		PoseSample h;
 		if (!CalibrationEngine::InterpolateAt(refWindow, refTime,
 			config.maxInterpolationGap, h))
+		{
+			++diagnostics.interpolationRejected;
 			continue;
+		}
 		if (h.angVel.norm() > config.maxAngularSpeed || h.vel.norm() > config.maxLinearSpeed)
+		{
+			++diagnostics.referenceSpeedRejected;
 			continue;
+		}
 
 		// C_obs = H o E o T_s^-1 (see header). Independent of the currently
 		// applied calibration: both poses are raw-universe.
@@ -199,13 +220,17 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 			// glitched ref sample corrupts every obs interpolated across it
 			// with correlated errors, which would otherwise self-confirm.
 			if (obs.time - pendingObs->time < config.jumpConfirmSpacing)
+			{
+				++diagnostics.jumpGuardRejected;
 				continue;
+			}
 			double dRot = qObs.angularDistance(pendingObs->rot) * RadToDeg;
 			double dPos = (tObs - pendingObs->trans).norm();
 			// Consumed either way: confirmed below, or discarded as a glitch.
 			pendingObs.reset();
 			if (dRot <= config.jumpGuardRotDeg && dPos <= config.jumpGuardPosM)
 			{
+				++diagnostics.jumpGuardResets;
 				observations.clear();
 				refWindow.clear();
 				targetWindow.clear();
@@ -228,6 +253,7 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 				double dPos = (tObs - prev.trans).norm();
 				if (dRot > config.jumpGuardRotDeg || dPos > config.jumpGuardPosM)
 				{
+					++diagnostics.jumpGuardRejected;
 					pendingObs = obs;
 					continue;
 				}
@@ -238,11 +264,13 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 		// this before normal thinning so a healthy high-rate stream does not coast,
 		// but rejected jump candidates cannot leave stale state marked Tracking.
 		lastObsTime = obs.time;
+		++diagnostics.observationsFormed;
 
 		if (obs.time - lastKeptObsTime < config.obsMinSpacing)
 			continue;
 		lastKeptObsTime = obs.time;
 		observations.push_back(obs);
+		++diagnostics.observationsKept;
 	}
 }
 
@@ -727,8 +755,21 @@ bool ContinuousAlignment::PollEvent(Event &out)
 	return true;
 }
 
-void ContinuousAlignment::Reset()
+ContinuousAlignment::Diagnostics ContinuousAlignment::GetDiagnostics() const
 {
+	Diagnostics result = diagnostics;
+	result.referenceSamples = refWindow.size() - refHead;
+	result.targetSamples = targetWindow.size() - targetHead;
+	result.pendingTargets = targetWindow.size() - targetProcessed;
+	result.observations = observations.size();
+	result.requiredObservations = config.minObsForEstimate;
+	result.lastObservationTime = lastObsTime;
+	return result;
+}
+
+void ContinuousAlignment::Reset(ResetReason reason)
+{
+	++diagnostics.resets[static_cast<size_t>(reason)];
 	refWindow.clear();
 	targetWindow.clear();
 	refHead = 0;

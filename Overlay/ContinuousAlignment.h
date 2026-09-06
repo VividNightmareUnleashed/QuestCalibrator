@@ -32,6 +32,8 @@
 
 #include "CalibrationEngine.h"
 
+#include <array>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <optional>
@@ -182,6 +184,25 @@ public:
 		Eigen::Quaterniond &rotationOut,
 		Eigen::Vector3d &translationOut)>;
 
+	enum class ResetReason { Requested, StreamGap, UniverseJump, Suspended, ModeChanged, Count };
+
+	// Counters last for this engine's lifetime, including across Reset(). Window
+	// sizes and timestamps in GetDiagnostics() describe the current window only.
+	struct Diagnostics
+	{
+		uint64_t referenceOutOfOrder = 0, targetOutOfOrder = 0;
+		uint64_t referenceSpeedRejected = 0, targetSpeedRejected = 0;
+		uint64_t referenceTooOld = 0, interpolationRejected = 0;
+		uint64_t referenceWaitUpdates = 0;
+		uint64_t jumpGuardRejected = 0, jumpGuardResets = 0;
+		uint64_t observationsFormed = 0, observationsKept = 0;
+		std::array<uint64_t, static_cast<size_t>(ResetReason::Count)> resets{};
+		size_t referenceSamples = 0, targetSamples = 0, pendingTargets = 0;
+		size_t observations = 0, requiredObservations = 0;
+		double lastObservationTime = 0.0;
+	};
+	Diagnostics GetDiagnostics() const;
+
 	void SetConfig(const Config &c) { config = c; }
 	void SetExtrinsic(const MountExtrinsic &e) { extrinsic = e; }
 	const MountExtrinsic &Extrinsic() const { return extrinsic; }
@@ -224,7 +245,7 @@ public:
 	// Drop all windows and pending output (ring gap, accepted universe jump,
 	// suspension). Keeps the extrinsic; a persisting deviation re-freezes
 	// within freezeConfirmSeconds of resuming.
-	void Reset();
+	void Reset(ResetReason reason = ResetReason::Requested);
 
 	// Derive the mount extrinsic from a manual calibration's sample buffers
 	// and its solved result. The per-pair spread doubles as the rigidity gate:
@@ -275,6 +296,7 @@ private:
 	void ClearConfirmMarks();
 
 	Config config;
+	Diagnostics diagnostics;
 	MountExtrinsic extrinsic;
 	State state = State::Inactive;
 

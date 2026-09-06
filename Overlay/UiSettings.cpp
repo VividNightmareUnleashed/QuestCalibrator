@@ -508,7 +508,7 @@ void BuildSettingsScreen(const VRState &state)
 			if (IconButton("savediag", "Save diagnostics file", IconCopy, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 			{
 				std::string path, error;
-				if (WriteDiagnosticsFile(CalCtx, path, error))
+				if (WriteDiagnosticsFile(CalCtx, path, error, vr::VRSystem(), CaptureCalibrationDiagnostics()))
 				{
 					CalCtx.Tell("Diagnostics saved to " + path, CalibrationContext::Tone::Good);
 					if (!g_uiPreviewMode)

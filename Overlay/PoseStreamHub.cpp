@@ -47,6 +47,15 @@ int PoseStreamHub::CreateConsumer()
 	return static_cast<int>(consumers.size()) - 1;
 }
 
+PoseStreamHub::Diagnostics PoseStreamHub::ReadDiagnostics()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	Diagnostics snapshot = diagnostics;
+	snapshot.reportedLoss = sourceDropCount;
+	snapshot.open = RingOpen();
+	return snapshot;
+}
+
 void PoseStreamHub::AccountForHistoryOverflowLocked(int consumer, uint64_t &dropped)
 {
 	auto &cursor = consumers[consumer];
@@ -165,6 +174,13 @@ void PoseStreamHub::DiscardBacklog(int consumer)
 
 void PoseStreamHub::AppendSampleLocked(const protocol::DevicePoseSample &sample)
 {
+	if (sample.deviceId < diagnostics.devices.size())
+	{
+		auto &device = diagnostics.devices[sample.deviceId];
+		++device.received;
+		device.streamBoundary = diagnostics.streamBoundaries;
+		device.latest = sample;
+	}
 	auto &entry = history[head % HistoryCapacity];
 	entry = HistoryEntry{};
 	entry.sample = sample;
@@ -179,6 +195,7 @@ void PoseStreamHub::AppendGapLocked(uint64_t count)
 {
 	if (count == 0)
 		return;
+	++diagnostics.gapMarkers;
 	auto &entry = history[head % HistoryCapacity];
 	entry = HistoryEntry{};
 	entry.sourceDropCountBefore = (sourceDropCount += count);
@@ -188,6 +205,7 @@ void PoseStreamHub::AppendGapLocked(uint64_t count)
 
 void PoseStreamHub::AppendSessionBoundaryLocked()
 {
+	++diagnostics.streamBoundaries;
 	// Everything buffered may predate a universe rebase, so discard it rather
 	// than hand a consumer positionally incoherent history. The marker is a
 	// single count deliberately: it says "there is a hole here", not how many

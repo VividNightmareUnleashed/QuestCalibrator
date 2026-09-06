@@ -120,6 +120,19 @@ as `QuestCalibrator.prev.log`; nothing older accumulates). Attach both files to 
 bug report — they carry the timeline and the numbers behind whatever the overlay
 decided to do.
 
+For continuous-calibration failures, turn on **Detailed logging** in Settings,
+then use **Save diagnostics file** once while alignment looks correct and again
+after the problem appears, before recalibrating or restarting. Keep the devices
+still while exporting. The report includes per-device input counts and freshness,
+stream gaps, window resets, Quest observation gates, Legacy solve status, and a
+snapshot of connected devices relative to SteamVR's floor. Counters survive
+recalibration and method changes for the session. Exports also include raw driver
+poses for every device, scale and timing confidence, mount and field transforms,
+driver synchronization status, and executable hashes to identify the build. The
+raw stream is sampled independently of continuous mode. Detailed-log snapshots are
+written every ten seconds. Describe whether the problem is visible in SteamVR
+tracker positions or only in the game, and identify which devices look misplaced.
+
 ## Updates
 
 Automatic updates are off by default. Turn them on in Settings to let

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <openvr.h>
+#include "DriverSyncTracker.h"
 
 #include <array>
 #include <cstdint>
@@ -22,6 +23,7 @@ void StartCalibrationDriver();
 void StopCalibrationDriver();
 void SynchronizeCalibrationDriver(CalibrationContext &ctx);
 void PollCalibrationDriver(CalibrationContext &ctx);
+DriverSyncTracker CaptureDriverSyncDiagnostics();
 std::optional<DriverNeutralizationResult> TakeCalibrationNeutralization(
 	uint64_t sequence);
 uint64_t NeutralizeCalibrationDevices(

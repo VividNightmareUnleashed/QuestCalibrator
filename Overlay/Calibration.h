@@ -6,6 +6,7 @@
 #include "ContinuousCorrectionGate.h"
 #include "PersistenceState.h"
 #include "ProfileValidation.h"
+#include "RingPoseMath.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -126,6 +127,23 @@ enum class ContinuousMode { Quest = 0, Legacy = 1 };
 
 struct CalibrationContext : CalibrationProfileState
 {
+	// Session evidence survives profile resets and recalibrations. Only the
+	// continuous loops feed these per-slot counts while their method is active.
+	struct ContinuousDiagnostics
+	{
+		std::array<RingInputDiagnostics, vr::k_unMaxTrackedDeviceCount> devices{};
+		uint64_t batches = 0, samples = 0, gapEvents = 0, reportedLoss = 0;
+		double lastUpdateTime = 0.0;
+		questcal::ContinuousAlignment::Diagnostics engine;
+		struct Legacy
+		{
+			uint64_t resets = 0, gapResets = 0, bindingResets = 0, staleResets = 0;
+			uint64_t solveAttempts = 0, solvesAccepted = 0, pairSkewRejected = 0;
+			size_t samples = 0;
+			bool valid = false;
+		} legacy;
+	} continuousDiagnostics;
+
 	CalibrationState state = CalibrationState::None;
 	uint32_t referenceID = 0xFFFFFFFF, targetID = 0xFFFFFFFF;
 	// Every transient input and temporary mutation belongs to one run. Keeping
