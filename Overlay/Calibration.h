@@ -41,7 +41,7 @@ struct CalibrationTransform
 
 	Eigen::Vector3d RotationEulerDegrees() const
 	{
-		return rotation.toRotationMatrix().eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+		return rotation.toRotationMatrix().canonicalEulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
 	}
 };
 

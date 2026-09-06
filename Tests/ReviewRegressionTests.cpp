@@ -581,7 +581,7 @@ void LegacyTranslationScenario(Check check)
 				- qi * (samples[i].ref.trans - rotation * samples[i].target.trans);
 			row += 3;
 		}
-		Eigen::Vector3d expected = coefficients.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+		Eigen::Vector3d expected = coefficients.jacobiSvd<Eigen::ComputeThinU | Eigen::ComputeThinV>().solve(constants);
 		worst = std::max(worst, (expected - calc.Transformation().translation()).norm());
 	}
 	char detail[128];
@@ -651,8 +651,15 @@ void UpdaterRestartScenario(Check check)
 }
 } // namespace
 
+void RunOpenVRLayoutScenarios(Check check);
+void RunImGuiInputScenarios(Check check);
+bool CalibrationEulerRoundTripScenario();
+
 void RunReviewRegressionScenarios(Check check)
 {
+	RunOpenVRLayoutScenarios(check);
+	RunImGuiInputScenarios(check);
+	check("Eigen: manual Euler round trip", CalibrationEulerRoundTripScenario(), "");
 	RuntimeTransactionScenario(check);
 	CorrectionWithdrawalScenarios(check);
 	ContinuousDriverSlewScenarios(check);

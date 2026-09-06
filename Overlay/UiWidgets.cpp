@@ -72,7 +72,7 @@ void ApplyTheme()
 	c[ImGuiCol_TextSelectedBg]       = ImVec4(Pal::Accent.x, Pal::Accent.y, Pal::Accent.z, 0.35f);
 	// Dark enough that the coloured status rows behind a modal stop competing
 	// with it for attention.
-	c[ImGuiCol_ModalWindowDarkening] = ImVec4(0, 0, 0, 0.80f);
+	c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.80f);
 	c[ImGuiCol_NavHighlight]         = Pal::Accent;
 }
 
@@ -85,8 +85,8 @@ float LetterSpacedWidth(ImFont *font, const char *text, float spacing)
 	float w = 0.0f;
 	for (const char *p = text; *p; ++p)
 	{
-		const ImFontGlyph *g = font->FindGlyph((ImWchar)(unsigned char)*p);
-		w += (g ? g->AdvanceX : font->FontSize * 0.5f) + spacing;
+		const ImFontGlyph *g = font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p);
+		w += (g ? g->AdvanceX : font->LegacySize * 0.5f) + spacing;
 	}
 	return w > 0.0f ? w - spacing : 0.0f;
 }
@@ -99,9 +99,9 @@ void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, con
 	for (const char *p = text; *p; ++p)
 	{
 		buf[0] = *p;
-		dl->AddText(font, font->FontSize, ImVec2(x, pos.y), col, buf);
-		const ImFontGlyph *g = font->FindGlyph((ImWchar)(unsigned char)*p);
-		x += (g ? g->AdvanceX : font->FontSize * 0.5f) + spacing;
+		dl->AddText(font, font->LegacySize, ImVec2(x, pos.y), col, buf);
+		const ImFontGlyph *g = font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p);
+		x += (g ? g->AdvanceX : font->LegacySize * 0.5f) + spacing;
 	}
 }
 
@@ -111,7 +111,7 @@ void SectionLabel(const char *text)
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	ImVec2 p = ImGui::GetCursorScreenPos();
 	LetterSpacedTextAt(dl, g_fontSmall, p, Pal::U32(Pal::Dim), text, 2.0f);
-	ImGui::Dummy(ImVec2(LetterSpacedWidth(g_fontSmall, text, 2.0f), g_fontSmall->FontSize + 4.0f));
+	ImGui::Dummy(ImVec2(LetterSpacedWidth(g_fontSmall, text, 2.0f), g_fontSmall->LegacySize + 4.0f));
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ void IconHMD(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	ImVec2 a = ImVec2(c.x - s, c.y - s * 0.60f);
 	ImVec2 b = ImVec2(c.x + s, c.y + s * 0.44f);
 	dl->PathRect(a, b, s * 0.34f);
-	dl->PathStroke(col, true, 2.2f);
+	dl->PathStroke(col, 2.2f, ImDrawFlags_Closed);
 	dl->AddCircleFilled(ImVec2(c.x - s * 0.42f, c.y - s * 0.06f), s * 0.16f, col, 12);
 	dl->AddCircleFilled(ImVec2(c.x + s * 0.42f, c.y - s * 0.06f), s * 0.16f, col, 12);
 }
@@ -185,8 +185,8 @@ void IconTrash(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	dl->AddLine(ImVec2(c.x - s * 0.62f, c.y - s * 0.36f), ImVec2(c.x + s * 0.62f, c.y - s * 0.36f), col, 2.2f);
 	dl->AddLine(ImVec2(c.x - s * 0.20f, c.y - s * 0.60f), ImVec2(c.x + s * 0.20f, c.y - s * 0.60f), col, 2.2f);
-	dl->PathRect(ImVec2(c.x - s * 0.45f, c.y - s * 0.36f), ImVec2(c.x + s * 0.45f, c.y + s * 0.62f), s * 0.16f, ImDrawCornerFlags_Bot);
-	dl->PathStroke(col, true, 2.0f);
+	dl->PathRect(ImVec2(c.x - s * 0.45f, c.y - s * 0.36f), ImVec2(c.x + s * 0.45f, c.y + s * 0.62f), s * 0.16f, ImDrawFlags_RoundCornersBottom);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_Closed);
 	dl->AddLine(ImVec2(c.x - s * 0.15f, c.y - s * 0.12f), ImVec2(c.x - s * 0.15f, c.y + s * 0.36f), col, 1.8f);
 	dl->AddLine(ImVec2(c.x + s * 0.15f, c.y - s * 0.12f), ImVec2(c.x + s * 0.15f, c.y + s * 0.36f), col, 1.8f);
 }
@@ -194,9 +194,9 @@ void IconTrash(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 void IconCopy(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	dl->PathRect(ImVec2(c.x - s * 0.62f, c.y - s * 0.62f), ImVec2(c.x + s * 0.14f, c.y + s * 0.14f), s * 0.14f);
-	dl->PathStroke(col, true, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_Closed);
 	dl->PathRect(ImVec2(c.x - s * 0.14f, c.y - s * 0.14f), ImVec2(c.x + s * 0.62f, c.y + s * 0.62f), s * 0.14f);
-	dl->PathStroke(col, true, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_Closed);
 }
 
 void IconCrosshair(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -216,7 +216,7 @@ void IconCheck(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 		ImVec2(c.x - s * 0.15f, c.y + s * 0.55f),
 		ImVec2(c.x + s * 0.70f, c.y - s * 0.50f)
 	};
-	dl->AddPolyline(pts, 3, col, false, 2.4f);
+	dl->AddPolyline(pts, 3, col, 2.4f, ImDrawFlags_None);
 }
 
 void IconClock(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -260,15 +260,15 @@ void IconScale(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	dl->AddLine(ImVec2(c.x - s * 0.58f, c.y - s * 0.40f), ImVec2(c.x + s * 0.58f, c.y - s * 0.40f), col, 2.0f);
 	dl->AddLine(ImVec2(c.x - s * 0.30f, c.y + s * 0.46f), ImVec2(c.x + s * 0.30f, c.y + s * 0.46f), col, 2.0f);
 	dl->PathArcTo(ImVec2(c.x - s * 0.58f, c.y - s * 0.16f), s * 0.24f, 0.0f, IM_PI, 12);
-	dl->PathStroke(col, false, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_None);
 	dl->PathArcTo(ImVec2(c.x + s * 0.58f, c.y - s * 0.16f), s * 0.24f, 0.0f, IM_PI, 12);
-	dl->PathStroke(col, false, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_None);
 }
 
 void IconGauge(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	dl->PathArcTo(ImVec2(c.x, c.y + s * 0.25f), s * 0.72f, IM_PI, 2.0f * IM_PI, 20);
-	dl->PathStroke(col, false, 2.2f);
+	dl->PathStroke(col, 2.2f, ImDrawFlags_None);
 	dl->AddLine(ImVec2(c.x, c.y + s * 0.25f), ImVec2(c.x + s * 0.38f, c.y - s * 0.22f), col, 2.2f);
 	dl->AddCircleFilled(ImVec2(c.x, c.y + s * 0.25f), s * 0.12f, col, 8);
 }
@@ -279,7 +279,7 @@ void IconField(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	dl->AddCircle(ImVec2(c.x, c.y - s * 0.30f), s * 0.34f, col, 16, 2.0f);
 	dl->AddLine(ImVec2(c.x, c.y + s * 0.04f), ImVec2(c.x, c.y + s * 0.44f), col, 2.0f);
 	dl->PathArcTo(ImVec2(c.x, c.y + s * 0.44f), s * 0.55f, IM_PI * 0.15f, IM_PI * 0.85f, 12);
-	dl->PathStroke(col, false, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_None);
 }
 
 void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -476,13 +476,13 @@ void DrawFocusRing(ImDrawList *dl, ImVec2 a, ImVec2 b, float rounding)
 {
 	if (ImGui::IsItemFocused())
 		dl->AddRect(ImVec2(a.x - 2.0f, a.y - 2.0f), ImVec2(b.x + 2.0f, b.y + 2.0f),
-			Pal::U32(Pal::Accent), rounding + 2.0f, ImDrawCornerFlags_All, 2.0f);
+			Pal::U32(Pal::Accent), rounding + 2.0f, 2.0f, ImDrawFlags_RoundCornersAll);
 }
 
 bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, BtnKind kind, bool smallCaps)
 {
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	bool pressed = ImGui::InvisibleButton(id, size);
+	bool pressed = ImGui::InvisibleButton(id, size, ImGuiButtonFlags_EnableNav);
 	bool hov = ImGui::IsItemHovered();
 	bool act = ImGui::IsItemActive();
 	ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -533,9 +533,9 @@ bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, Btn
 		cx += iconBlock;
 	}
 	if (smallCaps)
-		LetterSpacedTextAt(dl, font, ImVec2(cx, cy - font->FontSize * 0.5f), tcol, label, spacing);
+		LetterSpacedTextAt(dl, font, ImVec2(cx, cy - font->LegacySize * 0.5f), tcol, label, spacing);
 	else
-		dl->AddText(font, font->FontSize, ImVec2(cx, cy - font->FontSize * 0.5f), tcol, label);
+		dl->AddText(font, font->LegacySize, ImVec2(cx, cy - font->LegacySize * 0.5f), tcol, label);
 
 	return pressed;
 }
@@ -544,7 +544,7 @@ bool QCCheckbox(const char *id, bool *v)
 {
 	const float sz = 24.0f;
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	bool pressed = ImGui::InvisibleButton(id, ImVec2(sz, sz));
+	bool pressed = ImGui::InvisibleButton(id, ImVec2(sz, sz), ImGuiButtonFlags_EnableNav);
 	if (pressed)
 		*v = !*v;
 	bool hov = ImGui::IsItemHovered();
@@ -559,12 +559,12 @@ bool QCCheckbox(const char *id, bool *v)
 			ImVec2(p.x + sz * 0.43f, p.y + sz * 0.72f),
 			ImVec2(p.x + sz * 0.78f, p.y + sz * 0.30f)
 		};
-		dl->AddPolyline(pts, 3, Pal::U32(Pal::White), false, 2.6f);
+		dl->AddPolyline(pts, 3, Pal::U32(Pal::White), 2.6f, ImDrawFlags_None);
 	}
 	else
 	{
 		dl->AddRectFilled(p, b, Pal::U32(Pal::Inset), 6.0f);
-		dl->AddRect(p, b, Pal::U32(hov ? Pal::BorderHov : Pal::GhostBorder), 6.0f, ImDrawCornerFlags_All, 1.2f);
+		dl->AddRect(p, b, Pal::U32(hov ? Pal::BorderHov : Pal::GhostBorder), 6.0f, 1.2f, ImDrawFlags_RoundCornersAll);
 	}
 	DrawFocusRing(dl, p, b, 6.0f);
 	return pressed;
@@ -574,7 +574,7 @@ bool QCCheckbox(const char *id, bool *v)
 ImVec2 BeginRowCard(float height)
 {
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	float w = ImGui::GetWindowContentRegionWidth();
+	float w = ImGui::GetContentRegionAvail().x;
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	dl->AddRectFilled(p, ImVec2(p.x + w, p.y + height), Pal::U32(Pal::Card), 12.0f);
 	dl->AddRect(p, ImVec2(p.x + w, p.y + height), Pal::U32(Pal::Border), 12.0f);
@@ -592,8 +592,8 @@ void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	ImVec2 iconC = ImVec2(rowPos.x + 66.0f, rowPos.y + 26.0f);
 	icon(dl, iconC, 9.0f, Pal::U32(Pal::Dim));
-	dl->AddText(g_fontBody, g_fontBody->FontSize,
-		ImVec2(rowPos.x + 92.0f, rowPos.y + 26.0f - g_fontBody->FontSize * 0.5f),
+	dl->AddText(g_fontBody, g_fontBody->LegacySize,
+		ImVec2(rowPos.x + 92.0f, rowPos.y + 26.0f - g_fontBody->LegacySize * 0.5f),
 		Pal::U32(Pal::Text), label);
 }
 
@@ -603,7 +603,7 @@ void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
 
 void RowSubLine(ImVec2 rowPos, const char *text)
 {
-	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->FontSize,
+	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
 		ImVec2(rowPos.x + 92.0f, rowPos.y + kRowHeight - 6.0f), Pal::U32(Pal::Dim), text);
 }
 
@@ -628,7 +628,7 @@ bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, cons
 // modal has one, and a key that visibly does nothing reads as a hang.
 bool EscapePressed()
 {
-	return ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape), false);
+	return ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 }
 
 void ShowTip(const char *text, bool leftOfCursor)
@@ -636,7 +636,7 @@ void ShowTip(const char *text, bool leftOfCursor)
 	// Nothing behind a modal may raise a tooltip: a rect-based hover test does
 	// not know the modal is there, and a tooltip window appearing takes focus
 	// from it.
-	if (ImGuiWindow *modal = ImGui::GetFrontMostPopupModal())
+	if (ImGuiWindow *modal = ImGui::GetTopMostPopupModal())
 	{
 		ImGuiWindow *current = ImGui::GetCurrentWindowRead();
 		if (!current || current->RootWindow != modal->RootWindow)
@@ -647,7 +647,7 @@ void ShowTip(const char *text, bool leftOfCursor)
 	for (const char *p = text; *p; ++p)
 		if (*p == '\n')
 			++lines;
-	float h = lines * g_fontBody->FontSize + 24.0f;
+	float h = lines * g_fontBody->LegacySize + 24.0f;
 	// Above the cursor in the lower half of the window, and never past the
 	// right edge: the window is fixed-size, so a tooltip raised near the
 	// edge would otherwise be cut mid-sentence.
@@ -678,12 +678,12 @@ bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bo
 	ImGui::SetCursorScreenPos(pos);
 	bool changed = QCCheckbox(id, &value);
 	bool hovered = ImGui::IsItemHovered();
-	ImGui::GetWindowDrawList()->AddText(g_fontBody, g_fontBody->FontSize,
-		ImVec2(pos.x + 36.0f, pos.y + 12.0f - g_fontBody->FontSize * 0.5f),
+	ImGui::GetWindowDrawList()->AddText(g_fontBody, g_fontBody->LegacySize,
+		ImVec2(pos.x + 36.0f, pos.y + 12.0f - g_fontBody->LegacySize * 0.5f),
 		Pal::U32(Pal::Text), label);
 	ImGui::SetCursorScreenPos(ImVec2(pos.x + 30.0f, pos.y - 4.0f));
 	std::string labelId = std::string(id) + "_label";
-	if (ImGui::InvisibleButton(labelId.c_str(), ImVec2(width - 30.0f, 32.0f)))
+	if (ImGui::InvisibleButton(labelId.c_str(), ImVec2(width - 30.0f, 32.0f), ImGuiButtonFlags_EnableNav))
 	{
 		value = !value;
 		changed = true;
@@ -710,7 +710,7 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 		ImVec2 ip = ImVec2(p.x + pad + i * itemW, p.y + pad);
 		ImVec2 isz = ImVec2(itemW, h - pad * 2.0f);
 		ImGui::SetCursorScreenPos(ip);
-		if (ImGui::InvisibleButton("seg", isz))
+		if (ImGui::InvisibleButton("seg", isz, ImGuiButtonFlags_EnableNav))
 			value = i;
 		bool hov = ImGui::IsItemHovered();
 
@@ -726,8 +726,8 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 		DrawFocusRing(dl, ip, ImVec2(ip.x + isz.x, ip.y + isz.y), 5.0f);
 
 		ImVec2 ts = ImGui::CalcTextSize(items[i]);
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
-			ImVec2(ip.x + (isz.x - ts.x) * 0.5f, ip.y + (isz.y - g_fontBody->FontSize) * 0.5f),
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(ip.x + (isz.x - ts.x) * 0.5f, ip.y + (isz.y - g_fontBody->LegacySize) * 0.5f),
 			Pal::U32(i == value ? Pal::Text : Pal::Dim), items[i]);
 		ImGui::PopID();
 	}
@@ -760,8 +760,8 @@ void DrawStatusCard(const std::vector<StatusRowData> &rows)
 		ImVec4 bg = r.color; bg.w = 0.15f;
 		dl->AddCircleFilled(c, 13.0f, Pal::U32(bg), 20);
 		r.icon(dl, c, 8.5f, Pal::U32(r.color));
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
-			ImVec2(c.x + 23.0f, cy - g_fontBody->FontSize * 0.5f),
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(c.x + 23.0f, cy - g_fontBody->LegacySize * 0.5f),
 			Pal::U32(r.color), r.text.c_str());
 	}
 

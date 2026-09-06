@@ -205,7 +205,7 @@ Eigen::Matrix3d WeightedKabsch(const std::vector<AxisPair> &pairs, double gravit
 	// not a constraint — enough real off-vertical axis content outvotes it.
 	cross += gravityWeight * (kUp * kUp.transpose());
 
-	Eigen::JacobiSVD<Eigen::Matrix3d> svd(cross, Eigen::ComputeFullU | Eigen::ComputeFullV);
+	Eigen::JacobiSVD<Eigen::Matrix3d, Eigen::ComputeFullU | Eigen::ComputeFullV> svd(cross);
 	Eigen::Matrix3d d = Eigen::Matrix3d::Identity();
 	d(2, 2) = (svd.matrixV() * svd.matrixU().transpose()).determinant() < 0.0 ? -1.0 : 1.0;
 	return svd.matrixV() * d * svd.matrixU().transpose();

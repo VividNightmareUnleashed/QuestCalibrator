@@ -1,6 +1,7 @@
 #include "Logging.h"
 #include "Hooking.h"
 #include "InterfaceHookInjector.h"
+#include "OpenVRHookLayout.h"
 #include "ServerTrackedDeviceProvider.h"
 
 #include <atomic>
@@ -286,9 +287,9 @@ Hook<void*(*)(vr::IVRDriverContext *, const char *, vr::EVRInitError *)>
 	GetGenericInterfaceHook("IVRDriverContext::GetGenericInterface");
 
 using PoseUpdateHook =
-	Hook<void(*)(vr::IVRServerDriverHost *, uint32_t, const vr::DriverPose_t &, uint32_t)>;
+	Hook<void(*)(void *, uint32_t, const vr::DriverPose_t &, uint32_t)>;
 using PoseUpdateDetour =
-	void (*)(vr::IVRServerDriverHost *, uint32_t, const vr::DriverPose_t &, uint32_t);
+	void (*)(void *, uint32_t, const vr::DriverPose_t &, uint32_t);
 
 PoseUpdateHook TrackedDevicePoseUpdatedHook005("IVRServerDriverHost005::TrackedDevicePoseUpdated");
 PoseUpdateHook TrackedDevicePoseUpdatedHook006("IVRServerDriverHost006::TrackedDevicePoseUpdated");
@@ -298,7 +299,7 @@ PoseUpdateHook TrackedDevicePoseUpdatedHook006("IVRServerDriverHost006::TrackedD
 // diverging when the argument handling, the null-driver fallback or the guard
 // changes. The detours themselves must stay distinct functions: each is the
 // address MinHook patches in for its own target.
-void ForwardPoseUpdate(PoseUpdateHook &hook, vr::IVRServerDriverHost *_this,
+void ForwardPoseUpdate(PoseUpdateHook &hook, void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	auto original = hook.originalFunc.load(std::memory_order_acquire);
@@ -330,7 +331,7 @@ void ForwardPoseUpdate(PoseUpdateHook &hook, vr::IVRServerDriverHost *_this,
 	}
 }
 
-void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this,
+void DetourTrackedDevicePoseUpdated005(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	CallbackGuard callback;
@@ -338,21 +339,13 @@ void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this,
 		unPoseStructSize);
 }
 
-void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this,
+void DetourTrackedDevicePoseUpdated006(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	CallbackGuard callback;
 	ForwardPoseUpdate(TrackedDevicePoseUpdatedHook006, _this, unWhichDevice, newPose,
 		unPoseStructSize);
 }
-
-// TrackedDevicePoseUpdated is the second virtual in the vendored
-// IVRServerDriverHost_005 declaration, which is the only layout this repository
-// can check. The 006 layout is not declared anywhere here, so the same index is
-// an assumption for that branch; if a future revision reorders it, the detour is
-// entered with mismatched arguments inside vrserver. Declaring 006 is what would
-// settle it.
-constexpr int PoseUpdateVTableIndex = 1;
 
 // Adding a version means one row here rather than an edit at the install site,
 // both teardown paths and the accessor.
@@ -419,7 +412,7 @@ void TryInstallPoseHook(const char *interfaceVersion, void *originalInterface)
 	if (binding->ready->load(std::memory_order_relaxed))
 		return;
 	if (binding->hook->CreateHookInObjectVTable(
-		originalInterface, PoseUpdateVTableIndex, binding->detour))
+		originalInterface, openvr_hook::PoseUpdateSlot, binding->detour))
 	{
 		binding->ready->store(true, std::memory_order_release);
 	}
@@ -484,7 +477,7 @@ bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 	Driver.store(driver, std::memory_order_release);
 
 	if (!GetGenericInterfaceHook.CreateHookInObjectVTable(
-		pDriverContext, 0, &DetourGetGenericInterface))
+		pDriverContext, openvr_hook::GetGenericInterfaceSlot, &DetourGetGenericInterface))
 	{
 		Driver.store(nullptr, std::memory_order_release);
 		MH_Uninitialize();

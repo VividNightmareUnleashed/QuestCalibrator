@@ -76,7 +76,7 @@ public:
 	const Eigen::Vector3d EulerRotation() const
 	{
 		auto rot = m_estimatedTransformation.rotation();
-		return rot.eulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+		return rot.canonicalEulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
 	}
 
 	bool isValid() const { return m_isValid; }

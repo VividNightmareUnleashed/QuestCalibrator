@@ -105,7 +105,7 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 	}
 	if (!texture)
 	{
-		dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(origin.x, origin.y + 24.0f),
+		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(origin.x, origin.y + 24.0f),
 			Pal::U32(Pal::Warn), "Motion demos couldn't load. Reinstall QuestCalibrator to restore them.");
 		return;
 	}
@@ -133,7 +133,7 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 		// Half-texel inset keeps linear filtering inside this frame.
 		const ImVec2 uv0((column * frameW + 0.5f) / atlasW, (row * frameH + 0.5f) / atlasH);
 		const ImVec2 uv1((column * frameW + frameW - 0.5f) / atlasW, (row * frameH + frameH - 0.5f) / atlasH);
-		dl->AddImage(reinterpret_cast<ImTextureID>(static_cast<intptr_t>(texture)), top,
+		dl->AddImage(static_cast<ImTextureID>(texture), top,
 			ImVec2(top.x + imageW, top.y + imageH), uv0, uv1,
 			ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, opacity)));
 	};
@@ -144,8 +144,8 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 		drawFrame(frame, ImVec2(origin.x + (size.x - imageW) * 0.5f, origin.y),
 			static_cast<float>(std::clamp(t / 0.2, 0.0, 1.0)));
 		const char *label = t < 2.0 ? "Bring the controller to the wrist tracker" : "Turn and tilt as you move in a figure eight";
-		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->FontSize, FLT_MAX, 0.0f, label);
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
+		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, label);
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(origin.x + (size.x - textSize.x) * 0.5f, origin.y + imageH + 8.0f), Pal::U32(Pal::Text), label);
 		return;
 	}
@@ -155,10 +155,10 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 		drawFrame(std::min(119, static_cast<int>(t * 60.0)),
 			ImVec2(origin.x + (size.x - imageW) * 0.5f, origin.y), opacity);
 		const char *label = demo == GuideDemo::HeadsetContact ? "Rest the controller against the visor" : "Bring the controller to the wrist tracker";
-		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->FontSize, FLT_MAX, 0.0f, label);
+		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, label);
 		ImVec4 color = Pal::Text;
 		color.w *= opacity;
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(origin.x + (size.x - textSize.x) * 0.5f, origin.y + imageH + 8.0f), Pal::U32(color), label);
 	}
 	const int frame = static_cast<int>(std::fmod(std::max(0.0, t - 2.3), 4.0) * 60.0) % 240;
@@ -168,10 +168,10 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 		const ImVec2 top(x + (cellW - imageW) * 0.5f, origin.y);
 		drawFrame(120 + axis * 240 + frame, top, motionAlpha);
 		const char *label = headLabels[axis];
-		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->FontSize, FLT_MAX, 0.0f, label);
+		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, label);
 		ImVec4 color = Pal::Text;
 		color.w *= motionAlpha;
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(x + (cellW - textSize.x) * 0.5f, origin.y + imageH + 8.0f), Pal::U32(color), label);
 	}
 }
@@ -190,8 +190,8 @@ void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const quest
 	for (int i = 0; i < 3; ++i)
 	{
 		const float x = origin.x + (cellW + 16.0f) * static_cast<float>(i);
-		dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, origin.y), Pal::U32(Pal::Text), names[i]);
-		dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(x, origin.y + 28.0f), Pal::U32(Pal::Dim), states[i]);
+		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, origin.y), Pal::U32(Pal::Text), names[i]);
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(x, origin.y + 28.0f), Pal::U32(Pal::Dim), states[i]);
 		const ImVec2 a(x, origin.y + 50.0f), b(x + cellW, origin.y + 54.0f);
 		dl->AddRectFilled(a, b, Pal::U32(Pal::Border), 2.0f);
 		const float fill = static_cast<float>(std::clamp(values[i], 0.0, 1.0));
@@ -209,7 +209,7 @@ void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const quest
 void BuildMenu(const VRState &state, bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	if ((s_guide.stage == GuideStage::Done || s_guide.stage == GuideStage::Idle) && s_guideTexture)
 	{
 		glDeleteTextures(1, &s_guideTexture);
@@ -259,8 +259,8 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		// facts are here: what is happening and how to stop it.
 		ImVec2 p = BeginRowCard(64.0f);
 		ImDrawList *dl = ImGui::GetWindowDrawList();
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
-			ImVec2(p.x + 20.0f, p.y + 32.0f - g_fontBody->FontSize * 0.5f),
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(p.x + 20.0f, p.y + 32.0f - g_fontBody->LegacySize * 0.5f),
 			Pal::U32(Pal::Text), "Calibrating...");
 		ImGui::SetCursorScreenPos(ImVec2(p.x + cw - 150.0f, p.y + 13.0f));
 		if (IconButton("cancelcard", "Cancel", nullptr, ImVec2(130.0f, 38.0f), BtnKind::Ghost))
@@ -315,13 +315,13 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 	}
 	const bool showingResult = s_guide.stage == GuideStage::Done;
 	float modalW = showingResult ? 660.0f : 940.0f;
-	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, showingResult ? 180.0f : 60.0f), ImGuiSetCond_Always);
-	ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiSetCond_Always);
+	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, showingResult ? 180.0f : 60.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiCond_Always);
 	if (ImGui::BeginPopupModal("Calibration Progress", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
 		using Msg = CalibrationContext::Message;
-		const float mw = ImGui::GetWindowContentRegionWidth();
+		const float mw = ImGui::GetContentRegionAvail().x;
 		ImDrawList *mdl = ImGui::GetWindowDrawList();
 		if (s_guide.stage == GuideStage::Countdown || s_guide.stage == GuideStage::Running ||
 			(s_guide.stage == GuideStage::GetSet && s_guide.animate))
@@ -603,8 +603,8 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 	}
 
 	// ---- Clear calibration confirmation ----
-	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, 180.0f), ImGuiSetCond_Always);
-	ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiSetCond_Always);
+	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, 180.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiCond_Always);
 	if (ImGui::BeginPopupModal("Clear calibration?", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
@@ -615,7 +615,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGui::TextWrapped("This also removes the saved field anchors and headset tracker setup.");
 		ImGui::Spacing();
 		ImGui::Spacing();
-		float bw = ImGui::GetWindowContentRegionWidth();
+		float bw = ImGui::GetContentRegionAvail().x;
 		// The safe choice carries the accent and the width; the destructive
 		// one is outlined in the error colour, so a laser pointer that lands
 		// on the big blue button keeps the calibration.
@@ -641,8 +641,8 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 	// Narrower than the other modals: three paragraphs of prose want a
 	// 60-70 character measure, and the buttons should span the text.
 	const float proseW = 640.0f;
-	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - proseW) * 0.5f, 180.0f), ImGuiSetCond_Always);
-	ImGui::SetNextWindowSize(ImVec2(proseW, 0.0f), ImGuiSetCond_Always);
+	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - proseW) * 0.5f, 180.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(proseW, 0.0f), ImGuiCond_Always);
 	if (ImGui::BeginPopupModal("Chaperone Drift Warning", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
@@ -672,7 +672,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGui::Spacing();
 		ImGui::Spacing();
 
-		float bw = ImGui::GetWindowContentRegionWidth();
+		float bw = ImGui::GetContentRegionAvail().x;
 		float cancelW = 210.0f, bgap = 12.0f;
 		int remain = static_cast<int>(std::ceil(5.0 - (ImGui::GetTime() - g_chapWarnOpenedAt)));
 		if (remain > 0)
@@ -685,8 +685,8 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			mdl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Border), 10.0f);
 			std::string lbl = FormatString("I understand (%d s)", remain);
 			ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-			mdl->AddText(g_fontBody, g_fontBody->FontSize,
-				ImVec2(p.x + (sz.x - ts.x) * 0.5f, p.y + sz.y * 0.5f - g_fontBody->FontSize * 0.5f),
+			mdl->AddText(g_fontBody, g_fontBody->LegacySize,
+				ImVec2(p.x + (sz.x - ts.x) * 0.5f, p.y + sz.y * 0.5f - g_fontBody->LegacySize * 0.5f),
 				Pal::U32(Pal::Dim), lbl.c_str());
 			ImGui::Dummy(sz);
 		}

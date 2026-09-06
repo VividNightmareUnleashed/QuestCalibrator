@@ -44,7 +44,7 @@ void BuildHeader()
 {
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	const float h = 44.0f;
 
 	// Logo mark
@@ -53,15 +53,15 @@ void BuildHeader()
 	dl->AddRect(lp, ImVec2(lp.x + 38, lp.y + 38), Pal::U32(Pal::Border), 11.0f);
 	IconLogo(dl, ImVec2(lp.x + 19, lp.y + 19), 12.0f, Pal::U32(Pal::Text));
 
-	dl->AddText(g_fontTitle, g_fontTitle->FontSize,
-		ImVec2(p.x + 52.0f, p.y + (h - g_fontTitle->FontSize) * 0.5f),
+	dl->AddText(g_fontTitle, g_fontTitle->LegacySize,
+		ImVec2(p.x + 52.0f, p.y + (h - g_fontTitle->LegacySize) * 0.5f),
 		Pal::U32(Pal::Text), "QuestCalibrator");
 
 	// Gear (settings) toggle at the far right
 	const float gearS = 38.0f;
 	ImVec2 gp = ImVec2(p.x + cw - gearS, p.y + (h - gearS) * 0.5f);
 	ImGui::SetCursorScreenPos(gp);
-	if (ImGui::InvisibleButton("##settingsgear", ImVec2(gearS, gearS)))
+	if (ImGui::InvisibleButton("##settingsgear", ImVec2(gearS, gearS), ImGuiButtonFlags_EnableNav))
 		s_showSettings = !s_showSettings;
 	bool gearHov = ImGui::IsItemHovered();
 	{
@@ -81,7 +81,7 @@ void BuildHeader()
 void BuildFooter(bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	// ---- Footer ----
 	{
 		float footerY = ImGui::GetWindowHeight() - 40.0f;
@@ -146,8 +146,8 @@ void BuildMainWindow(bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
 
-	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiSetCond_Always);
-	ImGui::SetNextWindowSize(io.DisplaySize, ImGuiSetCond_Always);
+	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
 
 	if (!ImGui::Begin("MainWindow", nullptr, bareWindowFlags))
 	{
@@ -189,8 +189,8 @@ void BuildMainWindow(bool runningInOverlay)
 	// NavFlattened: keyboard focus walks straight from the header into the
 	// content's controls instead of stopping on the child as one item.
 	ImGui::BeginChild("##content",
-		ImVec2(0.0f, ImGui::GetWindowHeight() - ImGui::GetCursorPosY() - s_bottomReserve), false,
-		ImGuiWindowFlags_NavFlattened);
+		ImVec2(0.0f, ImGui::GetWindowHeight() - ImGui::GetCursorPosY() - s_bottomReserve),
+		ImGuiChildFlags_NavFlattened);
 	// The settings screen replaces the whole content area; keeping the device
 	// panes above it buried the settings below the fold for no benefit.
 	bool inSettings = (CalCtx.state == CalibrationState::None && s_showSettings);

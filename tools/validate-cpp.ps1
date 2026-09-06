@@ -103,6 +103,14 @@ function Invoke-MSBuildValidation {
         '/nologo'
     )
     if ($ClangTidy) {
+        # Eigen exceeds the 32-bit analyzer's address space. Select the binary
+        # directly: VS can override PreferredToolArchitecture for this toolset.
+        $clangTidyDirectory = [System.IO.Path]::GetFullPath(
+            (Join-Path (Split-Path -Parent $msbuild) '../../../VC/Tools/Llvm/x64/bin'))
+        if (-not (Test-Path -LiteralPath (Join-Path $clangTidyDirectory 'clang-tidy.exe'))) {
+            Write-Output 'The VS x64 Clang-Tidy tools are required for analysis.'
+            exit 2
+        }
         # Rebuild is intentional: Visual Studio's integrated Clang-Tidy target
         # then receives the exact evaluated MSVC defines, include paths, PCH,
         # SDK, and per-file options for every translation unit.
@@ -134,6 +142,10 @@ function Invoke-MSBuildValidation {
             '%2Creadability-simplify-boolean-expr'
         $arguments += @(
             '/t:Rebuild',
+            "/p:ClangTidyToolPath=$clangTidyDirectory",
+            # The Windows SDK otherwise uses MSVC's non-constant offsetof
+            # extension, which Clang cannot use in static layout assertions.
+            '/p:ClangTidyToolExeAdditionalOptions=--extra-arg=-D_CRT_USE_BUILTIN_OFFSETOF',
             '/p:RunCppAnalysis=true',
             '/p:EnableMicrosoftCodeAnalysis=false',
             '/p:EnableClangTidyCodeAnalysis=true',

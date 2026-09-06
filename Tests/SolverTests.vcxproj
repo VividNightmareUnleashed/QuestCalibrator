@@ -88,6 +88,13 @@
   <ItemGroup>
     <ClCompile Include="CalibrationContextTests.cpp" />
     <ClCompile Include="ReviewRegressionTests.cpp" />
+    <ClCompile Include="OpenVRLayoutTests.cpp" />
+    <ClCompile Include="ImGuiInputTests.cpp" />
+    <ClCompile Include="..\lib\imgui\imgui.cpp" />
+    <ClCompile Include="..\lib\imgui\imgui_draw.cpp" />
+    <ClCompile Include="..\lib\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="..\lib\imgui\imgui_tables.cpp" />
+    <ClCompile Include="..\lib\imgui\imgui_demo.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="..\Driver\ServerTrackedDeviceProvider.cpp" />
     <ClCompile Include="..\Driver\AlignmentField.cpp" />
@@ -103,6 +110,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Driver\AlignmentField.h" />
+    <ClInclude Include="..\Driver\OpenVRHookLayout.h" />
+    <ClInclude Include="..\Overlay\ImGuiVRInput.h" />
+    <ClInclude Include="..\lib\openvr\compat\ivrserverdriverhost_005.h" />
     <ClInclude Include="..\Driver\PoseScale.h" />
     <ClInclude Include="..\Driver\PoseTransform.h" />
     <ClInclude Include="..\Driver\ProtocolValidation.h" />

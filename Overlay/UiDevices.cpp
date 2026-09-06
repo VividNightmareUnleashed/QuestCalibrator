@@ -70,10 +70,10 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 	const float h = 52.0f;
 	ImGui::PushID(dev.id);
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	bool pressed = ImGui::InvisibleButton("row", ImVec2(w, h));
 	// The rename and identify tools sit on top of the row and must win the
 	// hover.
-	ImGui::SetItemAllowOverlap();
+	ImGui::SetNextItemAllowOverlap();
+	bool pressed = ImGui::InvisibleButton("row", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
 	bool hov = ImGui::IsItemHovered();
 	const bool rowFocused = ImGui::IsItemFocused();
 	ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -82,7 +82,9 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 	if (!first)
 		dl->AddLine(ImVec2(p.x + 16.0f, p.y), ImVec2(b.x - 16.0f, p.y), Pal::U32(Pal::Border), 1.0f);
 
-	int corners = (first ? ImDrawCornerFlags_Top : 0) | (last ? ImDrawCornerFlags_Bot : 0);
+	int corners = (first ? ImDrawFlags_RoundCornersTop : 0) | (last ? ImDrawFlags_RoundCornersBottom : 0);
+	if (!corners)
+		corners = ImDrawFlags_RoundCornersNone;
 	if (selected)
 	{
 		ImVec4 tint = Pal::Accent; tint.w = 0.08f;
@@ -125,7 +127,7 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		const float bw = 26.0f, bh = 12.0f, nub = 2.5f;
 		ImVec2 g0 = ImVec2(b.x - 16.0f - bw - nub, p.y + (h - bh) * 0.5f);
 		ImVec2 g1 = ImVec2(g0.x + bw, g0.y + bh);
-		dl->AddRect(g0, g1, Pal::U32(Pal::Faint), 3.0f, ImDrawCornerFlags_All, 1.0f);
+		dl->AddRect(g0, g1, Pal::U32(Pal::Faint), 3.0f, 1.0f, ImDrawFlags_RoundCornersAll);
 		dl->AddRectFilled(ImVec2(g1.x + 1.0f, iconC.y - 2.5f),
 			ImVec2(g1.x + 1.0f + nub, iconC.y + 2.5f), Pal::U32(Pal::Faint), 1.0f);
 		float level = dev.battery > 1.0f ? 1.0f : dev.battery;
@@ -145,8 +147,8 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		ImVec2 sw = ImGui::CalcTextSize(stateWord);
 		ImGui::PopFont();
 		float sx = textRight - sw.x;
-		dl->AddText(g_fontSmall, g_fontSmall->FontSize,
-			ImVec2(sx, p.y + (h - g_fontSmall->FontSize) * 0.5f),
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
+			ImVec2(sx, p.y + (h - g_fontSmall->LegacySize) * 0.5f),
 			Pal::U32(dev.connected ? Pal::Bad : Pal::Dim), stateWord);
 		textRight = sx - 10.0f;
 	}
@@ -163,14 +165,14 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		const float by = p.y + (h - bs) * 0.5f;
 		auto tool = [&](const char *id, IconFn icon, float iconSize, const char *tip) {
 			ImGui::SetCursorScreenPos(ImVec2(bx, by));
-			bool pressedTool = ImGui::InvisibleButton(id, ImVec2(bs, bs));
+			bool pressedTool = ImGui::InvisibleButton(id, ImVec2(bs, bs), ImGuiButtonFlags_EnableNav);
 			bool hovTool = ImGui::IsItemHovered();
 			bool focused = ImGui::IsItemFocused();
 			if (hovTool || focused)
 				dl->AddRectFilled(ImVec2(bx, by), ImVec2(bx + bs, by + bs),
 					Pal::U32(ImVec4(1, 1, 1, 0.08f)), 6.0f);
 			if (focused)
-				dl->AddRect(ImVec2(bx, by), ImVec2(bx + bs, by + bs), Pal::U32(Pal::Accent), 6.0f, 0, 2.0f);
+				dl->AddRect(ImVec2(bx, by), ImVec2(bx + bs, by + bs), Pal::U32(Pal::Accent), 6.0f, 2.0f, ImDrawFlags_RoundCornersNone);
 			// No tip while the field is open: it would sit on the field.
 			if (hovTool && s_renameDeviceId != dev.id)
 				ShowTip(tip, true);
@@ -220,10 +222,10 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		ImGui::PopStyleVar();
 		ImGui::PopItemWidth();
 		if (s_renameBuf[0] == '\0')
-			dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(tx, p.y + 6.0f),
+			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(tx, p.y + 6.0f),
 				Pal::U32(Pal::Faint), "Hip, Left foot, Chest...");
 		std::string sub = dev.model + "  " + dev.serial;
-		dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(tx, p.y + 31.0f),
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(tx, p.y + 31.0f),
 			Pal::U32(Pal::Dim), sub.c_str(), nullptr, 0.0f, &clip);
 		if (finished)
 		{
@@ -233,23 +235,23 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 	}
 	else if (const std::string *name = FindDeviceName(dev.serial))
 	{
-		dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(tx, p.y + 6.0f),
+		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(tx, p.y + 6.0f),
 			Pal::U32(dev.connected ? Pal::Text : Pal::Dim), name->c_str(), nullptr, 0.0f, &clip);
 		std::string sub = dev.model + "  " + dev.serial;
-		dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(tx, p.y + 31.0f),
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(tx, p.y + 31.0f),
 			Pal::U32(dev.connected ? Pal::Dim : Pal::Faint), sub.c_str(), nullptr, 0.0f, &clip);
 	}
 	else
 	{
-		dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(tx, p.y + 6.0f),
+		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(tx, p.y + 6.0f),
 			Pal::U32(dev.connected ? Pal::Text : Pal::Dim), dev.model.c_str(), nullptr, 0.0f, &clip);
-		dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(tx, p.y + 31.0f),
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(tx, p.y + 31.0f),
 			Pal::U32(dev.connected ? Pal::Dim : Pal::Faint), dev.serial.c_str(), nullptr, 0.0f, &clip);
 	}
 
 	if (rowFocused)
 		dl->AddRect(ImVec2(p.x + 2.0f, p.y + 2.0f), ImVec2(b.x - 2.0f, b.y - 2.0f),
-			Pal::U32(Pal::Accent), 6.0f, ImDrawCornerFlags_All, 2.0f);
+			Pal::U32(Pal::Accent), 6.0f, 2.0f, ImDrawFlags_RoundCornersAll);
 
 	// The tools and the rename field moved the cursor; the next row starts
 	// where this one ends, as it did when the row was a single button.
@@ -322,7 +324,7 @@ void BuildDeviceList(const VRState &state, uint32_t &selected, const std::string
 		dl->AddRect(origin, b, Pal::U32(Pal::Border), 12.0f);
 		const char *msg = "No devices connected";
 		ImVec2 ts = ImGui::CalcTextSize(msg);
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(origin.x + (paneW - ts.x) * 0.5f, origin.y + (rowH - ts.y) * 0.5f),
 			Pal::U32(Pal::Dim), msg);
 		ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + rowH));
@@ -409,8 +411,8 @@ void PickTrackingSystem(const char *id, const std::vector<std::string> &candidat
 		dl->AddRect(p, ImVec2(p.x + width, p.y + h), Pal::U32(Pal::Border), 9.0f);
 		ImGui::Dummy(ImVec2(width, h));
 		if (!items.empty())
-			dl->AddText(g_fontBody, g_fontBody->FontSize,
-				ImVec2(p.x + 14.0f, p.y + (h - g_fontBody->FontSize) * 0.5f),
+			dl->AddText(g_fontBody, g_fontBody->LegacySize,
+				ImVec2(p.x + 14.0f, p.y + (h - g_fontBody->LegacySize) * 0.5f),
 				Pal::U32(Pal::Text), items[0]);
 	}
 	else
@@ -431,11 +433,11 @@ void BuildSpacesSection(const VRState &state)
 		const float h = 120.0f;
 		ImVec2 p = BeginRowCard(h);
 		ImDrawList *dl = ImGui::GetWindowDrawList();
-		float cw = ImGui::GetWindowContentRegionWidth();
+		float cw = ImGui::GetContentRegionAvail().x;
 		const char *msg = "No tracked devices found";
 		ImVec2 ts = ImGui::CalcTextSize(msg);
 		IconHMD(dl, ImVec2(p.x + cw * 0.5f, p.y + 42.0f), 16.0f, Pal::U32(Pal::Faint));
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(p.x + (cw - ts.x) * 0.5f, p.y + 70.0f), Pal::U32(Pal::Dim), msg);
 		EndRowCard(p, h);
 		return;
@@ -458,7 +460,7 @@ void BuildSpacesSection(const VRState &state)
 		}
 	}
 
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	const float paneGap = 24.0f;
 	float paneW = (cw - paneGap) * 0.5f;
 

@@ -5,7 +5,7 @@
 
 void BuildSettingsScreen(const VRState &state)
 {
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	const float gap = 12.0f;
 	(void)gap;
 
@@ -75,7 +75,7 @@ void BuildSettingsScreen(const VRState &state)
 				if (!CalCtx.uiAdvanced)
 				{
 					std::string line = FormatString("%zu anchor%s saved", anchorCount, anchorCount == 1 ? "" : "s");
-					dl->AddText(g_fontSmall, g_fontSmall->FontSize,
+					dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
 						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH), Pal::U32(Pal::Dim), line.c_str());
 				}
 				for (size_t i = 0; CalCtx.uiAdvanced && i < CalCtx.fieldAnchors.size(); ++i)
@@ -88,7 +88,7 @@ void BuildSettingsScreen(const VRState &state)
 					double rotDeltaDeg = a.rotation.angularDistance(CalCtx.transform.rotation) * 180.0 / EIGEN_PI;
 					std::string line = FormatString("Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base",
 						i + 1, a.position.x(), a.position.z(), posDeltaCm, rotDeltaDeg);
-					dl->AddText(g_fontSmall, g_fontSmall->FontSize,
+					dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
 						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH + i * 24.0f), Pal::U32(Pal::Dim), line.c_str());
 				}
 			}
@@ -122,8 +122,8 @@ void BuildSettingsScreen(const VRState &state)
 			{
 				std::string applied = FormatString("%+.1f ms", CalCtx.appliedTimeOffset * 1000.0);
 				ImVec2 ts = ImGui::CalcTextSize(applied.c_str());
-				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->FontSize * 0.5f),
+				dl->AddText(g_fontBody, g_fontBody->LegacySize,
+					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(Pal::Dim), applied.c_str());
 			}
 
@@ -138,20 +138,20 @@ void BuildSettingsScreen(const VRState &state)
 
 				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 9.0f));
 				QCCheckbox("##manualOverride", &CalCtx.useManualTimeOffset);
-				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(np.x + 48.0f, (np.y + nb.y) * 0.5f - g_fontBody->FontSize * 0.5f),
+				dl->AddText(g_fontBody, g_fontBody->LegacySize,
+					ImVec2(np.x + 48.0f, (np.y + nb.y) * 0.5f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(Pal::Text), "Manual time offset override (debug)");
 
 				ImVec2 msSize = ImGui::CalcTextSize("ms");
 				float inputW = 110.0f;
-				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(nb.x - 14.0f - msSize.x, (np.y + nb.y) * 0.5f - g_fontBody->FontSize * 0.5f),
+				dl->AddText(g_fontBody, g_fontBody->LegacySize,
+					ImVec2(nb.x - 14.0f - msSize.x, (np.y + nb.y) * 0.5f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(Pal::Dim), "ms");
 				ImGui::SetCursorScreenPos(ImVec2(nb.x - 14.0f - msSize.x - 10.0f - inputW, np.y + 5.0f));
 				ImGui::PushItemWidth(inputW);
 				float manualMs = (float)CalCtx.manualTimeOffsetMs;
 				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 6));
-				if (ImGui::InputFloat("##manualTimeOffset", &manualMs, 0.0f, 0.0f, 1))
+				if (ImGui::InputFloat("##manualTimeOffset", &manualMs, 0.0f, 0.0f, "%.1f"))
 				{
 					if (!std::isfinite(manualMs)) manualMs = 0.0f;
 					if (manualMs > 50.0f) manualMs = 50.0f;
@@ -193,8 +193,8 @@ void BuildSettingsScreen(const VRState &state)
 				continuous = ContinuousStatusNow();
 				const char *status = ContinuousStateWord(continuous);
 				ImVec2 ts = ImGui::CalcTextSize(status);
-				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->FontSize * 0.5f),
+				dl->AddText(g_fontBody, g_fontBody->LegacySize,
+					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(ContinuousStatusColor(continuous)), status);
 
 				// Nested inset: tracker pick, game visibility, opt-in latency.
@@ -203,8 +203,8 @@ void BuildSettingsScreen(const VRState &state)
 				dl->AddRectFilled(np, nb, Pal::U32(Pal::Inset), 9.0f);
 				const float nestedW = nb.x - np.x - 24.0f;
 
-				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(np.x + 12.0f, np.y + 17.0f - g_fontBody->FontSize * 0.5f),
+				dl->AddText(g_fontBody, g_fontBody->LegacySize,
+					ImVec2(np.x + 12.0f, np.y + 17.0f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(Pal::Text), "Headset tracker");
 
 				// Candidates: every target-system device except the HMD. A
@@ -272,8 +272,8 @@ void BuildSettingsScreen(const VRState &state)
 				{
 					const float segItemW = 150.0f, segH = 32.0f;
 					const float rowY = np.y + 40.0f;
-					dl->AddText(g_fontBody, g_fontBody->FontSize,
-						ImVec2(np.x + 12.0f, rowY + segH * 0.5f - g_fontBody->FontSize * 0.5f),
+					dl->AddText(g_fontBody, g_fontBody->LegacySize,
+						ImVec2(np.x + 12.0f, rowY + segH * 0.5f - g_fontBody->LegacySize * 0.5f),
 						Pal::U32(Pal::Text), "Method");
 					const ImVec2 segPos(nb.x - 14.0f - (segItemW * 2.0f + 8.0f), rowY);
 					ImGui::SetCursorScreenPos(segPos);
@@ -330,7 +330,7 @@ void BuildSettingsScreen(const VRState &state)
 					ImVec2 ap = ImVec2(p.x + kRowInsetX, nb.y + 6.0f);
 					if (needsPick)
 					{
-						dl->AddText(g_fontBody, g_fontBody->FontSize,
+						dl->AddText(g_fontBody, g_fontBody->LegacySize,
 							ImVec2(ap.x, ap.y + 8.0f), Pal::U32(Pal::Violet),
 							"Strap a spare tracker to the headset and pick it above.");
 					}
@@ -389,7 +389,7 @@ void BuildSettingsScreen(const VRState &state)
 					CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1],
 					copied ? copied->c_str() : "age unknown");
 			}
-			ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->FontSize,
+			ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
 				ImVec2(p.x + 92.0f, p.y + 46.0f), Pal::U32(Pal::Dim), info.c_str());
 
 			float btnW = 224.0f;
@@ -453,7 +453,7 @@ void BuildSettingsScreen(const VRState &state)
 					status = "Ready to check";
 					break;
 				}
-				dl->AddText(g_fontSmall, g_fontSmall->FontSize,
+				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
 					ImVec2(p.x + 92.0f, actionY + 10.0f), Pal::U32(color), status.c_str());
 
 				const bool installReady = update.state == questcal::update::State::Ready;
@@ -571,7 +571,7 @@ void SeedTransformEditorDraft()
 bool BuildProfileEditor()
 {
 	ImGuiStyle &style = ImGui::GetStyle();
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	float width = cw / 3.0f - style.FramePadding.x;
 	float widthF = width - style.FramePadding.x;
 

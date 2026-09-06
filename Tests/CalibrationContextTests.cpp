@@ -1,6 +1,20 @@
 #include "../Overlay/Calibration.h"
 #include "../Overlay/CalibrationDriver.h"
 
+bool CalibrationEulerRoundTripScenario()
+{
+	for (double yaw : {-179.0, -90.0, -0.1, 0.0, 90.0, 179.0})
+		for (double pitch : {-90.0, -89.9, 0.0, 89.9, 90.0})
+		{
+			CalibrationTransform transform;
+			transform.rotation = CalibrationContext::RebuildRotationFromEuler(Eigen::Vector3d(yaw, pitch, 27.0));
+			const auto rebuilt = CalibrationContext::RebuildRotationFromEuler(transform.RotationEulerDegrees());
+			if (transform.rotation.angularDistance(rebuilt) > 1e-9)
+				return false;
+		}
+	return true;
+}
+
 bool CalibrationContextResetScenario()
 {
 	CalibrationContext ctx;

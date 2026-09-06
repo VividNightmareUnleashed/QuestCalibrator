@@ -100,6 +100,7 @@
     <ClInclude Include="AtomicSnapshot.h" />
     <ClInclude Include="Hooking.h" />
     <ClInclude Include="InterfaceHookInjector.h" />
+    <ClInclude Include="OpenVRHookLayout.h" />
     <ClInclude Include="IPCServer.h" />
     <ClInclude Include="IPCProtocolGate.h" />
     <ClInclude Include="Logging.h" />

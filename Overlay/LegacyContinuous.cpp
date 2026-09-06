@@ -188,8 +188,7 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const
 
 	auto crossCV = refPoints.transpose() * targetPoints;
 
-	Eigen::BDCSVD<Eigen::MatrixXd> bdcsvd;
-	auto svd = bdcsvd.compute(crossCV, Eigen::ComputeThinU | Eigen::ComputeThinV);
+	Eigen::BDCSVD<Eigen::MatrixXd, Eigen::ComputeThinU | Eigen::ComputeThinV> svd(crossCV);
 
 	Eigen::Matrix3d i = Eigen::Matrix3d::Identity();
 	if ((svd.matrixU() * svd.matrixV().transpose()).determinant() < 0)
@@ -211,7 +210,7 @@ std::vector<bool> CalibrationCalc::DetectOutliers() const
 		coefficients.block<4, 4>(4 * i, 0) = Eigen::Matrix4d::Identity();
 		constraints.block<4, 1>(4 * i, 0) = Eigen::Vector4d(quatExtTmp.w(), quatExtTmp.x(), quatExtTmp.y(), quatExtTmp.z());
 	}
-	Eigen::Vector4d result = coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constraints);
+	Eigen::Vector4d result = coefficients.bdcSvd<Eigen::ComputeThinU | Eigen::ComputeThinV>().solve(constraints);
 	Eigen::Quaterniond quatExt(result(0), result(1), result(2), result(3));
 	quatExt.normalize();
 	const double threshold = 0.99;
@@ -273,7 +272,7 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) co
 	auto crossCV = refPoints.transpose() * targetPoints;
 
 	// Singular Value Decomposition (SVD)
-	Eigen::JacobiSVD<Eigen::MatrixXd> svd(crossCV, Eigen::ComputeThinU | Eigen::ComputeThinV);
+	Eigen::JacobiSVD<Eigen::MatrixXd, Eigen::ComputeThinU | Eigen::ComputeThinV> svd(crossCV);
 
 	// Calculate 2D rotation matrix
 	Eigen::Matrix2d i = Eigen::Matrix2d::Identity();
@@ -323,7 +322,7 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	// Center each frame family separately: this is the same least-squares
 	// problem with 6n rows instead of 3n(n-1), without squaring its condition
 	// number by forming normal equations.
-	return coefficients.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(constants);
+	return coefficients.bdcSvd<Eigen::ComputeThinU | Eigen::ComputeThinV>().solve(constants);
 }
 
 Eigen::AffineCompact3d CalibrationCalc::ComputeCalibration(const bool ignoreOutliers) const

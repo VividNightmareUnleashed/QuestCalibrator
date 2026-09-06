@@ -304,7 +304,7 @@ void BuildStatusBand(const VRState &state)
 	const ContinuousStatus continuous = ContinuousStatusNow();
 	if (CalCtx.validProfile && continuous == ContinuousStatus::Frozen)
 	{
-		const float width = ImGui::GetWindowContentRegionWidth();
+		const float width = ImGui::GetContentRegionAvail().x;
 		const float actionW = 280.0f;
 		const float bandH = CalCtx.uiAdvanced ? 220.0f : 184.0f;
 		s_bottomReserve = bandH;
@@ -418,8 +418,8 @@ void BuildStatusBand(const VRState &state)
 	// nudge.
 	{
 		const bool showContinuous = CalCtx.validProfile && continuous != ContinuousStatus::Off;
-		const float lineH = g_fontBody->FontSize + 6.0f;
-		const float detailH = g_fontSmall->FontSize + 6.0f;
+		const float lineH = g_fontBody->LegacySize + 6.0f;
+		const float detailH = g_fontSmall->LegacySize + 6.0f;
 		int lines = CalCtx.validProfile ? 1 + (showContinuous ? 1 : 0) + (nudge ? 1 : 0) : 1;
 		float stripH = lineH * (float)lines + (lines > 1 ? 4.0f : 0.0f)
 			+ detailH * (float)details.size() + (details.empty() ? 0.0f : 4.0f);
@@ -450,12 +450,12 @@ void BuildStatusBand(const VRState &state)
 		{
 			// Line 1: the verdict word carries the colour; the age beside it
 			// is information, so it gets Dim rather than Faint.
-			float ty = y + lineH * 0.5f - g_fontBody->FontSize * 0.5f;
+			float ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
 			float x = p.x;
 			const char *label = RatingLabel(rating);
-			dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(Pal::Text), "Tracking quality: ");
+			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), "Tracking quality: ");
 			x += ImGui::CalcTextSize("Tracking quality: ").x;
-			dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(RatingColor(rating)), label);
+			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(RatingColor(rating)), label);
 			x += ImGui::CalcTextSize(label).x;
 
 			std::string ageLine;
@@ -472,8 +472,8 @@ void BuildStatusBand(const VRState &state)
 				auto age = FormatAlignmentAge();
 				ageLine = age ? *age : std::string("calibration time unknown");
 			}
-			dl->AddText(g_fontSmall, g_fontSmall->FontSize,
-				ImVec2(x + 18.0f, y + lineH * 0.5f - g_fontSmall->FontSize * 0.5f + 2.0f),
+			dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
+				ImVec2(x + 18.0f, y + lineH * 0.5f - g_fontSmall->LegacySize * 0.5f + 2.0f),
 				Pal::U32(Pal::Dim), ageLine.c_str());
 			y += lineH;
 
@@ -481,8 +481,8 @@ void BuildStatusBand(const VRState &state)
 			// verdict they support.
 			for (const auto &detail : details)
 			{
-				dl->AddText(g_fontSmall, g_fontSmall->FontSize,
-					ImVec2(p.x, y + detailH * 0.5f - g_fontSmall->FontSize * 0.5f),
+				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
+					ImVec2(p.x, y + detailH * 0.5f - g_fontSmall->LegacySize * 0.5f),
 					Pal::U32(detail.color), detail.text.c_str());
 				y += detailH;
 			}
@@ -494,11 +494,11 @@ void BuildStatusBand(const VRState &state)
 			if (showContinuous)
 			{
 				y += 4.0f;
-				ty = y + lineH * 0.5f - g_fontBody->FontSize * 0.5f;
+				ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
 				x = p.x;
-				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(Pal::Text), "Continuous calibration");
+				dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), "Continuous calibration");
 				x += ImGui::CalcTextSize("Continuous calibration").x;
-				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty),
+				dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty),
 					Pal::U32(ContinuousStatusColor(continuous)), ContinuousStatusLine(continuous));
 				y += lineH;
 			}
@@ -507,15 +507,15 @@ void BuildStatusBand(const VRState &state)
 			{
 				if (!showContinuous)
 					y += 4.0f;
-				dl->AddText(g_fontBody, g_fontBody->FontSize,
-					ImVec2(p.x, y + lineH * 0.5f - g_fontBody->FontSize * 0.5f),
+				dl->AddText(g_fontBody, g_fontBody->LegacySize,
+					ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(Pal::Violet), nudge);
 			}
 		}
 		else
 		{
-			dl->AddText(g_fontBody, g_fontBody->FontSize,
-				ImVec2(p.x, y + lineH * 0.5f - g_fontBody->FontSize * 0.5f),
+			dl->AddText(g_fontBody, g_fontBody->LegacySize,
+				ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
 				Pal::U32(Pal::Dim),
 				"Not calibrated yet. Pick a device on each side and press Start calibration.");
 		}
@@ -527,7 +527,7 @@ void BuildStatusBand(const VRState &state)
 
 void BuildMainScreen(const VRState &state)
 {
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	const float gap = 12.0f;
 
 	{

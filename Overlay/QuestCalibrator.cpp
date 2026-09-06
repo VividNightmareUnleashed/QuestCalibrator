@@ -1,13 +1,14 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 #include "Calibration.h"
 #include "Configuration.h"
 #include "EmbeddedFiles.h"
 #include "Updater.h"
 #include "UserInterface.h"
+#include "ImGuiVRInput.h"
 
 #include <imgui/imgui.h>
-#include <imgui/imgui_impl_glfw.h>
-#include <imgui/imgui_impl_opengl3.h>
+#include <imgui/backends/imgui_impl_glfw.h>
+#include <imgui/backends/imgui_impl_opengl3.h>
 #include <GL/gl3w.h>
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -45,6 +46,7 @@ void GLFWErrorCallback(int error, const char* description)
 static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved);
 
 static GLFWwindow *glfwWindow = nullptr;
+static bool dashboardOwnsInput = false;
 static vr::VROverlayHandle_t overlayMainHandle = 0, overlayThumbnailHandle = 0;
 static bool imguiContextInitialized = false;
 static bool imguiGlfwInitialized = false;
@@ -293,6 +295,8 @@ void CreateGLFWWindow()
 
 	if (!g_uiPreviewMode)
 		glfwIconifyWindow(glfwWindow);
+	else
+		glfwShowWindow(glfwWindow);
 
 	imguiContextInitialized = ImGui::CreateContext() != nullptr;
 	if (!imguiContextInitialized)
@@ -309,6 +313,9 @@ void CreateGLFWWindow()
 	imguiGlfwInitialized = ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
 	if (!imguiGlfwInitialized)
 		throw std::runtime_error("Failed to initialize the ImGui GLFW backend");
+	glfwSetWindowFocusCallback(glfwWindow, [](GLFWwindow *, int focused) {
+		imgui_vr::DesktopFocusEvent(focused != 0, dashboardOwnsInput);
+	});
 	imguiOpenGLInitialized = ImGui_ImplOpenGL3_Init("#version 330");
 	if (!imguiOpenGLInitialized)
 		throw std::runtime_error("Failed to initialize the ImGui OpenGL backend");
@@ -358,6 +365,7 @@ void TryCreateVROverlay()
 	vr::VROverlay()->SetOverlayWidthInMeters(overlayMainHandle, 3.0f);
 	vr::VROverlay()->SetOverlayInputMethod(overlayMainHandle, vr::VROverlayInputMethod_Mouse);
 	vr::VROverlay()->SetOverlayFlag(overlayMainHandle, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
+	vr::VROverlay()->SetOverlayFlag(overlayMainHandle, vr::VROverlayFlags_NoBackside, true);
 
 	vr::VROverlay()->SetOverlayFromFile(overlayThumbnailHandle, AppFile("icon.png").c_str());
 }
@@ -434,13 +442,18 @@ void RunLoop()
 		CalibrationTick(time);
 
 		bool dashboardVisible = false;
+		auto &io = ImGui::GetIO();
+		io.SetAppAcceptingEvents(true);
 		int width, height;
 		glfwGetFramebufferSize(glfwWindow, &width, &height);
 
 		if (overlayMainHandle && vr::VROverlay())
 		{
-			auto &io = ImGui::GetIO();
 			dashboardVisible = vr::VROverlay()->IsActiveDashboardOverlay(overlayMainHandle);
+			if (dashboardVisible != dashboardOwnsInput)
+				imgui_vr::ChangeInputSource(dashboardVisible,
+					glfwGetWindowAttrib(glfwWindow, GLFW_FOCUSED) != 0);
+			dashboardOwnsInput = dashboardVisible;
 
 			// Closing the VR keyboard takes two frames to settle, so the phase is
 			// named rather than encoded in flags whose combinations only a
@@ -452,15 +465,19 @@ void RunLoop()
 			{
 				Closed,
 				Open,
-				CommitText,         // Done pressed; give ImGui a frame to take SetActiveText
+				CommitText,         // Done pressed; let ImGui consume the queued edit
 				AwaitInputRelease,  // widget cleared; wait for io.WantTextInput to catch up
 			};
 			static KeyboardPhase keyboardPhase = KeyboardPhase::Closed;
+			static ImGuiID keyboardWidget = 0;
 
 			switch (keyboardPhase)
 			{
 			case KeyboardPhase::CommitText:
-				ImGui::ClearActiveID();
+				if (imgui_vr::HasPendingInput())
+					break;
+				if (ImGui::GetActiveID() == keyboardWidget)
+					ImGui::ClearActiveID();
 				keyboardPhase = KeyboardPhase::AwaitInputRelease;
 				break;
 			case KeyboardPhase::AwaitInputRelease:
@@ -473,19 +490,20 @@ void RunLoop()
 					keyboardPhase = KeyboardPhase::Closed;
 				break;
 			case KeyboardPhase::Closed:
-				if (io.WantTextInput)
+				if (dashboardVisible && io.WantTextInput)
 				{
-					char buf[0x400];
-					ImGui::GetActiveText(buf, sizeof buf);
-					buf[0x3ff] = 0;
+					const char *text = imgui_vr::ActiveText();
 					uint32_t unFlags = 0; // EKeyboardFlags
 
 					vr::EVROverlayError error = vr::VROverlay()->ShowKeyboardForOverlay(
 						overlayMainHandle, vr::k_EGamepadTextInputModeNormal, vr::k_EGamepadTextInputLineModeSingleLine,
-						unFlags, "QuestCalibrator Overlay", sizeof buf, buf, 0
+						unFlags, "QuestCalibrator Overlay", 0x400, text, 0
 					);
 					if (error == vr::VROverlayError_None)
+					{
 						keyboardPhase = KeyboardPhase::Open;
+						keyboardWidget = ImGui::GetActiveID();
+					}
 				}
 				break;
 			}
@@ -495,33 +513,27 @@ void RunLoop()
 			{
 				switch (vrEvent.eventType) {
 				case vr::VREvent_MouseMove:
-					io.MousePos.x = vrEvent.data.mouse.x;
-					io.MousePos.y = vrEvent.data.mouse.y;
+					io.AddMousePosEvent(vrEvent.data.mouse.x, vrEvent.data.mouse.y);
 					break;
 				case vr::VREvent_MouseButtonDown:
-					io.MouseDown[vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1] = true;
+					io.AddMouseButtonEvent(vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1, true);
 					break;
 				case vr::VREvent_MouseButtonUp:
-					io.MouseDown[vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1] = false;
+					io.AddMouseButtonEvent(vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1, false);
 					break;
 				case vr::VREvent_ScrollDiscrete:
-					io.MouseWheelH += vrEvent.data.scroll.xdelta * 360.0f * 8.0f;
-					io.MouseWheel += vrEvent.data.scroll.ydelta * 360.0f * 8.0f;
+					io.AddMouseWheelEvent(vrEvent.data.scroll.xdelta * 360.0f * 8.0f,
+						vrEvent.data.scroll.ydelta * 360.0f * 8.0f);
 					break;
 				case vr::VREvent_KeyboardDone: {
 					char buf[0x400] = {};
-					uint32_t bytes = vr::VROverlay()->GetKeyboardText(buf, sizeof buf);
-					if (bytes > 0)
-					{
-						buf[sizeof buf - 1] = 0;
-						// buf_size is the capacity: the decoder writes at most
-						// buf_size - 1 characters, so passing the string length
-						// drops the last one typed.
-						ImGui::SetActiveText(buf, static_cast<int>(sizeof buf));
-					}
-					// A Done for a keyboard we no longer consider open has no
-					// widget to clear; only settle.
-					keyboardPhase = keyboardPhase == KeyboardPhase::Open
+					vr::VROverlay()->GetKeyboardText(buf, sizeof buf);
+					buf[sizeof buf - 1] = 0;
+					// Empty text is a valid edit. A late Done must not replace
+					// a different widget's contents or clear its focus.
+					bool replaced = keyboardPhase == KeyboardPhase::Open &&
+						imgui_vr::ReplaceActiveText(buf, keyboardWidget);
+					keyboardPhase = replaced
 						? KeyboardPhase::CommitText
 						: KeyboardPhase::AwaitInputRelease;
 					break;
@@ -532,11 +544,15 @@ void RunLoop()
 			}
 		}
 
-		ImGui::GetIO().DisplaySize = ImVec2((float) fboTextureWidth, (float) fboTextureHeight);
-
-		ImGui_ImplGlfw_SetReadMouseFromGlfw(!dashboardVisible);
+		// The upstream backend still owns desktop input, timing and cursors.
+		// Suppress its events while the dashboard owns input, including when
+		// the desktop window is focused or minimized.
+		io.SetAppAcceptingEvents(!dashboardVisible);
 		ImGui_ImplOpenGL3_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
+		io.SetAppAcceptingEvents(true);
+		io.DisplaySize = ImVec2((float) fboTextureWidth, (float) fboTextureHeight);
+		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
 		ImGui::NewFrame();
 
 		BuildMainWindow(dashboardVisible);
@@ -598,6 +614,7 @@ void RunLoop()
 		// visibly stutter. Hidden/minimized windows still need the idle wait.
 		const bool displayPaced = CalCtx.wantedUpdateInterval <= 1.0 / 60.0 && width && height &&
 			glfwGetWindowAttrib(glfwWindow, GLFW_VISIBLE) && !glfwGetWindowAttrib(glfwWindow, GLFW_ICONIFIED);
+		io.SetAppAcceptingEvents(!dashboardVisible);
 		if (displayPaced)
 			glfwPollEvents();
 		else

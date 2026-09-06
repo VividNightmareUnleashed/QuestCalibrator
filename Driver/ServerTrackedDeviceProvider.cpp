@@ -34,11 +34,11 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	}
 
 	// Install the context detour before OpenVR initializes its cached interfaces.
-	// InitServerDriverContext requests IVRServerDriverHost_005 through the detour,
+	// InitServerDriverContext requests IVRServerDriverHost_006 through the detour,
 	// which is why the check below can succeed on our own context init alone: it
 	// proves a pose hook was created on some host object, not that the device
 	// drivers in this vrserver are routed through it. A driver that resolved
-	// IVRServerDriverHost_006 before this detour existed keeps forwarding poses
+	// a different supported host interface before this detour existed keeps forwarding poses
 	// untouched; only the `01questcalibrator` manifest name orders this driver
 	// first, and nothing in code enforces that.
 	if (!InjectHooks(this, pDriverContext))
