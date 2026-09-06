@@ -126,6 +126,8 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 	const float motionAlpha = blend * blend * (3.0f - 2.0f * blend);
 	auto drawFrame = [&](int index, ImVec2 top, float opacity)
 	{
+		// The captured reference aliases the static texture handle for this call.
+		// NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
 		if (!texture || opacity <= 0.0f)
 			return;
 		const int column = index % columns;

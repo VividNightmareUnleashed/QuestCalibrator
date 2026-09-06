@@ -334,9 +334,12 @@ static bool DecodeTexture(IWICImagingFactory *factory, IWICBitmapDecoder *decode
 	// External device icons retain their small allocation bound. The embedded
 	// guides have fixed, bounded atlas layouts for the wrist and head demos.
 	UINT w = 0, h = 0;
-	if (FAILED(conv->GetSize(&w, &h)) ||
-		(guide ? !((w == 4608 && h == 5880) || (w == 5120 && h == 5760))
-			: (w == 0 || h == 0 || w > 1024 || h > 1024)))
+	if (FAILED(conv->GetSize(&w, &h)))
+		return false;
+	const bool validDimensions = guide
+		? ((w == 4608 && h == 5880) || (w == 5120 && h == 5760))
+		: (w > 0 && h > 0 && w <= 1024 && h <= 1024);
+	if (!validDimensions)
 		return false;
 
 	std::vector<unsigned char> pixels((size_t)w * h * 4);

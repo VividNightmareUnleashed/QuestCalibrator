@@ -67,6 +67,8 @@ bool DispatchPose()
 	pose.deviceIsConnected = true;
 	// Exercise the same MSVC x64 vtable access used by the driver hook.
 	using Callback = void (*)(void *, uint32_t, const Pose &, uint32_t);
+	// The analyzer does not model the vtable pointer installed by construction.
+	// NOLINTNEXTLINE(clang-analyzer-core.uninitialized.Assign)
 	auto table = *reinterpret_cast<void ***>(&host);
 	auto callback = reinterpret_cast<Callback>(table[openvr_hook::PoseUpdateSlot]);
 	callback(&host, 17, pose, sizeof(pose));
