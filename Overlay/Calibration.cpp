@@ -92,6 +92,8 @@ static void ResetContinuousObservations(CalibrationContext &ctx,
 	ctx.continuousCorrectionGate.Clear();
 }
 
+static void LegacyReset(CalibrationContext &ctx);
+
 static uint64_t DrainContinuousInput(CalibrationContext &ctx)
 {
 	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch);
@@ -613,6 +615,13 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		Drift->Reset();
 		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::UniverseJump);
+		// The legacy window is a 25 s pose history that its next re-solve
+		// fits as one calibration. Left straddling the rebase, that solve
+		// lands between the two frames and pulls the just-corrected
+		// calibration halfway back (7.5 cm for a simulated 15 cm reset),
+		// then walks it out over the following windows.
+		if (ctx.continuousMode == ContinuousMode::Legacy)
+			LegacyReset(ctx);
 	}
 
 	DriftMonitor::Event drift;
