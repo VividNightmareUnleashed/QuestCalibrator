@@ -65,9 +65,67 @@ public:
 		// that follow-up instead of being discarded. A step the HMD sees
 		// alone and no controller ever follows - a 3DoF-to-6DoF catch-up
 		// after a wake, a stream hiccup - still expires unapplied.
+		// The clock pauses while every other reference device is locked
+		// still: the engine's static prior freezes a controller that has
+		// been stationary for a second (its position then repeats bit for
+		// bit, which a tracked 6DoF position never does), and a frozen
+		// controller cannot step until the hand moves again. Hands resting
+		// through a headset reset would otherwise expire the step and leave
+		// the whole error in place; instead the candidate waits for the
+		// hands and is confirmed by their first movement, or expires 30 s
+		// after they move without stepping.
 		double controllerFollowSeconds = 30.0;
+		// The controller frontend's anchor follower has no grace period and
+		// snaps a delta above 5 cm at once, while the headset smoother slides
+		// for the rest of its 5 s grace after a reset before it resets
+		// again. The second of two close map moves therefore reaches the
+		// controllers up to 5 s before the headset. A controller step this
+		// far ahead of the HMD's counts as confirmation; the deltas still
+		// have to match.
+		double controllerLeadSeconds = 5.0;
 		double soloPosThreshold = 0.30;    // single-device heuristic acceptance floor
 		double soloYawThresholdRad = 10.0 * 3.14159265358979 / 180.0;
+		// Headset-only setups (the primary population: a Quest headset with
+		// lighthouse trackers and controllers, no Quest controllers) never
+		// have a second reference device to confirm a step, so every SLAM
+		// correction under the solo floor used to be fitted, found
+		// persistent, and discarded. One session logged three same-sign
+		// steps of 1 to 4 cm and 0.5 to 3 deg inside three minutes: the
+		// drift a recalibration later removes. A clean persistent HMD step
+		// with no other device tracking is therefore accepted alone down to
+		// the corroborated floor, once the two ways a false step arises are
+		// excluded: the stream must have been continuous for
+		// soloSettledSeconds (a wake, a stream restart and Virtual Desktop's
+		// reconnect re-zeroing all fall inside the first minute), and the
+		// pre-window must carry no held-position signature. The engine's
+		// 3DoF fallback holds the last tracked position bit-for-bit while the
+		// IMU orientation keeps moving, and the snap back to 6DoF is a clean
+		// step; in 6DoF the SLAM position never repeats between frames
+		// (0 of 8,515 streamed frames on 2026-09-11).
+		double soloSettledPos = 0.05;
+		double soloSettledYawRad = 2.0 * 3.14159265358979 / 180.0;
+		double soloSettledSeconds = 60.0;
+		// The engine removes odometry drift through its correction smoother:
+		// it slides toward the map target while the head moves and, once the
+		// remaining offset exceeds its reset threshold (10 cm or 10 deg on
+		// the examined build, checked every frame after a 5 s grace), snaps
+		// the rest in one step. Drift grows by a fraction of a millimetre or
+		// a thousandth of a degree per frame, so that snap is a step of
+		// almost exactly the threshold. Such a snap restores the alignment
+		// (it cancels error accrued since the calibration) and compensating
+		// it would put the drift back; a frame change lands on the threshold
+		// only by coincidence. A headset step whose translation or yaw sits
+		// inside this band is therefore never applied alone; a matching
+		// controller step still confirms it, and controllers never step on
+		// drift because their follower slews it continuously. A frame change
+		// of exactly the threshold is the cost: it is logged and left for
+		// the next correction. The thresholds are compiled defaults read
+		// from the library, not from the device; solo steps clustering at
+		// some other size in the log would show a different build's values.
+		double driftCatchUpPos = 0.10;
+		double driftCatchUpPosBand = 0.005;
+		double driftCatchUpYawRad = 10.0 * 3.14159265358979 / 180.0;
+		double driftCatchUpYawBandRad = 0.3 * 3.14159265358979 / 180.0;
 		double gapSeconds = 2.0;           // reference stream gap => no compensation, event only
 		// A discontinuity this soon after the device's stream (re)started is
 		// annotated with its resume age. Observed on a Quest Pro through
@@ -93,10 +151,11 @@ public:
 		// jump; < 0 when unknown. Reported, never used to gate acceptance.
 		double secondsSinceStreamResume = -1.0;
 		// Heuristic path: seconds between the HMD's step and the confirming
-		// device's step when the confirmation arrived after agreeWindow
-		// (a controller following a map switch); 0 when devices agreed at
-		// once or the delta was accepted solo. `time` stays the HMD's jump
-		// instant either way.
+		// device's step when the confirmation arrived outside agreeWindow:
+		// positive for a controller following a map switch, negative for a
+		// controller that stepped ahead of the headset (the smoother's
+		// grace); 0 when devices agreed at once or the delta was accepted
+		// solo. `time` stays the HMD's jump instant either way.
 		double confirmationLagSeconds = 0.0;
 		// Absolute HMD worldFromDriver endpoint captured by this exact sample.
 		// `exact` is the validity discriminator; heuristic deltas leave identity.
@@ -177,6 +236,25 @@ private:
 		std::vector<Hist> preWindow;
 		bool needsCorroboration = false;
 		bool held = false;   // HMD heuristic: past agreeWindow, awaiting a controller follow-up
+		// HMD heuristic: when the follow-up wait ends. Starts at
+		// t + window + controllerFollowSeconds and moves out by every second
+		// the other reference devices spend locked still (see
+		// controllerFollowSeconds); `heldLocked` marks that the extension
+		// was logged.
+		double followDeadline = 0.0;
+		double lastHoldCheck = -1.0;
+		bool heldLocked = false;
+		// HMD heuristic, decided once when the fit completes. `heldPosition`:
+		// the pre-window carried the 3DoF fallback's signature, so this step
+		// is a catch-up onto tracking that resumed, never a frame change;
+		// no solo path applies it. `driftCatchUp`: the step is the size of
+		// the engine's reset threshold, so it is most likely the smoother
+		// cancelling accrued drift; no solo path applies it (see
+		// driftCatchUp* in Config). `settledSolo`: the step may be applied
+		// with no other reference device tracking (see soloSettled*).
+		bool heldPosition = false;
+		bool driftCatchUp = false;
+		bool settledSolo = false;
 
 		// The filters every consumer needs, once each.
 		bool LiveExact() const { return kind == Kind::Exact && life != Life::Dead; }
@@ -195,6 +273,9 @@ private:
 		Eigen::Vector3d drvAngVel{ 0, 0, 0 };
 		double lastValidTime = -1.0;
 		double streamResumeTime = -1.0;    // first valid sample ever, or first after a gap
+		// Consecutive samples whose composed position repeated the previous
+		// one bit for bit: the static prior's lock on a still controller.
+		int repeatedPositions = 0;
 		std::deque<Hist> hist;
 	};
 
@@ -203,12 +284,19 @@ private:
 		return dev.streamResumeTime >= 0.0 ? t - dev.streamResumeTime : -1.0;
 	}
 
+	// The engine's 3DoF fallback: position held bit-for-bit between frames
+	// while the orientation keeps integrating. Never seen in 6DoF.
+	static bool HeldPositionSignature(const std::vector<Hist> &window);
+
 	void DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	                     const Eigen::Quaterniond &newRot, const Eigen::Vector3d &newTrans);
 	void DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist &incoming);
 	void EvaluatePendingCandidates();
 	void TryAccept();
 	int ActiveDeviceCount(double now) const;
+	// True when at least one other reference device is tracking and every
+	// one of them is locked still (position repeated over the last samples).
+	bool OthersLockedStill(double now) const;
 
 	Config config;
 	double qpcToSeconds;
@@ -219,4 +307,11 @@ private:
 	std::deque<GapEvent> gaps;
 	std::deque<std::string> notes;
 	double lastAcceptTime = -1e9;
+	// HMD steps that expired unapplied since the last Reset, summed as one
+	// transform so the log shows whether they add up to the drift a
+	// recalibration later removes.
+	int ignoredSteps = 0;
+	int driftCatchUps = 0;
+	double ignoredYaw = 0.0;
+	Eigen::Vector3d ignoredTranslation{ 0, 0, 0 };
 };

@@ -144,7 +144,34 @@ Quest Pro controllers track on their own and can lag a headset map switch by
 up to half a minute. A headset step that no controller matched at once is
 held rather than dropped, and applied when a controller follows within 30 s;
 the log line then says how much later it was confirmed. A step nothing
-follows is discarded.
+follows is discarded. Two engine habits are allowed for: a controller lying
+still is frozen by the headset and cannot step until the hand moves, so the
+30 s wait pauses while every controller is frozen and the step is confirmed
+by their first movement; and a controller corrects up to 5 s ahead of the
+headset after a recent reset, so a matching controller step that arrived
+first also confirms. None of this applies without Quest controllers.
+
+With no Quest controllers in use there is nothing to confirm a headset step,
+so the headset's small tracking corrections used to be detected and then
+discarded, and the alignment drifted by their sum. A clean headset step of at
+least 5 cm or 2 degrees is now applied on its own once the headset's stream
+has been continuous for a minute (a wake or a stream restart re-zeroes inside
+that minute) and its position was not being held before the step (the
+headset's 3DoF fallback). A step of any size that follows a held position is
+never applied on its own: it is the headset catching up onto resumed
+tracking, not a change of frame. Steps that are still discarded are totalled
+in the log, so a session's ignored corrections can be compared with what the
+next calibration removes.
+
+One more refusal covers the headset's own drift correction. Under continuous
+tracking the headset removes odometry drift by sliding while you move and,
+once the remaining error exceeds its reset threshold (10 cm or 10 degrees),
+snapping the rest in one step. That snap restores the alignment, so applying
+it would put the drift back. Drift crosses the threshold a hair at a time,
+so the snap is a step of almost exactly the threshold: a headset-only step
+within half a centimetre of 10 cm or a third of a degree of 10 degrees is
+refused as a drift catch-up and counted separately in the log. A change of
+frame that happens to be that size is left for the next correction.
 
 ## Updates
 

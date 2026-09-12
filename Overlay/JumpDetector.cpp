@@ -109,6 +109,7 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 		// bridge it, even when the valid endpoints are less than gapSeconds apart.
 		dev.wfdValid = false;
 		dev.hist.clear();
+		dev.repeatedPositions = 0;
 		for (auto &candidate : candidates)
 			if (candidate.deviceId == s.deviceId && candidate.kind == Kind::Heuristic)
 				candidate.life = Life::Dead;
@@ -214,6 +215,10 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 		DetectDiscontinuity(s.deviceId, dev, h);
 	}
 
+	if (!dev.hist.empty() && dev.hist.back().pos == h.pos)
+		dev.repeatedPositions++;
+	else
+		dev.repeatedPositions = 0;
 	dev.hist.push_back(h);
 	while (!dev.hist.empty() && h.t - dev.hist.front().t > 2.0 * config.window)
 		dev.hist.pop_front();
@@ -291,6 +296,8 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	c.kind = Kind::Heuristic;
 	c.life = Life::Pending;
 	c.needsCorroboration = posErr < config.discontinuityPos && yawErr < config.discontinuityYawRad;
+	c.followDeadline = c.t + config.window + config.controllerFollowSeconds;
+	c.lastHoldCheck = c.t;
 	// Keep only the pre-jump window, in order: find where it starts and copy
 	// the suffix once (erasing the expired head one element at a time
 	// relocated the remainder on every step).
@@ -369,8 +376,37 @@ void JumpDetector::EvaluatePendingCandidates()
 		const double resumeAge = ResumeAge(dev, c.t);
 		if (resumeAge >= 0.0 && resumeAge <= config.recentResumeSeconds)
 			note += Format(" (%.1f s after the stream resumed)", resumeAge);
+
+		// Decide the headset-only acceptance here, once, while the evidence
+		// is in hand; TryAccept only reads the verdict. Both refusals are
+		// logged so a later reader can tell a gated step from a small one.
+		if (c.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
+		{
+			c.heldPosition = HeldPositionSignature(c.preWindow);
+			c.driftCatchUp =
+				std::abs(c.trans.norm() - config.driftCatchUpPos) <= config.driftCatchUpPosBand ||
+				std::abs(std::abs(dYaw) - config.driftCatchUpYawRad) <= config.driftCatchUpYawBandRad;
+			bool aboveFloor = c.trans.norm() > config.soloSettledPos ||
+				std::abs(dYaw) > config.soloSettledYawRad;
+			bool steady = resumeAge >= config.soloSettledSeconds;
+			c.settledSolo = aboveFloor && steady && !c.heldPosition && !c.driftCatchUp;
+			if (c.heldPosition)
+				note += "; position was held before the step (3DoF), not accepted alone";
+			else if (c.driftCatchUp)
+				note += "; the size of the engine's reset threshold (a drift catch-up), not accepted alone";
+			else if (aboveFloor && !steady)
+				note += Format("; stream steady under %.0f s, not accepted alone", config.soloSettledSeconds);
+		}
 		notes.push_back(note);
 	}
+}
+
+bool JumpDetector::HeldPositionSignature(const std::vector<Hist> &window)
+{
+	for (size_t i = 1; i < window.size(); ++i)
+		if (window[i].pos == window[i - 1].pos && window[i].yaw != window[i - 1].yaw)
+			return true;
+	return false;
 }
 
 void JumpDetector::TryAccept()
@@ -445,10 +481,11 @@ void JumpDetector::TryAccept()
 			if (!o.ReadyHeuristic() || counted.test(o.deviceId))
 				continue;
 			// Devices agree within agreeWindow either way round. A controller
-			// may also follow the HMD up to controllerFollowSeconds later; it
-			// never leads it by more than agreeWindow.
+			// may also follow the HMD until the candidate's follow-up
+			// deadline, or lead it by up to the smoother's grace (see
+			// controllerLeadSeconds).
 			double oLag = o.t - c0.t;
-			if (oLag < -config.agreeWindow || oLag > config.controllerFollowSeconds)
+			if (oLag < -config.controllerLeadSeconds || o.t > c0.followDeadline)
 				continue;
 			double dPos = (o.trans - c0.trans).norm();
 			double dYaw = std::abs(WrapAngle(YawOf(o.rot) - YawOf(c0.rot)));
@@ -459,17 +496,29 @@ void JumpDetector::TryAccept()
 				counted.set(o.deviceId);
 				agree.push_back(&o);
 				spread = std::max(spread, dPos);
-				if (oLag > config.agreeWindow)
-					lag = std::max(lag, oLag);
+				if (std::abs(oLag) > config.agreeWindow && std::abs(oLag) > std::abs(lag))
+					lag = oLag;
 			}
 		}
 
 		bool solo = ActiveDeviceCount(now) <= 1;
-		bool bigSolo = solo && !c0.needsCorroboration &&
+		// A large step after a held position is the catch-up onto resumed
+		// tracking (a wake, a dark corner): the frame did not change, the
+		// head did. No solo path applies it, whatever its size. Nor does one
+		// apply a step of the smoother's reset threshold, the drift
+		// catch-up; the 10 deg yaw threshold sits exactly on the solo floor.
+		bool bigSolo = solo && !c0.needsCorroboration && !c0.heldPosition && !c0.driftCatchUp &&
 			(c0.trans.norm() > config.soloPosThreshold ||
 			 std::abs(YawOf(c0.rot)) > config.soloYawThresholdRad);
+		// Below the solo floor, a headset-only setup applies the step on the
+		// strength of the fit alone (see soloSettled* in Config).
+		bool settledSolo = solo && !bigSolo && c0.settledSolo;
+		if (settledSolo)
+			notes.push_back(Format(
+				"pose discontinuity on device %u accepted alone: stream steady for %.0f s and position never held",
+				c0.deviceId, ResumeAge(devices[c0.deviceId], c0.t)));
 
-		if (agree.size() >= 2 || bigSolo)
+		if (agree.size() >= 2 || bigSolo || settledSolo)
 		{
 			UniverseDelta d;
 			d.time = c0.t;
@@ -499,7 +548,21 @@ void JumpDetector::TryAccept()
 
 		if (now <= c0.t + config.window + config.agreeWindow)
 			continue;   // immediate agreement can still arrive
-		if (!solo && now <= c0.t + config.window + config.controllerFollowSeconds)
+		// While every other reference device is locked still it cannot
+		// step, so that time does not count against the follow-up wait.
+		if (!solo && OthersLockedStill(now))
+		{
+			c0.followDeadline += now - c0.lastHoldCheck;
+			if (!c0.heldLocked)
+			{
+				c0.heldLocked = true;
+				notes.push_back(Format(
+					"pose discontinuity on device %u: the other devices are locked still; waiting for them to move",
+					c0.deviceId));
+			}
+		}
+		c0.lastHoldCheck = now;
+		if (!solo && now <= c0.followDeadline)
 		{
 			// Other reference devices are tracking and stayed continuous: on a
 			// Quest Pro that is what a headset map switch looks like until the
@@ -514,16 +577,37 @@ void JumpDetector::TryAccept()
 			continue;
 		}
 		c0.life = Life::Dead;
-		notes.push_back(Format("unconfirmed pose discontinuity on device %u ignored", c0.deviceId));
+		// A refused drift catch-up restored the alignment; it is not drift a
+		// recalibration would remove, so it stays out of the ignored total.
+		if (c0.driftCatchUp)
+		{
+			driftCatchUps++;
+			notes.push_back(Format(
+				"pose discontinuity on device %u expired as a drift catch-up (%d this session)",
+				c0.deviceId, driftCatchUps));
+			continue;
+		}
+		// Sum the discarded steps as one transform: the log then shows
+		// whether what was ignored adds up to the drift a recalibration
+		// later removes, the evidence the next threshold change needs.
+		ignoredSteps++;
+		ignoredYaw = WrapAngle(ignoredYaw + YawOf(c0.rot));
+		ignoredTranslation += c0.trans;
+		notes.push_back(Format(
+			"unconfirmed pose discontinuity on device %u ignored (%d ignored this session: yaw %+.2f deg, shift %.3f m in total)",
+			c0.deviceId, ignoredSteps, ignoredYaw * 180.0 / EIGEN_PI, ignoredTranslation.norm()));
 	}
 
-	// Prune stale entries. A held HMD candidate lives for the follow-up
-	// window; everything else has no use past a few seconds.
+	// Prune stale entries. A held HMD candidate lives until its follow-up
+	// deadline; a controller step is kept long enough to confirm an HMD
+	// step that trails it by the lead window; everything else has no use
+	// past a few seconds.
 	candidates.erase(
 		std::remove_if(candidates.begin(), candidates.end(),
 			[&](const Candidate &c) {
 				double keep = c.kind == Kind::Heuristic && c.deviceId == vr::k_unTrackedDeviceIndex_Hmd
-					? config.window + config.controllerFollowSeconds : 5.0;
+					? c.followDeadline - c.t
+					: std::max(5.0, config.controllerLeadSeconds + config.window + config.agreeWindow);
 				return c.life == Life::Dead ||
 					devices[c.deviceId].lastValidTime - c.t > keep;
 			}),
@@ -537,6 +621,21 @@ int JumpDetector::ActiveDeviceCount(double now) const
 		if (dev.lastValidTime > now - 1.0)
 			n++;
 	return n;
+}
+
+bool JumpDetector::OthersLockedStill(double now) const
+{
+	int others = 0;
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		const auto &dev = devices[id];
+		if (id == vr::k_unTrackedDeviceIndex_Hmd || dev.lastValidTime <= now - 1.0)
+			continue;
+		++others;
+		if (dev.repeatedPositions < 2)
+			return false;
+	}
+	return others > 0;
 }
 
 bool JumpDetector::PollDelta(UniverseDelta &out)
@@ -573,6 +672,7 @@ void JumpDetector::Reset()
 		dev.wfdValid = false;
 		dev.lastValidTime = -1.0;
 		dev.streamResumeTime = -1.0;
+		dev.repeatedPositions = 0;
 		dev.hist.clear();
 	}
 	candidates.clear();
@@ -580,4 +680,8 @@ void JumpDetector::Reset()
 	gaps.clear();
 	notes.clear();
 	lastAcceptTime = -1e9;
+	ignoredSteps = 0;
+	driftCatchUps = 0;
+	ignoredYaw = 0.0;
+	ignoredTranslation.setZero();
 }
