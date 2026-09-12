@@ -68,6 +68,7 @@ bool ContinuousWindowDiagnosticsScenario();
 bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
+void RunLighthouseScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
 
@@ -8971,6 +8972,7 @@ int main(int argc, char **argv)
 
 	// ---- Drift staleness monitoring ----
 	RunDriftScenarios();
+	RunLighthouseScenarios(Check);
 
 	// ---- Spatial correction field ----
 	RunFieldScenarios();

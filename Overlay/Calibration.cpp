@@ -6,6 +6,9 @@
 #include "LegacyContinuous.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
+#include "LighthouseLog.h"
+
+#include <chrono>
 #include "Diagnostics.h"
 #include "FieldMath.h"
 #include "PoseStreamHub.h"
@@ -31,6 +34,16 @@ static std::vector<protocol::DevicePoseSample> CollectorScratch;
 static double QpcToSeconds = 0.0;
 
 static std::unique_ptr<DriftMonitor> Drift;
+
+// Base station visibility from SteamVR's lighthouse log (LighthouseLog.h):
+// followed at 4 Hz, folded into ctx.lighthouse, joined to the drift
+// monitor's device ids through this serial table.
+static std::unique_ptr<lighthouselog::Tailer> LighthouseTail;
+static std::string DeviceSerials[vr::k_unMaxTrackedDeviceCount];
+static double LastLighthousePoll = -1e9;
+static double LastSerialScan = -1e9;
+static uint64_t LighthouseRotationsSeen = 0;
+static bool LighthouseAnnounced = false;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
@@ -510,6 +523,90 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 		NotifyStaleAlignment(ctx);
 }
 
+// Follows the lighthouse driver's log and keeps the serial table the drift
+// monitor needs to join its events onto it. The log is a convenience: when
+// it is missing or unreadable everything downstream behaves as it did
+// without it.
+static void LighthouseTick(CalibrationContext &ctx, double time)
+{
+	if (!LighthouseTail)
+	{
+		LighthouseTail = std::make_unique<lighthouselog::Tailer>(lighthouselog::DefaultLogPath());
+		ctx.lighthouseLogPath = LighthouseTail->Path();
+	}
+
+	// Serials are what the log names devices by. Property reads are
+	// cross-process calls, so a slow scan; the set of devices changes rarely.
+	if (time - LastSerialScan >= 2.0)
+	{
+		LastSerialScan = time;
+		if (auto *system = vr::VRSystem())
+		{
+			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+			{
+				if (system->GetTrackedDeviceClass(id) == vr::TrackedDeviceClass_Invalid)
+				{
+					DeviceSerials[id].clear();
+					continue;
+				}
+				std::string serial;
+				if (ReadTrackedDeviceString(id, vr::Prop_SerialNumber_String, serial))
+					DeviceSerials[id] = serial;
+			}
+		}
+	}
+
+	if (time - LastLighthousePoll < 0.25)
+		return;
+	LastLighthousePoll = time;
+
+	static std::vector<lighthouselog::Event> events;
+	events.clear();
+	const bool wasAvailable = ctx.lighthouseLogAvailable;
+	LighthouseTail->Poll(events);
+	ctx.lighthouseLogAvailable = LighthouseTail->Available();
+	if (!LighthouseAnnounced || ctx.lighthouseLogAvailable != wasAvailable)
+	{
+		LighthouseAnnounced = true;
+		ctx.Log(ctx.lighthouseLogAvailable
+			? "Reading base station visibility from " + ctx.lighthouseLogPath + "\n"
+			: "SteamVR's log is not readable at " + ctx.lighthouseLogPath +
+				"; base station visibility is unavailable\n");
+	}
+	// A rotated log is a new SteamVR session: the old sets and counts are
+	// about devices that were since restarted.
+	if (LighthouseTail->Rotations() != LighthouseRotationsSeen)
+	{
+		LighthouseRotationsSeen = LighthouseTail->Rotations();
+		ctx.lighthouse.Reset();
+	}
+	if (events.empty())
+		return;
+
+	// The lines carry wall-clock stamps; the monitors run on the ring clock.
+	LARGE_INTEGER qpcNow{};
+	QueryPerformanceCounter(&qpcNow);
+	const double ringNow = static_cast<double>(qpcNow.QuadPart) * QpcToSeconds;
+	const double unixNow = std::chrono::duration<double>(
+		std::chrono::system_clock::now().time_since_epoch()).count();
+	for (const auto &e : events)
+	{
+		double ringTime = ringNow;
+		if (e.timeKnown)
+		{
+			const double age = unixNow - e.unixTime;
+			if (age > -5.0 && age < 3600.0)
+				ringTime = ringNow - age;
+		}
+		std::string note = ctx.lighthouse.Apply(e, ringTime);
+		if (!note.empty())
+			ctx.Log(e.serial + " " + note + "\n");
+		else if (!e.historical && e.visibleKnown)
+			ctx.Diag(e.serial + " now sees " + std::to_string(e.visibleChannels.size()) +
+				" base station(s)");
+	}
+}
+
 static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 {
 	// Score even while the monitors are parked so the UI's health readout
@@ -628,6 +725,23 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	while (Drift->PollEvent(drift))
 	{
 		char buf[256];
+		// A lighthouse device that just lost or regained a base station is
+		// reporting its own tracking, not the universes (LighthouseVisibility.h).
+		const std::string &serial = DeviceSerials[drift.deviceId];
+		if (!serial.empty() && ctx.lighthouse.Disturbed(serial, drift.time))
+		{
+			ctx.lighthouseAttributedEvents++;
+			const LighthouseVisibility::Device *seen = ctx.lighthouse.Find(serial);
+			snprintf(buf, sizeof buf,
+				"Device %u %s %.1f cm after it %s -- its base stations, not drift\n",
+				drift.deviceId,
+				drift.type == DriftMonitor::Event::StationarySlide ? "slid" : "recovered",
+				drift.magnitude * 100.0,
+				seen && !seen->lastDisturbanceText.empty()
+					? seen->lastDisturbanceText.c_str() : "changed base stations");
+			ctx.Log(buf);
+			continue;
+		}
 		if (drift.type == DriftMonitor::Event::StationarySlide)
 		{
 			ctx.driftSlideEvents++;
@@ -1697,6 +1811,9 @@ void CalibrationTick(double time)
 
 	ctx.timeLastTick = time;
 
+	// Before the monitors: a log line that explains this tick's drift event
+	// must already be folded in when the event is scored.
+	LighthouseTick(ctx, time);
 	RuntimeMonitorTick(ctx, time);
 	questcal::CalibrationSpaceTick(ctx, time);
 	// After the monitors: an accepted jump must land (and reset the continuous

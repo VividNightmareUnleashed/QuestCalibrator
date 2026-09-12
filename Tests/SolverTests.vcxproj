@@ -89,6 +89,8 @@
     <ClCompile Include="CalibrationContextTests.cpp" />
     <ClCompile Include="ReviewRegressionTests.cpp" />
     <ClCompile Include="TrackingRecoveryTests.cpp" />
+    <ClCompile Include="LighthouseLogTests.cpp" />
+    <ClCompile Include="VirtualLighthouse.cpp" />
     <ClCompile Include="OpenVRLayoutTests.cpp" />
     <ClCompile Include="ImGuiInputTests.cpp" />
     <ClCompile Include="..\lib\imgui\imgui.cpp" />
@@ -106,6 +108,8 @@
     <ClCompile Include="..\Overlay\Diagnostics.cpp" />
     <ClCompile Include="..\Overlay\LegacyContinuous.cpp" />
     <ClCompile Include="..\Overlay\DriftMonitor.cpp" />
+    <ClCompile Include="..\Overlay\LighthouseLog.cpp" />
+    <ClCompile Include="..\Overlay\LighthouseVisibility.cpp" />
     <ClCompile Include="..\Overlay\JumpDetector.cpp" />
     <ClCompile Include="..\Overlay\PoseStreamHub.cpp" />
     <ClCompile Include="..\Overlay\Updater.cpp" />

@@ -93,6 +93,12 @@
     <ClInclude Include="DriftMonitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="LighthouseLog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LighthouseVisibility.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="DriverSession.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -201,6 +207,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="DriftMonitor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LighthouseLog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LighthouseVisibility.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="JumpDetector.cpp">

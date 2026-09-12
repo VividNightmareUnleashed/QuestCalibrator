@@ -398,6 +398,29 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			<< ctx.chaperone.playSpaceSize.v[0] << " x " << ctx.chaperone.playSpaceSize.v[1] << " m";
 	out << "\n\n";
 
+	out << "[base stations]\n";
+	out << "lighthouse log " << (ctx.lighthouseLogAvailable ? "read from " : "not readable at ")
+		<< ctx.lighthouseLogPath << "\n";
+	for (const auto &s : ctx.lighthouse.Stations())
+		out << "station " << ctx.lighthouse.StationName(s.channel) << ": dropped " << s.drops
+			<< " times, was the last station lost " << s.losses << " times\n";
+	for (const auto &kv : ctx.lighthouse.Devices())
+	{
+		const auto &d = kv.second;
+		out << "device " << d.serial << ": sees";
+		if (!d.visibleKnown)
+			out << " (unknown)";
+		else if (d.visible.empty())
+			out << " none";
+		for (int c : d.visible)
+			out << " " << ctx.lighthouse.StationName(c);
+		out << "; drops " << d.drops << ", losses " << d.losses << ", bootstraps " << d.bootstraps;
+		if (!d.lastDisturbanceText.empty())
+			out << "; last: " << d.lastDisturbanceText;
+		out << "\n";
+	}
+	out << "drift events attributed to base stations: " << ctx.lighthouseAttributedEvents << "\n\n";
+
 	out << "[driver synchronization]\n";
 	const auto &sync = capture.driverSync;
 	out << "submitted sequence: " << sync.latestSequence << ", state change sequence: " << sync.latestStateChangeSequence

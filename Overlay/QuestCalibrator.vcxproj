@@ -114,6 +114,8 @@
     <ClInclude Include="ContinuousAlignment.h" />
     <ClInclude Include="ContinuousCorrectionGate.h" />
     <ClInclude Include="DriftMonitor.h" />
+    <ClInclude Include="LighthouseLog.h" />
+    <ClInclude Include="LighthouseVisibility.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
     <ClInclude Include="DriverSyncTracker.h" />
@@ -276,6 +278,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="DriftMonitor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="LighthouseLog.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="LighthouseVisibility.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="EmbeddedFiles.cpp">

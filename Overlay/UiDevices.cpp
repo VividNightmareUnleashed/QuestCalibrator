@@ -153,6 +153,45 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		textRight = sx - 10.0f;
 	}
 
+	// Base stations in view, from SteamVR's lighthouse log
+	// (LighthouseVisibility.h): "3/4" is three of the four stations seen
+	// this session. One station or none is what a swimming or coasting
+	// tracker looks like, so those read as a warning. Hovering the figure
+	// names the stations and says how often this device drops one.
+	const LighthouseVisibility::Device *seen =
+		dev.trackingSystem == "lighthouse" ? CalCtx.lighthouse.Find(dev.serial) : nullptr;
+	if (seen && seen->visibleKnown && dev.connected)
+	{
+		const int inView = static_cast<int>(seen->visible.size());
+		const int total = std::max(CalCtx.lighthouse.StationCount(), inView);
+		std::string badge = FormatString("%d/%d", inView, total);
+		ImGui::PushFont(g_fontSmall);
+		ImVec2 bsz = ImGui::CalcTextSize(badge.c_str());
+		ImGui::PopFont();
+		const float bx0 = textRight - bsz.x;
+		const float by0 = p.y + (h - g_fontSmall->LegacySize) * 0.5f;
+		const bool weak = inView < CalCtx.lighthouse.Settings().cleanStations;
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(bx0, by0),
+			Pal::U32(weak ? Pal::Bad : Pal::Dim), badge.c_str());
+		// The figure is not an item of its own (the row is), so the hover is
+		// a rect test; the tools never overlap it.
+		if (s_renameDeviceId != dev.id && ImGui::IsWindowHovered() &&
+			ImGui::IsMouseHoveringRect(ImVec2(bx0 - 4.0f, p.y), ImVec2(bx0 + bsz.x + 4.0f, b.y)))
+		{
+			std::string tip = "Base stations in view:";
+			if (seen->visible.empty())
+				tip += " none";
+			for (int c : seen->visible)
+				tip += " " + CalCtx.lighthouse.StationName(c);
+			tip += FormatString("\nDropped a station %u time%s this session, lost all of them %u time%s",
+				seen->drops, seen->drops == 1 ? "" : "s", seen->losses, seen->losses == 1 ? "" : "s");
+			if (!seen->lastDisturbanceText.empty())
+				tip += "\nLast: " + seen->lastDisturbanceText;
+			ShowTip(tip.c_str(), true);
+		}
+		textRight = bx0 - 10.0f;
+	}
+
 	// Two small tools, quiet at rest and bright on hover: rename, and buzz
 	// this one device. With six identical trackers these are what tell the
 	// rows apart.
@@ -529,6 +568,28 @@ void BuildSpacesSection(const VRState &state)
 		ImVec2 hs = ImGui::CalcTextSize(hint.c_str());
 		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (cw - hs.x) * 0.5f));
 		ImGui::TextColored(Pal::Dim, "%s", hint.c_str());
+		ImGui::PopFont();
+	}
+
+	// Which base station drops out most, from SteamVR's own log
+	// (LighthouseVisibility.h). Nothing shows until the log has named one;
+	// the worst-placed station heads the line.
+	const auto stations = CalCtx.lighthouse.Stations();
+	if (!stations.empty())
+	{
+		std::string line = "Base station drops this session:";
+		for (size_t i = 0; i < stations.size(); ++i)
+		{
+			const auto &s = stations[i];
+			line += i == 0 ? " " : "  /  ";
+			line += s.id != 0 ? FormatString("%08X", s.id) : FormatString("S-%d", s.channel);
+			line += FormatString(" %u", s.drops);
+		}
+		ImGui::Spacing();
+		ImGui::PushFont(g_fontSmall);
+		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cw);
+		ImGui::TextColored(Pal::Faint, "%s", line.c_str());
+		ImGui::PopTextWrapPos();
 		ImGui::PopFont();
 	}
 }

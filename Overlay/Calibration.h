@@ -7,6 +7,7 @@
 #include "PersistenceState.h"
 #include "ProfileValidation.h"
 #include "RingPoseMath.h"
+#include "LighthouseVisibility.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -250,6 +251,14 @@ struct CalibrationContext : CalibrationProfileState
 	// staleness and the UI.
 	bool referenceDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	bool targetDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
+	// Base station visibility folded from SteamVR's lighthouse log
+	// (LighthouseVisibility.h): what each lighthouse device sees, how often
+	// each station drops out, and which drift-monitor events a device's own
+	// tracking explains. Runtime only; empty when the log is unreadable.
+	LighthouseVisibility lighthouse;
+	bool lighthouseLogAvailable = false;
+	std::string lighthouseLogPath;
+	uint32_t lighthouseAttributedEvents = 0;
 	// Debounced persistence for runtime compensation updates: dirty records save
 	// after a quiet period and always on shutdown. See PersistenceState.h — the
 	// rules live with the data rather than as loose fields here.

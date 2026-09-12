@@ -172,6 +172,56 @@ void SetupPreviewState()
 	CalCtx.autoCorrectionsApplied = 14;
 	CalCtx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr)) - 42.0;
 
+	// Base station visibility as the lighthouse log would have reported it:
+	// every device learned four stations, the left controller is down to
+	// one (the red figure), one tracker lost one, and two stations carry
+	// most of the drops so the line under the panes has an order.
+	{
+		using K = lighthouselog::Event::Kind;
+		static const std::map<int, uint32_t> ids = {
+			{ 5, 0xD3D4E73Bu }, { 8, 0x170EE067u }, { 9, 0xF210FBA6u }, { 16, 0x04D47FB4u } };
+		auto line = [](K kind, const std::string &serial, int channel, std::vector<int> visible)
+		{
+			lighthouselog::Event e;
+			e.kind = kind;
+			e.serial = serial;
+			e.channel = channel;
+			e.stationId = ids.at(channel);
+			e.visibleKnown = true;
+			e.visibleChannels = std::move(visible);
+			for (int c : e.visibleChannels)
+				e.visibleIds.push_back(ids.at(c));
+			e.historical = true;
+			return e;
+		};
+		auto &vis = CalCtx.lighthouse;
+		std::vector<std::string> serials = { "LHR-A3C36EA5", "LHR-841C98C3" };
+		for (int i = 0; i < kPreviewManyTrackerCount; ++i)
+			serials.push_back(FormatString("LHR-77E5A2%02X", 0x11 + i));
+		for (const auto &s : serials)
+		{
+			vis.Apply(line(K::StationAdded, s, 5, { 5 }), 0.0);
+			vis.Apply(line(K::StationAdded, s, 8, { 5, 8 }), 0.0);
+			vis.Apply(line(K::StationAdded, s, 9, { 5, 8, 9 }), 0.0);
+			vis.Apply(line(K::StationAdded, s, 16, { 5, 8, 9, 16 }), 0.0);
+		}
+		for (int n = 0; n < 7; ++n)
+		{
+			vis.Apply(line(K::StationDropped, "LHR-77E5A211", 16, { 5, 8, 9 }), 0.0);
+			vis.Apply(line(K::StationAdded, "LHR-77E5A211", 16, { 5, 8, 9, 16 }), 0.0);
+		}
+		for (int n = 0; n < 3; ++n)
+		{
+			vis.Apply(line(K::StationDropped, "LHR-A3C36EA5", 5, { 8, 9, 16 }), 0.0);
+			vis.Apply(line(K::StationAdded, "LHR-A3C36EA5", 5, { 5, 8, 9, 16 }), 0.0);
+		}
+		vis.Apply(line(K::StationDropped, "LHR-77E5A212", 16, { 5, 8, 9 }), 0.0);
+		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 16, { 5, 8, 9 }), 0.0);
+		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 8, { 5, 9 }), 0.0);
+		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 5, { 9 }), 0.0);
+		CalCtx.lighthouseLogAvailable = true;
+	}
+
 	switch (g_uiPreviewScenario)
 	{
 	case PreviewScenario::Guide:
