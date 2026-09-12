@@ -9,6 +9,7 @@
 #include "Configuration.h"
 #include "ProfileValidation.h"
 #include "Updater.h"
+#include "UiLayout.h"
 #include "../common/Protocol.h"
 #include "../common/Version.h"
 

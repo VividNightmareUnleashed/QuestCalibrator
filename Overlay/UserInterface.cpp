@@ -47,24 +47,49 @@ void BuildHeader()
 	ImVec2 p = ImGui::GetCursorScreenPos();
 	float cw = ImGui::GetContentRegionAvail().x;
 	const float h = 44.0f;
+	static const char *const tabs[] = { "Calibration", "Lighthouse", "Smoothing" };
+
+	// One row: the brand at the left, the gear at the right, and the tab
+	// switch centred on the row as a whole rather than on what is left
+	// between them, so it stays put when the title's width changes.
+	FlexLayout fl;
+	YGNodeRef row = fl.Root();
+	YGNodeStyleSetHeight(row, h);
+	YGNodeStyleSetAlignItems(row, YGAlignCenter);
+	YGNodeStyleSetJustifyContent(row, YGJustifySpaceBetween);
+
+	YGNodeRef brand = fl.Row(row);
+	YGNodeStyleSetAlignItems(brand, YGAlignCenter);
+	YGNodeStyleSetGap(brand, YGGutterColumn, 14.0f);
+	YGNodeRef logo = fl.Add(brand);
+	YGNodeStyleSetWidth(logo, 38.0f);
+	YGNodeStyleSetHeight(logo, 38.0f);
+	YGNodeRef title = fl.Text(brand, g_fontTitle, "QuestCalibrator");
+
+	YGNodeRef tabsNode = fl.Add(row);
+	YGNodeStyleSetPositionType(tabsNode, YGPositionTypeAbsolute);
+	YGNodeStyleSetPositionPercent(tabsNode, YGEdgeLeft, 50.0f);
+	YGNodeStyleSetWidth(tabsNode, SegmentedTabsWidth(tabs, 3));
+	YGNodeStyleSetHeight(tabsNode, SegmentedTabsHeight());
+	YGNodeStyleSetMargin(tabsNode, YGEdgeLeft, -SegmentedTabsWidth(tabs, 3) * 0.5f);
+
+	YGNodeRef gear = fl.Add(row);
+	YGNodeStyleSetWidth(gear, 38.0f);
+	YGNodeStyleSetHeight(gear, 38.0f);
+	fl.Compute(p, cw, h);
 
 	// Logo mark
-	ImVec2 lp = ImVec2(p.x, p.y + (h - 38.0f) * 0.5f);
-	dl->AddRectFilled(lp, ImVec2(lp.x + 38, lp.y + 38), Pal::U32(Pal::Card), 11.0f);
-	dl->AddRect(lp, ImVec2(lp.x + 38, lp.y + 38), Pal::U32(Pal::Border), 11.0f);
-	IconLogo(dl, ImVec2(lp.x + 19, lp.y + 19), 12.0f, Pal::U32(Pal::Text));
+	const FlexRect lr = fl.Rect(logo);
+	dl->AddRectFilled(lr.min, lr.max, Pal::U32(Pal::Card), 11.0f);
+	dl->AddRect(lr.min, lr.max, Pal::U32(Pal::Border), 11.0f);
+	IconLogo(dl, lr.Center(), 12.0f, Pal::U32(Pal::Text));
 
-	dl->AddText(g_fontTitle, g_fontTitle->LegacySize,
-		ImVec2(p.x + 52.0f, p.y + (h - g_fontTitle->LegacySize) * 0.5f),
+	dl->AddText(g_fontTitle, g_fontTitle->LegacySize, fl.Rect(title).min,
 		Pal::U32(Pal::Text), "QuestCalibrator");
 
-	// The tab switch, centred between the title and the gear. Picking a tab
-	// is also the way back out of Settings.
+	// The tab switch. Picking a tab is also the way back out of Settings.
 	{
-		static const char *const tabs[] = { "Calibration", "Lighthouse", "Smoothing" };
-		const float tw = SegmentedTabsWidth(tabs, 3);
-		const float th = SegmentedTabsHeight();
-		ImGui::SetCursorScreenPos(ImVec2(p.x + (cw - tw) * 0.5f, p.y + (h - th) * 0.5f));
+		ImGui::SetCursorScreenPos(fl.Rect(tabsNode).min);
 		const int picked = SegmentedTabs("maintab", static_cast<int>(s_mainTab), tabs, 3,
 			1u << static_cast<int>(MainTab::Smoothing), "Smoothing isn't ready yet.");
 		if (picked != static_cast<int>(s_mainTab))
@@ -75,19 +100,18 @@ void BuildHeader()
 	}
 
 	// Gear (settings) toggle at the far right
-	const float gearS = 38.0f;
-	ImVec2 gp = ImVec2(p.x + cw - gearS, p.y + (h - gearS) * 0.5f);
-	ImGui::SetCursorScreenPos(gp);
-	if (ImGui::InvisibleButton("##settingsgear", ImVec2(gearS, gearS), ImGuiButtonFlags_EnableNav))
+	const FlexRect gr = fl.Rect(gear);
+	ImGui::SetCursorScreenPos(gr.min);
+	if (ImGui::InvisibleButton("##settingsgear", gr.Size(), ImGuiButtonFlags_EnableNav))
 		s_showSettings = !s_showSettings;
 	bool gearHov = ImGui::IsItemHovered();
 	{
 		ImVec4 bg = s_showSettings ? ImVec4(Pal::Accent.x, Pal::Accent.y, Pal::Accent.z, 0.20f)
 			: (gearHov ? Pal::CardHov : Pal::Card);
-		dl->AddRectFilled(gp, ImVec2(gp.x + gearS, gp.y + gearS), Pal::U32(bg), 10.0f);
-		dl->AddRect(gp, ImVec2(gp.x + gearS, gp.y + gearS),
+		dl->AddRectFilled(gr.min, gr.max, Pal::U32(bg), 10.0f);
+		dl->AddRect(gr.min, gr.max,
 			Pal::U32(s_showSettings ? Pal::Accent : (gearHov ? Pal::BorderHov : Pal::Border)), 10.0f);
-		IconGear(dl, ImVec2(gp.x + gearS * 0.5f, gp.y + gearS * 0.5f), 9.0f,
+		IconGear(dl, gr.Center(), 9.0f,
 			Pal::U32(s_showSettings || gearHov ? Pal::Text : Pal::Dim));
 	}
 

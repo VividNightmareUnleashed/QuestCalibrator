@@ -12,6 +12,7 @@ package is released.
 | Eigen | 5.0.1 (`Eigen/Version`) | `lib/Eigen/COPYING.*`, including MPL 2.0 and third-party notices. |
 | Dear ImGui | 1.92.9 | `lib/imgui/LICENSE.txt`; bundled `imstb_*` headers retain their notices. |
 | GLFW | 3.5.1, built from source | `lib/glfw/COPYING.txt` (upstream `LICENSE.md`). |
+| Yoga (flexbox layout) | 3.2.1, built from source | `lib/yoga/LICENSE` (MIT); every source file carries the Meta header. |
 | MinHook, including its HDE sources | No release number is encoded in the checked-in copy | `lib/MinHook/LICENSE`, which also includes the HDE notices. |
 | gl3w and generated Khronos headers | No gl3w release number is encoded | The generated gl3w files contain a public-domain dedication; `glcorearb.h` and `khrplatform.h` contain Khronos permission notices. |
 | picojson | No release number is encoded in the single header | `lib/picojson.h` contains its copyright and redistribution notice. |
@@ -28,6 +29,7 @@ extract described below.
 | Eigen | [5.0.1](https://gitlab.com/libeigen/eigen/-/tree/5.0.1) | `bc3b39870ecb690a623a3f49149a358b95c5781d` |
 | Dear ImGui | [v1.92.9](https://github.com/ocornut/imgui/tree/v1.92.9) | `01380c579715e62fb9a8d6ec0502c4ea83bfde6e` |
 | GLFW | [3.5.1](https://github.com/glfw/glfw/tree/3.5.1) | `d9d6f0f1f967807ffade6598ea9a631ebaf37a56` |
+| Yoga | [v3.2.1](https://github.com/facebook/yoga/tree/v3.2.1) | `042f5013152eb81c1552dec945b88f7b95ca350f` |
 
 - OpenVR: copy `headers/openvr.h`, `headers/openvr_driver.h`, Windows import
   libraries, and `bin/win64/openvr_api.dll`. The runtime DLL resides under
@@ -46,6 +48,13 @@ extract described below.
   the common, null and Win32 sources listed by upstream `src/CMakeLists.txt`,
   with `_GLFW_WIN32`. They inherit the application's C runtime selection in
   Debug and Release; no prebuilt GLFW library or C-runtime shim is needed.
+- Yoga: copy the upstream `yoga/` subtree (sources and headers, without its
+  `CMakeLists.txt` and `module.modulemap`) to `lib/yoga/` and the root
+  `LICENSE`. The overlay project compiles the nineteen sources directly, as
+  C++20 translation units (Yoga requires it; the overlay itself stays on
+  C++17) without the precompiled header. Its headers are included as
+  `<yoga/...>` through the existing `lib/` include path. Only the C API in
+  `Yoga.h` is used, through `Overlay/UiLayout.h`.
 
 OpenVR x64 binary SHA-256 values:
 
@@ -82,8 +91,8 @@ baseline for this upgrade.
 - Before distributing binaries, verify the upstream terms for every component and
   include the corresponding standalone license and notice material.
 - Include the repository `LICENSE`, `lib/MinHook/LICENSE`,
-  `lib/openvr/LICENSE`, `lib/Eigen/COPYING.*`, `lib/imgui/LICENSE.txt`, and
-  `lib/glfw/COPYING.txt` in the release notice bundle,
+  `lib/openvr/LICENSE`, `lib/Eigen/COPYING.*`, `lib/imgui/LICENSE.txt`,
+  `lib/glfw/COPYING.txt`, and `lib/yoga/LICENSE` in the release notice bundle,
   together with any verified notices added for the remaining components.
 - Compare the packaged DLLs and libraries with this inventory. A binary that is not
   explained here should block release until its source, version, and notice are

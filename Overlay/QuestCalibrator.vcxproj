@@ -127,6 +127,7 @@
     <ClInclude Include="PoseStreamHub.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />
+    <ClInclude Include="UiLayout.h" />
     <ClInclude Include="UserInterface.h" />
   </ItemGroup>
   <ItemGroup>
@@ -264,6 +265,102 @@
     <ClCompile Include="..\lib\imgui\imgui_demo.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <!-- Yoga is written to C++20; the overlay itself stays on 17. -->
+    <ClCompile Include="..\lib\yoga\YGConfig.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGEnums.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNode.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeStyle.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGPixelGrid.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGValue.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\AbsoluteLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Baseline.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Cache.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\CalculateLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\FlexLine.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\PixelGrid.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\config\Config.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\AssertFatal.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\Log.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\event\event.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\LayoutResults.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\Node.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="Calibration.cpp" />
     <ClCompile Include="CalibrationDriver.cpp" />
     <ClCompile Include="CalibrationSpace.cpp" />
@@ -304,6 +401,7 @@
     <ClCompile Include="UiWidgets.cpp" />
     <ClCompile Include="UiMainScreen.cpp" />
     <ClCompile Include="UiDevices.cpp" />
+    <ClCompile Include="UiLayout.cpp" />
     <ClCompile Include="UiLighthouse.cpp" />
     <ClCompile Include="UiGuide.cpp" />
     <ClCompile Include="UiSettings.cpp" />

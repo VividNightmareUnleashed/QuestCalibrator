@@ -19,6 +19,9 @@
     <Filter Include="Source Files\GL">
       <UniqueIdentifier>{d156ae5c-9fe6-41f0-a34e-333dc7a6b2f8}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\Yoga">
+      <UniqueIdentifier>{7b3e2f61-4c9d-4a05-9e1b-2f6d8c0a5e42}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">
@@ -61,6 +64,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="EmbeddedFiles.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UiLayout.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UserInterface.h">
@@ -182,8 +188,68 @@
     <ClCompile Include="UiDevices.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UiLayout.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UiLighthouse.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGConfig.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGEnums.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNode.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeLayout.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeStyle.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGPixelGrid.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGValue.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\AbsoluteLayout.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Baseline.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Cache.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\CalculateLayout.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\FlexLine.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\PixelGrid.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\config\Config.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\AssertFatal.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\Log.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\event\event.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\LayoutResults.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\Node.cpp">
+      <Filter>Source Files\Yoga</Filter>
     </ClCompile>
     <ClCompile Include="UiGuide.cpp">
       <Filter>Source Files</Filter>
