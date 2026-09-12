@@ -307,6 +307,13 @@ struct DriftFeedCandidate
 // what counts as "within arm's reach".
 constexpr double DriftHmdProximityWindowSeconds = 3.0;
 constexpr double DriftHmdProximityMeters = 1.2;
+// The sphere misses the lower body: knee and foot trackers sit 1.2 to 1.7 m
+// below the head of a standing user, pass the stationarity gates while the
+// user stands still, and "slide" a centimetre with each weight shift. One
+// session built a stale verdict out of five such events. Anything below the
+// headset within this horizontal radius is worn, or set down at the user's
+// feet, and says nothing about either universe.
+constexpr double DriftHmdBodyRadiusMeters = 0.8;
 
 inline bool AnchorsUniverse(const DriftFeedCandidate &c)
 {
@@ -319,7 +326,11 @@ inline bool AnchorsUniverse(const DriftFeedCandidate &c)
 	{
 		Eigen::Vector3d refPos = BaseCalibratedPosition(c.calibratedRotation,
 			c.calibratedTranslationMeters, c.calibratedScale, c.rawPosition);
-		if ((refPos - c.hmdRawPosition).norm() < DriftHmdProximityMeters)
+		Eigen::Vector3d fromHead = refPos - c.hmdRawPosition;
+		if (fromHead.norm() < DriftHmdProximityMeters)
+			anchors = false;
+		else if (fromHead.y() < 0.0 &&
+			std::hypot(fromHead.x(), fromHead.z()) < DriftHmdBodyRadiusMeters)
 			anchors = false;
 	}
 	return anchors;

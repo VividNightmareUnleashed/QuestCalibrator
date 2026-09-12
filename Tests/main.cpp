@@ -2015,10 +2015,24 @@ void RunPoseSampleScenarios()
 		ringpose::DriftFeedCandidate staleHmd = wornOnUser;
 		staleHmd.hmdRawTime = 96.0;
 
+		// The lower body is outside the sphere: a foot tracker 1.6 m below the
+		// head and 0.3 m across is worn; the same depth 1.5 m across is a
+		// device on the floor elsewhere, and the same radius above the head
+		// is not a body at all.
+		ringpose::DriftFeedCandidate atTheFeet = c;
+		atTheFeet.hmdRawPosition = Eigen::Vector3d(4.8, 1.6, 0.0);
+		ringpose::DriftFeedCandidate acrossTheFloor = c;
+		acrossTheFloor.hmdRawPosition = Eigen::Vector3d(6.0, 1.6, 0.0);
+		ringpose::DriftFeedCandidate overhead = c;
+		overhead.hmdRawPosition = Eigen::Vector3d(4.8, -1.6, 0.0);
+
 		bool ok =
 			!ringpose::AnchorsUniverse(wornOnUser) &&
 			ringpose::AnchorsUniverse(acrossTheRoom) &&
-			ringpose::AnchorsUniverse(staleHmd);
+			ringpose::AnchorsUniverse(staleHmd) &&
+			!ringpose::AnchorsUniverse(atTheFeet) &&
+			ringpose::AnchorsUniverse(acrossTheFloor) &&
+			ringpose::AnchorsUniverse(overhead);
 		snprintf(detail, sizeof detail,
 			"scale %.2f raw %.1f m -> reference %.1f m; window %.1f s",
 			c.calibratedScale, c.rawPosition.x(),
