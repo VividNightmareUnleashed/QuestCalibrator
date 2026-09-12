@@ -56,6 +56,16 @@ public:
 		double agreeWindow = 0.25;         // seconds within which devices must agree
 		double agreePosTol = 0.10;         // meters between per-device delta translations
 		double agreeYawTolRad = 3.0 * 3.14159265358979 / 180.0;
+		// Each Quest Pro controller is its own tracking frontend on the shared
+		// map. After the headset switches map, the engine lets a controller
+		// keep its previous 6DoF frame for up to 30 s before it follows, so
+		// the HMD steps alone and the matching controller step arrives
+		// seconds later. An HMD candidate no
+		// device confirmed inside agreeWindow is therefore held this long for
+		// that follow-up instead of being discarded. A step the HMD sees
+		// alone and no controller ever follows - a 3DoF-to-6DoF catch-up
+		// after a wake, a stream hiccup - still expires unapplied.
+		double controllerFollowSeconds = 30.0;
 		double soloPosThreshold = 0.30;    // single-device heuristic acceptance floor
 		double soloYawThresholdRad = 10.0 * 3.14159265358979 / 180.0;
 		double gapSeconds = 2.0;           // reference stream gap => no compensation, event only
@@ -82,6 +92,12 @@ public:
 		// (its first valid sample ever, or the first after a gap) and the
 		// jump; < 0 when unknown. Reported, never used to gate acceptance.
 		double secondsSinceStreamResume = -1.0;
+		// Heuristic path: seconds between the HMD's step and the confirming
+		// device's step when the confirmation arrived after agreeWindow
+		// (a controller following a map switch); 0 when devices agreed at
+		// once or the delta was accepted solo. `time` stays the HMD's jump
+		// instant either way.
+		double confirmationLagSeconds = 0.0;
 		// Absolute HMD worldFromDriver endpoint captured by this exact sample.
 		// `exact` is the validity discriminator; heuristic deltas leave identity.
 		Eigen::Quaterniond worldFromDriverRotation{ 1, 0, 0, 0 };
@@ -160,6 +176,7 @@ private:
 		// post-jump window has filled.
 		std::vector<Hist> preWindow;
 		bool needsCorroboration = false;
+		bool held = false;   // HMD heuristic: past agreeWindow, awaiting a controller follow-up
 
 		// The filters every consumer needs, once each.
 		bool LiveExact() const { return kind == Kind::Exact && life != Life::Dead; }

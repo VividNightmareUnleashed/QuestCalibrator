@@ -23,11 +23,12 @@ protocol::DevicePoseSample Sample(uint32_t id, double time, double shift)
 }
 
 int Replay(const std::function<double(int, uint32_t)> &shift,
-           const std::vector<uint32_t> &ids, double *translation = nullptr)
+           const std::vector<uint32_t> &ids, double *translation = nullptr,
+           int frames = 300, JumpDetector::UniverseDelta *last = nullptr)
 {
 	JumpDetector detector(QpcSeconds);
 	int count = 0;
-	for (int frame = 0; frame <= 300; ++frame)
+	for (int frame = 0; frame <= frames; ++frame)
 	{
 		for (auto id : ids)
 			detector.Push(Sample(id, 1.0 + frame * 0.01, shift(frame, id)));
@@ -36,6 +37,7 @@ int Replay(const std::function<double(int, uint32_t)> &shift,
 		{
 			++count;
 			if (translation) *translation = delta.translation.x();
+			if (last) *last = delta;
 		}
 	}
 	return count;
@@ -161,6 +163,43 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 			while (detector.PollDelta(delta)) ++accepted;
 		}
 		check("recovery: corroborated small yaw reset", accepted == 1, "3 degrees, shared rigid reference change");
+	}
+
+	// Quest Pro controllers are separate tracking frontends on the shared map;
+	// after a headset map switch the engine lets them keep the previous frame
+	// for up to 30 s. An HMD step nobody
+	// confirmed at once is held for that follow-up, stamped with the HMD's
+	// jump time when it arrives, and never applied alone while controllers
+	// stay continuous.
+	{
+		JumpDetector::UniverseDelta delta;
+		count = Replay([](int f, uint32_t id) { return f >= (id == 0 ? 150 : 1350) ? .4 : 0.; }, {0, 1}, &recovered, 3500, &delta);
+		check("recovery: controller follows a headset map switch 12 s later",
+			count == 1 && std::abs(recovered - .4) < 1e-8 && std::abs(delta.time - 2.5) < 1e-6 &&
+			std::abs(delta.confirmationLagSeconds - 12.0) < 1e-6 && delta.devicesAgreeing == 2,
+			"held HMD candidate confirmed by the late controller step; delta keeps the HMD jump time");
+		count = Replay([](int f, uint32_t id) { return f >= 150 && id == 0 ? .4 : 0.; }, {0, 1}, nullptr, 3500);
+		check("recovery: headset step no controller follows expires", count == 0, "controller continuous for 33 s");
+		count = Replay([](int f, uint32_t id) { return f >= (id == 0 ? 150 : 1350) ? (id == 0 ? .4 : .25) : 0.; }, {0, 1}, nullptr, 3500);
+		check("recovery: late controller step must match the headset step", count == 0, "15 cm disagreement 12 s later");
+		count = Replay([](int f, uint32_t id) { return f >= (id == 0 ? 150 : 3300) ? .4 : 0.; }, {0, 1}, nullptr, 3600);
+		check("recovery: controller step after the follow-up window does not confirm", count == 0, "31.5 s later");
+		count = Replay([](int f, uint32_t id) { return f >= (id == 0 ? 150 : 1350) ? .15 : 0.; }, {0, 1}, &recovered, 3500);
+		check("recovery: moderate headset step waits for the follow-up too", count == 1 && std::abs(recovered - .15) < 1e-8, "tight agreement, 12 s apart");
+		count = Replay([](int f, uint32_t) { return f >= 150 ? .4 : 0.; }, {0}, nullptr, 3500);
+		check("recovery: large solo step still applies at once", count == 1, "no controller to wait for");
+	}
+	{
+		JumpDetector detector(QpcSeconds);
+		for (int i = 0; i <= 1400; ++i)
+		{
+			auto hmd = Sample(0, 1 + i * .01, i >= 150 ? .4 : 0);
+			if (i == 800) hmd.poseIsValid = false;
+			detector.Push(hmd);
+			detector.Push(Sample(1, 1 + i * .01, i >= 1350 ? .4 : 0));
+		}
+		JumpDetector::UniverseDelta delta;
+		check("recovery: tracking loss during the hold revokes it", !detector.PollDelta(delta), "one invalid HMD frame 6.5 s in, controller follows at 12 s");
 	}
 
 	// The HMD candidate has finished fitting, then loses tracking before a

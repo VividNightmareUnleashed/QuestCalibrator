@@ -685,11 +685,18 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 		delta.secondsSinceStreamResume <= JumpDetector::Config().recentResumeSeconds)
 		snprintf(resumeNote, sizeof resumeNote, ", %.1f s after the reference stream resumed",
 			delta.secondsSinceStreamResume);
+	// A controller that followed the headset's step seconds later confirmed a
+	// held candidate (a Quest Pro map switch); the compensation is applied
+	// that late, and the log says so.
+	char lagNote[64] = "";
+	if (delta.confirmationLagSeconds > 0.0)
+		snprintf(lagNote, sizeof lagNote, ", confirmed %.1f s later",
+			delta.confirmationLagSeconds);
 	char message[256];
 	snprintf(message, sizeof message,
-		"Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)%s\n",
+		"Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)%s%s\n",
 		delta.exact ? "exact" : "estimated", yawDegrees,
-		delta.translation.norm(), delta.devicesAgreeing, resumeNote);
+		delta.translation.norm(), delta.devicesAgreeing, resumeNote, lagNote);
 	ctx.Log(message);
 	return true;
 }

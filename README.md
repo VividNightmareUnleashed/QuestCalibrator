@@ -140,6 +140,12 @@ with that age. In an observed Quest wake sequence, streaming poses resumed
 before full 6DoF tracking returned. A jump around that transition needs more
 evidence before its effect on alignment can be judged.
 
+Quest Pro controllers track on their own and can lag a headset map switch by
+up to half a minute. A headset step that no controller matched at once is
+held rather than dropped, and applied when a controller follows within 30 s;
+the log line then says how much later it was confirmed. A step nothing
+follows is discarded.
+
 ## Updates
 
 Automatic updates are off by default. Turn them on in Settings to let

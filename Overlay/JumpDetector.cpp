@@ -439,10 +439,16 @@ void JumpDetector::TryAccept()
 		std::bitset<vr::k_unMaxTrackedDeviceCount> counted;
 		counted.set(c0.deviceId);
 		double spread = 0.0;
+		double lag = 0.0;
 		for (const auto &o : candidates)
 		{
-			if (!o.ReadyHeuristic() || counted.test(o.deviceId) ||
-				std::abs(o.t - c0.t) > config.agreeWindow)
+			if (!o.ReadyHeuristic() || counted.test(o.deviceId))
+				continue;
+			// Devices agree within agreeWindow either way round. A controller
+			// may also follow the HMD up to controllerFollowSeconds later; it
+			// never leads it by more than agreeWindow.
+			double oLag = o.t - c0.t;
+			if (oLag < -config.agreeWindow || oLag > config.controllerFollowSeconds)
 				continue;
 			double dPos = (o.trans - c0.trans).norm();
 			double dYaw = std::abs(WrapAngle(YawOf(o.rot) - YawOf(c0.rot)));
@@ -453,6 +459,8 @@ void JumpDetector::TryAccept()
 				counted.set(o.deviceId);
 				agree.push_back(&o);
 				spread = std::max(spread, dPos);
+				if (oLag > config.agreeWindow)
+					lag = std::max(lag, oLag);
 			}
 		}
 
@@ -469,6 +477,7 @@ void JumpDetector::TryAccept()
 			d.devicesAgreeing = static_cast<int>(agree.size());
 			d.residualSpread = spread;
 			d.secondsSinceStreamResume = ResumeAge(devices[c0.deviceId], c0.t);
+			d.confirmationLagSeconds = lag;
 
 			Eigen::Vector3d trans = Eigen::Vector3d::Zero();
 			double s = 0.0, cs = 0.0;
@@ -488,20 +497,35 @@ void JumpDetector::TryAccept()
 			return;
 		}
 
-		if (now > c0.t + config.window + config.agreeWindow &&
-			!bigSolo && agree.size() < 2)
+		if (now <= c0.t + config.window + config.agreeWindow)
+			continue;   // immediate agreement can still arrive
+		if (!solo && now <= c0.t + config.window + config.controllerFollowSeconds)
 		{
-			c0.life = Life::Dead;
-			notes.push_back(Format("unconfirmed pose discontinuity on device %u ignored", c0.deviceId));
+			// Other reference devices are tracking and stayed continuous: on a
+			// Quest Pro that is what a headset map switch looks like until the
+			// controllers follow. Keep the candidate for that follow-up.
+			if (!c0.held)
+			{
+				c0.held = true;
+				notes.push_back(Format(
+					"pose discontinuity on device %u not confirmed at once; holding up to %.0f s for a controller to follow",
+					c0.deviceId, config.controllerFollowSeconds));
+			}
+			continue;
 		}
+		c0.life = Life::Dead;
+		notes.push_back(Format("unconfirmed pose discontinuity on device %u ignored", c0.deviceId));
 	}
 
-	// Prune stale entries.
+	// Prune stale entries. A held HMD candidate lives for the follow-up
+	// window; everything else has no use past a few seconds.
 	candidates.erase(
 		std::remove_if(candidates.begin(), candidates.end(),
 			[&](const Candidate &c) {
+				double keep = c.kind == Kind::Heuristic && c.deviceId == vr::k_unTrackedDeviceIndex_Hmd
+					? config.window + config.controllerFollowSeconds : 5.0;
 				return c.life == Life::Dead ||
-					devices[c.deviceId].lastValidTime - c.t > 5.0;
+					devices[c.deviceId].lastValidTime - c.t > keep;
 			}),
 		candidates.end());
 }
