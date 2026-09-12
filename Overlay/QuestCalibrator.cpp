@@ -20,6 +20,8 @@
 #endif
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
 // WIN32_LEAN_AND_MEAN keeps shellapi.h out of windows.h; CommandLineToArgvW
 // needs it (shell32.lib is already linked by the project).
 #include <shellapi.h>
@@ -44,6 +46,7 @@ void GLFWErrorCallback(int error, const char* description)
 }
 
 static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved);
+static std::string Narrow(const std::wstring &wide);
 
 static GLFWwindow *glfwWindow = nullptr;
 static bool dashboardOwnsInput = false;
@@ -143,6 +146,13 @@ static bool g_cliNoUi = false;
 // runnable as a smoke test: a crash on any of those frames leaves wWinMain with
 // a non-empty fatal message and a non-zero exit code.
 static int g_frameLimit = 0;
+
+// -shot PATH: write the overlay texture of the last frame to PATH as a PNG,
+// then return as -frames does. Without -frames it settles on thirty frames,
+// enough for the tab thumb and the hover fades to finish. The point is a
+// look at a screen without SteamVR, a headset or a window to click through:
+// the picture is the same 1200x800 texture the dashboard would receive.
+static std::wstring g_shotPath;
 
 static void CliReport(const char *message, bool isError)
 {
@@ -431,6 +441,76 @@ void InitVR(bool &initialized)
 	ActivateMultipleDrivers();
 }
 
+// The overlay texture, as the dashboard would show it, written to -shot's
+// path. Read back from the FBO rather than the window so the picture is the
+// full 1200x800 whatever size the desktop window has. WIC does the PNG: it
+// is part of Windows, and the encoder is a dozen calls with no library to
+// carry. Alpha is dropped on purpose; the compositor ignores it too.
+static bool SavePreviewShot(const std::wstring &path, std::string &error)
+{
+	const UINT w = static_cast<UINT>(fboTextureWidth), h = static_cast<UINT>(fboTextureHeight);
+	const UINT stride = w * 4;
+	std::vector<uint8_t> pixels(static_cast<size_t>(stride) * h);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, fboHandle);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_BGRA, GL_UNSIGNED_BYTE, pixels.data());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	// GL hands rows bottom-up; PNG wants them top-down. The alpha the
+	// blending left behind is overwritten while the rows are swapped.
+	std::vector<uint8_t> row(stride);
+	for (UINT y = 0; y < h / 2; ++y)
+	{
+		uint8_t *a = pixels.data() + static_cast<size_t>(y) * stride;
+		uint8_t *b = pixels.data() + static_cast<size_t>(h - 1 - y) * stride;
+		memcpy(row.data(), a, stride);
+		memcpy(a, b, stride);
+		memcpy(b, row.data(), stride);
+	}
+	for (size_t i = 3; i < pixels.size(); i += 4)
+		pixels[i] = 0xFF;
+
+	struct Com
+	{
+		HRESULT hr;
+		Com() : hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
+		~Com() { if (SUCCEEDED(hr)) CoUninitialize(); }
+	} com;
+	IWICImagingFactory *factory = nullptr;
+	IWICStream *stream = nullptr;
+	IWICBitmapEncoder *encoder = nullptr;
+	IWICBitmapFrameEncode *frame = nullptr;
+	HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(&factory));
+	if (SUCCEEDED(hr)) hr = factory->CreateStream(&stream);
+	if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+	if (SUCCEEDED(hr)) hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+	if (SUCCEEDED(hr)) hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+	if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, nullptr);
+	if (SUCCEEDED(hr)) hr = frame->Initialize(nullptr);
+	if (SUCCEEDED(hr)) hr = frame->SetSize(w, h);
+	// The encoder may answer with a format of its own choosing, and the
+	// buffer would then be read at the wrong width; only an exact match
+	// goes on.
+	WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+	if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&format);
+	if (SUCCEEDED(hr) && !IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA)) hr = WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT;
+	if (SUCCEEDED(hr)) hr = frame->WritePixels(h, stride, static_cast<UINT>(pixels.size()), pixels.data());
+	if (SUCCEEDED(hr)) hr = frame->Commit();
+	if (SUCCEEDED(hr)) hr = encoder->Commit();
+	if (frame) frame->Release();
+	if (encoder) encoder->Release();
+	if (stream) stream->Release();
+	if (factory) factory->Release();
+	if (FAILED(hr))
+	{
+		char buf[128];
+		snprintf(buf, sizeof buf, "Could not write the screenshot (HRESULT 0x%08lX): ", static_cast<unsigned long>(hr));
+		error = buf + Narrow(path);
+		return false;
+	}
+	return true;
+}
+
 void RunLoop()
 {
 	int framesRendered = 0;
@@ -607,7 +687,12 @@ void RunLoop()
 			waitEventsTimeout = 0.005;
 
 		if (g_frameLimit > 0 && ++framesRendered >= g_frameLimit)
+		{
+			std::string error;
+			if (!g_shotPath.empty() && !SavePreviewShot(g_shotPath, error))
+				CliReport(error.c_str(), true);
 			return;
+		}
 
 		// An animated visible window is already paced by SwapBuffers (vsync).
 		// A second timer wait can miss the next refresh and make 60 fps assets
@@ -889,6 +974,8 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		else if (arg == L"-frames" && i + 1 < args.size() &&
 			_wtoi(args[i + 1].c_str()) > 0)
 			g_frameLimit = _wtoi(args[++i].c_str());
+		else if (arg == L"-shot" && i + 1 < args.size())
+			g_shotPath = args[++i];
 		else if (cmd.empty())
 			cmd = arg;
 		else if (unrecognised.empty())
@@ -905,6 +992,9 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	// mistyped command, and used to be ignored entirely.
 	if (!unrecognised.empty())
 		CliExit("Unrecognised command-line argument: " + Narrow(unrecognised), true);
+
+	if (!g_shotPath.empty() && g_frameLimit == 0)
+		g_frameLimit = 30;
 
 	if (cmd == L"-uipreview")
 	{
