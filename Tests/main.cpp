@@ -69,6 +69,7 @@ bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
 void RunLighthouseScenarios(void (*check)(const char *, bool, const char *));
+void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
 
@@ -8435,6 +8436,7 @@ int main(int argc, char **argv)
 
 	// Production-shared driver algebra and broad solver edge/property passes.
 	RunDriverPoseTransformScenarios();
+	RunPredictionModelScenarios(Check);
 	RunDriverProtocolValidationScenarios();
 	RunDriverSyncScenarios();
 	RunDriverSessionScenarios();
