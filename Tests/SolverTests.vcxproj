@@ -88,6 +88,7 @@
   <ItemGroup>
     <ClCompile Include="CalibrationContextTests.cpp" />
     <ClCompile Include="ReviewRegressionTests.cpp" />
+    <ClCompile Include="TrackingRecoveryTests.cpp" />
     <ClCompile Include="OpenVRLayoutTests.cpp" />
     <ClCompile Include="ImGuiInputTests.cpp" />
     <ClCompile Include="..\lib\imgui\imgui.cpp" />

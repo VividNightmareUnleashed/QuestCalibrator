@@ -677,11 +677,19 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 	ctx.jumpsCompensated++;
 	const double yawDegrees = 2.0 *
 		std::atan2(delta.rotation.y(), delta.rotation.w()) * 180.0 / EIGEN_PI;
+	// A jump seconds after the reference stream came back is the headset's
+	// wake sequence as often as a moved universe (see recentResumeSeconds),
+	// so the log line carries the age for whoever reads it later.
+	char resumeNote[96] = "";
+	if (delta.secondsSinceStreamResume >= 0.0 &&
+		delta.secondsSinceStreamResume <= JumpDetector::Config().recentResumeSeconds)
+		snprintf(resumeNote, sizeof resumeNote, ", %.1f s after the reference stream resumed",
+			delta.secondsSinceStreamResume);
 	char message[256];
 	snprintf(message, sizeof message,
-		"Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)\n",
+		"Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)%s\n",
 		delta.exact ? "exact" : "estimated", yawDegrees,
-		delta.translation.norm(), delta.devicesAgreeing);
+		delta.translation.norm(), delta.devicesAgreeing, resumeNote);
 	ctx.Log(message);
 	return true;
 }

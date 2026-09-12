@@ -69,8 +69,8 @@ public:
 		size_t minObsForEstimate = 40;
 
 		// --- discontinuity guard: an obs-to-obs step this large this fast is a
-		// universe jump (JumpDetector's business) — drop the window, never
-		// "correct" it. Confirmation must come from an observation at least
+		// possible universe jump (JumpDetector's business). Verify an adjacent
+		// raw-pose step before dropping the window. Confirmation comes at least
 		// jumpConfirmSpacing later: a glitched reference sample corrupts every
 		// observation interpolated across it with correlated errors, and only
 		// temporal separation makes the confirming observation independent ---
@@ -111,6 +111,7 @@ public:
 		double resumeFactor = 0.5;         // unfreeze below freeze*factor ...
 		double resumeConfirmSeconds = 5.0; // ... sustained this long
 		double coastGapSeconds = 2.0;      // no fresh obs -> coasting
+		double maxStreamGapSeconds = 0.2; // never estimate across a tracking hiatus
 
 		// --- extrinsic derivation (rigidity gate) ---
 		size_t extrinsicMinPairs = 100;
@@ -244,7 +245,7 @@ public:
 
 	// Drop all windows and pending output (ring gap, accepted universe jump,
 	// suspension). Keeps the extrinsic; a persisting deviation re-freezes
-	// within freezeConfirmSeconds of resuming.
+	// after fresh evidence. StreamGap preserves Frozen and Coasting states.
 	void Reset(ResetReason reason = ResetReason::Requested);
 
 	// Derive the mount extrinsic from a manual calibration's sample buffers

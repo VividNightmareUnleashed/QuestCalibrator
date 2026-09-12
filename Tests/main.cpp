@@ -67,6 +67,7 @@ bool DiagnosticsExportScenario();
 bool ContinuousWindowDiagnosticsScenario();
 bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
+void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
 
@@ -4269,6 +4270,56 @@ void RunJumpScenarios()
 
 		snprintf(detail, sizeof detail, "deltas %d  gaps %d", deltas, gapEvents);
 		Check("jump: gap => event only", deltas == 0 && gapEvents == 1, detail);
+	}
+
+	// E. Resume age. A Quest Pro through Virtual Desktop resumes poses on wake
+	// while its tracking engine is still in 3DoF; the snap to the relocalized
+	// 6DoF pose seconds later is indistinguishable from a moved universe on
+	// the stream alone. The accepted delta must therefore report how long the
+	// stream had been back, measured from the first sample after the gap (or
+	// the first sample ever when there was no gap), so a log reader can tell
+	// the two apart.
+	{
+		auto run = [&](bool withGap)
+		{
+			JumpDetector jd(TestQpcToSeconds);
+			JumpRun r;
+			JumpDetector::UniverseDelta d;
+			const double tResume = 4.0, tSnap = 4.6;
+			auto feed = [&](double t0, double t1)
+			{
+				for (double t = t0; t < t1; t += 1.0 / rate)
+				{
+					Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
+					RefTrajectory(t, 0, rot, pos, vel, angVel);
+					if (t >= tSnap)
+						ApplyUniverse(D_R, D_T, rot, pos, vel, angVel);   // solo, above the big-solo floor
+					jd.Push(RingSample(0, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
+						rot, pos, vel, angVel));
+					while (jd.PollDelta(d)) { r.deltas++; r.last = d; }
+				}
+			};
+			if (withGap)
+			{
+				feed(0.0, 1.0);
+				feed(tResume, 5.5);
+			}
+			else
+			{
+				feed(0.0, 5.5);
+			}
+			return r;
+		};
+		JumpRun gapped = run(true);
+		JumpRun continuous = run(false);
+		bool pass = gapped.deltas == 1 && !gapped.last.exact &&
+			std::abs(gapped.last.secondsSinceStreamResume - 0.6) < 0.05 &&
+			continuous.deltas == 1 && !continuous.last.exact &&
+			std::abs(continuous.last.secondsSinceStreamResume - 4.6) < 0.05;
+		snprintf(detail, sizeof detail, "gapped deltas %d age %.2f s  continuous deltas %d age %.2f s",
+			gapped.deltas, gapped.last.secondsSinceStreamResume,
+			continuous.deltas, continuous.last.secondsSinceStreamResume);
+		Check("jump: delta reports seconds since stream resume", pass, detail);
 	}
 
 	// Malformed Running_OK samples and composed-time inversions must be treated
@@ -8902,6 +8953,7 @@ int main(int argc, char **argv)
 
 	// ---- Universe-jump detection ----
 	RunJumpScenarios();
+	RunTrackingRecoveryScenarios(Check);
 
 	// ---- Drift staleness monitoring ----
 	RunDriftScenarios();

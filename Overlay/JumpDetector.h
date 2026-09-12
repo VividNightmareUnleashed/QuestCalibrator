@@ -41,6 +41,14 @@ public:
 		double wfdTransEps = 1e-4;         // meters
 		double discontinuityPos = 0.20;    // meters of unexplained motion in one frame pair
 		double discontinuityYawRad = 5.0 * 3.14159265358979 / 180.0;
+		// Smaller steps need a clean fit and tighter HMD/controller agreement.
+		// They never qualify for the single-device fallback.
+		double corroboratedPos = 0.05;
+		double corroboratedYawRad = 2.0 * 3.14159265358979 / 180.0;
+		double corroboratedPosTol = 0.02;
+		double corroboratedYawTolRad = 1.0 * 3.14159265358979 / 180.0;
+		double fitPositionRms = 0.01;
+		double fitYawRmsRad = 0.5 * 3.14159265358979 / 180.0;
 		double maxFrameGap = ringpose::MaxAdjacentFrameSeconds;
 		double localContinuityPos = ringpose::MaxLocalPositionErrorMeters;
 		double localContinuityRotRad = ringpose::MaxLocalRotationErrorRadians;
@@ -50,8 +58,14 @@ public:
 		double agreeYawTolRad = 3.0 * 3.14159265358979 / 180.0;
 		double soloPosThreshold = 0.30;    // single-device heuristic acceptance floor
 		double soloYawThresholdRad = 10.0 * 3.14159265358979 / 180.0;
-		double retriggerHold = 1.0;        // seconds; gates re-triggering, never application
 		double gapSeconds = 2.0;           // reference stream gap => no compensation, event only
+		// A discontinuity this soon after the device's stream (re)started is
+		// annotated with its resume age. Observed on a Quest Pro through
+		// Virtual Desktop: after the headset wakes, poses resume while the
+		// tracking engine is still in 3DoF, and the snap to the relocalized
+		// 6DoF pose a few seconds later looks exactly like a universe jump.
+		// The age lets a log reader tell the two apart.
+		double recentResumeSeconds = 60.0;
 	};
 
 	// A universe delta to fold into the calibration: newCal = D ∘ oldCal.
@@ -64,6 +78,10 @@ public:
 		int devicesAgreeing = 0;
 		double residualTiltRad = 0.0;      // non-rigid part discarded by the yaw constraint
 		double residualSpread = 0.0;       // meters; disagreement between devices (heuristic)
+		// Seconds between the reporting device's most recent stream (re)start
+		// (its first valid sample ever, or the first after a gap) and the
+		// jump; < 0 when unknown. Reported, never used to gate acceptance.
+		double secondsSinceStreamResume = -1.0;
 		// Absolute HMD worldFromDriver endpoint captured by this exact sample.
 		// `exact` is the validity discriminator; heuristic deltas leave identity.
 		Eigen::Quaterniond worldFromDriverRotation{ 1, 0, 0, 0 };
@@ -141,6 +159,7 @@ private:
 		// Heuristic candidates: pre-jump window snapshot, evaluated once the
 		// post-jump window has filled.
 		std::vector<Hist> preWindow;
+		bool needsCorroboration = false;
 
 		// The filters every consumer needs, once each.
 		bool LiveExact() const { return kind == Kind::Exact && life != Life::Dead; }
@@ -158,8 +177,14 @@ private:
 		Eigen::Vector3d drvVel{ 0, 0, 0 };
 		Eigen::Vector3d drvAngVel{ 0, 0, 0 };
 		double lastValidTime = -1.0;
+		double streamResumeTime = -1.0;    // first valid sample ever, or first after a gap
 		std::deque<Hist> hist;
 	};
+
+	static double ResumeAge(const DeviceState &dev, double t)
+	{
+		return dev.streamResumeTime >= 0.0 ? t - dev.streamResumeTime : -1.0;
+	}
 
 	void DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	                     const Eigen::Quaterniond &newRot, const Eigen::Vector3d &newTrans);

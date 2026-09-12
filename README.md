@@ -109,8 +109,10 @@ use **Recalibrate with the headset tracker**. Waiting in a particular posture is
 not a calibration step. Manual profile editing changes the base transform; it does
 not relearn the mounted tracker relationship.
 
-Not planned: trackerless continuous alignment (without a rigid cross-universe pair
-there is nothing sound to measure during play).
+Ordinary FBT users do not need a headset-mounted tracker for jump compensation
+or drift warnings. Continuous drift correction without that rigid pair remains
+an open research problem: independently moving body trackers do not uniquely
+measure the headset-to-lighthouse alignment.
 
 ## Reporting problems
 
@@ -132,6 +134,11 @@ driver synchronization status, and executable hashes to identify the build. The
 raw stream is sampled independently of continuous mode. Detailed-log snapshots are
 written every ten seconds. Describe whether the problem is visible in SteamVR
 tracker positions or only in the game, and identify which devices look misplaced.
+
+A jump compensated within a minute of the reference stream resuming is logged
+with that age. In an observed Quest wake sequence, streaming poses resumed
+before full 6DoF tracking returned. A jump around that transition needs more
+evidence before its effect on alignment can be judged.
 
 ## Updates
 

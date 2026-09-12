@@ -11,6 +11,37 @@ namespace
 
 constexpr double RadToDeg = 180.0 / EIGEN_PI;
 
+bool HasPoseStep(const std::vector<PoseSample> &samples, double begin, double end,
+                const ContinuousAlignment::Config &config)
+{
+	auto next = std::upper_bound(samples.begin(), samples.end(), begin,
+		[](double time, const PoseSample &s) { return time < s.time; });
+	auto stop = std::lower_bound(samples.begin(), samples.end(), end,
+		[](const PoseSample &s, double time) { return s.time < time; });
+	// The reference pose may interpolate against the first sample after end.
+	if (stop != samples.end())
+		++stop;
+	if (next == samples.begin() && next != samples.end())
+		++next;
+	for (; next < stop; ++next)
+	{
+		const auto &previous = *(next - 1);
+		double dt = next->time - previous.time;
+		if (dt > config.maxInterpolationGap)
+			continue;
+		Eigen::Vector3d positionError = next->pos - previous.pos -
+			0.5 * (previous.vel + next->vel) * dt;
+		Eigen::Vector3d angularStep = 0.5 * (previous.angVel + next->angVel) * dt;
+		Eigen::Quaterniond predicted = previous.rot;
+		if (angularStep.norm() > 1e-12)
+			predicted = Eigen::Quaterniond(Eigen::AngleAxisd(angularStep.norm(), angularStep.normalized())) * predicted;
+		if (positionError.norm() > config.jumpGuardPosM ||
+			next->rot.angularDistance(predicted) * RadToDeg > config.jumpGuardRotDeg)
+			return true;
+	}
+	return false;
+}
+
 // Hemisphere-safe quaternion mean (Markley eigenvector method): the maximal
 // eigenvector of M = sum q q^T. The outer product is invariant under q -> -q,
 // so the double cover needs no bookkeeping.
@@ -136,6 +167,8 @@ void ContinuousAlignment::PushReference(const PoseSample &s)
 		++diagnostics.referenceOutOfOrder;
 		return;
 	}
+	if (!refWindow.empty() && s.time - refWindow.back().time >= config.maxStreamGapSeconds)
+		Reset(ResetReason::StreamGap);
 	refWindow.push_back(s);
 }
 
@@ -146,6 +179,8 @@ void ContinuousAlignment::PushTarget(const PoseSample &s)
 		++diagnostics.targetOutOfOrder;
 		return;
 	}
+	if (!targetWindow.empty() && s.time - targetWindow.back().time >= config.maxStreamGapSeconds)
+		Reset(ResetReason::StreamGap);
 	targetWindow.push_back(s);
 }
 
@@ -207,7 +242,7 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 
 		Observation obs{ t.time, qObs, tObs, t.pos };
 
-		// Discontinuity guard: a step this large this fast is a universe jump.
+		// Discontinuity guard: a fast step may indicate a universe jump.
 		// JumpDetector owns jumps; a window straddling one must never be
 		// averaged into a "correction". A real jump shifts every subsequent
 		// observation, while a single-sample tracking glitch is one-off — so a
@@ -251,10 +286,18 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 			{
 				double dRot = qObs.angularDistance(prev.rot) * RadToDeg;
 				double dPos = (tObs - prev.trans).norm();
-				if (dRot > config.jumpGuardRotDeg || dPos > config.jumpGuardPosM)
+				// Sparse, speed-gated observations can turn continuous tracking
+				// noise into an apparent step. Require a discontinuity in the raw
+				// adjacent poses before discarding the estimation window.
+				if ((dRot > config.jumpGuardRotDeg || dPos > config.jumpGuardPosM) &&
+					(HasPoseStep(refWindow, prev.time - calTimeOffset, obs.time - calTimeOffset, config) ||
+					 HasPoseStep(targetWindow, prev.time, obs.time, config)))
 				{
 					++diagnostics.jumpGuardRejected;
 					pendingObs = obs;
+					correctionEligible = false;
+					pendingCorrection.reset();
+					pendingTimeOffset.reset();
 					continue;
 				}
 			}
@@ -644,6 +687,7 @@ void ContinuousAlignment::ClearConfirmMarks()
 {
 	correctionEligible = false;
 	pendingCorrection.reset();
+	pendingTimeOffset.reset();
 	freezeExceededSince = -1.0;
 	resumeBelowSince = -1.0;
 	scatterSince = -1.0;
@@ -663,6 +707,12 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 
 	FormObservations(calScale, calTimeOffset);
 	TrimWindows(now);
+	if (pendingObs || observations.size() < config.minObsForEstimate)
+	{
+		correctionEligible = false;
+		pendingCorrection.reset();
+		pendingTimeOffset.reset();
+	}
 
 	bool obsFresh = lastObsTime > 0.0 && (now - lastObsTime) <= config.coastGapSeconds;
 	if (!obsFresh)
@@ -704,12 +754,19 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 	}
 
 	Decide(now, calRotation, calTranslationMeters, expectedAt);
+	if (pendingObs)
+	{
+		// Continue evaluating mount/tracking faults, but a window preceding
+		// an unresolved step cannot authorize a correction.
+		correctionEligible = false;
+		pendingCorrection.reset();
+	}
 
 	// Opt-in online latency measurement, only while actively Tracking (a
 	// frozen or coasting pair proves nothing). Runs on the raw stream windows,
 	// so it measures the true current latency independent of calTimeOffset;
 	// the engine's correlation floor rejects motionless windows.
-	if (config.latencyReestimation && state == State::Tracking &&
+	if (config.latencyReestimation && state == State::Tracking && !pendingObs &&
 		now - lastLatencyEstimateTime >= config.latencyIntervalSeconds)
 	{
 		lastLatencyEstimateTime = now;
@@ -769,6 +826,8 @@ ContinuousAlignment::Diagnostics ContinuousAlignment::GetDiagnostics() const
 
 void ContinuousAlignment::Reset(ResetReason reason)
 {
+	const bool keepFrozen = reason == ResetReason::StreamGap && state == State::Frozen;
+	const bool keepCoasting = reason == ResetReason::StreamGap && state == State::Coasting;
 	++diagnostics.resets[static_cast<size_t>(reason)];
 	refWindow.clear();
 	targetWindow.clear();
@@ -790,7 +849,7 @@ void ContinuousAlignment::Reset(ResetReason reason)
 	pendingCorrection.reset();
 	pendingTimeOffset.reset();
 	events.clear();
-	EnterState(State::Inactive);
+	EnterState(keepFrozen ? State::Frozen : keepCoasting ? State::Coasting : State::Inactive);
 }
 
 bool ContinuousAlignment::DeriveMountExtrinsic(const std::vector<PoseSample> &refStream,

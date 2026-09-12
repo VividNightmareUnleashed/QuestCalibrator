@@ -981,7 +981,10 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			continue;
 		questcal::PoseSample sample;
 		if (!diagnostics.devices[s.deviceId].Compose(s, QpcToSeconds, sample))
+		{
+			ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::StreamGap);
 			continue;
+		}
 		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
 			Continuous->PushReference(sample);
 		else
