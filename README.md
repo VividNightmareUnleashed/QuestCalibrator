@@ -85,10 +85,10 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   a one-shot notification instead of letting the alignment degrade silently.
 - **Base station visibility** — SteamVR's lighthouse driver logs which base
   stations each tracker sees and when one drops out. QuestCalibrator follows that
-  log, shows "3/4" (stations in view out of the stations seen this session) on
-  every lighthouse device row with a per-station drop count under the panes, and
-  stops counting a tracker's slide or re-appearance as drift evidence while it
-  sees fewer than two stations and for ten seconds after it lost or regained one.
+  log, lays the stations out per device on the Lighthouse tab (which ones each
+  tracker has in view, and which station drops out most), and stops counting a
+  tracker's slide or re-appearance as drift evidence while it sees fewer than
+  two stations and for ten seconds after it lost or regained one.
   Nothing changes when the log is unavailable. See
   [docs/lighthouse-visibility.md](docs/lighthouse-visibility.md).
 - **Spatial correction field** — multi-point calibration interpolated by each

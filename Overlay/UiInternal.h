@@ -13,6 +13,7 @@
 #include "../common/Version.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -102,6 +103,10 @@ namespace Pal
 	const ImVec4 VeryBad  (0.920f, 0.300f, 0.280f, 1.00f);
 	const ImVec4 Violet   (0.560f, 0.510f, 0.950f, 1.00f);
 	const ImVec4 White    (1.000f, 1.000f, 1.000f, 1.00f);
+	// The tab switch's ink, taken from the control it copies (the design
+	// reference's surface picker): warm greys, not this palette's cool ones.
+	const ImVec4 TabTextOn (0.941f, 0.937f, 0.925f, 1.00f);   // #f0efec
+	const ImVec4 TabTextOff(0.537f, 0.529f, 0.506f, 1.00f);   // #898781
 
 	inline ImU32 U32(const ImVec4 &c, float alphaMul = 1.0f)
 	{
@@ -208,8 +213,13 @@ static const float kCountdownSeconds = 3.0f;
 // Exceed the four-row scroll threshold and exercise several battery states.
 static const int kPreviewManyTrackerCount = 6;
 
+// The top-level tabs. Calibration is the screen the app always had;
+// Lighthouse is the base station view; Smoothing is announced but not built.
+enum class MainTab { Calibration = 0, Lighthouse, Smoothing };
+
 // Shared state, each owned by one file.
 extern IdentifyPulseState g_identifyPulse;
+extern MainTab s_mainTab;
 extern bool s_showSettings;
 extern double g_chapWarnOpenedAt;
 extern GuideState s_guide;
@@ -257,6 +267,13 @@ bool EscapePressed();
 void ShowTip(const char *text, bool leftOfCursor = false);
 bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bool &value, const char *tooltip);
 int Segmented(const char *id, int value, const char *const items[], int count, float itemW, float h);
+// The tab switch (UiWidgets.cpp). disabledMask bit i greys item i out and
+// shows disabledTip over it; the cell widths follow the labels.
+float SegmentedTabsWidth(const char *const items[], int count);
+float SegmentedTabsHeight();
+int SegmentedTabs(const char *id, int value, const char *const items[], int count,
+	unsigned disabledMask, const char *disabledTip);
+void BuildLighthouseScreen(const VRState &state);
 void DrawStatusCard(const std::vector<StatusRowData> &rows);
 std::string FormatString(const char *fmt, ...);
 bool PoseChannelDown();

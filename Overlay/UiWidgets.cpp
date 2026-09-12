@@ -474,10 +474,11 @@ std::string Prefer2x(const std::string &path)
 
 // Keyboard focus, drawn the same way on every hand-painted control: the
 // navigation highlight ImGui would draw on its own widgets never reaches an
-// InvisibleButton.
+// InvisibleButton. Only while the keyboard is driving: an item also holds
+// focus after a click, and at launch the first one holds it unasked.
 void DrawFocusRing(ImDrawList *dl, ImVec2 a, ImVec2 b, float rounding)
 {
-	if (ImGui::IsItemFocused())
+	if (ImGui::IsItemFocused() && ImGui::GetIO().NavVisible)
 		dl->AddRect(ImVec2(a.x - 2.0f, a.y - 2.0f), ImVec2(b.x + 2.0f, b.y + 2.0f),
 			Pal::U32(Pal::Accent), rounding + 2.0f, 2.0f, ImDrawFlags_RoundCornersAll);
 }
@@ -695,6 +696,147 @@ bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bo
 	if (hovered && tooltip)
 		ShowTip(tooltip);
 	return changed;
+}
+
+// ---------------------------------------------------------------------------
+// Segmented tabs
+// ---------------------------------------------------------------------------
+
+// The top-level tab switch, after the segmented surface picker in the design
+// reference (its "Chat / Cowork" control): a translucent track, a thumb that
+// slides to the chosen cell, and labels going from muted to primary. It is a
+// 28 px control with a 1 px track inset, 12 px cell padding, 7/6/5 px radii
+// and 14 px text. It is drawn at kTabScale so the 14 px text becomes the
+// body face and a cell is big enough for a laser pointer; every measure
+// below is the reference's times that scale.
+static const float kTabScale = 1.5f;
+
+static float TabCellWidth(const char *label)
+{
+	const float px = 12.0f * kTabScale;
+	return g_fontBody->CalcTextSizeA(g_fontBody->LegacySize,
+		std::numeric_limits<float>::max(), 0.0f, label).x + px * 2.0f;
+}
+
+float SegmentedTabsWidth(const char *const items[], int count)
+{
+	float w = 1.0f * kTabScale * 2.0f;
+	for (int i = 0; i < count; ++i)
+		w += TabCellWidth(items[i]);
+	return w;
+}
+
+float SegmentedTabsHeight()
+{
+	return 28.0f * kTabScale;
+}
+
+int SegmentedTabs(const char *id, int value, const char *const items[], int count,
+	unsigned disabledMask, const char *disabledTip)
+{
+	const float h = 28.0f * kTabScale;
+	const float pad = 1.0f * kTabScale;
+	const float px = 12.0f * kTabScale;
+	const float rTrack = 7.0f * kTabScale;
+	const float rThumb = 6.0f * kTabScale;
+	const float rCell = 5.0f * kTabScale;
+	const float ring = 1.0f * kTabScale;
+	if (count > 16)
+		count = 16;
+
+	ImGui::PushID(id);
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	float widths[16];
+	float total = pad * 2.0f;
+	for (int i = 0; i < count; ++i)
+	{
+		widths[i] = TabCellWidth(items[i]);
+		total += widths[i];
+	}
+	const ImVec2 b = ImVec2(p.x + total, p.y + h);
+
+	// Track: white at 5 %.
+	dl->AddRectFilled(p, b, Pal::U32(ImVec4(1, 1, 1, 0.05f)), rTrack);
+
+	// The thumb eases to the chosen cell, as the reference's does. Its
+	// position lives in the window's storage so the slide survives frames.
+	float targetX = pad;
+	for (int i = 0; i < value && i < count; ++i)
+		targetX += widths[i];
+	const float targetW = value >= 0 && value < count ? widths[value] : 0.0f;
+	ImGuiStorage *storage = ImGui::GetStateStorage();
+	const ImGuiID keyX = ImGui::GetID("thumb.x");
+	const ImGuiID keyW = ImGui::GetID("thumb.w");
+	float tx = storage->GetFloat(keyX, -1.0f);
+	float tw = storage->GetFloat(keyW, targetW);
+	if (tx < 0.0f)
+	{
+		tx = targetX;
+		tw = targetW;
+	}
+	else
+	{
+		// Exponential approach with a 45 ms time constant: within a pixel
+		// in about 160 ms, the ease-out the reference transitions with.
+		const float k = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / 0.045f);
+		tx += (targetX - tx) * k;
+		tw += (targetW - tw) * k;
+	}
+	storage->SetFloat(keyX, tx);
+	storage->SetFloat(keyW, tw);
+	if (targetW > 0.0f)
+	{
+		const ImVec2 t0 = ImVec2(p.x + tx, p.y + pad);
+		const ImVec2 t1 = ImVec2(p.x + tx + tw, b.y - pad);
+		// Its shadow (0 1px 2px, black at 5 %), then white at 10 % with a
+		// 1 px inset ring at 10 %.
+		dl->AddRectFilled(ImVec2(t0.x, t0.y + ring), ImVec2(t1.x, t1.y + ring),
+			Pal::U32(ImVec4(0, 0, 0, 0.05f)), rThumb);
+		dl->AddRectFilled(t0, t1, Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb);
+		dl->AddRect(ImVec2(t0.x + ring * 0.5f, t0.y + ring * 0.5f),
+			ImVec2(t1.x - ring * 0.5f, t1.y - ring * 0.5f),
+			Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb - ring * 0.5f, ImDrawFlags_RoundCornersAll, ring);
+	}
+
+	float x = p.x + pad;
+	for (int i = 0; i < count; ++i)
+	{
+		ImGui::PushID(i);
+		const ImVec2 c0 = ImVec2(x, p.y + pad);
+		const ImVec2 c1 = ImVec2(x + widths[i], b.y - pad);
+		const bool disabled = ((disabledMask >> i) & 1u) != 0;
+		bool hov = false;
+		ImGui::SetCursorScreenPos(c0);
+		if (!disabled)
+		{
+			if (ImGui::InvisibleButton("cell", ImVec2(widths[i], c1.y - c0.y), ImGuiButtonFlags_EnableNav))
+				value = i;
+			hov = ImGui::IsItemHovered();
+			DrawFocusRing(dl, c0, c1, rCell);
+		}
+		else
+		{
+			ImGui::Dummy(ImVec2(widths[i], c1.y - c0.y));
+			if (disabledTip && ImGui::IsItemHovered())
+				ShowTip(disabledTip);
+		}
+		// Muted at rest, primary when chosen or hovered; a disabled cell
+		// keeps its colour at the reference's 0.4 opacity.
+		ImVec4 col = (i == value || hov) ? Pal::TabTextOn : Pal::TabTextOff;
+		if (disabled)
+			col.w = 0.4f;
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(x + px, c0.y + (c1.y - c0.y - g_fontBody->LegacySize) * 0.5f),
+			Pal::U32(col), items[i]);
+		x += widths[i];
+		ImGui::PopID();
+	}
+
+	ImGui::SetCursorScreenPos(ImVec2(p.x, b.y));
+	ImGui::Dummy(ImVec2(total, 0.0f));
+	ImGui::PopID();
+	return value;
 }
 
 int Segmented(const char *id, int value, const char *const items[], int count, float itemW, float h)

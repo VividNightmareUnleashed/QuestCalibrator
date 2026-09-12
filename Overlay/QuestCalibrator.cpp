@@ -928,6 +928,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		g_uiPreviewScenario = cmd == L"-uipreview-frozen" ? PreviewScenario::Frozen
 			: cmd == L"-uipreview-failed" ? PreviewScenario::Failed : PreviewScenario::Empty;
 	}
+	else if (cmd == L"-uipreview-lighthouse")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = PreviewScenario::Lighthouse;
+	}
 	else if (cmd == L"-openvrpath")
 	{
 		InitVRUtilityOrExit();

@@ -11,6 +11,7 @@ ImFont *g_fontSmall = nullptr;
 ImFont *g_fontTitle = nullptr;
 
 IdentifyPulseState g_identifyPulse;
+MainTab s_mainTab = MainTab::Calibration;
 
 void UpdateIdentifyPulse(double now)
 {
@@ -56,6 +57,22 @@ void BuildHeader()
 	dl->AddText(g_fontTitle, g_fontTitle->LegacySize,
 		ImVec2(p.x + 52.0f, p.y + (h - g_fontTitle->LegacySize) * 0.5f),
 		Pal::U32(Pal::Text), "QuestCalibrator");
+
+	// The tab switch, centred between the title and the gear. Picking a tab
+	// is also the way back out of Settings.
+	{
+		static const char *const tabs[] = { "Calibration", "Lighthouse", "Smoothing" };
+		const float tw = SegmentedTabsWidth(tabs, 3);
+		const float th = SegmentedTabsHeight();
+		ImGui::SetCursorScreenPos(ImVec2(p.x + (cw - tw) * 0.5f, p.y + (h - th) * 0.5f));
+		const int picked = SegmentedTabs("maintab", static_cast<int>(s_mainTab), tabs, 3,
+			1u << static_cast<int>(MainTab::Smoothing), "Smoothing isn't ready yet.");
+		if (picked != static_cast<int>(s_mainTab))
+		{
+			s_mainTab = static_cast<MainTab>(picked);
+			s_showSettings = false;
+		}
+	}
 
 	// Gear (settings) toggle at the far right
 	const float gearS = 38.0f;
@@ -194,17 +211,29 @@ void BuildMainWindow(bool runningInOverlay)
 	// The settings screen replaces the whole content area; keeping the device
 	// panes above it buried the settings below the fold for no benefit.
 	bool inSettings = (CalCtx.state == CalibrationState::None && s_showSettings);
-	if (!inSettings)
+	// The Lighthouse tab owns the content area only while nothing else
+	// does: a calibration in progress or the profile editor keeps its
+	// screen whatever the tab says.
+	const bool lighthouseTab = !inSettings && CalCtx.state == CalibrationState::None &&
+		s_mainTab == MainTab::Lighthouse;
+	if (lighthouseTab)
 	{
-		BuildSpacesSection(state);
-		ImGui::Spacing();
+		BuildLighthouseScreen(state);
 	}
-	BuildMenu(state, runningInOverlay);
+	else
+	{
+		if (!inSettings)
+		{
+			BuildSpacesSection(state);
+			ImGui::Spacing();
+		}
+		BuildMenu(state, runningInOverlay);
+	}
 	ImGui::EndChild();
 
-	// The pinned bottom block: the band on the main screen, the footer
-	// everywhere.
-	if (!inSettings && CalCtx.state == CalibrationState::None)
+	// The pinned bottom block: the band on the calibration screen, the
+	// footer everywhere.
+	if (!inSettings && !lighthouseTab && CalCtx.state == CalibrationState::None)
 		BuildStatusBand(state);
 	else
 		s_bottomReserve = 48.0f;

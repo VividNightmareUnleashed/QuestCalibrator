@@ -220,6 +220,7 @@ void SetupPreviewState()
 		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 8, { 5, 9 }), 0.0);
 		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 5, { 9 }), 0.0);
 		CalCtx.lighthouseLogAvailable = true;
+		CalCtx.lighthouseLogPath = lighthouselog::DefaultLogPath();
 	}
 
 	switch (g_uiPreviewScenario)
@@ -263,6 +264,9 @@ void SetupPreviewState()
 		CalCtx.continuousState = questcal::ContinuousAlignment::State::Inactive;
 		CalCtx.continuousDeviation.valid = false;
 		CalCtx.autoCorrectionsApplied = 0;
+		break;
+	case PreviewScenario::Lighthouse:
+		s_mainTab = MainTab::Lighthouse;
 		break;
 	case PreviewScenario::Failed:
 	case PreviewScenario::Healthy:

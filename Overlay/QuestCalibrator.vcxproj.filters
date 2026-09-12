@@ -182,6 +182,9 @@
     <ClCompile Include="UiDevices.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="UiLighthouse.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="UiGuide.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

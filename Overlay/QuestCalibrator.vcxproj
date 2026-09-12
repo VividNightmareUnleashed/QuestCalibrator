@@ -304,6 +304,7 @@
     <ClCompile Include="UiWidgets.cpp" />
     <ClCompile Include="UiMainScreen.cpp" />
     <ClCompile Include="UiDevices.cpp" />
+    <ClCompile Include="UiLighthouse.cpp" />
     <ClCompile Include="UiGuide.cpp" />
     <ClCompile Include="UiSettings.cpp" />
     <ClCompile Include="UiPreview.cpp" />
