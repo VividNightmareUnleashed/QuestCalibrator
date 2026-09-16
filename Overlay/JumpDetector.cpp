@@ -350,8 +350,9 @@ void JumpDetector::EvaluatePendingCandidates()
 				if (after && (h.t < c.t || h.t > c.t + config.window))
 					continue;
 				Eigen::Vector3d predicted;
-				double yaw;
-				fit.At(predicted, yaw, h.t - c.t);
+				double yaw = 0.0;
+				if (!fit.At(predicted, yaw, h.t - c.t))
+					return false;
 				posSq += (h.pos - predicted).squaredNorm();
 				double yawError = WrapAngle(h.yaw - yaw);
 				yawSq += yawError * yawError;

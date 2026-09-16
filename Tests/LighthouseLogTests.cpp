@@ -417,6 +417,7 @@ void ModelScenarios(Check check)
 	{
 		Output run = Run(cfg, StillAt(home), { { 0.0, { 5, 8 } }, { 10.0, {} }, { 20.0, { 9 } } }, 25.0);
 		std::vector<Event::Kind> kinds;
+		kinds.reserve(run.events.size());
 		for (const auto &te : run.events)
 			kinds.push_back(te.event.kind);
 		using K = Event::Kind;

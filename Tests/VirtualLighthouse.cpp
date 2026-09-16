@@ -63,7 +63,7 @@ lighthouselog::Event Line(const Config &cfg, lighthouselog::Event::Kind kind, do
 // The lines the driver writes for one change of the visible set: drops one
 // at a time (each listing what remains), "no base stations seen" when the
 // set empties, a bootstrap when it refills from nothing, adds one at a time.
-void EmitChange(const Config &cfg, double t, std::vector<int> from, const std::vector<int> &to,
+void EmitChange(const Config &cfg, double t, const std::vector<int> &from, const std::vector<int> &to,
 	bool historical, std::vector<TimedEvent> &out)
 {
 	using K = lighthouselog::Event::Kind;
