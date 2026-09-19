@@ -34,7 +34,7 @@ packaging sources and outputs must not be committed to the repository.
   ```
 
 - Review every advisory clone or Clang-Tidy finding, even though those findings do
-  not automatically fail CI.
+  not fail validation on their own.
 
 ## Commit, push, and tag
 

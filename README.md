@@ -244,11 +244,6 @@ Windows SDK directories. Let clangd discover the installed MSVC toolchain, or se
 its `--query-driver` option locally when discovery is unavailable; do not commit
 machine-specific paths. MSBuild project evaluation remains authoritative.
 
-Windows CI runs the Release build, solver tests, and duplicate scan on pushes and
-pull requests. A whole-project Clang-Tidy rebuild can also be requested manually
-and runs on the weekly schedule. Clang-Tidy and clone findings remain review
-signals; configuration, build, or test failures fail the workflow.
-
 A from-source setup is manual — copy `Driver\01questcalibrator` into SteamVR's `drivers`
 folder, put the built `driver_01questcalibrator.dll` in its `bin\win64`, and run the
 overlay exe (with `openvr_api.dll`, `manifest.vrmanifest`, and `icon.png` beside it)

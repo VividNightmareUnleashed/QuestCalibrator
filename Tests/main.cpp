@@ -2125,7 +2125,7 @@ void RunPoseRingConcurrentScenario()
 				sample.position[1] = static_cast<double>(-token);
 				// This scenario checks payload ownership/integrity, not the
 				// separately-tested fail-fast policy. Retry an intentional claim-lock
-				// contention drop so a preempted producer cannot make CI flaky.
+				// contention drop so a preempted producer cannot make it flaky.
 				while (!writer.Publish(sample))
 				{
 					publishRetries.fetch_add(1, std::memory_order_relaxed);

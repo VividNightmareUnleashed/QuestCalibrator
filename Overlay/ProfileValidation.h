@@ -321,7 +321,7 @@ enum class PersistenceWriteGate
 {
 	Allowed,
 	// -uipreview drives the entire UI from fabricated state (and -frames N runs
-	// that as a CI smoke test), so it must never touch HKCU. It is the only
+	// that unattended as a smoke test), so it must never touch HKCU. It is the only
 	// outcome that reports success without writing, and that combination is
 	// exactly what would turn a mis-set preview flag on a normal launch into
 	// total silent persistence loss - the user recalibrates, the UI says
