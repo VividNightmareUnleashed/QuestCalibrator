@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../common/Version.h"
 #include "../lib/picojson.h"
 
 #include <array>
@@ -15,18 +16,59 @@ namespace questcal
 namespace update
 {
 
+// An empty prerelease label means a final release. The label and ordinal are
+// the shape QuestCalibrator actually publishes ("alpha", 3), not the whole of
+// SemVer's dot-separated identifier list.
 struct Version
 {
 	uint32_t major = 0;
 	uint32_t minor = 0;
 	uint32_t patch = 0;
+	std::string prereleaseLabel;
+	uint32_t prereleaseOrdinal = 0;
 };
 
+inline bool IsPrerelease(const Version &version)
+{
+	return !version.prereleaseLabel.empty();
+}
+
+// The build's own identity, assembled in exactly one place. Filling a Version
+// field by field at the call site is what let 1.2.0-alpha.3 report itself as
+// 1.2.0: a field nobody remembered to set defaults to "final", and the tester
+// then compares equal to the release they are waiting for.
+inline Version CurrentVersion()
+{
+	Version version;
+	version.major = QUESTCAL_VERSION_MAJOR;
+	version.minor = QUESTCAL_VERSION_MINOR;
+	version.patch = QUESTCAL_VERSION_PATCH;
+	version.prereleaseLabel = QUESTCAL_VERSION_PRERELEASE_LABEL;
+	version.prereleaseOrdinal = QUESTCAL_VERSION_PRERELEASE_ORDINAL;
+	return version;
+}
+
+// SemVer 2.0.0 section 11: when the three numbers agree, a final release
+// outranks every prerelease of it, and two prereleases of it are ordered by
+// label then ordinal. Labels compare as text, which puts alpha below beta
+// below rc.
+//
+// The update path never reaches these last four lines, because it decides the
+// lane before it compares anything and a feed candidate is always final. They
+// are here because a comparison that quietly ignored half the fields of the
+// thing it compares is what made 1.2.0-alpha.3 equal to 1.2.0 in the first
+// place, and whoever builds the prerelease lane will need the order to hold.
 inline int CompareVersions(const Version &a, const Version &b)
 {
 	if (a.major != b.major) return a.major < b.major ? -1 : 1;
 	if (a.minor != b.minor) return a.minor < b.minor ? -1 : 1;
 	if (a.patch != b.patch) return a.patch < b.patch ? -1 : 1;
+	if (IsPrerelease(a) != IsPrerelease(b)) return IsPrerelease(a) ? -1 : 1;
+	if (!IsPrerelease(a)) return 0;
+	if (a.prereleaseLabel != b.prereleaseLabel)
+		return a.prereleaseLabel < b.prereleaseLabel ? -1 : 1;
+	if (a.prereleaseOrdinal != b.prereleaseOrdinal)
+		return a.prereleaseOrdinal < b.prereleaseOrdinal ? -1 : 1;
 	return 0;
 }
 
@@ -35,7 +77,13 @@ inline std::string VersionString(const Version &version)
 	char text[48];
 	snprintf(text, sizeof text, "%u.%u.%u",
 		version.major, version.minor, version.patch);
-	return text;
+	std::string rendered = text;
+	if (IsPrerelease(version))
+	{
+		snprintf(text, sizeof text, ".%u", version.prereleaseOrdinal);
+		rendered += "-" + version.prereleaseLabel + text;
+	}
+	return rendered;
 }
 
 inline bool ParseVersionComponent(const std::string &text, size_t &cursor,
@@ -72,6 +120,8 @@ inline bool ParseVersionComponent(const std::string &text, size_t &cursor,
 // Only the fork's stable release namespace is eligible. This deliberately
 // rejects inherited v* tags and prerelease suffixes; alpha/beta delivery can be
 // added later as a separate, explicit channel without changing stable users.
+// Every version it yields is therefore a final release, which is what lets a
+// prerelease running locally compare below the stable release it matches.
 inline bool ParseReleaseTag(const std::string &tag, Version &version)
 {
 	static const std::string prefix = "questcalibrator-v";
@@ -88,6 +138,8 @@ inline bool ParseReleaseTag(const std::string &tag, Version &version)
 	return true;
 }
 
+// Only ever called for a candidate out of the feed, which ParseReleaseTag
+// guarantees is a final release, so this never has to name a prerelease asset.
 inline std::string CanonicalPackageName(const Version &version)
 {
 	return "QuestCalibrator-" + VersionString(version) + ".zip";
@@ -140,6 +192,9 @@ inline bool JsonField(const picojson::object &object, const char *key, T &out)
 	return true;
 }
 
+// The stable lane, and the only lane there is: the overlay reads published
+// stable releases and nothing else.
+//
 // The feed is untrusted input. Select the newest published stable release first,
 // then require its one canonical package to be complete and internally
 // consistent. Never fall back to an older package when the newest release is
@@ -150,6 +205,12 @@ inline bool SelectReleaseCandidate(const std::string &json,
 {
 	updateAvailable = false;
 	error.clear();
+	// A prerelease is on its own lane. It is installed by hand and leaves by
+	// hand, so the stable feed never has anything to say to it, whatever the
+	// feed holds. The updater stops before it gets here; this is the second
+	// lock, so no future caller can hand a tester a stable package by accident.
+	if (IsPrerelease(current))
+		return true;
 	picojson::value root;
 	const std::string parseError = picojson::parse(root, json);
 	if (!parseError.empty() || !root.is<picojson::array>())

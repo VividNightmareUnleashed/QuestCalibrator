@@ -24,6 +24,9 @@ bool HashFileSha256(const std::filesystem::path &path, std::array<unsigned char,
 enum class State
 {
 	Disabled,
+	// This build is a prerelease, so it is not on the stable lane and the
+	// updater will not check. The tester installs a stable build by hand.
+	Prerelease,
 	Idle,
 	Checking,
 	Downloading,

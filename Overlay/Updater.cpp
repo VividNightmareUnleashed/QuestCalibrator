@@ -427,20 +427,44 @@ bool Updater::CheckNow()
 {
 	std::thread finished;
 	uint64_t checkRevision = 0;
+	std::string prereleaseBuild;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		if (!enabled || stopping || running)
 			return false;
+		// A prerelease belongs to the hand-installed lane, so the stable feed is
+		// never asked. Say which build this is and leave the move to the tester.
+		const Version build = CurrentVersion();
+		if (IsPrerelease(build))
+		{
+			prereleaseBuild = VersionString(build);
+			snapshot = Snapshot();
+			snapshot.state = State::Prerelease;
+			snapshot.version = prereleaseBuild;
+			snapshot.message = "QuestCalibrator " + prereleaseBuild +
+				" is a prerelease. Automatic updates follow stable releases only, "
+				"so this build will not update itself. Install a stable release by "
+				"hand to rejoin them.";
+		}
 		if (worker.joinable())
 			finished = std::move(worker);
-		running = true;
-		checkRevision = ++revision;
-		snapshot = Snapshot();
-		snapshot.state = State::Checking;
-		snapshot.message = "Checking GitHub for updates";
+		if (prereleaseBuild.empty())
+		{
+			running = true;
+			checkRevision = ++revision;
+			snapshot = Snapshot();
+			snapshot.state = State::Checking;
+			snapshot.message = "Checking GitHub for updates";
+		}
 	}
 	if (finished.joinable())
 		finished.join();
+	if (!prereleaseBuild.empty())
+	{
+		Log("check skipped: " + prereleaseBuild +
+			" is a prerelease and is not on the stable lane");
+		return false;
+	}
 	Log("check started (current " QUESTCAL_VERSION_STRING ")");
 	try
 	{
@@ -549,8 +573,7 @@ void Updater::RunCheck(uint64_t checkRevision)
 		ReleaseCandidate release;
 		bool available = false;
 		std::string policyError;
-		const Version current{ QUESTCAL_VERSION_MAJOR,
-			QUESTCAL_VERSION_MINOR, QUESTCAL_VERSION_PATCH };
+		const Version current = CurrentVersion();
 		if (!SelectReleaseCandidate(feed, current, release, available, policyError))
 			throw std::runtime_error(policyError);
 		if (!available)

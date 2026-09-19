@@ -40,6 +40,7 @@
 #include "../Overlay/RingPoseMath.h"
 #include "../Overlay/PoseStreamHub.h"
 #include "../common/PoseChannel.h"
+#include "../common/Version.h"
 
 #include <algorithm>
 #include <atomic>
@@ -8238,6 +8239,19 @@ picojson::value UpdateReleaseValue(const std::string &tag, bool draft,
 	return picojson::value(release);
 }
 
+questcal::update::Version UpdateVersion(uint32_t major, uint32_t minor,
+	uint32_t patch, const std::string &prereleaseLabel = std::string(),
+	uint32_t prereleaseOrdinal = 0)
+{
+	questcal::update::Version version;
+	version.major = major;
+	version.minor = minor;
+	version.patch = patch;
+	version.prereleaseLabel = prereleaseLabel;
+	version.prereleaseOrdinal = prereleaseOrdinal;
+	return version;
+}
+
 void RunUpdatePolicyScenarios()
 {
 	using namespace questcal::update;
@@ -8251,6 +8265,36 @@ void RunUpdatePolicyScenarios()
 		!ParseReleaseTag("questcalibrator-v12.34.56-alpha.1", parsed) &&
 		!ParseReleaseTag("questcalibrator-v12.034.56", parsed) &&
 		!ParseReleaseTag("questcalibrator-v42949672960.0.0", parsed), "");
+
+	// Ordering the three numbers alone made 1.2.0-alpha.3 equal to 1.2.0. The
+	// update path now decides the lane before it compares, so this order is what
+	// the prerelease lane will be built on rather than what gates a download.
+	const Version alpha3 = UpdateVersion(1, 2, 0, "alpha", 3);
+	const Version stable120 = UpdateVersion(1, 2, 0);
+	Check("updates: a prerelease sorts below its final release",
+		CompareVersions(alpha3, stable120) < 0 &&
+		CompareVersions(stable120, alpha3) > 0 &&
+		CompareVersions(alpha3, alpha3) == 0 &&
+		CompareVersions(stable120, stable120) == 0 &&
+		CompareVersions(UpdateVersion(1, 2, 0, "alpha", 2), alpha3) < 0 &&
+		CompareVersions(alpha3, UpdateVersion(1, 2, 0, "beta", 1)) < 0 &&
+		CompareVersions(UpdateVersion(1, 2, 0, "beta", 9),
+			UpdateVersion(1, 2, 0, "rc", 1)) < 0 &&
+		CompareVersions(alpha3, UpdateVersion(1, 1, 0)) > 0 &&
+		CompareVersions(alpha3, UpdateVersion(1, 2, 1)) < 0 &&
+		CompareVersions(UpdateVersion(1, 2, 1, "alpha", 1), stable120) > 0, "");
+
+	Check("updates: a prerelease renders its suffix",
+		VersionString(alpha3) == "1.2.0-alpha.3" &&
+		VersionString(stable120) == "1.2.0" &&
+		CanonicalPackageName(stable120) == "QuestCalibrator-1.2.0.zip", "");
+
+	// The resource compiler cannot build the string from the numbers, so the two
+	// halves of Version.h are written out separately and can drift apart. A build
+	// that reports a version it is not is exactly what this whole check is about.
+	const std::string headerVersion = VersionString(CurrentVersion());
+	Check("updates: the version header agrees with itself",
+		headerVersion == QUESTCAL_VERSION_STRING, headerVersion.c_str());
 
 	std::array<unsigned char, 32> digestBytes{};
 	Check("updates: SHA-256 metadata is strict",
@@ -8276,7 +8320,7 @@ void RunUpdatePolicyScenarios()
 	bool available = false;
 	std::string error;
 	const bool selected = SelectReleaseCandidate(feed.serialize(),
-		Version{ 1, 1, 0 }, candidate, available, error);
+		UpdateVersion(1, 1, 0), candidate, available, error);
 	Check("updates: newest eligible stable release wins",
 		selected && available && error.empty() &&
 		VersionString(candidate.version) == "1.2.0" &&
@@ -8287,9 +8331,47 @@ void RunUpdatePolicyScenarios()
 	bool newerAvailable = true;
 	error.clear();
 	const bool current = SelectReleaseCandidate(feed.serialize(),
-		Version{ 1, 2, 0 }, none, newerAvailable, error);
+		UpdateVersion(1, 2, 0), none, newerAvailable, error);
 	Check("updates: current version does not redownload",
 		current && !newerAvailable && error.empty(), error.c_str());
+
+	// A prerelease is hand-installed and leaves by hand, so nothing in the
+	// stable feed is offered to it: not the release it precedes, not one newer,
+	// and not the older stable it is already ahead of.
+	ReleaseCandidate offered;
+	bool laneAvailable = true;
+	error.clear();
+	const bool laneSelected = SelectReleaseCandidate(feed.serialize(),
+		alpha3, offered, laneAvailable, error);
+	Check("updates: a prerelease is never offered a stable release",
+		laneSelected && !laneAvailable && error.empty() &&
+		offered.packageName.empty() && offered.downloadUrl.empty(), error.c_str());
+
+	picojson::array newerStable;
+	newerStable.push_back(UpdateReleaseValue("questcalibrator-v9.9.9", false,
+		false, "QuestCalibrator-9.9.9.zip", digest));
+	newerStable.push_back(UpdateReleaseValue("questcalibrator-v1.1.0", false,
+		false, "QuestCalibrator-1.1.0.zip", digest));
+	picojson::value stableLaneFeed;
+	stableLaneFeed.set<picojson::array>(std::move(newerStable));
+	bool farAvailable = true;
+	error.clear();
+	const bool farSelected = SelectReleaseCandidate(stableLaneFeed.serialize(),
+		alpha3, none, farAvailable, error);
+	Check("updates: no stable release reaches the prerelease lane",
+		farSelected && !farAvailable && error.empty(), error.c_str());
+
+	// The gate reads the running build, not the feed, so a final release on the
+	// same feed still gets everything it did before.
+	ReleaseCandidate stableSide;
+	bool stableAvailable = false;
+	error.clear();
+	const bool stableSelected = SelectReleaseCandidate(stableLaneFeed.serialize(),
+		UpdateVersion(1, 2, 0), stableSide, stableAvailable, error);
+	Check("updates: the stable lane is untouched by the gate",
+		stableSelected && stableAvailable && error.empty() &&
+		VersionString(stableSide.version) == "9.9.9" &&
+		stableSide.packageName == "QuestCalibrator-9.9.9.zip", error.c_str());
 
 	picojson::array missingDigest;
 	missingDigest.push_back(UpdateReleaseValue("questcalibrator-v2.0.0", false,
@@ -8299,7 +8381,8 @@ void RunUpdatePolicyScenarios()
 	available = false;
 	error.clear();
 	const bool acceptedMissingDigest = SelectReleaseCandidate(
-		missingDigestFeed.serialize(), Version{ 1, 1, 0 }, candidate, available, error);
+		missingDigestFeed.serialize(), UpdateVersion(1, 1, 0), candidate, available,
+		error);
 	Check("updates: package without digest fails closed",
 		!acceptedMissingDigest && available && !error.empty(), error.c_str());
 
@@ -8311,7 +8394,7 @@ void RunUpdatePolicyScenarios()
 	available = false;
 	error.clear();
 	const bool acceptedDuplicate = SelectReleaseCandidate(duplicateFeed.serialize(),
-		Version{ 1, 1, 0 }, candidate, available, error);
+		UpdateVersion(1, 1, 0), candidate, available, error);
 	Check("updates: duplicate canonical packages fail closed",
 		!acceptedDuplicate && available && !error.empty(), error.c_str());
 }

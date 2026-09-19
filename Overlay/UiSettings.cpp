@@ -449,6 +449,11 @@ void BuildSettingsScreen(const VRState &state)
 					status = "Update check failed";
 					color = Pal::Bad;
 					break;
+				case questcal::update::State::Prerelease:
+					status = "Prerelease " + update.version +
+						"; install a stable release by hand";
+					color = Pal::Warn;
+					break;
 				default:
 					status = "Ready to check";
 					break;
@@ -484,7 +489,8 @@ void BuildSettingsScreen(const VRState &state)
 						}
 					}
 				}
-				if (update.state == questcal::update::State::Failed &&
+				if ((update.state == questcal::update::State::Failed ||
+					update.state == questcal::update::State::Prerelease) &&
 					ImGui::IsMouseHoveringRect(ImVec2(p.x, actionY),
 						ImVec2(p.x + cw, actionY + 40.0f)))
 					ShowTip(update.message.c_str());

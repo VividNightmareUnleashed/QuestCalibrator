@@ -17,7 +17,12 @@ packaging sources and outputs must not be committed to the repository.
   `git rev-list --left-right --count upstream/master...HEAD`. Record the upstream
   base commit in the release notes.
 - Set `common/Version.h` to the intended release version and confirm the overlay and
-  driver version resources use it.
+  driver version resources use it. A final release clears
+  `QUESTCAL_VERSION_PRERELEASE_LABEL` to `""` and
+  `QUESTCAL_VERSION_PRERELEASE_ORDINAL` to `0`, and drops the suffix from
+  `QUESTCAL_VERSION_STRING`, in the same commit. The solver harness asserts that the
+  string and the numbers agree, so a half-finished edit fails validation rather than
+  shipping.
 - Review `docs/vendored-dependencies.md`; resolve missing or changed notice material
   before producing a distributable binary.
 - Run the Release build, duplicate scan, and full project-aware analysis:
@@ -91,3 +96,33 @@ canonical assets, and download URLs outside this repository are not eligible. Th
 updater checks and downloads only after the user opts in; applying the package remains
 an explicit action because Steam must be fully closed and Windows must approve the
 elevated installer.
+
+### Prerelease builds
+
+A prerelease sets both prerelease macros in `common/Version.h` (`"alpha"` and `3` give
+`1.2.0-alpha.3`) so the build reports what it actually is. Before this the alphas
+declared the bare `1.2.0`, the number of the release they precede, and every alpha
+build reported a version it was not.
+
+Prereleases are their own delivery lane, not a step on the stable one. They are
+installed by hand and left by hand:
+
+- A build with a prerelease label never asks the stable feed for anything. The updater
+  skips the check and reports which prerelease this is, and `SelectReleaseCandidate`
+  refuses a prerelease caller outright so no later path can hand a tester a stable
+  package by accident.
+- Testers move to a stable release by installing it by hand. Say so in the prerelease
+  notes: an alpha will not update itself when the release it precedes is published.
+- Prerelease tags stay out of the stable feed as before: tag them
+  `questcalibrator-vMAJOR.MINOR.PATCH-LABEL.N` and mark the GitHub Release as a
+  prerelease.
+
+Two consequences of the suffix reaching the version resources:
+
+- The numeric `FILEVERSION` has only four integers and cannot express a prerelease, so
+  `1.2.0-alpha.3` and `1.2.0` both carry `1,2,0,0`. Never distinguish a prerelease from
+  its release by the numeric file version; read the `FileVersion` string, which does
+  carry the suffix.
+- `install\build-package.ps1` names the ZIP from that string, so a prerelease package
+  is named for the prerelease. Stable releases are unaffected, and the exact
+  `QuestCalibrator-MAJOR.MINOR.PATCH.zip` asset name above still applies to them.
