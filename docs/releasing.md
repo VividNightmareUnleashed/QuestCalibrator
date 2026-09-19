@@ -74,7 +74,20 @@ packaging sources and outputs must not be committed to the repository.
 - Attach only the exact tested and hashed package ZIP. GitHub's automatically generated
   source archives are not substitutes for the install package.
 - Verify the draft's tag and attached ZIP name, size, and SHA-256 against the provenance
-  record, then publish it. Record the final GitHub Release URL in that record.
+  record.
+- Run the install test against the draft and publish only when it passes:
+
+  ```powershell
+  gh workflow run install-test.yml --ref alpha -f tag=questcalibrator-vMAJOR.MINOR.PATCH
+  ```
+
+  It installs the attached ZIP on a clean Windows runner against the fake OpenVR
+  runtime in `tools/fake-openvr-runtime`, then covers reinstall, removal of leftover
+  Space Calibrator drivers, an upgrade from the newest published release (or the
+  `previous` input), and uninstall. It checks files, the driver, registry, shortcut,
+  and what the overlay registered with the runtime. It does not replace the SteamVR,
+  handshake, and calibration checks above. Record the run URL, then publish the draft
+  and record the final GitHub Release URL.
 - Download the ZIP from the published release and verify its SHA-256 once more. Never
   replace an asset on an existing release; publish a new patch version if an artifact
   must change.
