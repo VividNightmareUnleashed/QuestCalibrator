@@ -339,15 +339,23 @@ static bool PreflightPoseRing(questcal::CalibrationRun &run,
 static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 {
 	auto &run = ctx.run;
-	uint64_t dropped = PoseHub.Drain(CollectorConsumer, CollectorScratch);
-	if (dropped > 0)
+	const auto drained = PoseHub.DrainThroughGaps(CollectorConsumer, CollectorScratch);
+	const bool crossedBoundary = PoseHub.StreamBoundaries() != run.streamBoundariesAtStart;
+	if (!ringpose::CollectionGapTolerable(drained.largestGap, crossedBoundary))
 	{
+		char detail[160];
+		snprintf(detail, sizeof detail,
+			crossedBoundary ? "Driver pose session restarted during collection"
+				: "Pose stream lost %llu samples in one gap during collection",
+			static_cast<unsigned long long>(drained.largestGap));
 		AbortCalibration(ctx, {
 			"Some tracking data was dropped: the PC couldn't keep up.",
 			"Try again; close capture or recording software if it repeats.",
-			"Pose stream overran during collection; retry calibration so no samples are missing" });
+			detail });
 		return false;
 	}
+	run.toleratedLoss += drained.loss;
+	run.toleratedGaps += drained.gaps;
 	for (const auto &s : CollectorScratch)
 	{
 		if ((s.deviceId == run.referenceId || s.deviceId == run.targetId) &&
@@ -1505,6 +1513,13 @@ static void FinishCalibration(CalibrationContext &ctx)
 	snprintf(buf, sizeof buf, "Collected %zu reference / %zu target samples, solving%s...\n",
 		run.referenceSamples.size(), run.targetSamples.size(), asAnchor ? " (field anchor)" : "");
 	ctx.Log(buf);
+	if (run.toleratedGaps > 0)
+	{
+		snprintf(buf, sizeof buf, "raw collection rode through %llu short pose stream gap(s), %llu sample(s) lost",
+			static_cast<unsigned long long>(run.toleratedGaps),
+			static_cast<unsigned long long>(run.toleratedLoss));
+		ctx.Diag(buf);
+	}
 
 	questcal::EngineResult result = questcal::CalibrationEngine::Solve(
 		run.referenceSamples, run.targetSamples, config);
@@ -2006,8 +2021,13 @@ void CalibrationTick(double time)
 		ctx.Log(buf);
 
 		// A mapping alone does not prove that this driver's hook sees the selected
-		// pair. Drain once and require recent trusted traffic from both devices.
-		const uint64_t preflightDropped = PoseHub.Drain(CollectorConsumer, CollectorScratch);
+		// pair. Drain to now and require recent trusted traffic from both devices.
+		// The collector sits idle between runs, so its backlog is whatever the hub
+		// still holds, and any driver drop in it is a gap: drain through them, or
+		// only the prefix before the first one comes back and nothing is fresh.
+		run.streamBoundariesAtStart = PoseHub.StreamBoundaries();
+		const uint64_t preflightDropped =
+			PoseHub.DrainThroughGaps(CollectorConsumer, CollectorScratch).loss;
 		LARGE_INTEGER qpcNow{};
 		bool hasClock = QueryPerformanceCounter(&qpcNow) != FALSE;
 		const char *preflightReason = hasClock ? "raw channel closed" : "QPC unavailable";

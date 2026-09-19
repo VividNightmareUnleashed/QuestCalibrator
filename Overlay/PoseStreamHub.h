@@ -70,6 +70,25 @@ public:
 	// a loss rate.
 	uint64_t Drain(int consumer, std::vector<protocol::DevicePoseSample> &out);
 
+	// Drain repeatedly until this consumer reaches the head, concatenating the
+	// segments on either side of every gap into `out` (cleared first). For
+	// consumers that order by sample time rather than stream position and only
+	// need to know how much went missing. A single Drain stops at the first gap,
+	// so a backlog with a gap in it would otherwise hand back only its older
+	// prefix.
+	struct DrainSummary
+	{
+		uint64_t loss = 0;          // sum of every gap crossed
+		uint64_t largestGap = 0;
+		uint64_t gaps = 0;
+	};
+	DrainSummary DrainThroughGaps(int consumer, std::vector<protocol::DevicePoseSample> &out);
+
+	// Session boundaries published so far (writer death or a new driver
+	// session). A consumer that must not cross one compares this across drains:
+	// in the drain result a boundary is indistinguishable from a one-sample gap.
+	uint64_t StreamBoundaries();
+
 	// Skip this consumer to now, discarding its backlog.
 	void DiscardBacklog(int consumer);
 
@@ -99,6 +118,8 @@ private:
 	};
 
 	void AccountForHistoryOverflowLocked(int consumer, uint64_t &dropped);
+	// Drain's body, appending to `out` instead of replacing it.
+	uint64_t DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out);
 	void AppendSampleLocked(const protocol::DevicePoseSample &sample);
 	void AppendGapLocked(uint64_t count);
 	// Publishes an observation hole: discards every consumer's backlog (it may

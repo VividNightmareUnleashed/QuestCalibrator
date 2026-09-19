@@ -75,7 +75,42 @@ void PoseStreamHub::AccountForHistoryOverflowLocked(int consumer, uint64_t &drop
 uint64_t PoseStreamHub::Drain(int consumer, std::vector<protocol::DevicePoseSample> &out)
 {
 	out.clear();
+	return DrainAppend(consumer, out);
+}
 
+PoseStreamHub::DrainSummary PoseStreamHub::DrainThroughGaps(int consumer,
+	std::vector<protocol::DevicePoseSample> &out)
+{
+	out.clear();
+	DrainSummary summary;
+	// Each pass ends at a gap or at the head as it stood when the pass began.
+	// The bound only guards against a producer that outruns the copy; in
+	// practice a pass or two reaches the head.
+	for (int pass = 0; pass < 64; ++pass)
+	{
+		const size_t before = out.size();
+		const uint64_t dropped = DrainAppend(consumer, out);
+		if (dropped > 0)
+		{
+			summary.loss += dropped;
+			summary.largestGap = (std::max)(summary.largestGap, dropped);
+			++summary.gaps;
+		}
+		if (dropped == 0 && out.size() == before)
+			break;
+	}
+	return summary;
+}
+
+uint64_t PoseStreamHub::StreamBoundaries()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return diagnostics.streamBoundaries;
+}
+
+uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out)
+{
+	const size_t start = out.size();
 	uint64_t dropped = 0;
 	uint64_t snapshotHead = 0;
 	size_t reserveCount = 0;
@@ -92,7 +127,7 @@ uint64_t PoseStreamHub::Drain(int consumer, std::vector<protocol::DevicePoseSamp
 	// One allocation for the whole backlog, taken OUTSIDE the mutex. Reserving
 	// only a chunk would move the growth into the copy loop below, which runs
 	// under the producer mutex - the opposite of what the chunking is for.
-	out.reserve(reserveCount);
+	out.reserve(start + reserveCount);
 
 	// Do not hold the producer mutex through an arbitrarily large backlog copy.
 	// A fixed snapshot makes this loop finite; chunking lets the dedicated
@@ -123,7 +158,7 @@ uint64_t PoseStreamHub::Drain(int consumer, std::vector<protocol::DevicePoseSamp
 				bool overflowPending = cursor < oldest;
 				bool sourcePending = !overflowPending && cursor < end &&
 					history[cursor % HistoryCapacity].sourceDropCountBefore > dropCursor;
-				if ((overflowPending || sourcePending) && !out.empty())
+				if ((overflowPending || sourcePending) && out.size() > start)
 					return dropped;
 
 				if (overflowPending)

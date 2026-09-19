@@ -103,6 +103,20 @@ inline bool IsFreshCaptureTime(
 	return std::isfinite(age) && age >= 0.0 && age <= maxAgeSeconds;
 }
 
+// Raw collection rides through the isolated poses the driver drops when two
+// device threads contend for a queue claim: one or two at a time, every few
+// seconds to minutes with a dozen devices on the ring. The solver already
+// refuses to interpolate across a dropout, so a short hole costs a pair or
+// two. A gap past this size (about 40 ms of a dozen devices' traffic) means
+// the overlay stalled, and a session boundary means the samples on either
+// side may not share a clock or a universe; either stops the collection.
+constexpr uint64_t MaxToleratedCollectionGap = 256;
+
+inline bool CollectionGapTolerable(uint64_t largestGap, bool crossedSessionBoundary)
+{
+	return !crossedSessionBoundary && largestGap <= MaxToleratedCollectionGap;
+}
+
 } // namespace ringpose
 
 // The per-field numeric checks are the shared wire vocabulary

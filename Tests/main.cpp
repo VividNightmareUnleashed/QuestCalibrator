@@ -3020,6 +3020,64 @@ void RunPoseHubConsumerIndependenceScenario()
 		detail);
 }
 
+void RunPoseHubDrainThroughGapsScenario()
+{
+	// An idle consumer's backlog with driver drops in it: a single Drain stops
+	// at the first gap and hands back only the stale prefix, which is how the
+	// calibration preflight kept missing fresh traffic. Draining through gaps
+	// must reach the newest sample and report every hole it crossed.
+	PoseStreamHub hub;
+	const int consumer = hub.CreateConsumer();
+	protocol::DevicePoseSample sample{};
+	sample.deviceId = 4;
+	sample.rotation.w = 1.0;
+	auto append = [&](int64_t token)
+	{
+		sample.sampleTimeQpc = token;
+		hub.AppendSampleForTest(sample);
+	};
+	append(1);
+	append(2);
+	hub.AppendGapForTest(1);
+	append(3);
+	hub.AppendGapForTest(2);
+	append(4);
+	append(5);
+	hub.AppendGapForTest(1);   // terminal: nothing after it yet
+
+	std::vector<protocol::DevicePoseSample> single;
+	const uint64_t singleDrops = hub.Drain(consumer, single);
+	bool singleStale = singleDrops == 0 && single.size() == 2 && single.back().sampleTimeQpc == 2;
+
+	std::vector<protocol::DevicePoseSample> all;
+	const auto summary = hub.DrainThroughGaps(consumer, all);
+	bool reachedHead = all.size() == 3 && all.front().sampleTimeQpc == 3 &&
+		all.back().sampleTimeQpc == 5;
+	bool counted = summary.loss == 4 && summary.gaps == 3 && summary.largestGap == 2;
+	const auto idle = hub.DrainThroughGaps(consumer, all);
+	bool caughtUp = all.empty() && idle.loss == 0 && idle.gaps == 0;
+
+	// Boundaries are counted separately: in a drain they look like a one-sample gap.
+	const uint64_t boundaries = hub.StreamBoundaries();
+
+	// The collection policy rides through contended-publish drops and stops
+	// on a stall-sized hole or a session boundary.
+	bool policy = ringpose::CollectionGapTolerable(0, false) &&
+		ringpose::CollectionGapTolerable(summary.largestGap, false) &&
+		ringpose::CollectionGapTolerable(ringpose::MaxToleratedCollectionGap, false) &&
+		!ringpose::CollectionGapTolerable(ringpose::MaxToleratedCollectionGap + 1, false) &&
+		!ringpose::CollectionGapTolerable(1, true);
+
+	char detail[192];
+	snprintf(detail, sizeof detail,
+		"single stale %d, through %zu (head %d) loss %llu gaps %llu largest %llu, idle %d, boundaries %llu, policy %d",
+		singleStale, all.size(), reachedHead, static_cast<unsigned long long>(summary.loss),
+		static_cast<unsigned long long>(summary.gaps), static_cast<unsigned long long>(summary.largestGap),
+		caughtUp, static_cast<unsigned long long>(boundaries), policy);
+	Check("pose hub: drain through gaps to the head",
+		singleStale && reachedHead && counted && caughtUp && boundaries == 0 && policy, detail);
+}
+
 void RunPoseHubMidDrainOverflowScenario()
 {
 	// Drain copies in bounded chunks so the producer thread can keep appending.
@@ -3280,6 +3338,7 @@ void RunPoseChannelScenarios()
 	RunPoseHubTerminalGapScenario();
 	RunPoseHubMarkerOverflowScenario();
 	RunPoseHubConsumerIndependenceScenario();
+	RunPoseHubDrainThroughGapsScenario();
 	RunPoseHubMidDrainOverflowScenario();
 	RunPoseHubWriterLivenessScenario();
 	RunPoseHubLiveResetGateScenario();
