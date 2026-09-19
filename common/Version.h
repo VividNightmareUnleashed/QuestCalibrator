@@ -18,8 +18,8 @@
 // Making a final release means clearing these two back to "" and 0 in the
 // same commit that drops the suffix from the string below.
 #define QUESTCAL_VERSION_PRERELEASE_LABEL "alpha"
-#define QUESTCAL_VERSION_PRERELEASE_ORDINAL 3
+#define QUESTCAL_VERSION_PRERELEASE_ORDINAL 4
 
 // The resource compiler cannot build this from the numbers above, so it is
 // written out by hand; the solver harness asserts the two agree.
-#define QUESTCAL_VERSION_STRING "1.2.0-alpha.3"
+#define QUESTCAL_VERSION_STRING "1.2.0-alpha.4"
