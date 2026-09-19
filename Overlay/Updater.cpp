@@ -434,7 +434,6 @@ bool Updater::CheckNow()
 			return false;
 		// A prerelease belongs to the hand-installed lane, so the stable feed is
 		// never asked. Say which build this is and leave the move to the tester.
-		const Version build = CurrentVersion();
 		if (IsPrerelease(build))
 		{
 			prereleaseBuild = VersionString(build);
@@ -465,7 +464,7 @@ bool Updater::CheckNow()
 			" is a prerelease and is not on the stable lane");
 		return false;
 	}
-	Log("check started (current " QUESTCAL_VERSION_STRING ")");
+	Log("check started (current " + VersionString(build) + ")");
 	try
 	{
 		worker = std::thread(&Updater::RunChecks, this, checkRevision);
@@ -573,7 +572,7 @@ void Updater::RunCheck(uint64_t checkRevision)
 		ReleaseCandidate release;
 		bool available = false;
 		std::string policyError;
-		const Version current = CurrentVersion();
+		const Version current = build;
 		if (!SelectReleaseCandidate(feed, current, release, available, policyError))
 			throw std::runtime_error(policyError);
 		if (!available)

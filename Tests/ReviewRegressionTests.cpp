@@ -592,6 +592,12 @@ void LegacyTranslationScenario(Check check)
 void UpdaterRestartScenario(Check check)
 {
 	using namespace questcal::update;
+	// The harness is built with the same Version.h as the overlay, so on an
+	// alpha it is itself a prerelease and its updater would never check. The
+	// restart machinery belongs to the stable lane; drive it as a stable build.
+	Version stable = CurrentVersion();
+	stable.prereleaseLabel.clear();
+	stable.prereleaseOrdinal = 0;
 	for (bool reenable : { false, true })
 	{
 		std::mutex mutex;
@@ -605,7 +611,7 @@ void UpdaterRestartScenario(Check check)
 			if (calls == 1)
 				changed.wait(lock, [&]() { return release; });
 			return std::string("[]");
-		});
+		}, stable);
 		updater.SetLogSink([&](const std::string &message) {
 			if (message.find("check completed:") == 0)
 			{
@@ -648,6 +654,24 @@ void UpdaterRestartScenario(Check check)
 			started && (reenable ? refreshed && calls == 2 && state == State::UpToDate
 				: !completed && calls == 1 && state == State::Disabled), "");
 	}
+
+	// A prerelease build never opens a session at all: enabling it reports the
+	// prerelease and the feed is not fetched.
+	Version alpha = stable;
+	alpha.prereleaseLabel = "alpha";
+	alpha.prereleaseOrdinal = 4;
+	std::atomic<unsigned> prereleaseCalls{ 0 };
+	Updater prerelease([&]() {
+		++prereleaseCalls;
+		return std::string("[]");
+	}, alpha);
+	prerelease.SetEnabled(true);
+	const bool manual = prerelease.CheckNow();
+	const auto snapshot = prerelease.GetSnapshot();
+	prerelease.Shutdown();
+	check("updates: a prerelease build never fetches the stable feed",
+		!manual && prereleaseCalls == 0 && snapshot.state == State::Prerelease &&
+			snapshot.version == VersionString(alpha), snapshot.message.c_str());
 }
 } // namespace
 

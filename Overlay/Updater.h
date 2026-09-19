@@ -49,7 +49,10 @@ class Updater
 public:
 	Updater() = default;
 #ifdef QUESTCAL_UPDATER_TEST_SEAM
-	explicit Updater(std::function<std::string()> fetch) : fetchForTest(std::move(fetch)) {}
+	// The build identity is injectable so the check machinery can be driven as
+	// a stable build from a harness that is itself compiled as a prerelease.
+	Updater(std::function<std::string()> fetch, const Version &version)
+		: build(version), fetchForTest(std::move(fetch)) {}
 #endif
 	~Updater();
 	Updater(const Updater &) = delete;
@@ -72,6 +75,7 @@ private:
 		uint64_t total = 0);
 	void Log(const std::string &message) const;
 
+	const Version build = CurrentVersion();
 	mutable std::mutex mutex;
 	std::thread worker;
 	bool enabled = false;
