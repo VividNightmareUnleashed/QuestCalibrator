@@ -1,0 +1,61 @@
+name: Install test
+
+# Installs a release package on a clean Windows machine, which a development
+# PC with SteamVR and earlier installs on it cannot stand in for. Run it
+# against a draft release before publishing. SteamVR is replaced by the fake
+# runtime in tools/fake-openvr-runtime, which records what the overlay
+# registers with it.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose package to test (the release may be a draft)
+        required: true
+      previous:
+        description: Earlier release tag for the upgrade scenario (default the newest published release)
+        required: false
+
+permissions:
+  # Draft releases are visible only to a token that can write to the repository.
+  contents: write
+
+jobs:
+  install:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag }}
+      PREVIOUS: ${{ inputs.previous }}
+
+    steps:
+      - name: Check out the test tools
+        uses: actions/checkout@v4
+
+      - name: Build the fake OpenVR runtime
+        shell: pwsh
+        run: tools\fake-openvr-runtime\build.ps1 -Out "$env:RUNNER_TEMP\fake-steamvr"
+
+      - name: Download the packages
+        shell: pwsh
+        run: |
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --pattern '*.zip' --dir "$env:RUNNER_TEMP\new"
+          $previous = $env:PREVIOUS
+          if (-not $previous) {
+            $previous = gh release list --repo $env:GITHUB_REPOSITORY --exclude-drafts --limit 20 --json tagName --jq '.[].tagName' |
+              Where-Object { $_ -ne $env:TAG } | Select-Object -First 1
+          }
+          if ($previous) {
+            Write-Host "Upgrade scenario from $previous"
+            gh release download $previous --repo $env:GITHUB_REPOSITORY --pattern '*.zip' --dir "$env:RUNNER_TEMP\old"
+          }
+
+      - name: Install, upgrade, conflict removal, uninstall
+        shell: pwsh
+        run: |
+          $package = @(Get-ChildItem "$env:RUNNER_TEMP\new\*.zip")
+          if ($package.Count -ne 1) { throw "Expected one package on $env:TAG, found $($package.Count)." }
+          $previous = @(Get-ChildItem "$env:RUNNER_TEMP\old\*.zip" -ErrorAction SilentlyContinue)
+          $arguments = @{ Package = $package[0].FullName; Runtime = "$env:RUNNER_TEMP\fake-steamvr" }
+          if ($previous.Count -eq 1) { $arguments.Previous = $previous[0].FullName }
+          tools\fake-openvr-runtime\test-install.ps1 @arguments
