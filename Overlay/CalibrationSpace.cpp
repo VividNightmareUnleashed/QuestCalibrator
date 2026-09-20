@@ -498,6 +498,11 @@ void ObserveUniversePose(const protocol::DevicePoseSample &sample)
 	Space.jumps->Push(sample);
 }
 
+void NoteUniverseStreamHole()
+{
+	Space.jumps->NoteStreamHole();
+}
+
 void ResetUniverseObservations(CalibrationContext &ctx)
 {
 	DrainJumpObservations(ctx);

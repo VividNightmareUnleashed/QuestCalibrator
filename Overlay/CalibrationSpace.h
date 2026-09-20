@@ -23,6 +23,8 @@ void CheckProtectedChaperone(CalibrationContext &ctx);
 // Universe-jump observation is fed from the shared runtime-monitor stream so
 // its accepted deltas land before drift and continuous-calibration decisions.
 void ObserveUniversePose(const protocol::DevicePoseSample &sample);
+// A few samples went missing from the monitor's drain (JumpDetector::NoteStreamHole).
+void NoteUniverseStreamHole();
 void ResetUniverseObservations(CalibrationContext &ctx);
 bool FinishUniverseObservations(CalibrationContext &ctx, double now);
 

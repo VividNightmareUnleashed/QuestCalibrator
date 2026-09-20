@@ -117,6 +117,21 @@ inline bool CollectionGapTolerable(uint64_t largestGap, bool crossedSessionBound
 	return !crossedSessionBoundary && largestGap <= MaxToleratedCollectionGap;
 }
 
+// The runtime monitors and both continuous loops ride through the same
+// contended-publish drops, on a much shorter leash. All of them judge
+// continuity by sample time, so a lost pose costs them a pair, not a window.
+// The leash is set by the drift monitor, which tells a tracking loss from a
+// hole in its own input by time alone, so a tolerated hole must never span
+// its 0.3 s lossGap: eight poses of a lone 72 Hz headset, the sparsest stream
+// there is, last 110 ms. Anything larger, and any session boundary, still
+// resets them.
+constexpr uint64_t MaxToleratedMonitorGap = 8;
+
+inline bool MonitorGapTolerable(uint64_t gap, bool crossedSessionBoundary)
+{
+	return !crossedSessionBoundary && gap <= MaxToleratedMonitorGap;
+}
+
 } // namespace ringpose
 
 // The per-field numeric checks are the shared wire vocabulary

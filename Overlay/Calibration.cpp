@@ -47,6 +47,7 @@ static bool LighthouseAnnounced = false;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
+static uint64_t MonitorBoundariesSeen = 0;
 
 // Everything the per-tick runtime monitors keep between ticks that does not
 // live inside a detector object. Collected here so "what is the monitor's
@@ -96,6 +97,7 @@ static std::unique_ptr<questcal::ContinuousAlignment> Continuous;
 static int ContinuousConsumer = -1;
 static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
+static uint64_t ContinuousBoundariesSeen = 0;
 
 static void ResetContinuousObservations(CalibrationContext &ctx,
 	questcal::ContinuousAlignment::ResetReason reason)
@@ -107,8 +109,20 @@ static void ResetContinuousObservations(CalibrationContext &ctx,
 
 static void LegacyReset(CalibrationContext &ctx);
 
-static uint64_t DrainContinuousInput(CalibrationContext &ctx)
+// Returns whether the drain crossed a hole the loops' windows must not span:
+// a stall-sized one or a driver session boundary. The driver's isolated
+// contended-publish drops are ridden through, because both loops pair poses
+// by sample time and refuse a pair a lost pose stretched too far. Clearing
+// the window for each one starved them: simulated with a pose lost every
+// 18 s, the legacy loop's 25 s window never filled, and at one every 4 s
+// neither method applied a correction.
+static bool DrainContinuousInput(CalibrationContext &ctx)
 {
+	// Before the drain, for the reason given in RuntimeMonitorTick.
+	const uint64_t boundaries = PoseHub.StreamBoundaries();
+	const bool crossedBoundary = boundaries != ContinuousBoundariesSeen;
+	ContinuousBoundariesSeen = boundaries;
+
 	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch);
 	auto &diagnostics = ctx.continuousDiagnostics;
 	++diagnostics.batches;
@@ -118,7 +132,7 @@ static uint64_t DrainContinuousInput(CalibrationContext &ctx)
 		++diagnostics.gapEvents;
 		diagnostics.reportedLoss += dropped;
 	}
-	return dropped;
+	return !ringpose::MonitorGapTolerable(dropped, crossedBoundary);
 }
 
 CalibrationContext CalCtx;
@@ -643,11 +657,21 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		PoseHub.DiscardBacklog(MonitorConsumer);
 		Monitors.ResetObservations();
+		MonitorBoundariesSeen = PoseHub.StreamBoundaries();
 		MonitorActive = true;
 	}
 
+	// A session boundary reaches a drain as a one-sample hole, so the count
+	// is what tells the two apart. Read it before the drain: a boundary that
+	// lands in between is then taken for a small hole this tick and resets
+	// the monitors on the next, where reading it afterwards would reset them
+	// now, feed them this tick's pre-boundary samples and never reset again.
+	const uint64_t boundaries = PoseHub.StreamBoundaries();
+	const bool crossedBoundary = boundaries != MonitorBoundariesSeen;
+	MonitorBoundariesSeen = boundaries;
+
 	uint64_t dropped = PoseHub.Drain(MonitorConsumer, MonitorScratch);
-	if (dropped > 0)
+	if (!ringpose::MonitorGapTolerable(dropped, crossedBoundary))
 	{
 		// We lost part of our own observation window; baselines across the
 		// hole are unsafe. For the drift monitor a drain hole would read as a
@@ -655,6 +679,14 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		questcal::ResetUniverseObservations(ctx);
 		Drift->Reset();
 		Monitors.ResetObservations();
+	}
+	else if (dropped > 0)
+	{
+		// The driver's isolated contended-publish drops (one or two poses,
+		// every few seconds to minutes). The drift monitor and the watermarks
+		// work on sample times and lose nothing to a hole this short; the
+		// jump detector must not fit a step across it, and keeps the rest.
+		questcal::NoteUniverseStreamHole();
 	}
 
 	for (const auto &s : MonitorScratch)
@@ -846,8 +878,7 @@ static void LegacyContinuousTick(CalibrationContext &ctx, double now)
 		bindCurrentProfile();
 	}
 
-	const uint64_t dropped = DrainContinuousInput(ctx);
-	if (dropped > 0)
+	if (DrainContinuousInput(ctx))
 	{
 		++ctx.continuousDiagnostics.legacy.gapResets;
 		LegacyReset(ctx);
@@ -1071,6 +1102,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	if (!ContinuousActive)
 	{
 		PoseHub.DiscardBacklog(ContinuousConsumer);
+		ContinuousBoundariesSeen = PoseHub.StreamBoundaries();
 		ContinuousActive = true;
 	}
 
@@ -1095,11 +1127,10 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	Continuous->SetExtrinsic(ctx.mountExtrinsic);
 	Continuous->SetLatencyReestimation(ctx.continuousLatencyReestimation);
 
-	uint64_t dropped = DrainContinuousInput(ctx);
 	auto &diagnostics = ctx.continuousDiagnostics;
-	if (dropped > 0)
+	if (DrainContinuousInput(ctx))
 	{
-		// A drain hole could fake a discontinuity; baselines across it are unsafe.
+		// A stall-sized hole could fake a discontinuity; baselines across it are unsafe.
 		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::StreamGap);
 	}
 

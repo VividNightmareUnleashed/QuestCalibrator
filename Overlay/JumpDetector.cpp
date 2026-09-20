@@ -666,6 +666,19 @@ bool JumpDetector::PollNote(std::string &out)
 	return true;
 }
 
+void JumpDetector::NoteStreamHole()
+{
+	for (auto &dev : devices)
+	{
+		dev.wfdValid = false;
+		dev.hist.clear();
+		dev.repeatedPositions = 0;
+	}
+	for (auto &candidate : candidates)
+		if (candidate.PendingHeuristic())
+			candidate.life = Life::Dead;
+}
+
 void JumpDetector::Reset()
 {
 	for (auto &dev : devices)

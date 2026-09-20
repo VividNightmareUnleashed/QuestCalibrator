@@ -59,13 +59,16 @@ int Replay(const std::function<double(int, uint32_t)> &shift,
 // Headset-only replay with a living headset: a slow turn so the heading
 // changes every frame, and (unless `heldPosition`) sub-millimetre SLAM noise
 // so the position never repeats bit-for-bit. Frames in [skipFrom, skipTo)
-// are not pushed, which the detector reads as a stream gap. Notes are
+// are not pushed, which the detector reads as a stream gap. Every
+// `holeEvery`th frame is lost to a driver queue drop instead: not pushed, and
+// reported as a hole the way the runtime monitor reports one. Notes are
 // drained into `log` when given.
 int ReplaySolo(int frames, const std::function<double(int)> &shift,
                const std::function<double(int)> &yawStep, bool heldPosition,
                int skipFrom = -1, int skipTo = -1,
                std::vector<std::string> *log = nullptr,
-               JumpDetector::UniverseDelta *last = nullptr)
+               JumpDetector::UniverseDelta *last = nullptr,
+               int holeEvery = 0)
 {
 	JumpDetector detector(QpcSeconds);
 	int count = 0;
@@ -73,6 +76,11 @@ int ReplaySolo(int frames, const std::function<double(int)> &shift,
 	{
 		if (frame >= skipFrom && frame < skipTo)
 			continue;
+		if (holeEvery > 0 && frame > 0 && frame % holeEvery == 0)
+		{
+			detector.NoteStreamHole();
+			continue;
+		}
 		double time = 1.0 + frame * 0.01;
 		auto s = Sample(0, time, shift(frame));
 		double yaw = 0.1 * time + yawStep(frame);
@@ -326,6 +334,66 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 			count == 0 && total.find("2 ignored this session") != std::string::npos &&
 			total.find("shift 0.160 m in total") != std::string::npos,
 			total.c_str());
+
+		// The driver drops an isolated pose every few seconds with a dozen
+		// devices on the ring (186 holes in one 57 minute session). Each used
+		// to reset the detector, so the stream never counted as steady for a
+		// minute and the ignored total never passed one. A hole breaks
+		// continuity and nothing else.
+		log.clear();
+		count = ReplaySolo(9300, [](int f) { return f >= 9050 ? .08 : 0.; }, none, false, -1, -1, &log, &delta, 1800);
+		noted = false;
+		for (const auto &n : log)
+			noted = noted || n.find("accepted alone") != std::string::npos;
+		check("stream holes: 8 cm step still applies alone with a pose lost every 18 s",
+			count == 1 && std::abs(delta.translation.x() - .08) < 1e-6 && noted,
+			"five holes in 90 s, the last 0.5 s before the step");
+
+		count = ReplaySolo(9200, lateStep, none, false, -1, -1, nullptr, nullptr, 1800);
+		check("stream holes: a step across a hole is never measured", count == 0,
+			"the lost pose is the one at the step");
+
+		log.clear();
+		count = ReplaySolo(1800, [](int f) { return (f >= 500 ? .08 : 0.) + (f >= 1500 ? .08 : 0.); }, none, false, -1, -1, &log, nullptr, 700);
+		total.clear();
+		for (const auto &n : log)
+			if (n.find("ignored") != std::string::npos)
+				total = n;
+		check("stream holes: ignored steps keep totalling across holes",
+			count == 0 && total.find("2 ignored this session") != std::string::npos &&
+			total.find("shift 0.160 m in total") != std::string::npos,
+			total.c_str());
+
+		count = ReplaySolo(11600, [](int f) { return f >= 11300 ? .08 : 0.; }, none, false, 9000, 9300, nullptr, nullptr, 1800);
+		check("stream holes: a real stream gap still restarts the steady clock", count == 0,
+			"3 s gap, then 20 s of stream with holes");
+
+		check("stream holes: the monitors ride through a few poses only",
+			ringpose::MonitorGapTolerable(0, false) && ringpose::MonitorGapTolerable(2, false) &&
+			ringpose::MonitorGapTolerable(ringpose::MaxToleratedMonitorGap, false) &&
+			!ringpose::MonitorGapTolerable(ringpose::MaxToleratedMonitorGap + 1, false) &&
+			!ringpose::MonitorGapTolerable(1, true),
+			"a larger hole or a session boundary resets them");
+	}
+	// A held headset step has both fit windows behind it, so a hole during
+	// the wait for the controller says nothing about it (an observed bad
+	// headset frame, below, still revokes it).
+	{
+		JumpDetector detector(QpcSeconds);
+		for (int i = 0; i <= 1400; ++i)
+		{
+			if (i == 800)
+			{
+				detector.NoteStreamHole();
+				continue;
+			}
+			detector.Push(Sample(0, 1 + i * .01, i >= 150 ? .4 : 0));
+			detector.Push(Sample(1, 1 + i * .01, i >= 1350 ? .4 : 0));
+		}
+		JumpDetector::UniverseDelta delta;
+		check("stream holes: a held headset step survives a hole", detector.PollDelta(delta) &&
+			std::abs(delta.translation.x() - .4) < 1e-8 && delta.devicesAgreeing == 2,
+			"hole 6.5 s into the hold, controller follows at 12 s");
 	}
 	{
 		JumpDetector detector(QpcSeconds);

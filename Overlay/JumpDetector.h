@@ -186,7 +186,21 @@ public:
 	// calibration log; drained by the caller.
 	bool PollNote(std::string &out);
 
-	// Drop all per-device state (calibration started, monitors disabled, ...).
+	// The caller's copy of the stream is missing a few samples (the driver
+	// drops an isolated pose when two device threads contend for a queue
+	// claim). Which device lost one, and whether it was a bad frame, is
+	// unknown, so no device's step may be measured across the hole: every
+	// device's continuity breaks as it does for an observed bad frame, and a
+	// candidate whose fit window was still filling dies. What the hole says
+	// nothing about stays: the resume clock (the headset's stream did not
+	// stop), a Ready candidate (both of its windows closed before the hole)
+	// and the session totals. A dozen devices drop a pose every few seconds
+	// to minutes, so treating each as a Reset meant soloSettledSeconds was
+	// never reached and the ignored-step total never passed one.
+	void NoteStreamHole();
+
+	// Drop all per-device state (calibration started, monitors disabled, a
+	// stall-sized hole or a driver session boundary in the stream, ...).
 	void Reset();
 
 private:
