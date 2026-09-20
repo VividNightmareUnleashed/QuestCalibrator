@@ -40,6 +40,8 @@ static std::unique_ptr<DriftMonitor> Drift;
 // monitor's device ids through this serial table.
 static std::unique_ptr<lighthouselog::Tailer> LighthouseTail;
 static std::string DeviceSerials[vr::k_unMaxTrackedDeviceCount];
+// Read in the same scan; the drift feed keeps base stations out by it.
+static vr::ETrackedDeviceClass DeviceClasses[vr::k_unMaxTrackedDeviceCount] = {};
 static double LastLighthousePoll = -1e9;
 static double LastSerialScan = -1e9;
 static uint64_t LighthouseRotationsSeen = 0;
@@ -566,7 +568,8 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 		{
 			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 			{
-				if (system->GetTrackedDeviceClass(id) == vr::TrackedDeviceClass_Invalid)
+				DeviceClasses[id] = system->GetTrackedDeviceClass(id);
+				if (DeviceClasses[id] == vr::TrackedDeviceClass_Invalid)
 				{
 					DeviceSerials[id].clear();
 					continue;
@@ -723,6 +726,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		// mistaken for playspace drift, including the mounted tracker.
 		ringpose::DriftFeedCandidate candidate;
 		candidate.deviceId = s.deviceId;
+		candidate.deviceClass = DeviceClasses[s.deviceId];
 		candidate.referenceSide = ctx.referenceDeviceMask[s.deviceId];
 		candidate.targetSide = ctx.targetDeviceMask[s.deviceId];
 		candidate.mountedTrackerId = ctx.continuousTrackerId;

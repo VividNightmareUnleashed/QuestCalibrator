@@ -1964,11 +1964,14 @@ void RunPoseSampleScenarios()
 		c.composedTime = 100.0;
 		c.hmdRawTime = 90.0;
 		c.mountedTrackerId = 9;
+		c.deviceClass = vr::TrackedDeviceClass_GenericTracker;
 
-		auto eligible = [&](uint32_t id, bool referenceSide, bool targetSide)
+		auto eligible = [&](uint32_t id, bool referenceSide, bool targetSide,
+			vr::ETrackedDeviceClass deviceClass = vr::TrackedDeviceClass_GenericTracker)
 		{
 			ringpose::DriftFeedCandidate q = c;
 			q.deviceId = id;
+			q.deviceClass = deviceClass;
 			q.referenceSide = referenceSide;
 			q.targetSide = targetSide;
 			return ringpose::AnchorsUniverse(q);
@@ -1985,9 +1988,15 @@ void RunPoseSampleScenarios()
 			eligible(5, false, true) &&           // lighthouse device, target side
 			!eligible(9, false, true) &&          // the HMD-mounted tracker
 			!eligible(4, false, false) &&         // neither system
+			// A base station's pose settles by metres as SteamVR starts, and
+			// a device the property scan has not reached may be one.
+			!eligible(8, false, true, vr::TrackedDeviceClass_TrackingReference) &&
+			!eligible(8, false, true, vr::TrackedDeviceClass_Invalid) &&
+			eligible(vr::k_unTrackedDeviceIndex_Hmd, true, false, vr::TrackedDeviceClass_HMD) &&
+			eligible(5, false, true, vr::TrackedDeviceClass_Controller) &&
 			ringpose::AnchorsUniverse(unresolvedTracker);
 		Check("drift feed: universe anchors", ok,
-			"HMD-only on the reference side; target side minus the mounted tracker");
+			"HMD-only on the reference side; target side minus the mounted tracker, base stations and unread classes");
 	}
 
 	// The worn-device proximity heuristic, and the placement of the calibrated
@@ -1999,6 +2008,7 @@ void RunPoseSampleScenarios()
 	{
 		ringpose::DriftFeedCandidate c;
 		c.deviceId = 5;
+		c.deviceClass = vr::TrackedDeviceClass_GenericTracker;
 		c.targetSide = true;
 		c.mountedTrackerId = vr::k_unTrackedDeviceIndexInvalid;
 		c.rawPosition = Eigen::Vector3d(3.0, 0.0, 0.0);

@@ -305,7 +305,14 @@ inline Eigen::Vector3d BaseCalibratedPosition(
 // the user is right next to, and a supported resting body passes the
 // stationarity gates then "slides" with slow posture creep.
 //
-// All three rules are load-bearing and are one predicate on purpose. The
+// A base station is on the target side too, but it is the universe, not a
+// device in it: it publishes a dozen poses in a session, and the early ones
+// move by metres while SteamVR settles where the station stands. One session
+// read two of them as tracking losses recovered 2.3 m away. A device whose
+// class has not been read yet is held back for the same reason: the property
+// scan runs every 2 s and a station's settling poses are its first.
+//
+// All of these rules are load-bearing and are one predicate on purpose. The
 // mounted-tracker exclusion in particular is the only thing keeping a resting
 // head out of the drift feed: without it the monitor logs StationarySlide,
 // UpdateDriftScore crosses the stale threshold, and the user is told a
@@ -313,6 +320,8 @@ inline Eigen::Vector3d BaseCalibratedPosition(
 struct DriftFeedCandidate
 {
 	uint32_t deviceId = vr::k_unTrackedDeviceIndexInvalid;
+	// Invalid until the property scan has read it.
+	vr::ETrackedDeviceClass deviceClass = vr::TrackedDeviceClass_Invalid;
 	bool referenceSide = false;   // device is in the reference tracking system
 	bool targetSide = false;      // ... the target tracking system
 	// The HMD-mounted continuous-calibration tracker, or invalid when the
@@ -346,6 +355,10 @@ constexpr double DriftHmdBodyRadiusMeters = 0.8;
 
 inline bool AnchorsUniverse(const DriftFeedCandidate &c)
 {
+	if (c.deviceClass == vr::TrackedDeviceClass_Invalid ||
+		c.deviceClass == vr::TrackedDeviceClass_TrackingReference)
+		return false;
+
 	bool anchors =
 		(c.deviceId == vr::k_unTrackedDeviceIndex_Hmd && c.referenceSide) ||
 		(c.targetSide && c.deviceId != c.mountedTrackerId);
