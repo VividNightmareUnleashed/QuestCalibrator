@@ -221,15 +221,35 @@ struct SpeedSample
 // OpenVR has no angular-velocity availability flag. Preserve reported nonzero
 // speeds; otherwise derive an interval average and timestamp it at its midpoint.
 // Assigning that average to the left endpoint biases lag by half a sample period.
+//
+// A reported speed is only used from a stream that never repeats one. A gyro
+// reading does not come back bit for bit, so a repeat is a transport holding
+// the previous value: Virtual Desktop does it in 25 to 40 % of headset frames
+// and once for a whole run. A held value is the profile one frame late, and
+// correlating it moved the measured offset by about the held share of a frame
+// (-4.5 ms at 30 %, simulated), differently on every run. The rotations of
+// such a stream are what gets paired afterwards, so its speed is derived from
+// them throughout; one repeat in twenty is enough to call it.
 std::vector<SpeedSample> BuildSpeedProfile(const std::vector<PoseSample> &stream, double maxGap)
 {
+	size_t reportedCount = 0, repeatedCount = 0;
+	for (size_t i = 1; i < stream.size(); ++i)
+	{
+		if (stream[i].angVel.norm() <= 1e-6)
+			continue;
+		++reportedCount;
+		if (stream[i].angVel == stream[i - 1].angVel)
+			++repeatedCount;
+	}
+	const bool heldReports = repeatedCount * 20 > reportedCount;
+
 	std::vector<SpeedSample> speed(stream.size());
 	for (size_t i = 0; i < stream.size(); ++i)
 	{
 		auto &sample = speed[i];
 		sample.time = stream[i].time;
 		double reported = stream[i].angVel.norm();
-		if (reported > 1e-6)
+		if (!heldReports && reported > 1e-6)
 		{
 			sample.value = reported;
 			sample.valid = true;

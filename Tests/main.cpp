@@ -3462,6 +3462,48 @@ void RunSolverPrimitiveScenarios()
 		Check("solver: sub-step offset recovery", subStepPass, detail);
 	}
 
+	// Virtual Desktop re-sends the headset's previous angular velocity in 25
+	// to 40 % of frames, and once held a single value for a whole run. A held
+	// value is the profile one frame late, so correlating it moved the
+	// measured offset by about the held share of a frame, differently each
+	// run: -5.1 ms and +1.6 ms two hours apart on one pair of devices. A
+	// stream that repeats itself is measured from its rotations instead.
+	{
+		GroundTruth truth;
+		truth.rotation = Eigen::Quaterniond(
+			Eigen::AngleAxisd(0.8, Eigen::Vector3d(-0.3, 0.8, 0.5).normalized()));
+		truth.translation = Eigen::Vector3d(-0.4, 0.9, 0.2);
+		SceneConfig scene;
+		scene.duration = 10.0;
+		scene.refRate = 90.0;
+		scene.targetRate = 250.0;
+
+		EngineConfig cfg;
+		double worst = 0.0;
+		bool pass = true;
+		const double latencies[] = { -0.012, 0.0, 0.009 };
+		const double shares[] = { 0.25, 0.4, 1.0 };
+		for (size_t i = 0; i < 3; ++i)
+			for (size_t j = 0; j < 3; ++j)
+			{
+				truth.latency = latencies[i];
+				std::vector<PoseSample> ref, target;
+				GenerateStreams(scene, truth, static_cast<uint32_t>(3170 + 3 * i + j), ref, target);
+				std::mt19937 rng(static_cast<uint32_t>(40 + 3 * i + j));
+				std::uniform_real_distribution<double> unit(0.0, 1.0);
+				for (size_t k = 1; k < ref.size(); ++k)
+					if (unit(rng) < shares[j])
+						ref[k].angVel = ref[k - 1].angVel;
+				double solved = 0.0;
+				bool ok = CalibrationEngine::EstimateTimeOffset(ref, target, cfg, solved);
+				double err = std::abs(solved - truth.latency);
+				worst = std::max(worst, err);
+				pass = pass && ok && err < 0.001;
+			}
+		snprintf(detail, sizeof detail, "worst %.2f ms with 25, 40 and 100 %% of headset frames repeating", worst * 1000.0);
+		Check("solver: offset ignores a held angular velocity", pass, detail);
+	}
+
 	// Dropouts are holes, not long interpolation ramps. Correlating across them
 	// used to turn a true +18 ms lag into a high-scoring negative lag. The
 	// estimator may recover the truth from the surviving support or abstain, but
