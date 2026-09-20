@@ -337,6 +337,10 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	out << "SteamVR worldScale setting: ";
 	if (capture.worldScaleError == vr::VRSettingsError_None)
 		out << capture.steamVrWorldScale;
+	// SteamVR ships no default for the key, so this is what every machine
+	// that never changed the world scale reports: not a failed read.
+	else if (capture.worldScaleError == vr::VRSettingsError_UnsetSettingHasNoDefault)
+		out << "not set (SteamVR uses 1)";
 	else
 		out << "unavailable (read error " << static_cast<int>(capture.worldScaleError) << ")";
 	out << "\n\n";
