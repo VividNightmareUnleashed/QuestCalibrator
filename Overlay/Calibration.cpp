@@ -46,6 +46,7 @@ static double LastLighthousePoll = -1e9;
 static double LastSerialScan = -1e9;
 static uint64_t LighthouseRotationsSeen = 0;
 static bool LighthouseAnnounced = false;
+static VisibilityDigest LighthouseDigest;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
@@ -604,7 +605,11 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 	{
 		LighthouseRotationsSeen = LighthouseTail->Rotations();
 		ctx.lighthouse.Reset();
+		LighthouseDigest.Reset();
 	}
+	const std::string digest = LighthouseDigest.Flush(time);
+	if (!digest.empty())
+		ctx.Diag(digest);
 	if (events.empty())
 		return;
 
@@ -627,8 +632,7 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 		if (!note.empty())
 			ctx.Log(e.serial + " " + note + "\n");
 		else if (!e.historical && e.visibleKnown)
-			ctx.Diag(e.serial + " now sees " + std::to_string(e.visibleChannels.size()) +
-				" base station(s)");
+			LighthouseDigest.Note(e.serial, static_cast<int>(e.visibleChannels.size()));
 	}
 }
 

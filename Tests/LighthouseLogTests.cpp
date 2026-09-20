@@ -339,6 +339,29 @@ Verdict Judge(const vlighthouse::Output &run, const vlighthouse::Config &cfg,
 	return v;
 }
 
+// The detailed log gets one line a minute for station counts, not one per
+// change: the devices that changed, their range and how often.
+void DigestScenarios(Check check)
+{
+	VisibilityDigest digest;
+	bool quietAtStart = digest.Flush(100.0).empty();
+	digest.Note("LHR-A", 4);      // first sight is not a change
+	digest.Note("LHR-B", 3);
+	digest.Note("LHR-A", 3);
+	digest.Note("LHR-A", 3);      // the same count again is not a change
+	digest.Note("LHR-A", 2);
+	digest.Note("LHR-A", 4);
+	bool notDue = digest.Flush(159.0).empty();
+	std::string line = digest.Flush(160.0);
+	bool summarised = line == "base stations seen over the last minute: LHR-A 2 to 4 (3 changes)";
+	digest.Note("LHR-B", 4);
+	std::string next = digest.Flush(220.0);
+	bool restarted = next == "base stations seen over the last minute: LHR-B 3 to 4 (1 change)";
+	bool quiet = digest.Flush(280.0).empty();
+	check("lighthouse log: station counts are summarised once a minute",
+		quietAtStart && notDue && summarised && restarted && quiet, (line + " | " + next).c_str());
+}
+
 void ModelScenarios(Check check)
 {
 	using namespace vlighthouse;
@@ -439,5 +462,6 @@ void RunLighthouseScenarios(void (*check)(const char *, bool, const char *))
 	ParserScenarios(check);
 	TailerScenarios(check);
 	VisibilityScenarios(check);
+	DigestScenarios(check);
 	ModelScenarios(check);
 }

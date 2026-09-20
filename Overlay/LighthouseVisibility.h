@@ -96,3 +96,67 @@ private:
 	std::map<std::string, Device> devices;
 	std::map<int, Station> stations;
 };
+
+// The detailed log's account of how many stations each device sees. A body
+// turning in a four-station room changes some device's count every few
+// seconds, and a line per change made 781 of one evening's 900 log lines.
+// The changes are gathered and written as one line a minute: every device
+// that changed, the range it moved through and how often. The disturbances
+// that matter (down to one station, a new solution) are logged where they
+// happen and are not part of this.
+class VisibilityDigest
+{
+public:
+	void Note(const std::string &serial, int stations)
+	{
+		auto found = devices.find(serial);
+		if (found == devices.end())
+		{
+			devices[serial] = { stations, stations, stations, 0 };
+			return;
+		}
+		Entry &entry = found->second;
+		if (stations == entry.last)
+			return;
+		entry.last = stations;
+		entry.low = stations < entry.low ? stations : entry.low;
+		entry.high = stations > entry.high ? stations : entry.high;
+		++entry.changes;
+	}
+
+	// The line for the interval ending now, or empty when it is not due or
+	// nothing changed. Every device starts the next interval at its last count.
+	std::string Flush(double time)
+	{
+		if (lastFlush < -1e8)
+			lastFlush = time;
+		if (time - lastFlush < 60.0)
+			return {};
+		lastFlush = time;
+		std::string line;
+		for (auto &device : devices)
+		{
+			Entry &entry = device.second;
+			if (entry.changes > 0)
+			{
+				line += line.empty() ? "base stations seen over the last minute: " : ", ";
+				line += device.first + " " + std::to_string(entry.low) + " to " +
+					std::to_string(entry.high) + " (" + std::to_string(entry.changes) +
+					(entry.changes == 1 ? " change)" : " changes)");
+			}
+			entry.low = entry.high = entry.last;
+			entry.changes = 0;
+		}
+		return line;
+	}
+
+	void Reset() { devices.clear(); }
+
+private:
+	struct Entry
+	{
+		int last = 0, low = 0, high = 0, changes = 0;
+	};
+	std::map<std::string, Entry> devices;
+	double lastFlush = -1e9;
+};
