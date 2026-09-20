@@ -971,6 +971,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		Eigen::Vector3d base;     // constant part of the RHS
 		Eigen::Vector3d scalePart; // part multiplied by scale
 		double weight = 1.0;
+		size_t first = 0, second = 0;   // the pair's sample indices, for the block jackknife
 	};
 	std::vector<TransRow> rows;
 
@@ -1007,6 +1008,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				ra.dQtdQ = ra.dQ.transpose() * ra.dQ;
 				ra.base = qA[j] * refJ - qA[i] * refI;
 				ra.scalePart = -(qA[j] * tgt[j] - qA[i] * tgt[i]);
+				ra.first = i;
+				ra.second = j;
 				rows.push_back(ra);
 
 				TransRow rb;
@@ -1014,6 +1017,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				rb.dQtdQ = rb.dQ.transpose() * rb.dQ;
 				rb.base = qB[j] * refJ - qB[i] * refI;
 				rb.scalePart = -(qB[j] * tgt[j] - qB[i] * tgt[i]);
+				rb.first = i;
+				rb.second = j;
 				rows.push_back(rb);
 			}
 		}
@@ -1211,6 +1216,67 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			std::max(1.0, 3.0 * weightSum - 4.0);
 		result.scaleStdDev = std::sqrt(variance /
 			std::max(1e-12, conditionalInformation));
+
+		// That is the textbook figure, and it counts every row as an
+		// independent measurement. They are not: a row is a PAIR of samples
+		// and each sample sits in about a dozen of them, and a headset's
+		// position error wanders over a second or more rather than redrawing
+		// every frame. Simulated, the figure understated the real scatter of
+		// the scale 2.2x on white noise and 18x with 2 mm of slow wander, and
+		// one live session reported 0.0007 for a scale the next calibration
+		// contradicted by 0.028. The delete-one-block jackknife makes neither
+		// assumption: re-solve with each stretch of the collection left out
+		// and see how far the scale moves. The larger of the two is reported.
+		const size_t sampleCount = samples.size();
+		const size_t blocks = config.scaleJackknifeBlocks;
+		if (blocks >= 2 && sampleCount >= 4 * blocks)
+		{
+			std::vector<double> leftOut;
+			for (size_t b = 0; b < blocks; ++b)
+			{
+				const size_t begin = b * sampleCount / blocks;
+				const size_t end = (b + 1) * sampleCount / blocks;
+				Eigen::Matrix4d ata = Eigen::Matrix4d::Zero();
+				Eigen::Vector4d atb = Eigen::Vector4d::Zero();
+				for (const auto &r : rows)
+				{
+					if ((r.first >= begin && r.first < end) ||
+						(r.second >= begin && r.second < end))
+						continue;
+					Eigen::Matrix<double, 3, 4> a;
+					a.leftCols<3>() = r.dQ;
+					a.col(3) = -r.scalePart;
+					ata += r.weight * a.transpose() * a;
+					atb += r.weight * a.transpose() * r.base;
+				}
+				Eigen::LDLT<Eigen::Matrix4d> factor(ata);
+				if (factor.info() != Eigen::Success || !factor.isPositive())
+					continue;
+				double blockScale = factor.solve(atb)(3);
+				if (std::isfinite(blockScale))
+					leftOut.push_back(blockScale);
+			}
+			if (leftOut.size() == blocks)
+			{
+				double mean = 0.0;
+				for (double v : leftOut)
+					mean += v;
+				mean /= static_cast<double>(blocks);
+				double spread = 0.0;
+				for (double v : leftOut)
+					spread += (v - mean) * (v - mean);
+				double jackknife = std::sqrt(spread *
+					static_cast<double>(blocks - 1) / static_cast<double>(blocks));
+				result.scaleStdDev = std::max(result.scaleStdDev, jackknife);
+			}
+			else
+			{
+				// A stretch the scale cannot be solved without is not a
+				// measured scale. Finite, because the figure is persisted
+				// with the profile.
+				result.scaleStdDev = std::max(result.scaleStdDev, 1.0);
+			}
+		}
 		result.scaleIdentifiable = std::isfinite(result.scaleCondition) &&
 			std::isfinite(result.scaleStdDev) &&
 			result.scaleCondition >= config.minScaleCondition &&

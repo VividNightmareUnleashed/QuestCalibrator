@@ -103,6 +103,9 @@ struct SceneConfig
 	// to neutral, so long-lag pairs spanning it carry no off-axis delta.
 	double offAxisBurstT0 = -1e9;
 	double offAxisBurstT1 = 1e9;
+	// Scales the figure-eight translation about its centre: a user looking
+	// around in place moves the head a few centimetres, not the full sweep.
+	double translationScale = 1.0;
 };
 
 // Smooth, rich test motion: two-axis rotation plus a figure-eight translation,
@@ -146,7 +149,8 @@ void DevicePoseAt(double t, const SceneConfig &scene,
                   Eigen::Quaterniond &rot, Eigen::Vector3d &pos)
 {
 	rot = RotationAt(t, scene);
-	pos = PositionAt(t);
+	const Eigen::Vector3d centre(0.0, 1.25, 0.0);
+	pos = centre + scene.translationScale * (PositionAt(t) - centre);
 }
 
 PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
@@ -3502,6 +3506,67 @@ void RunSolverPrimitiveScenarios()
 			}
 		snprintf(detail, sizeof detail, "worst %.2f ms with 25, 40 and 100 %% of headset frames repeating", worst * 1000.0);
 		Check("solver: offset ignores a held angular velocity", pass, detail);
+	}
+
+	// The scale's one-sigma has to describe how far the scale really scatters,
+	// because it decides whether the scale is applied. The textbook figure
+	// treats every row as independent; rows are overlapping sample pairs and a
+	// headset's position error wanders over a second or more, so it understated
+	// the scatter 2.2x on white noise and 18x with 2 mm of slow wander, in-place
+	// motion or not. The block jackknife is checked against the scatter itself.
+	{
+		GroundTruth truth;
+		truth.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(0.8, Eigen::Vector3d::UnitY()));
+		truth.translation = Eigen::Vector3d(-0.4, 0.9, 0.2);
+		SceneConfig scene;
+		scene.duration = 10.0;
+		scene.refRate = 90.0;
+		scene.targetRate = 250.0;
+		scene.posNoise = 0.0003;
+		scene.rotNoiseDeg = 0.03;
+		scene.translationScale = 0.3;   // a head looking around in place
+
+		bool pass = true;
+		std::string summary;
+		for (double wanderMm : { 0.0, 2.0 })
+		{
+			double sumErrSq = 0.0, sumSigma = 0.0;
+			int n = 0, beyond2 = 0;
+			for (uint32_t seed = 0; seed < 40; ++seed)
+			{
+				std::vector<PoseSample> ref, target;
+				GenerateStreams(scene, truth, 9000 + seed, ref, target);
+				// Ornstein-Uhlenbeck wander on the headset position, 1.5 s
+				// correlation time: SLAM error, unlike sensor noise, persists.
+				std::mt19937 rng(77 + seed);
+				std::normal_distribution<double> g(0.0, 1.0);
+				const double sigma = wanderMm * 1e-3, tau = 1.5;
+				Eigen::Vector3d w = sigma * Eigen::Vector3d(g(rng), g(rng), g(rng));
+				for (size_t i = 0; i < ref.size(); ++i)
+				{
+					double a = i ? std::exp(-(ref[i].time - ref[i - 1].time) / tau) : 1.0;
+					w = a * w + std::sqrt(1.0 - a * a) * sigma * Eigen::Vector3d(g(rng), g(rng), g(rng));
+					ref[i].pos += w;
+				}
+				EngineConfig cfg;
+				cfg.solveScale = true;
+				cfg.pinScaleOnSmoothing = false;
+				EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
+				if (!(r.scaleStdDev > 0.0))
+					continue;
+				double err = r.scale - 1.0;
+				sumErrSq += err * err;
+				sumSigma += r.scaleStdDev;
+				beyond2 += std::abs(err) > 2.0 * r.scaleStdDev;
+				++n;
+			}
+			double ratio = n ? std::sqrt(sumErrSq / n) / (sumSigma / n) : 0.0;
+			pass = pass && n == 40 && ratio > 0.5 && ratio < 1.4 && beyond2 <= 6;
+			snprintf(detail, sizeof detail, "%s%.0f mm wander: scatter %.5f is %.1fx the reported sigma, %d of %d beyond two",
+				summary.empty() ? "" : "; ", wanderMm, n ? std::sqrt(sumErrSq / n) : 0.0, ratio, beyond2, n);
+			summary += detail;
+		}
+		Check("solver: scale sigma matches the scale's real scatter", pass, summary.c_str());
 	}
 
 	// Dropouts are holes, not long interpolation ramps. Correlating across them

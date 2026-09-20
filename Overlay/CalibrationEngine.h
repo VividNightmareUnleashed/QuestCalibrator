@@ -92,7 +92,15 @@ struct EngineConfig
 	bool   solveScale = false;
 	double scaleSearchRange = 0.15;    // bounded to [1-r, 1+r]
 	double minScaleCondition = 0.002;  // conditional scale information after eliminating translation
-	double maxScaleStdDev = 0.02;      // one-sigma uncertainty in the dimensionless scale
+	// One-sigma uncertainty in the dimensionless scale. A headset's metric
+	// scale is off by a percent or so, so a scale known no better than that
+	// is not worth applying over neutral 1.0: 0.005 is 1 cm at 2 m. It was
+	// 0.02 while the sigma understated the scatter up to 18x, which left the
+	// condition gate alone to refuse anything.
+	double maxScaleStdDev = 0.005;
+	// Stretches of the collection left out in turn to measure that uncertainty
+	// (see the jackknife in SolveAligned). 0 keeps the textbook figure alone.
+	size_t scaleJackknifeBlocks = 5;
 
 	// --- motion-amplitude gain diagnostic + scale guard ---
 	// The two position tracks' amplitude ratio, split into a gross-motion band
