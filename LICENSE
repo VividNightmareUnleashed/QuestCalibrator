@@ -1,54 +1,114 @@
-# License
+QuestCalibrator End User License Agreement
+Copyright (c) 2026 VividNightmare. All rights reserved.
 
-QuestCalibrator is source-available, not open source.
-Copyright (c) 2026 VividNightmare. All rights reserved except as granted below.
+This agreement ("Agreement") is between you and VividNightmare (the
+"Licensor") and covers QuestCalibrator: the overlay application, the SteamVR
+driver, the installer and uninstaller scripts, the embedded artwork and
+guidance images, and any updates the Licensor provides (together, the
+"Software"). By installing, copying or using the Software you agree to this
+Agreement. If you do not agree, do not install or use it.
 
-You may:
+1. License
 
-- Read the source and build QuestCalibrator from it for your own use.
-- Modify your own build for your own use.
+   The Software is provided free of charge. The Licensor grants you a
+   personal, non-exclusive, non-transferable, revocable, royalty-free
+   license to install and use the Software on computers you own or
+   control, for your own use. No one may charge you for the Software; if
+   you paid for it, you did not get it from the Licensor.
 
-You may not:
+2. Restrictions
 
-- Redistribute QuestCalibrator in any form -- source, binaries, or
-  installers -- modified or unmodified -- without prior permission from the
-  copyright holder.
-- Sell QuestCalibrator or include it (or any part of its code) in other
-  products, packages, or bundles.
+   Except as this Agreement allows, or as section 3 or section 10 permits,
+   you may not:
 
-No warranty: the software is provided as is, and no liability is accepted for
-any damages arising from its use.
+   a. copy, redistribute, re-host, sublicense, rent, lend or sell the
+      Software, or charge for access to it or for installing it, in whole or in part, modified or unmodified, in any form
+      (including repackaged installers, mod-manager packages or bundles),
+      without the Licensor's prior written permission;
+   b. reverse engineer, decompile, disassemble, deobfuscate or otherwise
+      try to derive the source code of the Software;
+   c. modify, adapt, patch or create derivative works of the Software;
+   d. remove, alter or obscure any copyright, license or attribution notice
+      in the Software;
+   e. use the Software, or any part of it, to build a competing product.
 
-## Upstream and vendored code
+   You may read and run the installer and uninstaller scripts as provided,
+   and change them only as needed to install or uninstall the Software on
+   your own computers.
 
-QuestCalibrator is based on OpenVR-SpaceCalibrator by Justin Li (pushrax).
-Those portions were received under the MIT License below, which continues to
-apply to them and must be retained; the original, unrestricted project remains
-available at https://github.com/pushrax/OpenVR-SpaceCalibrator. No code from
-other forks of OpenVR-SpaceCalibrator is included; ideas credited to other
-forks in the README were reimplemented independently. MinHook is vendored
-under its own BSD-2-Clause license (lib/MinHook/LICENSE).
+3. Third-party components
 
----
+   The Software includes components owned by third parties and licensed
+   under their own terms, listed in THIRD-PARTY-NOTICES.txt and the
+   THIRD-PARTY-NOTICES folder that accompany it. Those terms, not this
+   Agreement, govern your use of those components, and nothing in this
+   Agreement limits the rights they give you. Portions of the Software are
+   based on OpenVR-SpaceCalibrator by Justin Li, used under the MIT License
+   reproduced in those notices.
 
-MIT License
+4. Ownership
 
-Copyright (c) 2020 Justin Li
+   The Software is licensed, not sold. The Licensor and its licensors keep
+   all rights, title and interest in the Software, including all
+   intellectual property rights. All rights not expressly granted are
+   reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+5. Updates
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+   The Licensor may provide updates but is not obliged to. Updates are
+   covered by this Agreement unless they come with different terms.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+6. Termination
+
+   This Agreement ends automatically if you break any of its terms. The
+   Licensor may also end it by notice to you. When it ends, stop using the
+   Software and delete every copy you have. Sections 3, 4, 7, 8 and 10
+   survive termination.
+
+7. No warranty
+
+   The Software is provided free of charge, and therefore:
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. The Software changes
+   how SteamVR reports device positions. You use it at your own risk and are
+   responsible for staying aware of your physical surroundings while using
+   VR.
+
+8. Limitation of liability
+
+   TO THE FULLEST EXTENT PERMITTED BY LAW, IN NO EVENT SHALL THE LICENSOR BE
+   LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+   CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH
+   THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE, INCLUDING
+   INDIRECT, INCIDENTAL, SPECIAL OR CONSEQUENTIAL DAMAGES AND LOSS OF DATA.
+
+   Nothing in this Agreement excludes or limits liability for intent or
+   gross negligence, for death or personal injury caused by negligence, or
+   any other liability that cannot be excluded or limited under applicable
+   law.
+
+9. Trademarks
+
+   QuestCalibrator is not affiliated with, endorsed by or sponsored by Meta,
+   Valve, HTC or VRChat. Meta Quest, SteamVR, Valve Index, VIVE and VRChat
+   are trademarks of their respective owners and are used only to describe
+   compatibility.
+
+10. General
+
+   This Agreement is governed by the laws of Italy, without regard to its
+   conflict-of-laws rules. If any provision is held unenforceable,
+   the rest remains in effect. This Agreement is the entire agreement
+   between you and the Licensor about the Software. The Licensor's failure
+   to enforce a provision is not a waiver of it. Nothing in this Agreement
+   limits rights you have under consumer protection or other law that
+   cannot be waived by contract, including the rights in Articles 5(3) and
+   6 of Directive 2009/24/EC (articles 64-ter and 64-quater of Italian Law
+   no. 633 of 22 April 1941) to observe, study and test how the Software
+   works while using it and to decompile it where needed for
+   interoperability. If you are a consumer, you also keep the protection
+   of the mandatory law of the country where you live.
+
+Contact: https://github.com/VividNightmareUnleashed/QuestCalibrator/issues

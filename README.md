@@ -268,10 +268,11 @@ alignment, weighting, and validation described above.
 
 ## License
 
-Source-available: build and modify it for your own use; redistribution needs
-permission first, and selling it isn't allowed — see `LICENSE` for the exact terms. Portions inherited from OpenVR-SpaceCalibrator,
-Copyright (c) 2020 Justin Li (pushrax), remain under their original MIT License
-(included in `LICENSE`).
+Proprietary and free of charge: install and use it for your own use;
+redistribution needs permission first, and no one may charge for it — see
+`LICENSE` for the exact terms. Portions inherited from OpenVR-SpaceCalibrator,
+Copyright (c) 2020 Justin Li (pushrax), remain under their original MIT License,
+reproduced in `THIRD-PARTY-NOTICES.txt` with every other third-party notice.
 Several solver-quality ideas (outlier rejection, axis-variance conditioning,
 raw-driver-pose sampling) were inspired by the
 [hyblocker fork](https://github.com/hyblocker/OpenVR-SpaceCalibrator) and
