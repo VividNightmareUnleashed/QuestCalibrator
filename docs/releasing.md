@@ -12,7 +12,7 @@ packaging sources and outputs must not be committed to the repository.
 ## Source preflight
 
 - Confirm the release is authorized by the QuestCalibrator copyright holder.
-- Start from a clean `quest` worktree and fetch both `origin` and `upstream`.
+- Start from a clean `alpha` checkout and fetch both `origin` and `upstream`.
 - Review `git status`, `git log upstream/master..HEAD`, and
   `git rev-list --left-right --count upstream/master...HEAD`. Record the upstream
   base commit in the release notes.
@@ -38,7 +38,7 @@ packaging sources and outputs must not be committed to the repository.
 
 ## Commit, push, and tag
 
-- Commit the version and release-note changes, then push `quest`. Verify the exact
+- Commit the version and release-note changes, then push `alpha`. Verify the exact
   release commit is visible on `origin`; do not tag an unpushed-only commit.
 - Create an annotated `questcalibrator-vMAJOR.MINOR.PATCH` tag on that reviewed
   commit and include the version, validation result, and upstream base in its
