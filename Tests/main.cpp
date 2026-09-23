@@ -68,6 +68,7 @@ bool DiagnosticsExportScenario();
 bool ContinuousWindowDiagnosticsScenario();
 bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
+void RunHookInjectorScenarios(void (*check)(const char *, bool, const char *));
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
 #ifdef QUESTCAL_VIRTUAL_QUEST
 void RunVirtualQuestScenarios(void (*check)(const char *, bool, const char *));
@@ -8738,6 +8739,10 @@ int main(int argc, char **argv)
 		printf("%-28s %s\n", "driver linear scale", pass ? "PASS" : "FAIL");
 		RecordResult(pass);
 	}
+
+	// Before any group that starts threads: DisableHooks proves quiescence only
+	// while no other thread has a frame in this executable.
+	RunHookInjectorScenarios(Check);
 
 	// Production-shared driver algebra and broad solver edge/property passes.
 	RunDriverPoseTransformScenarios();

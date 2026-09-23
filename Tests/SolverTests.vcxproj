@@ -55,10 +55,10 @@
       <WarningLevel>Level3</WarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>Disabled</Optimization>
-      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;_DEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;_DEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>..\lib;..\lib\openvr;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\lib;..\lib\openvr;..\lib\MinHook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -74,9 +74,9 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;NDEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;NDEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>..\lib;..\lib\openvr;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\lib;..\lib\openvr;..\lib\MinHook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -95,6 +95,7 @@
   <ItemGroup>
     <ClCompile Include="CalibrationContextTests.cpp" />
     <ClCompile Include="ReviewRegressionTests.cpp" />
+    <ClCompile Include="HookInjectorTests.cpp" />
     <ClCompile Include="TrackingRecoveryTests.cpp" />
     <ClCompile Include="LighthouseLogTests.cpp" />
     <ClCompile Include="PredictionModelTests.cpp" />
@@ -112,6 +113,12 @@
     <ClCompile Include="..\Driver\ServerTrackedDeviceProvider.cpp" />
     <ClCompile Include="..\Driver\AlignmentField.cpp" />
     <ClCompile Include="..\Driver\IPCServer.cpp" />
+    <ClCompile Include="..\Driver\InterfaceHookInjector.cpp" />
+    <ClCompile Include="..\lib\MinHook\src\buffer.c" />
+    <ClCompile Include="..\lib\MinHook\src\hook.c" />
+    <ClCompile Include="..\lib\MinHook\src\trampoline.c" />
+    <ClCompile Include="..\lib\MinHook\src\hde\hde32.c" />
+    <ClCompile Include="..\lib\MinHook\src\hde\hde64.c" />
     <ClCompile Include="..\Driver\Logging.cpp" />
     <ClCompile Include="..\Overlay\CalibrationEngine.cpp" />
     <ClCompile Include="..\Overlay\ContinuousAlignment.cpp" />
