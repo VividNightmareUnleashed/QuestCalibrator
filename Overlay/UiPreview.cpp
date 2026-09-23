@@ -271,6 +271,9 @@ void SetupPreviewState()
 	case PreviewScenario::Lighthouse:
 		s_mainTab = MainTab::Lighthouse;
 		break;
+	case PreviewScenario::Settings:
+		s_showSettings = true;
+		break;
 	case PreviewScenario::Failed:
 	case PreviewScenario::Healthy:
 		break;

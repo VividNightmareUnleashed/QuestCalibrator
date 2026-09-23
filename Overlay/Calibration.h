@@ -170,6 +170,10 @@ struct CalibrationContext : CalibrationProfileState
 	bool uiAdvanced = false;
 	bool notifyPoorCalibration = true;
 
+	// The overlay's language as a code ("en", "ja"); empty until the player
+	// picks one, meaning "follow Windows". Persisted setting.
+	std::string language;
+
 	// Extra detail for bug reports (continuous-loop decisions, solve numbers),
 	// written to the session log only while on. Off by default: the log is
 	// bounded and the detail is per second.

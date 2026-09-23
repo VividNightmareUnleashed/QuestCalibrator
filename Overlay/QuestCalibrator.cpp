@@ -2,6 +2,7 @@
 #include "Calibration.h"
 #include "Configuration.h"
 #include "EmbeddedFiles.h"
+#include "Localization.h"
 #include "Updater.h"
 #include "UserInterface.h"
 #include "ImGuiVRInput.h"
@@ -28,6 +29,7 @@
 #include <openvr.h>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -74,7 +76,8 @@ static void ShowVRToast(const char *message)
 		vr::VRNotificationId notifId = 0;
 		vr::VRNotifications()->CreateNotification(
 			overlayMainHandle, 0, vr::EVRNotificationType_Transient,
-			message, vr::EVRNotificationStyle_Application, nullptr, &notifId);
+			questcal::i18n::Tr(std::string(message)).c_str(),
+			vr::EVRNotificationStyle_Application, nullptr, &notifId);
 	}
 }
 static GLuint fboHandle = 0, fboTextureHandle = 0;
@@ -153,6 +156,13 @@ static int g_frameLimit = 0;
 // look at a screen without SteamVR, a headset or a window to click through:
 // the picture is the same 1200x800 texture the dashboard would receive.
 static std::wstring g_shotPath;
+
+// -lang CODE: show the overlay in this language for the session, whatever the
+// saved setting says, so a preview can be shot in each language.
+// -i18n-missing PATH: on exit, write the English strings the current language
+// had no translation for, one per line; a translator's checklist.
+static std::string g_langOverride;
+static std::wstring g_missingPath;
 
 static void CliReport(const char *message, bool isError)
 {
@@ -280,6 +290,58 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	return result;
 }
 
+// Japanese is drawn from a font Windows already has rather than a bundled
+// one: Yu Gothic ships with Windows 10 and 11, Meiryo and MS Gothic before it.
+// Read once and shared by every size.
+static const std::vector<char> &JapaneseFontData()
+{
+	static std::vector<char> data;
+	static bool searched = false;
+	if (searched)
+		return data;
+	searched = true;
+	wchar_t windows[MAX_PATH] = {};
+	const UINT len = GetWindowsDirectoryW(windows, MAX_PATH);
+	if (len == 0 || len >= MAX_PATH)
+		return data;
+	for (const wchar_t *name : { L"YuGothM.ttc", L"YuGothR.ttc", L"meiryo.ttc", L"msgothic.ttc" })
+	{
+		std::error_code ec;
+		const std::filesystem::path path = std::filesystem::path(windows) / L"Fonts" / name;
+		const auto size = std::filesystem::file_size(path, ec);
+		if (ec || size == 0 || size > 64u * 1024u * 1024u)
+			continue;
+		std::ifstream in(path, std::ios::binary);
+		data.resize(static_cast<size_t>(size));
+		if (in.read(data.data(), static_cast<std::streamsize>(size)))
+			break;
+		data.clear();
+	}
+	return data;
+}
+
+// One UI face at one size: DroidSans, with the Japanese font merged in as its
+// fallback so Japanese text (the UI's, or a tracker renamed in Japanese)
+// draws. ImGui 1.92 bakes glyphs on first use, so the merge costs nothing
+// until a Japanese glyph is drawn.
+static ImFont *AddUiFont(ImGuiIO &io, float size)
+{
+	ImFont *font = io.Fonts->AddFontFromMemoryCompressedTTF(
+		DroidSans_compressed_data, DroidSans_compressed_size, size);
+	const std::vector<char> &japanese = JapaneseFontData();
+	const bool merged = font && !japanese.empty();
+	if (merged)
+	{
+		ImFontConfig config;
+		config.MergeMode = true;
+		config.FontDataOwnedByAtlas = false;   // shared by all three sizes
+		io.Fonts->AddFontFromMemoryTTF(const_cast<char *>(japanese.data()),
+			static_cast<int>(japanese.size()), size, &config);
+	}
+	questcal::i18n::SetFontAvailable(questcal::i18n::Language::Japanese, merged);
+	return font;
+}
+
 void CreateGLFWWindow()
 {
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -315,9 +377,9 @@ void CreateGLFWWindow()
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 	io.IniFilename = nullptr;
-	g_fontBody = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 21.0f);
-	g_fontSmall = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 14.0f);
-	g_fontTitle = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 27.0f);
+	g_fontBody = AddUiFont(io, 21.0f);
+	g_fontSmall = AddUiFont(io, 14.0f);
+	g_fontTitle = AddUiFont(io, 27.0f);
 	io.FontDefault = g_fontBody;
 
 	imguiGlfwInitialized = ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
@@ -633,6 +695,7 @@ void RunLoop()
 		io.SetAppAcceptingEvents(true);
 		io.DisplaySize = ImVec2((float) fboTextureWidth, (float) fboTextureHeight);
 		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+		questcal::i18n::BeginFrame();
 		ImGui::NewFrame();
 
 		BuildMainWindow(dashboardVisible);
@@ -850,6 +913,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 			LoadProfile(CalCtx);
 			questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 		}
+		if (!g_langOverride.empty())
+			CalCtx.language = g_langOverride;
+		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(CalCtx.language));
 		RunLoop();
 	}
 	catch (const std::exception &e)
@@ -862,6 +928,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	}
 
 	questcal::update::AppUpdater.Shutdown();
+	if (!g_missingPath.empty())
+		questcal::i18n::WriteMissing(g_missingPath);
 
 	// One shutdown pair for every path, and before the modal dialog below can
 	// block this process indefinitely: ShutdownCalibrator flushes debounced
@@ -976,6 +1044,10 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 			g_frameLimit = _wtoi(args[++i].c_str());
 		else if (arg == L"-shot" && i + 1 < args.size())
 			g_shotPath = args[++i];
+		else if (arg == L"-lang" && i + 1 < args.size())
+			g_langOverride = Narrow(args[++i]);
+		else if (arg == L"-i18n-missing" && i + 1 < args.size())
+			g_missingPath = args[++i];
 		else if (cmd.empty())
 			cmd = arg;
 		else if (unrecognised.empty())
@@ -1023,6 +1095,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		g_uiPreviewMode = true;
 		g_uiPreviewMany = true;
 		g_uiPreviewScenario = PreviewScenario::Lighthouse;
+	}
+	else if (cmd == L"-uipreview-settings")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = PreviewScenario::Settings;
 	}
 	else if (cmd == L"-openvrpath")
 	{

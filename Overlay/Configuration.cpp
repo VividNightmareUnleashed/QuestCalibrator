@@ -67,6 +67,7 @@ struct SettingsRecord
 	bool applyTimeOffset = true;
 	bool detailedLogging = false;
 	bool automaticUpdates = false;
+	std::string language;
 	std::map<std::string, std::string> deviceNames;
 	ChaperoneRecord chaperone;
 };
@@ -102,6 +103,7 @@ static SettingsRecord CaptureSettingsRecord(const CalibrationContext &ctx)
 	record.applyTimeOffset = ctx.applyTimeOffset;
 	record.detailedLogging = ctx.detailedLogging;
 	record.automaticUpdates = ctx.automaticUpdates;
+	record.language = ctx.language;
 	record.deviceNames = ctx.deviceNames;
 	record.chaperone = CaptureChaperoneRecord(ctx.chaperone);
 	return record;
@@ -186,6 +188,7 @@ static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 	ctx.applyTimeOffset = record.applyTimeOffset;
 	ctx.detailedLogging = record.detailedLogging;
 	ctx.automaticUpdates = record.automaticUpdates;
+	ctx.language = record.language;
 	ctx.deviceNames = record.deviceNames;
 	ApplyChaperoneRecord(ctx, std::move(record.chaperone));
 }
@@ -485,6 +488,8 @@ static void WriteSettings(const SettingsRecord &record,
 	settings["apply_time_offset"].set<bool>(record.applyTimeOffset);
 	settings["detailed_logging"].set<bool>(record.detailedLogging);
 	settings["automatic_updates"].set<bool>(record.automaticUpdates);
+	if (!record.language.empty())
+		settings["language"].set<std::string>(record.language);
 	if (!record.deviceNames.empty())
 	{
 		picojson::object names;
@@ -530,6 +535,14 @@ static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &s
 		settings.detailedLogging = obj.at("detailed_logging").get<bool>();
 	if (HasTypedValue<bool>(obj, "automatic_updates"))
 		settings.automaticUpdates = obj.at("automatic_updates").get<bool>();
+	// A code this build does not know is dropped, not refused: it reads as
+	// "follow Windows", and the rest of the record still loads.
+	if (HasTypedValue<std::string>(obj, "language"))
+	{
+		const std::string code = obj.at("language").get<std::string>();
+		if (code == "en" || code == "ja")
+			settings.language = code;
+	}
 	if (HasTypedValue<picojson::object>(obj, "device_names"))
 	{
 		// Bounded on read as on write: a hand-edited record cannot grow the

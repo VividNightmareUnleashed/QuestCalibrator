@@ -153,14 +153,14 @@ void BuildFooter(bool runningInOverlay)
 		const bool keyboardHint = io.NavVisible || ImGui::GetTime() - s_lastMouseMove > 6.0;
 		if (!runningInOverlay && keyboardHint)
 		{
-			const char *hint = "Arrow keys to move \xC2\xB7 Enter to select";
+			const char *hint = Tr("Arrow keys to move \xC2\xB7 Enter to select");
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
 		}
 		if (runningInOverlay)
 		{
-			const char *hint = "Close the SteamVR dashboard to use the mouse";
+			const char *hint = Tr("Close the SteamVR dashboard to use the mouse");
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
@@ -215,9 +215,9 @@ void BuildMainWindow(bool runningInOverlay)
 	if (!CalCtx.uiError.empty())
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
-		ImGui::TextWrapped("%s", CalCtx.uiError.c_str());
+		ImGui::TextWrapped("%s", Tr(CalCtx.uiError.c_str()));
 		ImGui::PopStyleColor();
-		if (ImGui::SmallButton("Dismiss"))
+		if (ImGui::SmallButton((std::string(Tr("Dismiss")) + "###dismisserror").c_str()))
 		{
 			CalCtx.uiError.clear();
 			CalCtx.uiErrorSource = CalibrationContext::ErrorSource::None;

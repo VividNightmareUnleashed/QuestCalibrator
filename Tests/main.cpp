@@ -74,6 +74,7 @@ void RunVirtualQuestScenarios(void (*check)(const char *, bool, const char *));
 #endif
 void RunLighthouseScenarios(void (*check)(const char *, bool, const char *));
 void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *));
+void RunLocalizationScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
 
@@ -9241,6 +9242,7 @@ int main(int argc, char **argv)
 	// ---- Drift staleness monitoring ----
 	RunDriftScenarios();
 	RunLighthouseScenarios(Check);
+	RunLocalizationScenarios(Check);
 
 	// ---- Spatial correction field ----
 	RunFieldScenarios();

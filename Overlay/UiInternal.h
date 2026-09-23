@@ -10,6 +10,7 @@
 #include "ProfileValidation.h"
 #include "Updater.h"
 #include "UiLayout.h"
+#include "Localization.h"
 #include "../common/Protocol.h"
 #include "../common/Version.h"
 
@@ -31,6 +32,10 @@
 #include <shellapi.h>
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "shell32.lib")
+
+// Every widget below translates the text it is handed, so a call site passes
+// English and only direct ImGui and draw-list text needs Tr of its own.
+using questcal::i18n::Tr;
 
 struct VRDevice
 {
@@ -249,6 +254,7 @@ void IconPin(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconScale(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconGauge(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconField(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
+void IconGlobe(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH);
 bool LoadGuideTexture(GuideDemo demo, GLuint *outTex);
@@ -258,6 +264,9 @@ bool FileExists(const std::string &path);
 std::string Prefer2x(const std::string &path);
 void DrawFocusRing(ImDrawList *dl, ImVec2 a, ImVec2 b, float rounding);
 bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, BtnKind kind, bool smallCaps = false);
+// The width a button needs for its label in the current language, and never
+// less than the English layout's width.
+float ButtonWidthFor(const char *english, bool withIcon, float minWidth);
 bool QCCheckbox(const char *id, bool *v);
 ImVec2 BeginRowCard(float height);
 void EndRowCard(ImVec2 p, float height);

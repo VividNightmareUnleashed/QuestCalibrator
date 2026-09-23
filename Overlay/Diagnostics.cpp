@@ -356,7 +356,8 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	out << "latency reestimation: " << OnOff(ctx.continuousLatencyReestimation)
 		<< ", require trigger: " << OnOff(ctx.continuousRequireTrigger)
 		<< ", hide headset tracker: " << OnOff(ctx.hideMountedTracker) << "\n";
-	out << "detailed logging: " << OnOff(ctx.detailedLogging) << "\n\n";
+	out << "detailed logging: " << OnOff(ctx.detailedLogging) << "\n";
+	out << "language: " << (ctx.language.empty() ? "follow Windows" : ctx.language) << "\n\n";
 
 	out << "[profile]\n";
 	out << "valid: " << OnOff(ctx.validProfile) << ", enabled: " << OnOff(ctx.enabled) << "\n";

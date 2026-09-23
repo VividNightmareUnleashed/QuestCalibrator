@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "UiInternal.h"
 #include "Diagnostics.h"
+#include "LocalizationTables.h"
 
 void BuildSettingsScreen(const VRState &state)
 {
@@ -13,6 +14,53 @@ void BuildSettingsScreen(const VRState &state)
 		// No "SETTINGS" eyebrow: the lit gear in the pinned header and the
 		// list of switches already say where this is.
 		ImGui::Spacing();
+
+		// Language. Each choice is written in its own language, so a player
+		// who cannot read the current one still finds theirs. A translation
+		// says it may be imperfect and where corrections go.
+		{
+			using questcal::i18n::Language;
+			const bool japaneseFont = questcal::i18n::FontAvailable(Language::Japanese);
+			const Language chosen = questcal::i18n::LanguageFromCode(CalCtx.language);
+			const bool translated = chosen != Language::English;
+			RowCard row(kRowHeight + (translated ? kRowSubLineH + 26.0f : 0.0f));
+			const ImVec2 p = row.pos;
+			RowIconLabel(p, IconGlobe, "Language");
+
+			// Without a Japanese font its name would draw as boxes.
+			const char *languages[] = { "English",
+				japaneseFont ? questcal::i18n::kJapaneseNativeName : "Japanese" };
+			const float segItemW = 130.0f, segH = 34.0f;
+			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - (segItemW * 2.0f + 8.0f), p.y + 9.0f));
+			const int current = chosen == Language::Japanese ? 1 : 0;
+			const int picked = Segmented("language", current, languages, 2, segItemW, segH);
+			if (picked != current)
+			{
+				if (picked == 1 && !japaneseFont)
+				{
+					CalCtx.ReportError("Japanese needs a Japanese font, and Windows doesn't have one installed. "
+						"Add the Japanese Supplemental Fonts in Windows Settings > System > Optional features.\n");
+				}
+				else
+				{
+					const std::string previous = CalCtx.language;
+					CalCtx.language = questcal::i18n::LanguageCode(picked == 1 ? Language::Japanese : Language::English);
+					SaveSettingOrRestore(CalCtx.language, previous);
+					questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(CalCtx.language));
+				}
+			}
+
+			if (translated)
+			{
+				RowSubLine(p, "This translation may not be accurate.");
+				ImGui::SetCursorScreenPos(ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH - 4.0f));
+				ImGui::PushFont(g_fontSmall);
+				ImGui::TextColored(Pal::Dim, "%s", Tr("Feel free to send any feedback:"));
+				ImGui::SameLine(0.0f, 8.0f);
+				LinkText("Report on GitHub", "https://github.com/VividNightmareUnleashed/QuestCalibrator/issues");
+				ImGui::PopFont();
+			}
+		}
 
 		// Advanced mode
 		{
@@ -59,7 +107,7 @@ void BuildSettingsScreen(const VRState &state)
 
 			if (anchorCount > 0)
 			{
-				float btnW = 150.0f;
+				float btnW = ButtonWidthFor("Clear anchors", true, 150.0f);
 				ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
 				// Irreversible like Clear calibration, so confirmed like it.
 				if (IconButton("clearanchors", "Clear anchors", IconTrash, ImVec2(btnW, 34.0f), BtnKind::Ghost))
@@ -72,13 +120,13 @@ void BuildSettingsScreen(const VRState &state)
 					ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 				{
 					ImGui::PushFont(g_fontTitle);
-					ImGui::TextUnformatted(anchorCount == 1 ? "Clear 1 field anchor?"
-						: FormatString("Clear %zu field anchors?", anchorCount).c_str());
+					ImGui::TextUnformatted(Tr(anchorCount == 1 ? std::string("Clear 1 field anchor?")
+						: FormatString("Clear %zu field anchors?", anchorCount)).c_str());
 					ImGui::PopFont();
 					ImGui::Spacing();
-					ImGui::TextWrapped("%s", anchorCount == 1
+					ImGui::TextWrapped("%s", Tr(anchorCount == 1
 						? "That spot goes back to the main calibration. The calibration itself is kept."
-						: "Those spots go back to the main calibration. The calibration itself is kept.");
+						: "Those spots go back to the main calibration. The calibration itself is kept."));
 					ImGui::Spacing();
 					ImGui::Spacing();
 					const float bw = ImGui::GetContentRegionAvail().x;
@@ -104,7 +152,7 @@ void BuildSettingsScreen(const VRState &state)
 				{
 					std::string line = FormatString("%zu anchor%s saved", anchorCount, anchorCount == 1 ? "" : "s");
 					dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH), Pal::U32(Pal::Dim), line.c_str());
+						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH), Pal::U32(Pal::Dim), Tr(line.c_str()));
 				}
 				for (size_t i = 0; CalCtx.uiAdvanced && i < CalCtx.fieldAnchors.size(); ++i)
 				{
@@ -117,7 +165,7 @@ void BuildSettingsScreen(const VRState &state)
 					std::string line = FormatString("Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base",
 						i + 1, a.position.x(), a.position.z(), posDeltaCm, rotDeltaDeg);
 					dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH + i * 24.0f), Pal::U32(Pal::Dim), line.c_str());
+						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH + i * 24.0f), Pal::U32(Pal::Dim), Tr(line.c_str()));
 				}
 			}
 		}
@@ -168,7 +216,7 @@ void BuildSettingsScreen(const VRState &state)
 				QCCheckbox("##manualOverride", &CalCtx.useManualTimeOffset);
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(np.x + 48.0f, (np.y + nb.y) * 0.5f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Text), "Manual tracking delay override (debug)");
+					Pal::U32(Pal::Text), Tr("Manual tracking delay override (debug)"));
 
 				ImVec2 msSize = ImGui::CalcTextSize("ms");
 				float inputW = 110.0f;
@@ -219,7 +267,7 @@ void BuildSettingsScreen(const VRState &state)
 				// The toggle above changes what the loop is doing; the row height
 				// for this frame is already committed, but the text is not.
 				continuous = ContinuousStatusNow();
-				const char *status = ContinuousStateWord(continuous);
+				const char *status = Tr(ContinuousStateWord(continuous));
 				ImVec2 ts = ImGui::CalcTextSize(status);
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->LegacySize * 0.5f),
@@ -233,7 +281,7 @@ void BuildSettingsScreen(const VRState &state)
 
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(np.x + 12.0f, np.y + 17.0f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Text), "Headset tracker");
+					Pal::U32(Pal::Text), Tr("Headset tracker"));
 
 				// Candidates: every target-system device except the HMD. A
 				// disconnected one stays listed (it is still the pick) and
@@ -251,13 +299,13 @@ void BuildSettingsScreen(const VRState &state)
 				for (size_t i = 0; i < candidates.size(); ++i)
 				{
 					labels.push_back(DeviceDisplayName(*candidates[i]) + "  " + candidates[i]->serial +
-						(candidates[i]->connected ? "" : "  Off"));
+						(candidates[i]->connected ? "" : std::string("  ") + Tr("Off")));
 					if (candidates[i]->serial == CalCtx.continuousTrackerSerial)
 						sel = (int)i;
 				}
 				if (sel < 0 && !CalCtx.continuousTrackerSerial.empty())
 				{
-					labels.push_back(CalCtx.continuousTrackerSerial + "  Off");
+					labels.push_back(CalCtx.continuousTrackerSerial + "  " + Tr("Off"));
 					sel = (int)labels.size() - 1;
 				}
 				std::vector<const char *> items;
@@ -302,7 +350,7 @@ void BuildSettingsScreen(const VRState &state)
 					const float rowY = np.y + 40.0f;
 					dl->AddText(g_fontBody, g_fontBody->LegacySize,
 						ImVec2(np.x + 12.0f, rowY + segH * 0.5f - g_fontBody->LegacySize * 0.5f),
-						Pal::U32(Pal::Text), "Method");
+						Pal::U32(Pal::Text), Tr("Method"));
 					const ImVec2 segPos(nb.x - 14.0f - (segItemW * 2.0f + 8.0f), rowY);
 					ImGui::SetCursorScreenPos(segPos);
 					const char *methods[] = { "Standard", "Legacy" };
@@ -360,7 +408,7 @@ void BuildSettingsScreen(const VRState &state)
 					{
 						dl->AddText(g_fontBody, g_fontBody->LegacySize,
 							ImVec2(ap.x, ap.y + 8.0f), Pal::U32(Pal::Violet),
-							"Strap a tracker to your headset and pick it above.");
+							Tr("Strap a tracker to your headset and pick it above."));
 					}
 					else
 					{
@@ -418,9 +466,9 @@ void BuildSettingsScreen(const VRState &state)
 					copied ? copied->c_str() : "age unknown");
 			}
 			ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
-				ImVec2(p.x + 92.0f, p.y + 46.0f), Pal::U32(Pal::Dim), info.c_str());
+				ImVec2(p.x + 92.0f, p.y + 46.0f), Pal::U32(Pal::Dim), Tr(info.c_str()));
 
-			float btnW = 224.0f;
+			float btnW = ButtonWidthFor("Restore chaperone now", true, 224.0f);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
 			if (IconButton("pastechap", "Restore chaperone now", IconCopy, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 				ApplyChaperoneBounds();
@@ -487,7 +535,7 @@ void BuildSettingsScreen(const VRState &state)
 					break;
 				}
 				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-					ImVec2(p.x + 92.0f, actionY + 10.0f), Pal::U32(color), status.c_str());
+					ImVec2(p.x + 92.0f, actionY + 10.0f), Pal::U32(color), Tr(status.c_str()));
 
 				const bool installReady = update.state == questcal::update::State::Ready;
 				const bool canRetry = update.state == questcal::update::State::Failed ||
@@ -537,7 +585,7 @@ void BuildSettingsScreen(const VRState &state)
 			RowIconLabel(p, IconInfo, "Detailed calibration logging");
 			RowSubLine(p, "Records extra tracking and calibration details. Saved diagnostics remove your name and folder paths.");
 
-			const float btnW = 210.0f;
+			const float btnW = ButtonWidthFor("Save diagnostics file", true, 210.0f);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + kRowHeight * 0.5f - 17.0f));
 			if (IconButton("savediag", "Save diagnostics file", IconCopy, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 			{
@@ -554,7 +602,7 @@ void BuildSettingsScreen(const VRState &state)
 		}
 
 		ImGui::Spacing();
-		if (ImGui::CollapsingHeader("Motion demo credits"))
+		if (ImGui::CollapsingHeader((std::string(Tr("Motion demo credits")) + "###democredits").c_str()))
 			ImGui::TextWrapped("%s", GuideModelCredits().c_str());
 
 		// Raw transform editor -- power users only.
@@ -613,11 +661,11 @@ bool BuildProfileEditor()
 
 	ImGui::PushItemWidth(widthF);
 	bool rotationEdited = false;
-	rotationEdited |= ImGui::InputDouble("Yaw##Yaw", &g_transformDraft.rotationEuler(1), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble((std::string(Tr("Yaw")) + "##Yaw").c_str(), &g_transformDraft.rotationEuler(1), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	rotationEdited |= ImGui::InputDouble("Pitch##Pitch", &g_transformDraft.rotationEuler(2), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble((std::string(Tr("Pitch")) + "##Pitch").c_str(), &g_transformDraft.rotationEuler(2), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	rotationEdited |= ImGui::InputDouble("Roll##Roll", &g_transformDraft.rotationEuler(0), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble((std::string(Tr("Roll")) + "##Roll").c_str(), &g_transformDraft.rotationEuler(0), 0.1, 1.0, "%.8f");
 
 	ImGui::Spacing();
 	SectionLabel("TRANSLATION (CENTIMETERS)");
@@ -668,8 +716,9 @@ bool BuildProfileEditor()
 	if (!g_transformDraft.valid)
 	{
 		ImGui::Spacing();
-		ImGui::TextColored(Pal::Bad,
-			"These values can't be applied. Use plain numbers within range. The saved calibration is unchanged.");
+		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
+		ImGui::TextWrapped("%s", Tr("These values can't be applied. Use plain numbers within range. The saved calibration is unchanged."));
+		ImGui::PopStyleColor();
 	}
 	return g_transformDraft.valid;
 }

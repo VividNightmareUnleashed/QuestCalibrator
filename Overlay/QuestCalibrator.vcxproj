@@ -102,6 +102,8 @@
     <ClInclude Include="UiInternal.h" />
     <ClInclude Include="ImGuiVRInput.h" />
     <ClInclude Include="Diagnostics.h" />
+    <ClInclude Include="Localization.h" />
+    <ClInclude Include="LocalizationTables.h" />
     <ClInclude Include="LegacyContinuous.h" />
     <ClInclude Include="UpdatePolicy.h" />
     <ClInclude Include="Updater.h" />
@@ -366,6 +368,13 @@
     <ClCompile Include="CalibrationDriver.cpp" />
     <ClCompile Include="CalibrationSpace.cpp" />
     <ClCompile Include="Diagnostics.cpp" />
+    <ClCompile Include="Localization.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="LocalizationJa.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="LegacyContinuous.cpp" />
     <ClCompile Include="Updater.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">

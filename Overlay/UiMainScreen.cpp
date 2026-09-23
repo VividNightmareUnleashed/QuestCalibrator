@@ -312,10 +312,10 @@ void BuildStatusBand(const VRState &state)
 		ImGui::SetCursorPosY(ImGui::GetWindowHeight() - bandH + 18.0f);
 		const ImVec2 p = ImGui::GetCursorScreenPos();
 		ImGui::PushFont(g_fontTitle);
-		ImGui::TextUnformatted("Continuous calibration paused");
+		ImGui::TextUnformatted(Tr("Continuous calibration paused"));
 		ImGui::PopFont();
 		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - actionW - 36.0f);
-		ImGui::TextWrapped("Tracking no longer matches the saved alignment. Recalibrate with the headset tracker.");
+		ImGui::TextWrapped("%s", Tr("Tracking no longer matches the saved alignment. Recalibrate with the headset tracker."));
 		ImGui::PopTextWrapPos();
 		ImGui::SetCursorScreenPos(ImVec2(p.x + width - actionW, p.y));
 		if (IconButton("fixmount", "Recalibrate", IconPlay, ImVec2(actionW, 46.0f), BtnKind::Primary))
@@ -329,9 +329,10 @@ void BuildStatusBand(const VRState &state)
 		if (CalCtx.uiAdvanced && CalCtx.continuousDeviation.valid)
 		{
 			ImGui::PushFont(g_fontSmall);
-			ImGui::TextColored(Pal::Dim, "Difference: %.1f deg yaw, %.1f deg tilt, %.1f cm position",
+			ImGui::TextColored(Pal::Dim, "%s", Tr(FormatString(
+				"Difference: %.1f deg yaw, %.1f deg tilt, %.1f cm position",
 				CalCtx.continuousDeviation.yawDeg, CalCtx.continuousDeviation.tiltDeg,
-				CalCtx.continuousDeviation.posM * 100.0);
+				CalCtx.continuousDeviation.posM * 100.0)).c_str());
 			ImGui::PopFont();
 		}
 		return;
@@ -453,9 +454,10 @@ void BuildStatusBand(const VRState &state)
 			// is information, so it gets Dim rather than Faint.
 			float ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
 			float x = p.x;
-			const char *label = RatingLabel(rating);
-			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), "Alignment: ");
-			x += ImGui::CalcTextSize("Alignment: ").x;
+			const char *label = Tr(RatingLabel(rating));
+			const char *heading = Tr("Alignment: ");
+			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), heading);
+			x += ImGui::CalcTextSize(heading).x;
 			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(RatingColor(rating)), label);
 			x += ImGui::CalcTextSize(label).x;
 
@@ -475,7 +477,7 @@ void BuildStatusBand(const VRState &state)
 			}
 			dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
 				ImVec2(x + 18.0f, y + lineH * 0.5f - g_fontSmall->LegacySize * 0.5f + 2.0f),
-				Pal::U32(Pal::Dim), ageLine.c_str());
+				Pal::U32(Pal::Dim), Tr(ageLine.c_str()));
 			y += lineH;
 
 			// Advanced mode: the numbers, small and in the colour of the
@@ -484,7 +486,7 @@ void BuildStatusBand(const VRState &state)
 			{
 				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
 					ImVec2(p.x, y + detailH * 0.5f - g_fontSmall->LegacySize * 0.5f),
-					Pal::U32(detail.color), detail.text.c_str());
+					Pal::U32(detail.color), Tr(detail.text.c_str()));
 				y += detailH;
 			}
 			if (!details.empty())
@@ -496,7 +498,7 @@ void BuildStatusBand(const VRState &state)
 				y += 4.0f;
 				ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
 				dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(p.x, ty),
-					Pal::U32(ContinuousStatusColor(continuous)), ContinuousStatusLine(continuous));
+					Pal::U32(ContinuousStatusColor(continuous)), Tr(ContinuousStatusLine(continuous)));
 				y += lineH;
 			}
 
@@ -506,7 +508,7 @@ void BuildStatusBand(const VRState &state)
 					y += 4.0f;
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Violet), nudge);
+					Pal::U32(Pal::Violet), Tr(nudge));
 			}
 		}
 		else
@@ -514,7 +516,7 @@ void BuildStatusBand(const VRState &state)
 			dl->AddText(g_fontBody, g_fontBody->LegacySize,
 				ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
 				Pal::U32(Pal::Dim),
-				"Not calibrated yet. Pick a device on each side and press Start calibration.");
+				Tr("Not calibrated yet. Pick a device on each side and press Start calibration."));
 		}
 
 		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + stripH));
@@ -591,7 +593,7 @@ void BuildMainScreen(const VRState &state)
 		// beside it so the whole screen fits without scrolling ----
 		bool haveProfile = CalCtx.validProfile;
 		const float bh = 56.0f;
-		const float clearW = 190.0f;
+		const float clearW = ButtonWidthFor("Clear calibration", true, 190.0f);
 		const float segItemW = 112.0f;
 		const float segW = segItemW * 3.0f + 8.0f;
 		float startW = cw - segW - gap - (haveProfile ? clearW + gap : 0.0f);
@@ -689,7 +691,8 @@ void BuildMainScreen(const VRState &state)
 		ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
 		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Pal::CardHov);
 		ImGui::PushStyleColor(ImGuiCol_HeaderActive, Pal::Inset);
-		const bool showActivity = !CalCtx.activity.empty() && ImGui::CollapsingHeader("Recent activity");
+		const bool showActivity = !CalCtx.activity.empty() && ImGui::CollapsingHeader(
+			(std::string(Tr("Recent activity")) + "###recentactivity").c_str());
 		ImGui::PopStyleColor(3);
 		if (showActivity)
 		{
@@ -705,7 +708,7 @@ void BuildMainScreen(const VRState &state)
 				ImGui::PushFont(g_fontSmall);
 				ImGui::TextColored(Pal::Dim, "%s", stamp);
 				ImGui::PopFont();
-				ImGui::TextWrapped("%s", entry.text.c_str());
+				ImGui::TextWrapped("%s", Tr(entry.text.c_str()));
 				ImGui::Spacing();
 			}
 		}
