@@ -85,6 +85,13 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
+  <!-- The simulated headset and its scenarios live in the private VirtualQuest
+       submodule; they build and run only where it is checked out. -->
+  <ItemDefinitionGroup Condition="Exists('..\VirtualQuest\Tests\VirtualQuestTests.cpp')">
+    <ClCompile>
+      <PreprocessorDefinitions>QUESTCAL_VIRTUAL_QUEST;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CalibrationContextTests.cpp" />
     <ClCompile Include="ReviewRegressionTests.cpp" />
@@ -92,6 +99,8 @@
     <ClCompile Include="LighthouseLogTests.cpp" />
     <ClCompile Include="PredictionModelTests.cpp" />
     <ClCompile Include="VirtualLighthouse.cpp" />
+    <ClCompile Include="..\VirtualQuest\Tests\VirtualQuest.cpp" Condition="Exists('..\VirtualQuest\Tests\VirtualQuest.cpp')" />
+    <ClCompile Include="..\VirtualQuest\Tests\VirtualQuestTests.cpp" Condition="Exists('..\VirtualQuest\Tests\VirtualQuestTests.cpp')" />
     <ClCompile Include="OpenVRLayoutTests.cpp" />
     <ClCompile Include="ImGuiInputTests.cpp" />
     <ClCompile Include="..\lib\imgui\imgui.cpp" />
