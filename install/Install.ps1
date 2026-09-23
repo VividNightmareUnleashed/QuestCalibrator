@@ -11,6 +11,9 @@ param(
     # removal prompt rather than answer it for the user. The exit code is the
     # result.
     [switch]$Unattended,
+    # Accepts the license agreement in LICENSE, including the specific approval
+    # of its sections 2, 6 and 8. An unattended install needs it.
+    [switch]$AcceptEula,
     # Optional modules. An unattended install gets only the ones named here;
     # an interactive one asks, offering what the previous install had.
     [switch]$Lighthouse
@@ -52,6 +55,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
         '-UserLocalAppData', "`"$env:LOCALAPPDATA`""
     )
     if ($Lighthouse) { $relaunchArgs += '-Lighthouse' }
+    if ($AcceptEula) { $relaunchArgs += '-AcceptEula' }
     Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $relaunchArgs
     exit 0
 }
@@ -62,6 +66,54 @@ $steamProcesses = Get-Process -Name 'steam','vrserver','vrmonitor','vrcompositor
 if ($steamProcesses) {
     $names = ($steamProcesses | Select-Object -ExpandProperty Name) -join ', '
     Fail "Steam is still running ($names). Please close Steam completely (check the system tray) and run this again."
+}
+
+# --- License agreement --------------------------------------------------------
+# Asked before anything changes, and read before the upgrade path's uninstall
+# clears the registry. An update whose LICENSE is unchanged since the user last
+# agreed doesn't ask again; changed terms are asked for again. Articles 1341
+# and 1342 of the Italian Civil Code make the restriction, termination and
+# liability clauses of standard terms binding only when approved specifically,
+# hence the second question.
+$licensePath = Join-Path $PSScriptRoot 'LICENSE'
+if (-not (Test-Path -LiteralPath $licensePath)) {
+    Fail "LICENSE is missing from the package. Extract the whole zip and run this again."
+}
+$licenseHash = (Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash
+$licenseKey  = 'HKLM:\Software\QuestCalibrator\License'
+$agreedHash  = (Get-ItemProperty $licenseKey -ErrorAction SilentlyContinue).AcceptedSha256
+
+function Stop-NotAccepted {
+    Write-Host ""
+    Write-Host "Installation cancelled: the license agreement was not accepted. Nothing was changed." -ForegroundColor Yellow
+    Write-Host ""
+    Pause-ForUser
+    exit 1
+}
+
+if ($Unattended) {
+    if (-not $AcceptEula) {
+        Fail "An unattended install must pass -AcceptEula to accept the license agreement in LICENSE."
+    }
+} elseif (-not $AcceptEula -and $agreedHash -ne $licenseHash) {
+    Write-Host ""
+    Write-Host "License agreement" -ForegroundColor Cyan
+    Write-Host "  QuestCalibrator is free to use under the end user license agreement in"
+    Write-Host "  $licensePath"
+    Write-Host "  In short: use it on your own computers; don't redistribute, sell, modify"
+    Write-Host "  or reverse engineer it, except where the law allows."
+    do {
+        $answer = Read-Host "Type R to read it here, Y to agree, or N to cancel"
+        if ($answer -match '^[Rr]') { Get-Content -LiteralPath $licensePath | Out-Host -Paging }
+    } until ($answer -match '^[YyNn]')
+    if ($answer -notmatch '^[Yy]') { Stop-NotAccepted }
+
+    Write-Host ""
+    Write-Host "  Under articles 1341 and 1342 of the Italian Civil Code, these sections need"
+    Write-Host "  your specific approval: 2 (restrictions), 6 (termination) and 8 (limitation"
+    Write-Host "  of liability)."
+    $answer = Read-Host "Do you specifically approve sections 2, 6 and 8? [Y/N]"
+    if ($answer -notmatch '^[Yy]') { Stop-NotAccepted }
 }
 
 # --- Optional modules ---------------------------------------------------------
@@ -331,6 +383,11 @@ Set-ItemProperty -Path 'HKLM:\Software\QuestCalibrator\Driver' -Name '(default)'
 # The overlay reads this at startup (UserInterface.cpp) to enable each module.
 New-Item -Path $modulesKey -Force | Out-Null
 Set-ItemProperty -Path $modulesKey -Name 'Lighthouse' -Value ([int]$installLighthouse) -Type DWord
+# Which license text was agreed to, and when, so an update with the same terms
+# doesn't ask again.
+New-Item -Path $licenseKey -Force | Out-Null
+Set-ItemProperty -Path $licenseKey -Name 'AcceptedSha256' -Value $licenseHash
+Set-ItemProperty -Path $licenseKey -Name 'AcceptedUtc' -Value ((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
 
 $installedKb  = [int](((Get-ChildItem $installDir -Recurse -File | Measure-Object -Property Length -Sum).Sum) / 1KB)
 $uninstallCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installDir\Uninstall.ps1`""

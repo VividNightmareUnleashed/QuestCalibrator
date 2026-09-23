@@ -6,6 +6,10 @@ IMPORTANT: Close Steam completely before installing (not just SteamVR).
 Steam.exe itself locks the driver files. Check the system tray and exit Steam
 fully.
 
+QuestCalibrator is free to use under the end user license agreement in the
+LICENSE file in this folder. Read it before installing: installing or using
+QuestCalibrator, by either method below, means you accept it.
+
 There are two ways to install: the script (easiest) or manually.
 
 
@@ -28,12 +32,16 @@ OPTION 1: Script install (recommended)
 
 4. Click "Yes" when Windows asks for administrator permission.
 
-5. Answer the optional module question. The Lighthouse module adds base
+5. Accept the license agreement: type R to read it, Y to agree, then Y again
+   to approve its sections 2, 6 and 8 specifically. An update with unchanged
+   terms doesn't ask again.
+
+6. Answer the optional module question. The Lighthouse module adds base
    station tools, starting with a tab showing each base station and which
    lighthouse-tracked devices can see it; later versions add more. To add
    or remove it later, run Install.ps1 again.
 
-6. Done. Start SteamVR - QuestCalibrator appears as a dashboard overlay and
+7. Done. Start SteamVR - QuestCalibrator appears as a dashboard overlay and
    starts automatically with SteamVR.
 
 To uninstall: run Uninstall.ps1 the same way, or find "QuestCalibrator" in
@@ -54,6 +62,12 @@ If you use a custom Steam library folder, SteamVR is under
     <that folder>\steamapps\common\SteamVR
 
 Steps:
+
+0. Read LICENSE in this folder. A manual install accepts it just as the
+   script install does, including the specific approval of its sections 2
+   (restrictions), 6 (termination) and 8 (limitation of liability) under
+   articles 1341 and 1342 of the Italian Civil Code. If you don't accept it,
+   stop here.
 
 1. Close Steam completely (not just SteamVR).
 

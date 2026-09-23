@@ -90,14 +90,17 @@ function Invoke-Script([string]$script, [string[]]$arguments) {
     $p.ExitCode
 }
 
-function Supports-Unattended([string]$script) {
+function Supports-Parameter([string]$script, [string]$name) {
     $ast = [Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
-    [bool]($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Unattended' })
+    [bool]($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq $name })
 }
 
 function Install([string]$packageDir) {
     $script = Join-Path $packageDir 'Install.ps1'
-    $arguments = if (Supports-Unattended $script) { @('-Unattended') } else { @() }
+    # Older packages (the upgrade scenario's previous release) predate these.
+    $arguments = @()
+    if (Supports-Parameter $script 'Unattended') { $arguments += '-Unattended' }
+    if (Supports-Parameter $script 'AcceptEula') { $arguments += '-AcceptEula' }
     Invoke-Script $script $arguments
 }
 
