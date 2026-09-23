@@ -398,7 +398,12 @@ struct CalibrationContext : CalibrationProfileState
 
 	double CollectionSeconds() const
 	{
-		switch (calibrationSpeed)
+		return CollectionSecondsFor(calibrationSpeed);
+	}
+
+	static double CollectionSecondsFor(Speed speed)
+	{
+		switch (speed)
 		{
 		case FAST:
 			return 10.0;

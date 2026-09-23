@@ -105,7 +105,7 @@ void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, con
 	}
 }
 
-// Section label ("REFERENCE SPACE") as an inline widget.
+// Section label ("REFERENCE SYSTEM") as an inline widget.
 void SectionLabel(const char *text)
 {
 	ImDrawList *dl = ImGui::GetWindowDrawList();

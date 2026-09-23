@@ -153,14 +153,14 @@ void BuildFooter(bool runningInOverlay)
 		const bool keyboardHint = io.NavVisible || ImGui::GetTime() - s_lastMouseMove > 6.0;
 		if (!runningInOverlay && keyboardHint)
 		{
-			const char *hint = "Arrow keys move, Enter presses";
+			const char *hint = "Arrow keys to move \xC2\xB7 Enter to select";
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
 		}
 		if (runningInOverlay)
 		{
-			const char *hint = "Close VR overlay to use mouse";
+			const char *hint = "Close the SteamVR dashboard to use the mouse";
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
@@ -217,7 +217,7 @@ void BuildMainWindow(bool runningInOverlay)
 		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
 		ImGui::TextWrapped("%s", CalCtx.uiError.c_str());
 		ImGui::PopStyleColor();
-		if (ImGui::SmallButton("Dismiss error"))
+		if (ImGui::SmallButton("Dismiss"))
 		{
 			CalCtx.uiError.clear();
 			CalCtx.uiErrorSource = CalibrationContext::ErrorSource::None;

@@ -388,7 +388,7 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 					reference ? run.referenceModel : run.targetModel,
 					reference ? run.referenceSerial : run.targetSerial, reference);
 				AbortCalibration(ctx, {
-					name + " changed tracking space during the measurement.",
+					name + "'s tracking reset during the measurement.",
 					"Let tracking settle for a few seconds, then start again.",
 					std::string(reference ? "Reference" : "Target") + " world-from-driver changed during collection",
 					CalibrationContext::GuideHint::WaitForTracking });
@@ -501,9 +501,9 @@ static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *line
 static void NotifyStaleAlignment(CalibrationContext &ctx)
 {
 	NotifyOnce(ctx, Monitors.staleNotified,
-		"Your calibration looks off. Run a new calibration.",
+		"Your calibration looks off. Recalibrate.",
 		CalibrationContext::Tone::Warn,
-		"QuestCalibrator: your calibration looks off. Run a new calibration.",
+		"QuestCalibrator: your calibration looks off. Recalibrate.",
 		ctx.notifyPoorCalibration);
 }
 
@@ -1451,13 +1451,13 @@ static StopReason DescribeSolveFailure(const questcal::EngineResult &result)
 		reason.action = "Cover a larger area, or turn off Solve playspace scale in Settings.";
 		break;
 	case EngineFailure::Config:
-		reason.body = "Internal configuration error.";
-		reason.action = "Please report this.";
+		reason.body = "Something went wrong inside QuestCalibrator.";
+		reason.action = "Save a diagnostics file in Settings and send it with your report.";
 		break;
 	case EngineFailure::NonFinite:
 	case EngineFailure::OutOfRange:
 	default:
-		reason.body = "The solve produced an unusable result.";
+		reason.body = "The calibration result wasn't usable.";
 		reason.action = "Try again with smooth motion around the room.";
 		break;
 	}
@@ -1622,12 +1622,12 @@ static void FinishCalibration(CalibrationContext &ctx)
 				ctx.Log(buf);
 				mount.measured = true;
 				mount.note = ctx.continuousEnabled
-					? "Headset tracker measured, so continuous calibration can keep it that way."
-					: "Headset tracker measured. Turn on continuous calibration in Settings to use it.";
+					? "Headset tracker set up, so continuous calibration can keep it that way."
+					: "Headset tracker set up. Turn on continuous calibration in Settings to use it.";
 			}
 			else
 			{
-				mount.note = "The tracker's identity couldn't be verified, so the previous headset tracker measurement is kept.";
+				mount.note = "The headset tracker's identity couldn't be verified, so its previous setup is kept.";
 				mount.action = "Try again. If it repeats, restart SteamVR.";
 			}
 		}
@@ -1641,9 +1641,9 @@ static void FinishCalibration(CalibrationContext &ctx)
 			mount.attempted = true;
 			mount.tooFast = true;
 			mount.note = ctx.mountExtrinsic.valid
-				? "The headset tracker's position couldn't be measured consistently, so the previous measurement is kept."
+				? "The headset tracker's position couldn't be measured consistently, so its previous setup is kept."
 				: "The headset tracker's position couldn't be measured consistently.";
-			mount.action = "Run the setup again and look around more slowly.";
+			mount.action = "Recalibrate with the headset tracker and look around more slowly.";
 		}
 	}
 
@@ -1790,14 +1790,14 @@ static void FinishCalibration(CalibrationContext &ctx)
 		{
 			if (mount.tooFast)
 				ctx.lastRunHint = CalibrationContext::GuideHint::SlowDown;
-			ctx.Outcome("Done, but the headset tracker wasn't measured",
+			ctx.Outcome("Done, but the headset tracker wasn't set up",
 				quality + " " + mount.note, mount.action, "", CalibrationContext::Tone::Warn);
 		}
 	}
 	else
 		ctx.Outcome("Calibration complete", quality, action, "", tone);
 	if (!saved)
-		ctx.Tell("Applied for this session, but it couldn't be saved; redo it after restarting.",
+		ctx.Tell("Applied for this session, but it couldn't be saved. Recalibrate after restarting.",
 			CalibrationContext::Tone::Warn);
 }
 
@@ -1986,7 +1986,7 @@ void CalibrationTick(double time)
 		if (run.referenceId >= vr::k_unMaxTrackedDeviceCount)
 		{
 			AbortCalibration(ctx, {
-				"Missing reference device.",
+				"No reference device is selected.",
 				"Pick a device that's switched on.",
 				"Missing reference device",
 				CalibrationContext::GuideHint::WrongPick });
@@ -1995,7 +1995,7 @@ void CalibrationTick(double time)
 		if (run.targetId >= vr::k_unMaxTrackedDeviceCount)
 		{
 			AbortCalibration(ctx, {
-				"Missing target device.",
+				"No target device is selected.",
 				"Pick a device that's switched on.",
 				"Missing target device",
 				CalibrationContext::GuideHint::WrongPick });
@@ -2005,7 +2005,7 @@ void CalibrationTick(double time)
 		{
 			AbortCalibration(ctx, {
 				DeviceName(ctx, run.referenceModel, run.referenceSerial, true) + " isn't tracking.",
-				"Check it's awake and visible to its base stations, then try again.",
+				"Check it's awake and in view of its tracking cameras or base stations, then try again.",
 				"Reference device is not Running_OK",
 				CalibrationContext::GuideHint::TrackingLost });
 			return;

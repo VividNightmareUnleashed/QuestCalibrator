@@ -85,7 +85,7 @@ void BuildLighthouseScreen(const VRState &state)
 
 	if (devices.empty())
 	{
-		MessageCard(IconTracker, "No base station devices",
+		MessageCard(IconTracker, "No Lighthouse devices",
 			"Turn on a tracker or controller that uses base stations.");
 		return;
 	}
@@ -152,10 +152,11 @@ void BuildLighthouseScreen(const VRState &state)
 			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, c1.y - 56.0f),
 				Pal::U32(unseen ? Pal::Bad : Pal::Text), seenLine.c_str());
 
-			std::string dropLine = s.drops == 0 ? std::string("No drops this session")
-				: FormatString("Dropped %u time%s", s.drops, s.drops == 1 ? "" : "s");
+			// A loss is a drop that left a device with no station at all.
+			std::string dropLine = s.drops == 0 ? std::string("No dropouts this session")
+				: FormatString("Dropped out %u time%s", s.drops, s.drops == 1 ? "" : "s");
 			if (s.losses > 0)
-				dropLine += FormatString(", last to go %u time%s", s.losses, s.losses == 1 ? "" : "s");
+				dropLine += FormatString(" \xC2\xB7 the last one left %u time%s", s.losses, s.losses == 1 ? "" : "s");
 			dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(x, c1.y - 28.0f),
 				Pal::U32(Pal::Dim), dropLine.c_str());
 		}
@@ -237,10 +238,10 @@ void BuildLighthouseScreen(const VRState &state)
 			const int total = std::max(CalCtx.lighthouse.StationCount(), inView);
 			figure = FormatString("%d of %d in view", inView, total);
 			figureColor = inView < clean ? Pal::Bad : Pal::Text;
-			detail = seen->drops == 0 ? std::string("no drops")
-				: FormatString("%u drop%s", seen->drops, seen->drops == 1 ? "" : "s");
+			detail = seen->drops == 0 ? std::string("no dropouts")
+				: FormatString("%u dropout%s", seen->drops, seen->drops == 1 ? "" : "s");
 			if (seen->losses > 0)
-				detail += FormatString(", lost all %u time%s", seen->losses, seen->losses == 1 ? "" : "s");
+				detail += FormatString(", %u full loss%s", seen->losses, seen->losses == 1 ? "" : "es");
 		}
 		const float fx = b.x - 16.0f - TextWidth(g_fontBody, figure.c_str());
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
@@ -261,7 +262,7 @@ void BuildLighthouseScreen(const VRState &state)
 			if (!seen->lastDisturbanceText.empty())
 				tip += "\nLast change: " + seen->lastDisturbanceText;
 			if (seen->bootstraps > 0)
-				tip += FormatString("\nStarted over %u time%s", seen->bootstraps, seen->bootstraps == 1 ? "" : "s");
+				tip += FormatString("\nTracking restarted %u time%s", seen->bootstraps, seen->bootstraps == 1 ? "" : "s");
 			ShowTip(tip.c_str(), true);
 		}
 		ImGui::PopID();
@@ -272,11 +273,12 @@ void BuildLighthouseScreen(const VRState &state)
 	ImGui::Spacing();
 	ImGui::PushFont(g_fontSmall);
 	if (CalCtx.lighthouseAttributedEvents > 0)
-		ImGui::TextColored(Pal::Dim, "%u drift reading%s this session %s set aside because a base station had just changed.",
-			CalCtx.lighthouseAttributedEvents, CalCtx.lighthouseAttributedEvents == 1 ? "" : "s",
-			CalCtx.lighthouseAttributedEvents == 1 ? "was" : "were");
+		ImGui::TextColored(Pal::Dim, CalCtx.lighthouseAttributedEvents == 1
+			? "1 drift check this session was skipped because a base station had just changed."
+			: "%u drift checks this session were skipped because a base station had just changed.",
+			CalCtx.lighthouseAttributedEvents);
 	else
-		ImGui::TextColored(Pal::Dim, "No drift reading has been set aside for a base station change this session.");
+		ImGui::TextColored(Pal::Dim, "Base station changes haven't affected drift checks this session.");
 	if (!CalCtx.lighthouseLogPath.empty())
 		ImGui::TextColored(Pal::Faint, "Read from %s", CalCtx.lighthouseLogPath.c_str());
 	ImGui::PopFont();

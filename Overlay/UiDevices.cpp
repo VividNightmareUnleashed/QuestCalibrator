@@ -472,7 +472,7 @@ void BuildSpacesSection(const VRState &state)
 	// ---- Left pane: reference space ----
 	ImGui::SetCursorScreenPos(top);
 	ImGui::BeginGroup();
-	SectionLabel("REFERENCE SPACE");
+	SectionLabel("REFERENCE SYSTEM");
 	PickTrackingSystem("##ReferenceTrackingSystem", state.trackingSystems,
 		firstReferenceSystemNotTargetSystem, paneW, CalCtx.pendingReferenceTrackingSystem);
 
@@ -496,7 +496,7 @@ void BuildSpacesSection(const VRState &state)
 
 	ImGui::SetCursorScreenPos(ImVec2(top.x + paneW + paneGap, top.y));
 	ImGui::BeginGroup();
-	SectionLabel("TARGET SPACE");
+	SectionLabel("TARGET SYSTEM");
 	if (!targetSystems.empty())
 	{
 		// An emptied pick (the collision rule above) settles on the first
@@ -523,10 +523,12 @@ void BuildSpacesSection(const VRState &state)
 	ImGui::Dummy(ImVec2(0, 0));
 
 	// ---- What happens next, then Identify ----
+	// How to move depends on the picks (figure eight, looking around), and
+	// the guide shows it; this line only sets the length.
 	ImGui::Spacing();
 	{
 		std::string hint = FormatString(
-			"Hold both devices together and rotate them for %.0f seconds.",
+			"Calibration takes %.0f seconds. The next screen shows how to move.",
 			CalCtx.CollectionSeconds());
 		ImGui::PushFont(g_fontSmall);
 		ImVec2 hs = ImGui::CalcTextSize(hint.c_str());

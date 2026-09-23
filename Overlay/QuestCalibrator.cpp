@@ -209,7 +209,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 			MAX_PATH, &error);
 		if (error != vr::VRApplicationError_None)
 		{
-			result.message = "Failed to locate the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" +
+			result.message = "Couldn't find the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" +
 				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error));
 			return result;
 		}
@@ -242,7 +242,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	{
 		auto error = vr::VRApplications()->RemoveApplicationManifest(oldManifest.c_str());
 		if (error != vr::VRApplicationError_None)
-			return failed("Failed to remove the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
+			return failed("Couldn't remove the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
 				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), false);
 	}
 
@@ -250,7 +250,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	{
 		auto error = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
 		if (error != vr::VRApplicationError_None)
-			return failed("Failed to register the application manifest with SteamVR.\n\n" +
+			return failed("Couldn't register QuestCalibrator with SteamVR.\n\n" +
 				manifestPath + "\n\n" +
 				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), replacing);
 	}
@@ -268,7 +268,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 		{
 			if (adding)
 				vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-			return failed("SteamVR could not set QuestCalibrator auto-launch.\n\n" +
+			return failed("SteamVR couldn't set QuestCalibrator to start automatically.\n\n" +
 				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error)),
 				replacing);
 		}
@@ -292,12 +292,12 @@ void CreateGLFWWindow()
 
 	glfwWindow = glfwCreateWindow(fboTextureWidth, fboTextureHeight, "QuestCalibrator", NULL, NULL);
 	if (!glfwWindow)
-		throw std::runtime_error("Failed to create window");
+		throw std::runtime_error("Couldn't create the window.");
 
 	glfwMakeContextCurrent(glfwWindow);
 	glfwSwapInterval(1);
 	if (gl3wInit() != 0)
-		throw std::runtime_error("Failed to initialize OpenGL functions");
+		throw std::runtime_error("Couldn't start OpenGL. Update your graphics driver.");
 
 	// Dark titlebar on Windows 10 20H1+ (attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE).
 	BOOL darkTitlebar = TRUE;
@@ -310,7 +310,7 @@ void CreateGLFWWindow()
 
 	imguiContextInitialized = ImGui::CreateContext() != nullptr;
 	if (!imguiContextInitialized)
-		throw std::runtime_error("Failed to initialize ImGui");
+		throw std::runtime_error("Couldn't start the user interface (ImGui).");
 	ImGuiIO &io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
@@ -322,13 +322,13 @@ void CreateGLFWWindow()
 
 	imguiGlfwInitialized = ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
 	if (!imguiGlfwInitialized)
-		throw std::runtime_error("Failed to initialize the ImGui GLFW backend");
+		throw std::runtime_error("Couldn't start the user interface (ImGui GLFW backend).");
 	glfwSetWindowFocusCallback(glfwWindow, [](GLFWwindow *, int focused) {
 		imgui_vr::DesktopFocusEvent(focused != 0, dashboardOwnsInput);
 	});
 	imguiOpenGLInitialized = ImGui_ImplOpenGL3_Init("#version 330");
 	if (!imguiOpenGLInitialized)
-		throw std::runtime_error("Failed to initialize the ImGui OpenGL backend");
+		throw std::runtime_error("Couldn't start the user interface (ImGui OpenGL backend).");
 
 	ApplyTheme();
 
@@ -504,7 +504,7 @@ static bool SavePreviewShot(const std::wstring &path, std::string &error)
 	if (FAILED(hr))
 	{
 		char buf[128];
-		snprintf(buf, sizeof buf, "Could not write the screenshot (HRESULT 0x%08lX): ", static_cast<unsigned long>(hr));
+		snprintf(buf, sizeof buf, "Couldn't write the screenshot (HRESULT 0x%08lX): ", static_cast<unsigned long>(hr));
 		error = buf + Narrow(path);
 		return false;
 	}
@@ -911,7 +911,7 @@ static void CliExit(const std::string &message, bool isError)
 
 static std::string InitErrorMessage(vr::EVRInitError vrErr)
 {
-	return std::string("Failed to initialize OpenVR: ")
+	return std::string("Couldn't start OpenVR: ")
 		+ vr::VR_GetVRInitErrorAsEnglishDescription(vrErr)
 		+ "\n\nSteamVR must be installed. If it has never been run on this PC,"
 		" start SteamVR once and try again.";
@@ -986,12 +986,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	// so failing to resolve it must fail loudly here rather than register a
 	// manifest SteamVR will later auto-launch from the wrong place.
 	if (!appDirResolved)
-		CliExit("QuestCalibrator could not determine its own install directory.", true);
+		CliExit("QuestCalibrator couldn't find its own install folder.", true);
 
 	// An extra argument alongside a valid command is as much a mistake as a
 	// mistyped command, and used to be ignored entirely.
 	if (!unrecognised.empty())
-		CliExit("Unrecognised command-line argument: " + Narrow(unrecognised), true);
+		CliExit("Unrecognized command-line argument: " + Narrow(unrecognised), true);
 
 	if (!g_shotPath.empty() && g_frameLimit == 0)
 		g_frameLimit = 30;
@@ -1053,7 +1053,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 			!std::memchr(runtimePath, '\0', runtimePathCapacity) ||
 			runtimePath[0] == '\0')
 		{
-			CliExit("Failed to read the OpenVR runtime path.", true);
+			CliExit("Couldn't read the OpenVR runtime path.", true);
 		}
 
 		// Machine-readable, so no trailing newline: callers capture this on
@@ -1081,7 +1081,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 				manifestPath.c_str());
 			if (vrAppErr != vr::VRApplicationError_None)
 			{
-				CliExit("Failed to deregister QuestCalibrator from SteamVR.\n\n" +
+				CliExit("Couldn't unregister QuestCalibrator from SteamVR.\n\n" +
 					manifestPath + "\n\n" +
 					vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
 			}
@@ -1099,7 +1099,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		}
 		catch (std::runtime_error &e)
 		{
-			CliExit(std::string("Failed to enable SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
+			CliExit(std::string("Couldn't turn on SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
 		}
 		CliExit("SteamVR multiple-driver support enabled.", false);
 	}
@@ -1108,6 +1108,6 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		// A mistyped command used to launch the full GUI and exit 0, which a
 		// scripted install (Start-Process -Wait) cannot tell from success: it
 		// blocks until a human closes a window that is iconified at creation.
-		CliExit("Unrecognised command-line argument: " + Narrow(cmd), true);
+		CliExit("Unrecognized command-line argument: " + Narrow(cmd), true);
 	}
 }

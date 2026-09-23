@@ -185,7 +185,8 @@ void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const quest
 	const char *states[] = {
 		!m.valid ? "Measuring..." : m.coverage >= 0.99 ? "Enough variety" : "Keep turning and tilting",
 		!m.valid ? "Measuring..." : m.gatedFraction < 0.15 ? "Good pace" : "Move more slowly",
-		!m.rigidityValid ? "Measuring..." : m.rigidityDeg < 3.0 ? "Moving together" : "Movement doesn't match"
+		!m.rigidityValid ? "Measuring..." : m.rigidityDeg < 3.0 ? "Moving together"
+			: mountRun ? "Tracker is shifting on the headset" : "Hold them tighter together"
 	};
 	const double values[] = { m.coverage, m.valid ? 1.0 - m.gatedFraction : 0.0,
 		m.rigidityValid ? std::clamp(1.0 - (m.rigidityDeg - 1.0) / 8.0, 0.0, 1.0) : 0.0 };
@@ -234,8 +235,9 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGui::Spacing();
 		const float gap = 10.0f;
 		const float cancelWidth = 130.0f;
-		const char *saveLabel = transformValid ? "Save profile" : "Fix invalid values before saving";
-		if (IconButton("saveprofile", saveLabel, IconCheck,
+		// Invalid values keep the label and go quiet; the editor's red line
+		// above says what to fix.
+		if (IconButton("saveprofile", "Save calibration", IconCheck,
 			ImVec2(cw - cancelWidth - gap, 52.0f),
 			transformValid ? BtnKind::Primary : BtnKind::Ghost) && transformValid)
 		{
@@ -246,11 +248,13 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				SeedTransformEditorDraft();
 		}
 		ImGui::SameLine(0.0f, gap);
-		if (IconButton("cancelprofile", "Cancel", nullptr,
+		// "Close", not "Cancel": saving keeps the editor open, and leaving
+		// afterwards undoes nothing.
+		if (IconButton("cancelprofile", "Close", nullptr,
 			ImVec2(cancelWidth, 52.0f), BtnKind::Ghost))
 		{
-			// Nothing to discard: leaving Editing is enough, because re-entering
-			// it seeds the draft again.
+			// Unsaved edits are dropped: leaving Editing is enough, because
+			// re-entering it seeds the draft again.
 			CalCtx.state = CalibrationState::None;
 			CalCtx.timeLastScan = -1e9;
 		}
@@ -385,7 +389,10 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				const std::string who = picks[i] ? DeviceDisplayName(*picks[i])
 					: std::string(i == 0 ? "Reference device" : "Target device");
 				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + mw - 332.0f);
-				ImGui::TextWrapped("%s is %stracking", who.c_str(), ok ? "" : "not ");
+				if (ok)
+					ImGui::TextWrapped("%s is tracking", who.c_str());
+				else
+					ImGui::TextWrapped("%s isn't tracking. Wake it or bring it into view.", who.c_str());
 				ImGui::PopTextWrapPos();
 			}
 			const float readinessBottom = ImGui::GetCursorScreenPos().y;
@@ -396,7 +403,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				s_guide.animate = true;
 			}
 			ImGui::SameLine(0.0f, 12.0f);
-			if (IconButton("motiontoggle", s_guide.animate ? "Pause motion" : "Play motion", nullptr,
+			if (IconButton("motiontoggle", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
 				ImVec2(190.0f, 38.0f), BtnKind::Ghost))
 				s_guide.animate = !s_guide.animate;
 			ImGui::SetCursorScreenPos(ImVec2(row.x, std::max(readinessBottom, readiness.y + 38.0f) + 8.0f));
@@ -496,7 +503,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 					CancelCalibration();
 			}
 			ImGui::SameLine(0.0f, 12.0f);
-			if (IconButton("runningmotion", s_guide.animate ? "Pause motion" : "Play motion", nullptr,
+			if (IconButton("runningmotion", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
 				ImVec2(190.0f, 46.0f), BtnKind::Ghost))
 				s_guide.animate = !s_guide.animate;
 			break;
@@ -614,7 +621,8 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGui::TextUnformatted("Clear this calibration?");
 		ImGui::PopFont();
 		ImGui::Spacing();
-		ImGui::TextWrapped("This also removes the saved field anchors and headset tracker setup.");
+		ImGui::TextWrapped("Your trackers won't line up until you calibrate again. "
+			"This also removes the field anchors and the headset tracker setup.");
 		ImGui::Spacing();
 		ImGui::Spacing();
 		float bw = ImGui::GetContentRegionAvail().x;
@@ -622,10 +630,10 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		// one is outlined in the error colour, so a laser pointer that lands
 		// on the big blue button keeps the calibration.
 		float clearW = 210.0f, bgap = 12.0f;
-		if (IconButton("clearkeep", "Keep", nullptr, ImVec2(bw - clearW - bgap, 46.0f), BtnKind::Primary) || EscapePressed())
+		if (IconButton("clearkeep", "Keep calibration", nullptr, ImVec2(bw - clearW - bgap, 46.0f), BtnKind::Primary) || EscapePressed())
 			ImGui::CloseCurrentPopup();
 		ImGui::SameLine(0.0f, bgap);
-		if (IconButton("clearconfirm", "Clear", IconTrash, ImVec2(clearW, 46.0f), BtnKind::Danger))
+		if (IconButton("clearconfirm", "Clear calibration", IconTrash, ImVec2(clearW, 46.0f), BtnKind::Danger))
 		{
 			// The write can be refused; a destructive button that did nothing
 			// has to say so instead of leaving the screen unchanged.
@@ -655,15 +663,15 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 
 		ImGui::TextWrapped(
 			"QuestCalibrator saves and restores your SteamVR chaperone. "
-			"Tracking drift can still move those virtual walls away from the real room boundaries.");
+			"Tracking drift can still move the chaperone walls away from your real walls.");
 		ImGui::Spacing();
 		ImGui::TextWrapped(
-			"Keep the Quest's own boundary enabled too. A saved chaperone "
+			"Keep the Quest boundary turned on too. A protected chaperone "
 			"doesn't guarantee that your play area is clear or correctly aligned.");
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
 		ImGui::TextWrapped(
-			"Before playing, check that the virtual walls match your room and leave "
+			"Before playing, check that the chaperone walls match your room and leave "
 			"enough space to move safely, especially when dancing.");
 		ImGui::PopStyleColor();
 		if (!CalCtx.uiError.empty())
@@ -685,14 +693,16 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			ImDrawList *mdl = ImGui::GetWindowDrawList();
 			mdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Card), 10.0f);
 			mdl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Border), 10.0f);
-			std::string lbl = FormatString("I understand (%d s)", remain);
+			std::string lbl = FormatString("Protect chaperone (%d s)", remain);
 			ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
 			mdl->AddText(g_fontBody, g_fontBody->LegacySize,
 				ImVec2(p.x + (sz.x - ts.x) * 0.5f, p.y + sz.y * 0.5f - g_fontBody->LegacySize * 0.5f),
 				Pal::U32(Pal::Dim), lbl.c_str());
 			ImGui::Dummy(sz);
 		}
-		else if (IconButton("chapwarnok", "I understand", nullptr, ImVec2(bw - cancelW - bgap, 46.0f), BtnKind::Primary))
+		// Named for what it does: accepting the caveat is what saves the
+		// chaperone.
+		else if (IconButton("chapwarnok", "Protect chaperone", nullptr, ImVec2(bw - cancelW - bgap, 46.0f), BtnKind::Primary))
 		{
 			bool previousAck = CalCtx.chaperoneWarningAck;
 			CalCtx.chaperoneWarningAck = true;

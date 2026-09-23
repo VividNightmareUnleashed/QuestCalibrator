@@ -683,7 +683,9 @@ void LoadProfile(CalibrationContext &ctx)
 	if (profileRead.status == RegistryReadStatus::Error)
 	{
 		ctx.profileLoadState = questcal::RecordLoadState::Unreadable;
-		ctx.ReportError("Could not read the calibration profile: " + profileRead.error + "\n",
+		ctx.Log("Calibration profile read failed: " + profileRead.error + "\n");
+		ctx.ReportError("Couldn't read the saved calibration, so it was left as it is. "
+			"Restart QuestCalibrator. If this repeats, save a diagnostics file in Settings and report it.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 	}
 	else if (profileRead.status == RegistryReadStatus::Missing || profileRead.value.empty())
@@ -737,7 +739,9 @@ void LoadProfile(CalibrationContext &ctx)
 	if (settingsRead.status == RegistryReadStatus::Error)
 	{
 		ctx.settingsLoadState = questcal::RecordLoadState::Unreadable;
-		ctx.ReportError("Could not read application settings: " + settingsRead.error + "\n",
+		ctx.Log("Settings read failed: " + settingsRead.error + "\n");
+		ctx.ReportError("Couldn't read QuestCalibrator's settings, so they were left as they are. "
+			"Restart QuestCalibrator. If this repeats, save a diagnostics file in Settings and report it.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 	}
 	// Missing or empty deliberately takes no branch: it keeps whatever the
@@ -892,22 +896,22 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 		return true;
 	case questcal::PersistenceWriteGate::RefusedConfigUnreadable:
 		ctx.ReportError(
-			"Could not save the calibration profile because the existing Config record "
-			"could not be read. It was left untouched for recovery.\n",
+			"Couldn't save the calibration because the saved one couldn't be read. "
+			"It was left untouched so it can be recovered.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	case questcal::PersistenceWriteGate::RefusedSettingsUnreadable:
 		ctx.ReportError(
-			"Could not save the calibration profile because the existing Settings record "
-			"could not be read. It was left untouched for recovery.\n",
+			"Couldn't save the calibration because QuestCalibrator's settings couldn't be read. "
+			"They were left untouched so they can be recovered.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
 	if (ctx.persistence.legacySettingsMigrationPending && !WriteSettingsRecord(ctx))
 	{
 		ctx.ReportError(
-			"Could not save the calibration profile because the legacy settings copy "
-			"has not yet been migrated safely.\n",
+			"Couldn't save the calibration because settings from an older version haven't been "
+			"moved over safely yet. Restart QuestCalibrator and try again.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
@@ -918,7 +922,8 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 	if (!questcal::ValidateProfileRecord(
 		record, protocol::SetAlignmentField::MaxAnchors, why))
 	{
-		ctx.ReportError("Could not save the calibration profile: " + why + "\n",
+		ctx.Log("Calibration profile rejected: " + why + "\n");
+		ctx.ReportError("Couldn't save the calibration because it failed a safety check. Recalibrate.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
@@ -930,7 +935,8 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 	std::string error;
 	if (!WriteRegistryValue("Config", profile.str(), error))
 	{
-		ctx.ReportError("Could not save the calibration profile: " + error + "\n",
+		ctx.Log("Calibration profile write failed: " + error + "\n");
+		ctx.ReportError("Couldn't save the calibration. It will be lost when QuestCalibrator closes.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
@@ -973,7 +979,7 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 	{
 		if (!questcal::IsValidRotation(rotation))
 		{
-			ctx.ReportError("Could not save the calibration profile: the edited rotation is invalid\n",
+			ctx.ReportError("Couldn't save the calibration because the rotation values aren't valid.\n",
 				CalibrationContext::ErrorSource::ProfilePersistence);
 			return false;
 		}
@@ -1043,14 +1049,14 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 		return true;
 	case questcal::PersistenceWriteGate::RefusedConfigUnreadable:
 		ctx.ReportError(
-			"Could not save QuestCalibrator settings because the existing Config record "
-			"could not be read. Neither record was changed so legacy settings remain recoverable.\n",
+			"Couldn't save QuestCalibrator's settings because the saved calibration couldn't be read. "
+			"Nothing was changed, so both can still be recovered.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	case questcal::PersistenceWriteGate::RefusedSettingsUnreadable:
 		ctx.ReportError(
-			"Could not save QuestCalibrator settings because the existing Settings record "
-			"could not be read. It was left untouched for recovery.\n",
+			"Couldn't save QuestCalibrator's settings because the saved ones couldn't be read. "
+			"They were left untouched so they can be recovered.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
@@ -1062,8 +1068,10 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 	std::string why;
 	if (!ValidateChaperoneRecord(record.chaperone, true, why))
 	{
+		ctx.Log("Settings rejected: " + why + "\n");
 		ctx.ReportError(
-			"Could not save QuestCalibrator settings because " + why + "\n",
+			"Couldn't save QuestCalibrator's settings because the protected chaperone failed a safety check. "
+			"Protect it again.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
@@ -1073,7 +1081,8 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 	std::string error;
 	if (!WriteRegistryValue("Settings", settings.str(), error))
 	{
-		ctx.ReportError("Could not save QuestCalibrator settings: " + error + "\n",
+		ctx.Log("Settings write failed: " + error + "\n");
+		ctx.ReportError("Couldn't save QuestCalibrator's settings. Changes will be lost when it closes.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}

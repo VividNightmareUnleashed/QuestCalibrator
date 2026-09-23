@@ -91,7 +91,7 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   two stations and for ten seconds after it lost or regained one.
   Nothing changes when the log is unavailable. See
   [docs/lighthouse-visibility.md](docs/lighthouse-visibility.md).
-- **Spatial correction field** — multi-point calibration interpolated by each
+- **Field anchors (spatial correction field)** — multi-point calibration interpolated by each
   device's own position (Gaussian RBF blending in the driver), correcting SLAM map
   deformation that a single rigid transform cannot represent.
 - **Continuous calibration** — with a spare lighthouse tracker mounted firmly on the
