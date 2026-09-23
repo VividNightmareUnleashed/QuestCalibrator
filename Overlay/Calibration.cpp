@@ -1699,7 +1699,12 @@ static void FinishCalibration(CalibrationContext &ctx)
 
 	if (asAnchor)
 	{
-		EndCalibrationRun(ctx);
+		// Hand back the devices this run neutralized now, as every other exit
+		// does: StoreFieldAnchor resyncs only for an anchor it accepts and saves,
+		// and a refused one would otherwise leave them uncalibrated until the
+		// next idle scan.
+		if (EndCalibrationRun(ctx) && vr::VRSystem())
+			SynchronizeCalibrationDriver(ctx);
 		ctx.lastRunHint = CalibrationContext::GuideHint::Success;
 		StoreFieldAnchor(ctx, result, targetCentroid);
 		return;
