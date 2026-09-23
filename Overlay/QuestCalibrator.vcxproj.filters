@@ -105,6 +105,9 @@
     <ClInclude Include="LighthouseVisibility.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="TrackingStreamDigest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="DriverSession.h">
       <Filter>Header Files</Filter>
     </ClInclude>

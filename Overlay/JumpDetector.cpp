@@ -102,7 +102,7 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 		return;
 
 	auto &dev = devices[s.deviceId];
-	auto breakObservationContinuity = [&]()
+	auto breakObservationContinuity = [&](const std::string &reason)
 	{
 		// An explicitly observed bad frame is stronger evidence than mere
 		// absence. Neither the exact WFD path nor the composed-pose heuristic may
@@ -112,13 +112,17 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 		dev.repeatedPositions = 0;
 		for (auto &candidate : candidates)
 			if (candidate.deviceId == s.deviceId && candidate.kind == Kind::Heuristic)
-				candidate.life = Life::Dead;
+				Drop(candidate, reason);
 	};
 
 	bool valid = s.poseIsValid && s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK);
 	if (!valid || !IsUsableRingSample(s, qpcToSeconds))
 	{
-		breakObservationContinuity();
+		// Reasons are only formatted for the detail log: an idle device sends
+		// invalid frames continuously.
+		breakObservationContinuity(!detailed ? std::string() : valid
+			? std::string("a sample with unusable values")
+			: Format("a sample not tracking (valid %d, tracking result %u)", s.poseIsValid ? 1 : 0, s.trackingResult));
 		return;   // long gaps are still measured from the last valid sample
 	}
 
@@ -127,7 +131,8 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	{
 		// A composed-time inversion is a rejected observation too. Clear both
 		// continuity paths before accepting a later monotonic sample.
-		breakObservationContinuity();
+		breakObservationContinuity(!detailed ? std::string() :
+			Format("a sample %.1f ms out of order", (dev.lastValidTime - t) * 1000.0));
 		return;
 	}
 
@@ -142,7 +147,8 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 		// same three: a gap must never be bridged by driver-local state the
 		// bad-frame path correctly refuses to bridge. Deliberately no return —
 		// this sample is still processed.
-		breakObservationContinuity();
+		breakObservationContinuity(!detailed ? std::string() :
+			Format("a %.1f s gap in the stream", t - dev.lastValidTime));
 		resumed = true;
 	}
 	if (resumed)
@@ -288,7 +294,12 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	for (const auto &c : candidates)
 		if (c.deviceId == id && c.life != Life::Dead &&
 			std::abs(c.t - incoming.t) < config.window)
+		{
+			if (detailed)
+				details.push_back(Format("frame jump on device %u at %.3f s (%.3f m / %.2f deg) falls inside the candidate at %.3f s",
+					id, incoming.t, posErr, yawErr * 180.0 / EIGEN_PI, c.t));
 			return;
+		}
 
 	Candidate c;
 	c.deviceId = id;
@@ -307,6 +318,10 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	while (first < dev.hist.size() && c.t - dev.hist[first].t > config.window)
 		++first;
 	c.preWindow.assign(dev.hist.begin() + first, dev.hist.end());
+	if (detailed)
+		details.push_back(Format("candidate on device %u at %.3f s: frame jump %.3f m / %.2f deg over %.1f ms, moving %.3f m/s, turning %.3f rad/s%s",
+			id, c.t, posErr, yawErr * 180.0 / EIGEN_PI, dt * 1000.0, incoming.vel.norm(), std::abs(incoming.yawRate),
+			c.needsCorroboration ? "; under the solo floor, needs another device or a settled stream" : ""));
 	candidates.push_back(c);
 }
 
@@ -337,36 +352,71 @@ void JumpDetector::EvaluatePendingCandidates()
 		double preYaw, postYaw;
 		if (!pre.At(prePos, preYaw) || !post.At(postPos, postYaw))
 		{
-			c.life = Life::Dead;
+			Drop(c, Format("too few samples to fit (%d before, %d after)", pre.n, post.n));
 			continue;
 		}
 
 		// Reject windows containing a transient glitch or a second unresolved
 		// step. Their fitted endpoint is not evidence of a persistent rebase.
-		auto cleanFit = [&](const auto &history, const WindowFit &fit, bool after)
+		struct FitResidual { double pos = 0.0, yaw = 0.0; int count = 0; };
+		auto residual = [&](const auto &history, const WindowFit &fit, bool after)
 		{
 			double posSq = 0.0, yawSq = 0.0;
-			size_t count = 0;
+			FitResidual r;
 			for (const auto &h : history)
 			{
 				if (after && (h.t < c.t || h.t > c.t + config.window))
 					continue;
 				Eigen::Vector3d predicted;
 				double yaw = 0.0;
-				if (!fit.At(predicted, yaw, h.t - c.t))
-					return false;
+				fit.At(predicted, yaw, h.t - c.t);   // the fit succeeded above
 				posSq += (h.pos - predicted).squaredNorm();
 				double yawError = WrapAngle(h.yaw - yaw);
 				yawSq += yawError * yawError;
-				++count;
+				++r.count;
 			}
-			return posSq <= count * config.fitPositionRms * config.fitPositionRms &&
-				yawSq <= count * config.fitYawRmsRad * config.fitYawRmsRad;
+			if (r.count > 0)
+			{
+				r.pos = std::sqrt(posSq / r.count);
+				r.yaw = std::sqrt(yawSq / r.count);
+			}
+			return r;
 		};
-		if (!cleanFit(c.preWindow, pre, false) || !cleanFit(dev.hist, post, true))
+		const FitResidual before = residual(c.preWindow, pre, false), after = residual(dev.hist, post, true);
+		auto clean = [&](const FitResidual &r)
 		{
-			c.life = Life::Dead;
+			return r.pos <= config.fitPositionRms && r.yaw <= config.fitYawRmsRad;
+		};
+		const std::string fitText = detailed ? Format(
+			"fit rms before %.1f mm / %.3f deg over %d samples, after %.1f mm / %.3f deg over %d (limits %.1f mm / %.3f deg)",
+			before.pos * 1000.0, before.yaw * 180.0 / EIGEN_PI, before.count,
+			after.pos * 1000.0, after.yaw * 180.0 / EIGEN_PI, after.count,
+			config.fitPositionRms * 1000.0, config.fitYawRmsRad * 180.0 / EIGEN_PI) : std::string();
+		if (!clean(before) || !clean(after))
+		{
+			Drop(c, "fit not clean, a transient or a second step: " + fitText);
 			continue;
+		}
+		if (detailed)
+		{
+			details.push_back(Format(
+				"candidate on device %u at %.3f s fitted: before (%.4f, %.4f, %.4f) m yaw %.3f deg, after (%.4f, %.4f, %.4f) m yaw %.3f deg, %.3f m from the stream origin horizontally; ",
+				c.deviceId, c.t, prePos.x(), prePos.y(), prePos.z(), preYaw * 180.0 / EIGEN_PI,
+				postPos.x(), postPos.y(), postPos.z(), postYaw * 180.0 / EIGEN_PI,
+				std::hypot(prePos.x(), prePos.z())) + fitText);
+			// The raw evidence, so the step can be refitted offline.
+			std::string samples = Format("samples around the step on device %u (ms from it, x y z m, yaw deg):", c.deviceId);
+			auto add = [&](const Hist &h)
+			{
+				samples += Format(" %+.1f %.4f %.4f %.4f %.3f;", (h.t - c.t) * 1000.0,
+					h.pos.x(), h.pos.y(), h.pos.z(), h.yaw * 180.0 / EIGEN_PI);
+			};
+			for (const auto &h : c.preWindow)
+				add(h);
+			for (const auto &h : dev.hist)
+				if (h.t >= c.t && h.t <= c.t + config.window)
+					add(h);
+			details.push_back(samples);
 		}
 
 		double dYaw = WrapAngle(postYaw - preYaw);
@@ -482,7 +532,7 @@ void JumpDetector::TryAccept()
 		// rebase; elapsed time alone cannot distinguish an echo from a reset.
 		if (c0.preWindow.front().t <= lastAcceptTime)
 		{
-			c0.life = Life::Dead;
+			Drop(c0, "its window before the step reaches back past the last applied step");
 			continue;
 		}
 
@@ -682,6 +732,24 @@ bool JumpDetector::PollNote(std::string &out)
 	return true;
 }
 
+bool JumpDetector::PollDetail(std::string &out)
+{
+	if (details.empty())
+		return false;
+	out = details.front();
+	details.pop_front();
+	return true;
+}
+
+void JumpDetector::Drop(Candidate &c, const std::string &reason)
+{
+	if (c.life == Life::Dead)
+		return;
+	c.life = Life::Dead;
+	if (detailed)
+		details.push_back(Format("candidate on device %u at %.3f s dropped: %s", c.deviceId, c.t, reason.c_str()));
+}
+
 void JumpDetector::NoteStreamHole()
 {
 	for (auto &dev : devices)
@@ -692,7 +760,7 @@ void JumpDetector::NoteStreamHole()
 	}
 	for (auto &candidate : candidates)
 		if (candidate.PendingHeuristic())
-			candidate.life = Life::Dead;
+			Drop(candidate, "a driver queue drop inside its fit windows");
 }
 
 void JumpDetector::Reset()
@@ -709,6 +777,7 @@ void JumpDetector::Reset()
 	accepted.clear();
 	gaps.clear();
 	notes.clear();
+	details.clear();
 	lastAcceptTime = -1e9;
 	ignoredSteps = 0;
 	driftCatchUps = 0;

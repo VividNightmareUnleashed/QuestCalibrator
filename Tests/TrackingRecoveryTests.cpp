@@ -1,5 +1,6 @@
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/JumpDetector.h"
+#include "../Overlay/TrackingStreamDigest.h"
 
 #include <cmath>
 #include <cstdio>
@@ -472,6 +473,122 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 		aligner.Reset(CA::ResetReason::StreamGap);
 		check("recovery: tracking loss does not clear a mount fault",
 			frozen && aligner.GetState() == CA::State::Frozen, "fresh sustained recovery evidence remains necessary");
+	}
+
+	// ---- Detailed logging. The detector's detail lines carry each
+	// candidate's evidence and every drop reason, and only while asked for.
+	{
+		// A living headset (slow turn, sub-millimetre noise) that steps by
+		// `step` m at frame 9000; `glitch` makes that a one-frame spike instead;
+		// `holeAt` reports a driver queue drop at that frame.
+		auto run = [](bool detailed, double step, bool glitch, int holeAt)
+		{
+			JumpDetector detector(QpcSeconds);
+			detector.SetDetailed(detailed);
+			std::vector<std::string> lines;
+			for (int frame = 0; frame <= 9200; ++frame)
+			{
+				if (frame == holeAt)
+				{
+					detector.NoteStreamHole();
+					continue;
+				}
+				double time = 1.0 + frame * 0.01;
+				double shift = glitch ? (frame == 9000 ? step : 0.) : (frame >= 9000 ? step : 0.);
+				auto s = Sample(0, time, shift);
+				double yaw = 0.1 * time;
+				s.rotation = { std::cos(yaw / 2), 0, std::sin(yaw / 2), 0 };
+				s.position[2] = 1e-5 * std::sin(time * 700.0);
+				detector.Push(s);
+				JumpDetector::UniverseDelta delta;
+				while (detector.PollDelta(delta)) {}
+				std::string line;
+				while (detector.PollNote(line)) {}
+				while (detector.PollDetail(line))
+					lines.push_back(line);
+			}
+			return lines;
+		};
+		auto has = [](const std::vector<std::string> &lines, const char *text)
+		{
+			for (const auto &l : lines)
+				if (l.find(text) != std::string::npos)
+					return true;
+			return false;
+		};
+
+		auto quiet = run(false, .08, false, -1);
+		check("detailed log: nothing gathered while off", quiet.empty(), "detail is opt-in");
+
+		auto step = run(true, .08, false, -1);
+		check("detailed log: a step's evidence is written",
+			has(step, "candidate on device 0 at") && has(step, "frame jump 0.080 m") &&
+			has(step, "fitted: before (") && has(step, "fit rms before") && has(step, "samples around the step on device 0"),
+			step.empty() ? "no lines" : step.back().substr(0, 120).c_str());
+
+		auto spike = run(true, .08, true, -1);
+		check("detailed log: a glitch's candidate says why it was dropped",
+			has(spike, "dropped: fit not clean"), spike.empty() ? "no lines" : spike.back().substr(0, 120).c_str());
+
+		auto hole = run(true, .08, false, 9010);
+		check("detailed log: a candidate lost to a driver queue drop says so",
+			has(hole, "dropped: a driver queue drop"), hole.empty() ? "no lines" : hole.back().substr(0, 120).c_str());
+	}
+
+	// The stream digest: one line per device a minute with what the
+	// transport did. A 90 Hz headset for 61 s with every 13th frame
+	// re-predicted (velocities repeated, position moved on), 20 frames of
+	// held position under a moving heading, one 150 ms gap, two invalid
+	// frames and one driver queue drop.
+	{
+		TrackingStreamDigest digest;
+		digest.Flush(0.0);
+		double time = 1.0;
+		Eigen::Vector3d pos(0.3, 1.6, 0.4);
+		protocol::DevicePoseSample previous{};
+		int repredicted = 0, frames = 0;
+		for (int frame = 0; frame < 61 * 90; ++frame)
+		{
+			time += frame == 3000 ? 0.15 : 1.0 / 90.0;
+			auto s = Sample(0, time, 0.0);
+			const double yaw = 0.2 * time;
+			s.rotation = { std::cos(yaw / 2), 0, std::sin(yaw / 2), 0 };
+			const bool held = frame >= 1000 && frame < 1020;
+			if (!held)
+				pos.x() += 0.001;
+			for (int k = 0; k < 3; ++k)
+				s.position[k] = pos[k];
+			s.velocity[0] = 0.09 + 1e-4 * std::sin(frame * 1.3);
+			s.angularVelocity[1] = 0.2 + 1e-4 * std::cos(frame * 0.7);
+			if (frame % 13 == 0 && frame > 0 && !held && frame != 3000)
+			{
+				for (int k = 0; k < 3; ++k)
+				{
+					s.velocity[k] = previous.velocity[k];
+					s.angularVelocity[k] = previous.angularVelocity[k];
+				}
+				++repredicted;
+			}
+			if (frame == 4000 || frame == 4001)
+				s.poseIsValid = false;
+			digest.Note(s, QpcSeconds);
+			if (s.poseIsValid)
+				previous = s;
+			++frames;
+		}
+		digest.NoteDrops(1);
+		auto lines = digest.Flush(61.0);
+		const std::string line = lines.empty() ? std::string() : lines.front();
+		char expect[64];
+		snprintf(expect, sizeof expect, "re-predicted %d (", repredicted);
+		const bool counts = line.find(expect) != std::string::npos &&
+			line.find("position repeated 20 (20 under a moving heading)") != std::string::npos &&
+			line.find("1 over 100 ms") != std::string::npos && line.find("2 invalid") != std::string::npos &&
+			line.find("angular velocity alone repeated 0") != std::string::npos;
+		check("detailed log: the stream digest counts what the transport did",
+			lines.size() == 2 && counts && lines[1] == "driver queue drops over the last minute: 1 (1 pose(s))",
+			line.substr(0, 200).c_str());
+		check("detailed log: the digest waits a minute between lines", digest.Flush(90.0).empty(), "next line at 121 s");
 	}
 }
 

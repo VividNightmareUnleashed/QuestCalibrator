@@ -225,6 +225,17 @@ public:
 	// calibration still carries the drift and the catch-up restores it.
 	// The caller refreshes this every tick; Reset leaves it alone.
 	void SetDriftFollowed(bool followed) { driftFollowed = followed; }
+	// Detailed logging: each candidate's evidence (the frame jump that raised
+	// it, both fitted states and their residuals, the samples around the
+	// step) and the reason any candidate is dropped, which otherwise happens
+	// silently. Off, nothing is gathered. The caller refreshes it every tick.
+	void SetDetailed(bool on)
+	{
+		detailed = on;
+		if (!on)
+			details.clear();
+	}
+	bool PollDetail(std::string &out);
 
 	// Drop all per-device state (calibration started, monitors disabled, a
 	// stall-sized hole or a driver session boundary in the stream, ...).
@@ -353,6 +364,10 @@ private:
 	std::deque<std::string> notes;
 	double lastAcceptTime = -1e9;
 	bool driftFollowed = false;
+	bool detailed = false;
+	std::deque<std::string> details;
+	// Marks a live candidate dead and, in detailed mode, says why.
+	void Drop(Candidate &c, const std::string &reason);
 	// HMD steps that expired unapplied since the last Reset, summed as one
 	// transform so the log shows whether they add up to the drift a
 	// recalibration later removes.

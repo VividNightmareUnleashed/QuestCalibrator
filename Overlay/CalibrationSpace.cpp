@@ -517,6 +517,7 @@ bool FinishUniverseObservations(CalibrationContext &ctx, double now)
 	// The state is the last continuous tick's; the next evaluations use it.
 	Space.jumps->SetDriftFollowed(
 		ctx.continuousState == ContinuousAlignment::State::Tracking);
+	Space.jumps->SetDetailed(ctx.detailedLogging);
 	JumpDetector::UniverseDelta delta;
 	bool jumped = false;
 	while (Space.jumps->PollDelta(delta))
@@ -806,6 +807,8 @@ void DrainJumpObservations(CalibrationContext &ctx)
 	std::string note;
 	while (Space.jumps->PollNote(note))
 		ctx.Log(note + "\n");
+	while (Space.jumps->PollDetail(note))
+		ctx.Diag(note);
 
 	JumpDetector::GapEvent gap;
 	while (Space.jumps->PollGap(gap))

@@ -7,6 +7,7 @@
 #include "Configuration.h"
 #include "DriftMonitor.h"
 #include "LighthouseLog.h"
+#include "TrackingStreamDigest.h"
 
 #include <chrono>
 #include "Diagnostics.h"
@@ -47,6 +48,7 @@ static double LastSerialScan = -1e9;
 static uint64_t LighthouseRotationsSeen = 0;
 static bool LighthouseAnnounced = false;
 static VisibilityDigest LighthouseDigest;
+static TrackingStreamDigest StreamDigest;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
@@ -695,6 +697,10 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		// jump detector must not fit a step across it, and keeps the rest.
 		questcal::NoteUniverseStreamHole();
 	}
+	if (!ctx.detailedLogging)
+		StreamDigest.Reset();
+	else if (dropped > 0)
+		StreamDigest.NoteDrops(dropped);
 
 	for (const auto &s : MonitorScratch)
 	{
@@ -703,7 +709,11 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		// JumpDetector owns the observation-continuity policy and must see bad
 		// frames as well as good ones. Drift/HMD caches below remain valid-only.
 		if (ctx.referenceDeviceMask[s.deviceId])
+		{
 			questcal::ObserveUniversePose(s);
+			if (ctx.detailedLogging)
+				StreamDigest.Note(s, QpcToSeconds);
+		}
 
 		questcal::PoseSample sample;
 		if (!TryComposeRingSample(s, QpcToSeconds, sample))
@@ -748,6 +758,9 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	}
 
 	const bool jumped = questcal::FinishUniverseObservations(ctx, now);
+	if (ctx.detailedLogging)
+		for (const auto &line : StreamDigest.Flush(now))
+			ctx.Diag(line);
 
 	// A compensated jump moved the raw stream under the drift windows (an
 	// exact wfd rebase can be small enough to read as a "slide" while still

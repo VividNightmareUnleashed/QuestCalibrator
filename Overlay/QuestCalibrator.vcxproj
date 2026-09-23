@@ -116,6 +116,7 @@
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="LighthouseLog.h" />
     <ClInclude Include="LighthouseVisibility.h" />
+    <ClInclude Include="TrackingStreamDigest.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
     <ClInclude Include="DriverSyncTracker.h" />
