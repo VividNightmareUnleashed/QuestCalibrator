@@ -130,7 +130,7 @@ bool IPCServer::Run(RequestSink newSink)
 
 	// Establish the first listener synchronously. Init must not report success
 	// for a driver instance that can never accept control requests.
-	if (!CreateAndConnectInstance(&connectOverlap, listenerPipe, listenerConnectPending))
+	if (!CreateAndConnectInstance(pipeName, &connectOverlap, listenerPipe, listenerConnectPending))
 		return fail();
 
 	try
@@ -180,7 +180,7 @@ IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 	}
 	pipeInst->pipe = pipe;
 	pipeInst->server = this;
-	pipeInst->lastActivityMs = GetTickCount64();
+	pipeInst->lastActivityMs = Now();
 	try
 	{
 		pipes.insert(pipeInst);
@@ -206,9 +206,18 @@ void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 // nothing else reclaims these. Cancel the pending IO first: the completion
 // routine runs against the instance, and freeing it underneath the kernel
 // would corrupt the callback that casts the OVERLAPPED straight back to it.
+ULONGLONG IPCServer::Now() const
+{
+#ifdef QUESTCAL_IPC_SERVER_TEST_SEAM
+	if (clockForTest)
+		return clockForTest();
+#endif
+	return GetTickCount64();
+}
+
 void IPCServer::CloseIdleConnections()
 {
-	const ULONGLONG now = GetTickCount64();
+	const ULONGLONG now = Now();
 	for (PipeInstance *pipeInst : pipes)
 	{
 		if (pipeInst->closing ||
@@ -227,7 +236,7 @@ void IPCServer::CloseIdleConnections()
 
 DWORD IPCServer::NextIdleTimeoutMs() const
 {
-	const ULONGLONG now = GetTickCount64();
+	const ULONGLONG now = Now();
 	ULONGLONG nearest = MAXDWORD;
 	for (const PipeInstance *pipeInst : pipes)
 	{
@@ -261,7 +270,7 @@ void IPCServer::RunThread(IPCServer *_this)
 			ULONGLONG now = GetTickCount64();
 			if (now >= nextListenerAttempt)
 			{
-				if (CreateAndConnectInstance(&_this->connectOverlap,
+				if (CreateAndConnectInstance(_this->pipeName, &_this->connectOverlap,
 					_this->listenerPipe, _this->listenerConnectPending))
 				{
 					listenerRetryDelay = InitialListenerRetryMs;
@@ -324,12 +333,17 @@ void IPCServer::RunThread(IPCServer *_this)
 			_this->listenerConnectPending = false;
 
 			// Reap first, so a stale connection can never be what refuses the
-			// real client.
+			// real client. A reaped instance stays in `pipes` until its cancelled
+			// IO completes at the next alertable wait, so only the connections
+			// not already closing count toward the cap.
 			_this->CloseIdleConnections();
 
 			PipeInstance *pipeInst = nullptr;
-			if (_this->pipes.size() >= MaxConcurrentConnections)
-				LOG("Refusing IPC connection: %zu already open", _this->pipes.size());
+			const size_t open = static_cast<size_t>(std::count_if(
+				_this->pipes.begin(), _this->pipes.end(),
+				[](const PipeInstance *p) { return !p->closing; }));
+			if (open >= MaxConcurrentConnections)
+				LOG("Refusing IPC connection: %zu already open", open);
 			else
 				pipeInst = _this->CreatePipeInstance(connectedPipe);
 
@@ -400,7 +414,8 @@ void IPCServer::CloseListenerInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &
 	pending = false;
 }
 
-bool IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending)
+bool IPCServer::CreateAndConnectInstance(const char *name, LPOVERLAPPED overlap, HANDLE &pipe,
+	bool &pending)
 {
 	pending = false;
 	ResetEvent(overlap->hEvent);
@@ -409,8 +424,8 @@ bool IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, boo
 	overlap->Offset = 0;
 	overlap->OffsetHigh = 0;
 
-	pipe = CreateNamedPipe(
-		TEXT(QUESTCALIBRATOR_PIPE_NAME),
+	pipe = CreateNamedPipeA(
+		name,
 		PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
 		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
 		PIPE_UNLIMITED_INSTANCES,
@@ -460,7 +475,7 @@ IPCServer::PipeInstance *IPCServer::ActivePipeInstanceOrClose(LPOVERLAPPED overl
 		// place that sees every completed IO on a connection - stamping it here
 		// rather than at each callback keeps the idle deadline honest whatever
 		// the peer is doing.
-		pipeInst->lastActivityMs = GetTickCount64();
+		pipeInst->lastActivityMs = pipeInst->server->Now();
 		return pipeInst;
 	}
 

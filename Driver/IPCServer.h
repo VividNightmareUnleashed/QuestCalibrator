@@ -49,6 +49,11 @@ public:
 	{
 		HandleRequest(request, response, connection);
 	}
+	// Transport tests: their own pipe, so they never meet an installed driver,
+	// and a clock they advance past the idle deadline instead of waiting 30 s.
+	// Both are set before Run().
+	void SetPipeNameForTest(const char *name) { pipeName = name; }
+	void SetClockForTest(std::function<ULONGLONG()> clock) { clockForTest = std::move(clock); }
 #endif
 
 private:
@@ -89,6 +94,8 @@ private:
 
 	void CloseIdleConnections();
 	DWORD NextIdleTimeoutMs() const;
+	// The clock the idle deadline is measured on.
+	ULONGLONG Now() const;
 
 	// Both completion callbacks reinterpret_cast the LPOVERLAPPED the API hands
 	// back straight to PipeInstance*. Inserting any member above `overlap`, or
@@ -116,7 +123,8 @@ private:
 	static PipeInstance *ActivePipeInstanceOrClose(LPOVERLAPPED overlap);
 
 	static void RunThread(IPCServer *_this);
-	static bool CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending);
+	static bool CreateAndConnectInstance(const char *name, LPOVERLAPPED overlap, HANDLE &pipe,
+		bool &pending);
 	static void CloseListenerInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending);
 	static void WINAPI CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED overlap);
 	static void WINAPI CompletedWriteCallback(DWORD err, DWORD bytesWritten, LPOVERLAPPED overlap);
@@ -135,4 +143,8 @@ private:
 	bool listenerConnectPending = false;
 
 	RequestSink sink;
+	const char *pipeName = QUESTCALIBRATOR_PIPE_NAME;
+#ifdef QUESTCAL_IPC_SERVER_TEST_SEAM
+	std::function<ULONGLONG()> clockForTest;
+#endif
 };

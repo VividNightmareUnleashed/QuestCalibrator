@@ -98,6 +98,7 @@
     <ClCompile Include="HookInjectorTests.cpp" />
     <ClCompile Include="UniverseVerdictTests.cpp" />
     <ClCompile Include="PoseHubHoleTests.cpp" />
+    <ClCompile Include="IPCServerTransportTests.cpp" />
     <ClCompile Include="TrackingRecoveryTests.cpp" />
     <ClCompile Include="LighthouseLogTests.cpp" />
     <ClCompile Include="PredictionModelTests.cpp" />
