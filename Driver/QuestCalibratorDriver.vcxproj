@@ -137,6 +137,7 @@
     <ResourceCompile Include="QuestCalibratorDriver.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="..\tools\clang-tidy-first-party.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
