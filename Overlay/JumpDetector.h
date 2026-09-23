@@ -101,7 +101,7 @@ public:
 		// 3DoF fallback holds the last tracked position bit-for-bit while the
 		// IMU orientation keeps moving, and the snap back to 6DoF is a clean
 		// step; in 6DoF the SLAM position never repeats between frames
-		// (0 of 8,515 streamed frames on 2026-09-11).
+		// (0 of 4,331 live streamed frames on 2026-09-11).
 		double soloSettledPos = 0.05;
 		double soloSettledYawRad = 2.0 * 3.14159265358979 / 180.0;
 		double soloSettledSeconds = 60.0;
@@ -115,7 +115,8 @@ public:
 		// (it cancels error accrued since the calibration) and compensating
 		// it would put the drift back; a frame change lands on the threshold
 		// only by coincidence. A headset step whose translation or yaw sits
-		// inside this band is therefore never applied alone; a matching
+		// inside this band is therefore never applied alone (unless
+		// continuous alignment has followed the drift: SetDriftFollowed); a matching
 		// controller step still confirms it, and controllers never step on
 		// drift because their follower slews it continuously. A frame change
 		// of exactly the threshold is the cost: it is logged and left for
@@ -126,6 +127,24 @@ public:
 		double driftCatchUpPosBand = 0.005;
 		double driftCatchUpYawRad = 10.0 * 3.14159265358979 / 180.0;
 		double driftCatchUpYawBandRad = 0.3 * 3.14159265358979 / 180.0;
+		// The translation band only holds for a step without yaw. The engine
+		// measures its remaining offset about the map's origin, which the
+		// stream does not show, and a yaw step's translation depends on the
+		// point it is measured about: heading drift 1.5 m from the map origin
+		// snaps at 10 cm there (3.8 deg), and the same step measured about
+		// Virtual Desktop's origin 13 cm away is 9.1 cm, outside the band.
+		// Heading drift is what the smoother leaves behind when the user
+		// turns slowly in place (under its yaw dead zone; walking slides the
+		// translation away continuously), so it accrues about where the head
+		// is, and its catch-up turns the frame about the head: the heading
+		// steps, the head does not move. A frame change turns about the
+		// map's own points and moves the head by its distance from them
+		// times the angle, unless the head happens to sit on the pivot. A
+		// headset step turning no more than the yaw threshold while the head
+		// moves no more than this is therefore a drift catch-up too; a frame
+		// change pivoting within about 30 cm of the head at a few degrees is
+		// the cost, left for the next correction like the band's.
+		double driftCatchUpHeadShift = 0.02;
 		double gapSeconds = 2.0;           // reference stream gap => no compensation, event only
 		// A discontinuity this soon after the device's stream (re)started is
 		// annotated with its resume age. Observed on a Quest Pro through
@@ -198,6 +217,14 @@ public:
 	// to minutes, so treating each as a Reset meant soloSettledSeconds was
 	// never reached and the ignored-step total never passed one.
 	void NoteStreamHole();
+	// Whether continuous alignment is keeping the calibration on an
+	// independent reference (a mounted tracker, or the legacy loop's
+	// trackers). Its calibration has then followed the drift that a
+	// catch-up cancels, so the catch-up moves the frame away from it like
+	// any other step and is compensated like one. Without it the
+	// calibration still carries the drift and the catch-up restores it.
+	// The caller refreshes this every tick; Reset leaves it alone.
+	void SetDriftFollowed(bool followed) { driftFollowed = followed; }
 
 	// Drop all per-device state (calibration started, monitors disabled, a
 	// stall-sized hole or a driver session boundary in the stream, ...).
@@ -248,6 +275,10 @@ private:
 		// Heuristic candidates: pre-jump window snapshot, evaluated once the
 		// post-jump window has filled.
 		std::vector<Hist> preWindow;
+		// The velocity-compensated jump between the two frames that raised
+		// the candidate. Against the fitted step it shows whether the pose
+		// overshot within a frame and settled back.
+		double frameJumpPos = 0.0, frameJumpYawRad = 0.0;
 		bool needsCorroboration = false;
 		bool held = false;   // HMD heuristic: past agreeWindow, awaiting a controller follow-up
 		// HMD heuristic: when the follow-up wait ends. Starts at
@@ -321,6 +352,7 @@ private:
 	std::deque<GapEvent> gaps;
 	std::deque<std::string> notes;
 	double lastAcceptTime = -1e9;
+	bool driftFollowed = false;
 	// HMD steps that expired unapplied since the last Reset, summed as one
 	// transform so the log shows whether they add up to the drift a
 	// recalibration later removes.

@@ -224,8 +224,9 @@ struct SpeedSample
 //
 // A reported speed is only used from a stream that never repeats one. A gyro
 // reading does not come back bit for bit, so a repeat is a transport holding
-// the previous value: Virtual Desktop does it in 25 to 40 % of headset frames
-// and once for a whole run. A held value is the profile one frame late, and
+// the previous value: Virtual Desktop re-predicts about 8 % of headset frames
+// from the previous sample, repeating its velocities, and a stale stream can
+// hold them for a whole run. A held value is the profile one frame late, and
 // correlating it moved the measured offset by about the held share of a frame
 // (-4.5 ms at 30 %, simulated), differently on every run. The rotations of
 // such a stream are what gets paired afterwards, so its speed is derived from

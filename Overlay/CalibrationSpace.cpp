@@ -512,6 +512,11 @@ void ResetUniverseObservations(CalibrationContext &ctx)
 bool FinishUniverseObservations(CalibrationContext &ctx, double now)
 {
 	DrainJumpObservations(ctx);
+	// A tracking aligner or legacy loop has kept the calibration on the
+	// lighthouse, drift included, so a drift catch-up is a frame change to it.
+	// The state is the last continuous tick's; the next evaluations use it.
+	Space.jumps->SetDriftFollowed(
+		ctx.continuousState == ContinuousAlignment::State::Tracking);
 	JumpDetector::UniverseDelta delta;
 	bool jumped = false;
 	while (Space.jumps->PollDelta(delta))

@@ -68,9 +68,10 @@ int ReplaySolo(int frames, const std::function<double(int)> &shift,
                int skipFrom = -1, int skipTo = -1,
                std::vector<std::string> *log = nullptr,
                JumpDetector::UniverseDelta *last = nullptr,
-               int holeEvery = 0)
+               int holeEvery = 0, bool driftFollowed = false)
 {
 	JumpDetector detector(QpcSeconds);
+	detector.SetDriftFollowed(driftFollowed);
 	int count = 0;
 	for (int frame = 0; frame <= frames; ++frame)
 	{
@@ -315,9 +316,29 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 		check("headset-only: step after a held position is refused", count == 0 && held,
 			"position bit-constant while the heading moved: the 3DoF-to-6DoF snap");
 
-		count = ReplaySolo(9200, none, [](int f) { return f >= 9000 ? 3.0 * EIGEN_PI / 180.0 : 0.; }, false, -1, -1, nullptr, &delta);
+		// A frame change turns about the map's points, so the head moves
+		// with the heading: 3 deg about a point 57 cm away moves it 3 cm.
+		auto lateTurn = [](int f) { return f >= 9000 ? 3.0 * EIGEN_PI / 180.0 : 0.; };
+		count = ReplaySolo(9200, [](int f) { return f >= 9000 ? .03 : 0.; }, lateTurn, false, -1, -1, nullptr, &delta);
 		check("headset-only: 3 deg yaw step alone applies after steady tracking",
-			count == 1 && std::abs(YawDegrees(delta.rotation) - 3.0) < 0.05, "yaw-only correction above the 2 deg floor");
+			count == 1 && std::abs(YawDegrees(delta.rotation) - 3.0) < 0.05, "3 deg with the head moved 3 cm, above the 2 deg floor");
+
+		// The heading alone stepping, the head still, while the user turns
+		// slowly in place under the smoother's yaw dead zone: the drift
+		// catch-up, whatever the stream's origin. Refused and logged as one,
+		// unless continuous alignment has followed the drift, in which case
+		// the calibration carries it and the step is compensated.
+		log.clear();
+		count = ReplaySolo(9200, none, lateTurn, false, -1, -1, &log);
+		bool aboutHead = false;
+		for (const auto &n : log)
+			aboutHead = aboutHead || n.find("a turn about the head") != std::string::npos;
+		check("headset-only: a 3 deg turn about the head is refused as a drift catch-up", count == 0 && aboutHead,
+			"heading stepped, head still: the smoother cancelling heading drift");
+
+		count = ReplaySolo(9200, none, lateTurn, false, -1, -1, nullptr, &delta, 0, true);
+		check("headset-only: the same turn is compensated while continuous alignment follows drift",
+			count == 1 && std::abs(YawDegrees(delta.rotation) - 3.0) < 0.05, "the calibration already carries the drift");
 
 		count = ReplaySolo(9200, [](int f) { return f >= 9000 ? .03 : 0.; }, none, false);
 		check("headset-only: 3 cm step stays below the floor", count == 0, "under 5 cm and 2 deg nothing is applied");

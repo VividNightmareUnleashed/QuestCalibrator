@@ -295,6 +295,8 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	c.t = incoming.t;   // first post-jump sample time
 	c.kind = Kind::Heuristic;
 	c.life = Life::Pending;
+	c.frameJumpPos = posErr;
+	c.frameJumpYawRad = yawErr;
 	c.needsCorroboration = posErr < config.discontinuityPos && yawErr < config.discontinuityYawRad;
 	c.followDeadline = c.t + config.window + config.controllerFollowSeconds;
 	c.lastHoldCheck = c.t;
@@ -372,8 +374,14 @@ void JumpDetector::EvaluatePendingCandidates()
 		c.trans = postPos - c.rot * prePos;
 		c.life = Life::Ready;
 
-		std::string note = Format("pose discontinuity on device %u: yaw %+.2f deg, shift %.3f m",
-			c.deviceId, dYaw * 180.0 / EIGEN_PI, c.trans.norm());
+		// The shift is the step's translation about the stream origin; how far
+		// the device itself moved tells a turn about it (the heading alone
+		// stepping) from a turn about a distant point, which the shift alone
+		// cannot: both scale with the device's distance from the origin.
+		const double moved = (postPos - prePos).norm();
+		std::string note = Format("pose discontinuity on device %u: yaw %+.2f deg, shift %.3f m, device moved %.3f m (frame jump %.3f m / %.2f deg)",
+			c.deviceId, dYaw * 180.0 / EIGEN_PI, c.trans.norm(), moved,
+			c.frameJumpPos, c.frameJumpYawRad * 180.0 / EIGEN_PI);
 		const double resumeAge = ResumeAge(dev, c.t);
 		if (resumeAge >= 0.0 && resumeAge <= config.recentResumeSeconds)
 			note += Format(" (%.1f s after the stream resumed)", resumeAge);
@@ -384,17 +392,25 @@ void JumpDetector::EvaluatePendingCandidates()
 		if (c.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
 		{
 			c.heldPosition = HeldPositionSignature(c.preWindow);
-			c.driftCatchUp =
+			const bool thresholdSized =
 				std::abs(c.trans.norm() - config.driftCatchUpPos) <= config.driftCatchUpPosBand ||
 				std::abs(std::abs(dYaw) - config.driftCatchUpYawRad) <= config.driftCatchUpYawBandRad;
+			const bool turnAboutHead =
+				std::abs(dYaw) <= config.driftCatchUpYawRad + config.driftCatchUpYawBandRad &&
+				moved <= config.driftCatchUpHeadShift;
+			c.driftCatchUp = (thresholdSized || turnAboutHead) && !driftFollowed;
 			bool aboveFloor = c.trans.norm() > config.soloSettledPos ||
 				std::abs(dYaw) > config.soloSettledYawRad;
 			bool steady = resumeAge >= config.soloSettledSeconds;
 			c.settledSolo = aboveFloor && steady && !c.heldPosition && !c.driftCatchUp;
 			if (c.heldPosition)
 				note += "; position was held before the step (3DoF), not accepted alone";
-			else if (c.driftCatchUp)
+			else if ((thresholdSized || turnAboutHead) && driftFollowed)
+				note += "; shaped like a drift catch-up, but continuous alignment has followed the drift, so treated as a frame change";
+			else if (thresholdSized)
 				note += "; the size of the engine's reset threshold (a drift catch-up), not accepted alone";
+			else if (turnAboutHead)
+				note += "; a turn about the head (a drift catch-up), not accepted alone";
 			else if (aboveFloor && !steady)
 				note += Format("; stream steady under %.0f s, not accepted alone", config.soloSettledSeconds);
 		}
