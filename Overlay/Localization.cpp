@@ -19,7 +19,9 @@ namespace
 
 Language g_language = Language::English;
 Language g_pending = Language::English;
-bool g_fontAvailable[2] = { true, false };
+// Latin-script languages draw with the bundled face; Japanese waits for
+// the shell to find a font.
+bool g_fontAvailable[kLanguageCount] = { true, false, true };
 
 // Tr hands out pointers into this map, so it is only ever cleared between
 // frames. Formatted text (ages, counts) adds entries as the numbers change;
@@ -41,6 +43,9 @@ struct Table
 {
 	std::unordered_map<std::string, std::string> exact;
 	std::vector<Pattern> patterns;
+	// How the language joins what the English joined with ". " and ": ".
+	std::string sentenceGap;
+	std::string colon;
 };
 
 bool IsConversion(char c)
@@ -100,9 +105,11 @@ std::optional<std::string> KeyToRegex(const std::string &key)
 	return out;
 }
 
-Table BuildTable(const Entry *entries, size_t count)
+Table BuildTable(const Entry *entries, size_t count, const char *sentenceGap, const char *colon)
 {
 	Table table;
+	table.sentenceGap = sentenceGap;
+	table.colon = colon;
 	for (size_t i = 0; i < count; ++i)
 	{
 		const std::string key = entries[i].english;
@@ -134,12 +141,22 @@ Table BuildTable(const Entry *entries, size_t count)
 
 const Table *TableFor(Language language)
 {
-	if (language == Language::Japanese)
+	switch (language)
 	{
-		static const Table japanese = BuildTable(kJapanese, kJapaneseCount);
+	case Language::Japanese:
+	{
+		// Japanese runs sentences together and uses the full-width colon.
+		static const Table japanese = BuildTable(kJapanese, kJapaneseCount, "", "\xEF\xBC\x9A");
 		return &japanese;
 	}
-	return nullptr;
+	case Language::Italian:
+	{
+		static const Table italian = BuildTable(kItalian, kItalianCount, " ", ": ");
+		return &italian;
+	}
+	default:
+		return nullptr;
+	}
 }
 
 bool HasLetters(const std::string &s)
@@ -229,7 +246,7 @@ std::optional<std::string> TranslateSentence(const Table &table, const std::stri
 		auto head = Translate(table, text.substr(0, colon), depth + 1);
 		auto tail = Translate(table, text.substr(colon + 2), depth + 1);
 		if (head || tail)
-			return (head ? *head : text.substr(0, colon)) + "\xEF\xBC\x9A" +
+			return (head ? *head : text.substr(0, colon)) + table.colon +
 				(tail ? *tail : text.substr(colon + 2));
 	}
 	return std::nullopt;
@@ -271,10 +288,10 @@ std::optional<std::string> Translate(const Table &table, const std::string &text
 			continue;
 		}
 		auto translated = TranslateSentence(table, piece, depth);
-		// Japanese runs its sentences together; English left untranslated
-		// keeps the space it had.
-		if (spacePending && (previousEnglish || !translated))
-			out += ' ';
+		// The language's own sentence gap; English left untranslated keeps
+		// the space it had.
+		if (spacePending)
+			out += previousEnglish || !translated ? std::string(" ") : table.sentenceGap;
 		spacePending = false;
 		previousEnglish = !translated;
 		if (translated)
@@ -290,9 +307,14 @@ std::optional<std::string> Translate(const Table &table, const std::string &text
 	return out + tail;
 }
 
-bool JapaneseUiLanguage()
+Language WindowsUiLanguage()
 {
-	return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_JAPANESE;
+	switch (PRIMARYLANGID(GetUserDefaultUILanguage()))
+	{
+	case LANG_JAPANESE: return Language::Japanese;
+	case LANG_ITALIAN:  return Language::Italian;
+	default:            return Language::English;
+	}
 }
 
 } // namespace
@@ -301,6 +323,8 @@ Language LanguageFromCode(const std::string &code)
 {
 	if (code == "ja")
 		return Language::Japanese;
+	if (code == "it")
+		return Language::Italian;
 	if (code == "en")
 		return Language::English;
 	return SystemLanguage();
@@ -308,14 +332,18 @@ Language LanguageFromCode(const std::string &code)
 
 const char *LanguageCode(Language language)
 {
-	return language == Language::Japanese ? "ja" : "en";
+	switch (language)
+	{
+	case Language::Japanese: return "ja";
+	case Language::Italian:  return "it";
+	default:                 return "en";
+	}
 }
 
 Language SystemLanguage()
 {
-	if (JapaneseUiLanguage() && FontAvailable(Language::Japanese))
-		return Language::Japanese;
-	return Language::English;
+	const Language windows = WindowsUiLanguage();
+	return FontAvailable(windows) ? windows : Language::English;
 }
 
 void SetLanguage(Language language)

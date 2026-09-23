@@ -540,7 +540,7 @@ static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &s
 	if (HasTypedValue<std::string>(obj, "language"))
 	{
 		const std::string code = obj.at("language").get<std::string>();
-		if (code == "en" || code == "ja")
+		if (code == "en" || code == "ja" || code == "it")
 			settings.language = code;
 	}
 	if (HasTypedValue<picojson::object>(obj, "device_names"))

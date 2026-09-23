@@ -104,8 +104,8 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   mounted tracker can be hidden from games so full-body setups never mistake it for
   a body tracker. Optional (off by default): online re-estimation of the
   inter-system time offset from the same rigid pair.
-- **Languages** — English and Japanese, picked in Settings (Windows' display
-  language is the default). The Japanese translation may not be accurate;
+- **Languages** — English, Italian and Japanese, picked in Settings (Windows' display
+  language is the default). The translations may not be accurate;
   corrections are welcome as GitHub issues. Japanese text is drawn with a font
   Windows already has (Yu Gothic, Meiryo or MS Gothic), and the session log and
   diagnostics stay in English.

@@ -28,15 +28,20 @@ void BuildSettingsScreen(const VRState &state)
 			RowIconLabel(p, IconGlobe, "Language");
 
 			// Without a Japanese font its name would draw as boxes.
-			const char *languages[] = { "English",
+			const Language order[] = { Language::English, Language::Italian, Language::Japanese };
+			const char *languages[] = { "English", questcal::i18n::kItalianNativeName,
 				japaneseFont ? questcal::i18n::kJapaneseNativeName : "Japanese" };
+			const int count = 3;
 			const float segItemW = 130.0f, segH = 34.0f;
-			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - (segItemW * 2.0f + 8.0f), p.y + 9.0f));
-			const int current = chosen == Language::Japanese ? 1 : 0;
-			const int picked = Segmented("language", current, languages, 2, segItemW, segH);
+			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - (segItemW * count + 8.0f), p.y + 9.0f));
+			int current = 0;
+			for (int i = 0; i < count; ++i)
+				if (order[i] == chosen)
+					current = i;
+			const int picked = Segmented("language", current, languages, count, segItemW, segH);
 			if (picked != current)
 			{
-				if (picked == 1 && !japaneseFont)
+				if (order[picked] == Language::Japanese && !japaneseFont)
 				{
 					CalCtx.ReportError("Japanese needs a Japanese font, and Windows doesn't have one installed. "
 						"Add the Japanese Supplemental Fonts in Windows Settings > System > Optional features.\n");
@@ -44,7 +49,7 @@ void BuildSettingsScreen(const VRState &state)
 				else
 				{
 					const std::string previous = CalCtx.language;
-					CalCtx.language = questcal::i18n::LanguageCode(picked == 1 ? Language::Japanese : Language::English);
+					CalCtx.language = questcal::i18n::LanguageCode(order[picked]);
 					SaveSettingOrRestore(CalCtx.language, previous);
 					questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(CalCtx.language));
 				}

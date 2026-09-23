@@ -14,12 +14,22 @@ namespace
 using Check = void (*)(const char *, bool, const char *);
 using namespace questcal::i18n;
 
+const char *Lookup(const Entry *table, size_t count, const char *english)
+{
+	for (size_t i = 0; i < count; ++i)
+		if (std::strcmp(table[i].english, english) == 0)
+			return table[i].translation;
+	return nullptr;
+}
+
 const char *Japanese(const char *english)
 {
-	for (size_t i = 0; i < kJapaneseCount; ++i)
-		if (std::strcmp(kJapanese[i].english, english) == 0)
-			return kJapanese[i].translation;
-	return nullptr;
+	return Lookup(kJapanese, kJapaneseCount, english);
+}
+
+const char *Italian(const char *english)
+{
+	return Lookup(kItalian, kItalianCount, english);
 }
 
 // Conversions in a key, "%%" not counted: the number of values a pattern
@@ -53,13 +63,21 @@ std::string Fill(const char *translation, const std::string &a, const std::strin
 	return out;
 }
 
-void TableIsConsistent(Check check)
+std::set<std::string> Keys(const Entry *table, size_t count)
+{
+	std::set<std::string> keys;
+	for (size_t i = 0; i < count; ++i)
+		keys.insert(table[i].english);
+	return keys;
+}
+
+void TableIsConsistent(Check check, const char *language, const Entry *table, size_t count)
 {
 	std::set<std::string> keys;
 	bool unique = true, placeholders = true, nonEmpty = true;
-	for (size_t i = 0; i < kJapaneseCount; ++i)
+	for (size_t i = 0; i < count; ++i)
 	{
-		const Entry &e = kJapanese[i];
+		const Entry &e = table[i];
 		unique = keys.insert(e.english).second && unique;
 		nonEmpty = nonEmpty && *e.english && *e.translation;
 		const int captured = Conversions(e.english);
@@ -67,9 +85,19 @@ void TableIsConsistent(Check check)
 			if (p[0] == '{' && p[1] >= '0' && p[1] <= '9' && p[2] == '}' && p[1] - '0' >= captured)
 				placeholders = false;
 	}
-	check("i18n keys unique", unique, "every English key appears once");
-	check("i18n entries non-empty", nonEmpty, "no blank key or translation");
-	check("i18n placeholders captured", placeholders, "every {n} names a value its key captures");
+	const std::string prefix = std::string("i18n ") + language;
+	check((prefix + " keys unique").c_str(), unique, "every English key appears once");
+	check((prefix + " non-empty").c_str(), nonEmpty, "no blank key or translation");
+	check((prefix + " placeholders").c_str(), placeholders, "every {n} names a value its key captures");
+}
+
+// Every language translates the same strings: a key added to one table and
+// forgotten in another would show that language's player English.
+void TablesCoverTheSameText(Check check)
+{
+	check("i18n tables match",
+		Keys(kJapanese, kJapaneseCount) == Keys(kItalian, kItalianCount),
+		"Japanese and Italian have the same keys");
 }
 
 void EnglishPassesThrough(Check check)
@@ -138,11 +166,40 @@ void JapaneseLookups(Check check)
 	BeginFrame();
 }
 
+// Italian joins what Japanese runs together: sentences keep their space
+// and "headline: body" keeps a plain colon.
+void ItalianLookups(Check check)
+{
+	SetLanguage(Language::Italian);
+	BeginFrame();
+
+	check("i18n it exact", std::string(Tr("Start calibration")) == Italian("Start calibration"),
+		"an exact key");
+	check("i18n it headline and body",
+		Tr(std::string("Calibration failed: The devices didn't rotate far enough.")) ==
+			std::string(Italian("Calibration failed")) + ": " +
+				Italian("The devices didn't rotate far enough."),
+		"an activity line keeps a plain colon");
+	check("i18n it sentences",
+		Tr(std::string("Check that the tracker positions line up in VR. Headset tracker set up.")) ==
+			std::string(Italian("Check that the tracker positions line up in VR.")) + " " +
+				Italian("Headset tracker set up."),
+		"joined sentences keep their space");
+	check("i18n it code", LanguageFromCode("it") == Language::Italian &&
+		std::string(LanguageCode(Language::Italian)) == "it", "the saved code round-trips");
+
+	SetLanguage(Language::English);
+	BeginFrame();
+}
+
 } // namespace
 
 void RunLocalizationScenarios(Check check)
 {
-	TableIsConsistent(check);
+	TableIsConsistent(check, "ja", kJapanese, kJapaneseCount);
+	TableIsConsistent(check, "it", kItalian, kItalianCount);
+	TablesCoverTheSameText(check);
 	EnglishPassesThrough(check);
 	JapaneseLookups(check);
+	ItalianLookups(check);
 }

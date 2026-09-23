@@ -661,6 +661,7 @@ const Entry kJapanese[] = {
 	{ "started a new solution from %s", "{0} から新たにトラッキングを開始" },
 	{ "could not start tracking from %s", "{0} からトラッキングを開始できなかった" },
 	{ "Japanese", "日本語" },
+	{ "Italiano", "Italiano" },
 	// Names shown as they are.
 	{ "VividNightmareUnleashed", "VividNightmareUnleashed" },
 	{ "Jinxxy", "Jinxxy" },

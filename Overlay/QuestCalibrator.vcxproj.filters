@@ -167,6 +167,9 @@
     <ClCompile Include="LocalizationJa.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="LocalizationIt.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="LegacyContinuous.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

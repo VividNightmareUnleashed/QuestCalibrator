@@ -375,6 +375,10 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <ClCompile Include="LocalizationIt.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="LegacyContinuous.cpp" />
     <ClCompile Include="Updater.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">

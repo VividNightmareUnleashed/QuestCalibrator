@@ -16,7 +16,10 @@ namespace questcal::i18n
 
 	extern const Entry kJapanese[];
 	extern const size_t kJapaneseCount;
+	extern const Entry kItalian[];
+	extern const size_t kItalianCount;
 
-	// The language's own name, for the selector: shown as is in every language.
+	// Each language's own name, for the selector: shown as is in every language.
 	extern const char *const kJapaneseNativeName;
+	extern const char *const kItalianNativeName;
 }

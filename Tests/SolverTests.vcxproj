@@ -124,6 +124,9 @@
     <ClCompile Include="..\Overlay\LocalizationJa.cpp">
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
+    <ClCompile Include="..\Overlay\LocalizationIt.cpp">
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="..\Overlay\LighthouseVisibility.cpp" />
     <ClCompile Include="..\Overlay\JumpDetector.cpp" />
     <ClCompile Include="..\Overlay\PoseStreamHub.cpp" />
