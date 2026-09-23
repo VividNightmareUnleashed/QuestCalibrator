@@ -64,10 +64,9 @@ If you use a custom Steam library folder, SteamVR is under
 Steps:
 
 0. Read LICENSE in this folder. A manual install accepts it just as the
-   script install does, including the specific approval of its sections 2
-   (restrictions), 6 (termination) and 8 (limitation of liability) under
-   articles 1341 and 1342 of the Italian Civil Code. If you don't accept it,
-   stop here.
+   script install does, including the separate approval of its sections 2
+   (Restrictions), 6 (Termination) and 8 (Limitation of liability). If you
+   don't accept it, stop here.
 
 1. Close Steam completely (not just SteamVR).
 

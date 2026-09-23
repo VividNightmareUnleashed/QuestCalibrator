@@ -71,10 +71,10 @@ if ($steamProcesses) {
 # --- License agreement --------------------------------------------------------
 # Asked before anything changes, and read before the upgrade path's uninstall
 # clears the registry. An update whose LICENSE is unchanged since the user last
-# agreed doesn't ask again; changed terms are asked for again. Articles 1341
-# and 1342 of the Italian Civil Code make the restriction, termination and
-# liability clauses of standard terms binding only when approved specifically,
-# hence the second question.
+# agreed doesn't ask again; changed terms are asked for again. Some legal
+# systems bind users to the restriction, termination and liability clauses of
+# standard terms only when they approve them separately, hence the second
+# question.
 $licensePath = Join-Path $PSScriptRoot 'LICENSE'
 if (-not (Test-Path -LiteralPath $licensePath)) {
     Fail "LICENSE is missing from the package. Extract the whole zip and run this again."
@@ -109,9 +109,8 @@ if ($Unattended) {
     if ($answer -notmatch '^[Yy]') { Stop-NotAccepted }
 
     Write-Host ""
-    Write-Host "  Under articles 1341 and 1342 of the Italian Civil Code, these sections need"
-    Write-Host "  your specific approval: 2 (restrictions), 6 (termination) and 8 (limitation"
-    Write-Host "  of liability)."
+    Write-Host "  These sections need your separate approval: 2 (Restrictions),"
+    Write-Host "  6 (Termination) and 8 (Limitation of liability)."
     $answer = Read-Host "Do you specifically approve sections 2, 6 and 8? [Y/N]"
     if ($answer -notmatch '^[Yy]') { Stop-NotAccepted }
 }
