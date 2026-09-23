@@ -220,14 +220,14 @@ static const float kCountdownSeconds = 3.0f;
 static const int kPreviewManyTrackerCount = 6;
 
 // The top-level tabs. Calibration is the screen the app always had;
-// Lighthouse is the base station view; Smoothing is announced but not built.
+// Lighthouse and Smoothing are optional modules (CalCtx.modules); a tab
+// whose module is not installed stays greyed out.
 enum class MainTab { Calibration = 0, Lighthouse, Smoothing };
 
 // Shared state, each owned by one file.
 extern IdentifyPulseState g_identifyPulse;
 extern MainTab s_mainTab;
-extern bool s_showSettings;
-extern double g_chapWarnOpenedAt;
+extern bool s_showSettings;extern double g_chapWarnOpenedAt;
 extern GuideState s_guide;
 extern bool s_modalDetails;
 extern float s_bottomReserve;

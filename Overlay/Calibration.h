@@ -8,6 +8,7 @@
 #include "ProfileValidation.h"
 #include "RingPoseMath.h"
 #include "LighthouseVisibility.h"
+#include "Modules.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -263,6 +264,8 @@ struct CalibrationContext : CalibrationProfileState
 	bool lighthouseLogAvailable = false;
 	std::string lighthouseLogPath;
 	uint32_t lighthouseAttributedEvents = 0;
+	// The optional modules the installer put in (Modules.h), read at startup.
+	questcal::Modules modules;
 	// Debounced persistence for runtime compensation updates: dirty records save
 	// after a quiet period and always on shutdown. See PersistenceState.h — the
 	// rules live with the data rather than as loose fields here.

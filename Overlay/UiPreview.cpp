@@ -269,6 +269,7 @@ void SetupPreviewState()
 		CalCtx.autoCorrectionsApplied = 0;
 		break;
 	case PreviewScenario::Lighthouse:
+		CalCtx.modules.lighthouse = questcal::ModuleStatus::Installed;
 		s_mainTab = MainTab::Lighthouse;
 		break;
 	case PreviewScenario::Settings:

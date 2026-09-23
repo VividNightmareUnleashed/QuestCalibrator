@@ -111,6 +111,9 @@
     <ClInclude Include="LighthouseVisibility.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Modules.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="TrackingStreamDigest.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -192,6 +195,9 @@
       <Filter>Source Files\ImGui</Filter>
     </ClCompile>
     <ClCompile Include="EmbeddedFiles.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Modules.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UserInterface.cpp">

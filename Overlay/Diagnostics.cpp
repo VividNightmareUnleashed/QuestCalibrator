@@ -403,6 +403,10 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			<< ctx.chaperone.playSpaceSize.v[0] << " x " << ctx.chaperone.playSpaceSize.v[1] << " m";
 	out << "\n\n";
 
+	out << "[modules]\n";
+	out << "lighthouse: " << questcal::ModuleStatusName(ctx.modules.lighthouse) << "\n";
+	out << "smoothing: " << questcal::ModuleStatusName(ctx.modules.smoothing) << "\n\n";
+
 	out << "[base stations]\n";
 	out << "lighthouse log " << (ctx.lighthouseLogAvailable ? "read from " : "not readable at ")
 		<< ctx.lighthouseLogPath << "\n";

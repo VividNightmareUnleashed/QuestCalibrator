@@ -911,6 +911,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 			InitCalibrator();
 			calibratorInitialized = true;
 			LoadProfile(CalCtx);
+			CalCtx.modules = questcal::ReadInstalledModules();
 			questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 		}
 		if (!g_langOverride.empty())

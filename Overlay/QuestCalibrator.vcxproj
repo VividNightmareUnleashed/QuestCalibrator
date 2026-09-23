@@ -118,6 +118,7 @@
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="LighthouseLog.h" />
     <ClInclude Include="LighthouseVisibility.h" />
+    <ClInclude Include="Modules.h" />
     <ClInclude Include="TrackingStreamDigest.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
@@ -411,6 +412,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="Modules.cpp" />
     <ClCompile Include="UserInterface.cpp" />
     <ClCompile Include="UiWidgets.cpp" />
     <ClCompile Include="UiMainScreen.cpp" />

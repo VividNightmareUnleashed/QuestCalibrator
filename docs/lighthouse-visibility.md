@@ -10,6 +10,12 @@ out of the drift evidence.
 Everything here is read from SteamVR's log file. Nothing is read from the
 headset, and nothing changes when the log is missing or unreadable.
 
+The Lighthouse tab is the first feature of the Lighthouse module, which the
+installer leaves out unless asked and which will gain more base station
+tools (`docs/modules.md`). Reading the log, the session log lines, the
+diagnostics section and the drift rule are core and run on every install;
+module features build on them.
+
 ## Where it comes from
 
 `<Steam>\logs\vrserver.txt`, the Steam folder from the registry
@@ -48,7 +54,7 @@ shrank was rotated: SteamVR restarted, and the sets and counters start over.
 
 ## What is shown
 
-- **On the Lighthouse tab:** one card per station (channel, id, how many of
+- **On the Lighthouse tab** (with the Lighthouse module installed): one card per station (channel, id, how many of
   the switched-on devices see it, its drops this session), then one row per
   lighthouse device with a dot per station, filled while it is in view, and
   the in-view figure (`3 of 4 in view`, red for one or none) with the
