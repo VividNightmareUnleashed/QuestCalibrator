@@ -780,7 +780,7 @@ float SegmentedTabsHeight()
 }
 
 int SegmentedTabs(const char *id, int value, const char *const items[], int count,
-	unsigned disabledMask, const char *disabledTip)
+	unsigned disabledMask, const char *const disabledTips[])
 {
 	const float h = 28.0f * kTabScale;
 	const float pad = 1.0f * kTabScale;
@@ -866,8 +866,8 @@ int SegmentedTabs(const char *id, int value, const char *const items[], int coun
 		else
 		{
 			ImGui::Dummy(ImVec2(widths[i], c1.y - c0.y));
-			if (disabledTip && ImGui::IsItemHovered())
-				ShowTip(disabledTip);
+			if (disabledTips && disabledTips[i] && ImGui::IsItemHovered())
+				ShowTip(disabledTips[i]);
 		}
 		// Muted at rest, primary when chosen or hovered; a disabled cell
 		// keeps its colour at the reference's 0.4 opacity.

@@ -48,6 +48,9 @@ void BuildHeader()
 	float cw = ImGui::GetContentRegionAvail().x;
 	const float h = 44.0f;
 	static const char *const tabs[] = { "Calibration", "Lighthouse", "Smoothing" };
+	static const char *const disabledTips[] = { nullptr,
+		"Lighthouse module is currently not installed. Select it during installation.",
+		"Work in progress" };
 
 	// One row: the brand at the left, the gear at the right, and the tab
 	// switch centred on the row as a whole rather than on what is left
@@ -88,10 +91,13 @@ void BuildHeader()
 		Pal::U32(Pal::Text), "QuestCalibrator");
 
 	// The tab switch. Picking a tab is also the way back out of Settings.
+	// Lighthouse and Smoothing stay greyed out: they will ship as modules
+	// picked in the installer.
 	{
 		ImGui::SetCursorScreenPos(fl.Rect(tabsNode).min);
 		const int picked = SegmentedTabs("maintab", static_cast<int>(s_mainTab), tabs, 3,
-			1u << static_cast<int>(MainTab::Smoothing), "Smoothing isn't ready yet.");
+			(1u << static_cast<int>(MainTab::Lighthouse)) | (1u << static_cast<int>(MainTab::Smoothing)),
+			disabledTips);
 		if (picked != static_cast<int>(s_mainTab))
 		{
 			s_mainTab = static_cast<MainTab>(picked);

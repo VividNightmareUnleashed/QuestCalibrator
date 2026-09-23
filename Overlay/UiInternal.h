@@ -278,11 +278,11 @@ void ShowTip(const char *text, bool leftOfCursor = false);
 bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bool &value, const char *tooltip);
 int Segmented(const char *id, int value, const char *const items[], int count, float itemW, float h);
 // The tab switch (UiWidgets.cpp). disabledMask bit i greys item i out and
-// shows disabledTip over it; the cell widths follow the labels.
+// shows disabledTips[i] over it; the cell widths follow the labels.
 float SegmentedTabsWidth(const char *const items[], int count);
 float SegmentedTabsHeight();
 int SegmentedTabs(const char *id, int value, const char *const items[], int count,
-	unsigned disabledMask, const char *disabledTip);
+	unsigned disabledMask, const char *const disabledTips[]);
 void BuildLighthouseScreen(const VRState &state);
 void DrawStatusCard(const std::vector<StatusRowData> &rows);
 std::string FormatString(const char *fmt, ...);
