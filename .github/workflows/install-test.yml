@@ -16,15 +16,17 @@ on:
         required: false
 
 permissions:
-  # Draft releases are visible only to a token that can write to the repository.
-  contents: write
+  contents: read
 
 jobs:
   install:
     runs-on: windows-2022
     timeout-minutes: 20
     env:
-      GH_TOKEN: ${{ github.token }}
+      # Releases live in the public repository; drafts there are visible only to
+      # a token that can write to it.
+      GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+      PUBLIC_REPO: VividNightmareUnleashed/QuestCalibrator
       TAG: ${{ inputs.tag }}
       PREVIOUS: ${{ inputs.previous }}
 
@@ -39,15 +41,15 @@ jobs:
       - name: Download the packages
         shell: pwsh
         run: |
-          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --pattern '*.zip' --dir "$env:RUNNER_TEMP\new"
+          gh release download $env:TAG --repo $env:PUBLIC_REPO --pattern '*.zip' --dir "$env:RUNNER_TEMP\new"
           $previous = $env:PREVIOUS
           if (-not $previous) {
-            $previous = gh release list --repo $env:GITHUB_REPOSITORY --exclude-drafts --limit 20 --json tagName --jq '.[].tagName' |
+            $previous = gh release list --repo $env:PUBLIC_REPO --exclude-drafts --limit 20 --json tagName --jq '.[].tagName' |
               Where-Object { $_ -ne $env:TAG } | Select-Object -First 1
           }
           if ($previous) {
             Write-Host "Upgrade scenario from $previous"
-            gh release download $previous --repo $env:GITHUB_REPOSITORY --pattern '*.zip' --dir "$env:RUNNER_TEMP\old"
+            gh release download $previous --repo $env:PUBLIC_REPO --pattern '*.zip' --dir "$env:RUNNER_TEMP\old"
           }
 
       - name: Install, upgrade, conflict removal, uninstall
