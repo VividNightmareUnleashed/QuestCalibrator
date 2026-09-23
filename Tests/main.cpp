@@ -70,6 +70,7 @@ bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
 void RunHookInjectorScenarios(void (*check)(const char *, bool, const char *));
 void RunUniverseVerdictScenarios(void (*check)(const char *, bool, const char *));
+void RunPoseHubHoleScenarios(void (*check)(const char *, bool, const char *));
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
 #ifdef QUESTCAL_VIRTUAL_QUEST
 void RunVirtualQuestScenarios(void (*check)(const char *, bool, const char *));
@@ -8754,6 +8755,7 @@ int main(int argc, char **argv)
 	RunDriverWorkerScenario();
 	RunDriverSyncStateScenarios();
 	RunPoseChannelScenarios();
+	RunPoseHubHoleScenarios(Check);
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();
 	RunSolverPropertyScenarios(propertyTrials, propertySeed);

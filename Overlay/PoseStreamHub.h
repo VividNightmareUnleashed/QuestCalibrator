@@ -68,7 +68,19 @@ public:
 	// reports it as a single-count gap, not as the number of samples dropped.
 	// Consumers must treat a non-zero return as "there is a hole here", not as
 	// a loss rate.
-	uint64_t Drain(int consumer, std::vector<protocol::DevicePoseSample> &out);
+	//
+	// `hole`, when given, describes the whole hole in front of out.front(), or
+	// for an empty `out` the one still open after the last sample returned:
+	// a hole can reach a consumer over several drains (a terminal gap, then
+	// more loss before the next sample), and each drain's count is only its
+	// share. sessionBoundary says whether a boundary is in it, read under the
+	// same lock as the batch.
+	struct Hole
+	{
+		uint64_t size = 0;
+		bool sessionBoundary = false;
+	};
+	uint64_t Drain(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole *hole = nullptr);
 
 	// Drain repeatedly until this consumer reaches the head, concatenating the
 	// segments on either side of every gap into `out` (cleared first). For
@@ -79,14 +91,16 @@ public:
 	struct DrainSummary
 	{
 		uint64_t loss = 0;          // sum of every gap crossed
-		uint64_t largestGap = 0;
+		uint64_t largestGap = 0;    // largest whole Hole::size, across calls
+		                            // when a hole spans them
 		uint64_t gaps = 0;
 	};
 	DrainSummary DrainThroughGaps(int consumer, std::vector<protocol::DevicePoseSample> &out);
 
 	// Session boundaries published so far (writer death or a new driver
-	// session). A consumer that must not cross one compares this across drains:
-	// in the drain result a boundary is indistinguishable from a one-sample gap.
+	// session). A drain's own verdict is Hole::sessionBoundary; this count is for
+	// spans a cursor does not cover, such as a calibration run from before its
+	// preflight drain. In the drain count a boundary looks like a one-sample gap.
 	uint64_t StreamBoundaries();
 
 	// Skip this consumer to now, discarding its backlog.
@@ -95,6 +109,7 @@ public:
 #ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
 	void AppendSampleForTest(const protocol::DevicePoseSample &sample);
 	void AppendGapForTest(uint64_t count);
+	void AppendSessionBoundaryForTest();
 	void SetDrainChunkHookForTest(std::function<void()> hook);
 	uint64_t ResetDeferralsForTest() const
 	{
@@ -115,11 +130,15 @@ private:
 		uint64_t historyPosition = 0;
 		uint64_t samplePosition = 0;
 		uint64_t sourceDropPosition = 0;
+		// The hole open since the last sample copied: every loss accounted
+		// grows it, a boundary marks it, the next sample closes it.
+		uint64_t holeSize = 0;
+		bool holeHasBoundary = false;
 	};
 
 	void AccountForHistoryOverflowLocked(int consumer, uint64_t &dropped);
 	// Drain's body, appending to `out` instead of replacing it.
-	uint64_t DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out);
+	uint64_t DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole &hole);
 	void AppendSampleLocked(const protocol::DevicePoseSample &sample);
 	void AppendGapLocked(uint64_t count);
 	// Publishes an observation hole: discards every consumer's backlog (it may

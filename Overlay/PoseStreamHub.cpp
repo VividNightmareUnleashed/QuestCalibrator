@@ -68,14 +68,19 @@ void PoseStreamHub::AccountForHistoryOverflowLocked(int consumer, uint64_t &drop
 	// sourceDropCountBefore on the first retained entry.
 	uint64_t oldestSampleCount = history[oldest % HistoryCapacity].sampleCountBefore;
 	dropped += oldestSampleCount - cursor.samplePosition;
+	cursor.holeSize += oldestSampleCount - cursor.samplePosition;
 	cursor.samplePosition = oldestSampleCount;
 	cursor.historyPosition = oldest;
 }
 
-uint64_t PoseStreamHub::Drain(int consumer, std::vector<protocol::DevicePoseSample> &out)
+uint64_t PoseStreamHub::Drain(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole *hole)
 {
 	out.clear();
-	return DrainAppend(consumer, out);
+	Hole found;
+	const uint64_t dropped = DrainAppend(consumer, out, found);
+	if (hole)
+		*hole = found;
+	return dropped;
 }
 
 PoseStreamHub::DrainSummary PoseStreamHub::DrainThroughGaps(int consumer,
@@ -89,13 +94,15 @@ PoseStreamHub::DrainSummary PoseStreamHub::DrainThroughGaps(int consumer,
 	for (int pass = 0; pass < 64; ++pass)
 	{
 		const size_t before = out.size();
-		const uint64_t dropped = DrainAppend(consumer, out);
+		Hole hole;
+		const uint64_t dropped = DrainAppend(consumer, out, hole);
 		if (dropped > 0)
 		{
 			summary.loss += dropped;
-			summary.largestGap = (std::max)(summary.largestGap, dropped);
 			++summary.gaps;
 		}
+		// The whole hole, which an earlier pass or call may have begun.
+		summary.largestGap = (std::max)(summary.largestGap, hole.size);
 		if (dropped == 0 && out.size() == before)
 			break;
 	}
@@ -108,7 +115,7 @@ uint64_t PoseStreamHub::StreamBoundaries()
 	return diagnostics.streamBoundaries;
 }
 
-uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out)
+uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole &hole)
 {
 	const size_t start = out.size();
 	uint64_t dropped = 0;
@@ -171,6 +178,7 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 				{
 					const auto &gapEntry = history[cursor % HistoryCapacity];
 					dropped += gapEntry.sourceDropCountBefore - dropCursor;
+					consumerCursor.holeSize += gapEntry.sourceDropCountBefore - dropCursor;
 					dropCursor = gapEntry.sourceDropCountBefore;
 				}
 				if (cursor >= end || copiedThisChunk >= CopyChunk)
@@ -182,9 +190,19 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 				consumerCursor.samplePosition = entry.sampleCountBefore +
 					(entry.hasSample ? 1 : 0);
 				if (entry.hasSample)
+				{
+					// The batch's first sample closes the hole in front of it.
+					if (out.size() == start)
+						hole = { consumerCursor.holeSize, consumerCursor.holeHasBoundary };
+					consumerCursor.holeSize = 0;
+					consumerCursor.holeHasBoundary = false;
 					out.push_back(entry.sample);
+				}
 			}
 			copyComplete = cursor >= end;
+			// Nothing copied: report the hole still open, under this lock.
+			if (copyComplete && out.size() == start)
+				hole = { consumerCursor.holeSize, consumerCursor.holeHasBoundary };
 #ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
 			chunkHook = drainChunkHookForTest;
 #endif
@@ -244,9 +262,11 @@ void PoseStreamHub::AppendSessionBoundaryLocked()
 	// Everything buffered may predate a universe rebase, so discard it rather
 	// than hand a consumer positionally incoherent history. The marker is a
 	// single count deliberately: it says "there is a hole here", not how many
-	// samples were behind it (see Drain's contract in the header).
+	// samples were behind it (see Drain's contract in the header). The open
+	// hole keeps what it had and now holds a boundary, which the drain reports
+	// with the first sample after it.
 	for (auto &consumer : consumers)
-		consumer = { head, sampleCount, sourceDropCount };
+		consumer = { head, sampleCount, sourceDropCount, consumer.holeSize, true };
 	AppendGapLocked(1);
 }
 
@@ -265,6 +285,14 @@ void PoseStreamHub::AppendGapForTest(uint64_t count)
 	if (history.empty())
 		history.resize(static_cast<size_t>(HistoryCapacity));
 	AppendGapLocked(count);
+}
+
+void PoseStreamHub::AppendSessionBoundaryForTest()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	if (history.empty())
+		history.resize(static_cast<size_t>(HistoryCapacity));
+	AppendSessionBoundaryLocked();
 }
 
 void PoseStreamHub::SetDrainChunkHookForTest(std::function<void()> hook)
