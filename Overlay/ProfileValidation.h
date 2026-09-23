@@ -428,6 +428,10 @@ struct PersistenceLoadPlan
 	// back to. Getting it wrong lets one later profile save destroy a legacy
 	// user's only copy of their global settings and protected room.
 	bool legacySettingsMigrationPendingIfRewriteFails = false;
+	// Config must be rewritten as a new coupled revision (AdvanceRevision,
+	// MarkProfile) before the Settings rewrite, so that it carries a revision
+	// again and a partial repair still reads as a mismatch.
+	bool profileRewriteNeeded = false;
 };
 
 // The whole load-time state machine over {profile} x {settings} x {revision},
@@ -479,6 +483,27 @@ inline PersistenceLoadPlan PlanPersistenceLoad(const PersistenceLoadFacts &facts
 		{
 			plan.legacySettingsMigrationPending = true;
 			plan.settingsRewriteNeeded = settingsCanRewrite;
+		}
+		else if (facts.settingsRevision.value > 1)
+		{
+			// The migration materializes Settings at revision 1, and every later
+			// revision is coupled, written Config first. But while the migration
+			// is pending, WriteConfigRecord writes Settings before Config, so a
+			// coupled write can leave its Settings half here with a Config that
+			// never got its half, and no Config revision to compare against. Treat
+			// it as the mismatch it is, and have Config rewritten as the next
+			// revision so it carries one again.
+			plan.revisionMismatch = true;
+			plan.reportRevisionMismatch = armed;
+			if (armed)
+			{
+				plan.disarmChaperone = true;
+				armed = false;
+			}
+			plan.settingsRewriteNeeded = settingsCanRewrite;
+			// Only a valid profile can be saved; a coupled save of an invalid
+			// one would hold every Settings write back for the session.
+			plan.profileRewriteNeeded = facts.profileValid;
 		}
 	}
 	else

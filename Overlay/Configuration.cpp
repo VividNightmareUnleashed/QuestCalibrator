@@ -836,6 +836,14 @@ void LoadProfile(CalibrationContext &ctx)
 		break;
 	}
 
+	// A new coupled revision, not the stranded one: if only Config lands, the
+	// two records still differ and the next load still fails closed.
+	if (plan.profileRewriteNeeded)
+	{
+		ctx.persistence.AdvanceRevision();
+		ctx.persistence.MarkProfile(ctx.timeLastTick);
+	}
+
 	if (settingsRewriteNeeded)
 	{
 		ctx.persistence.MarkSettings(ctx.timeLastTick);

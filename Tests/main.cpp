@@ -7969,6 +7969,7 @@ void RunPersistenceLoadPlanScenario()
 		bool rewrite;
 		bool latch;
 		bool latchIfRewriteFails;
+		bool profileRewrite = false;
 	};
 	const RecordLoadState Mi = RecordLoadState::Missing;
 	const RecordLoadState Lo = RecordLoadState::Loaded;
@@ -7993,8 +7994,19 @@ void RunPersistenceLoadPlanScenario()
 		// embedded settings and room out of Config with no other copy anywhere.
 		{ "H5",  { Lo, Mi, { false, 0 }, { false, 0 }, false, false, true,  true  },
 			1, false, false, false, GArmed, true,  true,  true  },
-		{ "H6",  { Lo, Lo, { false, 0 }, { true,  5 }, false, false, true,  true  },
-			5, false, false, false, GArmed, false, false, true  },
+		// Migrated: Settings was materialized at revision 1 and Config has not
+		// been rewritten since. Healthy.
+		{ "H6",  { Lo, Lo, { false, 0 }, { true,  1 }, true,  true,  true,  true  },
+			1, false, false, false, GArmed, false, false, true  },
+		// Past revision 1 beside a Config with no revision: a coupled write whose
+		// Settings half landed through the migration's Settings-first write and
+		// whose Config half never did. Config is rewritten as the next revision.
+		{ "H6b", { Lo, Lo, { false, 0 }, { true,  5 }, false, false, true,  true  },
+			5, true,  false, false, GArmed, true,  false, true,  true  },
+		// The same with the rebased chaperone armed: restoring it would put a
+		// room re-bound to a new calibration onto the old one.
+		{ "H16", { Lo, Lo, { false, 0 }, { true,  2 }, true,  true,  true,  true  },
+			2, true,  true,  true,  GArmed, true,  false, true,  true  },
 		{ "H7",  { Lo, Lo, { false, 0 }, { false, 0 }, false, false, true,  true  },
 			1, false, false, false, GArmed, true,  true,  true  },
 		// Rewriting here would overwrite Settings while Config -- possibly the
@@ -8053,6 +8065,7 @@ void RunPersistenceLoadPlanScenario()
 		note("latch", plan.legacySettingsMigrationPending, c.latch);
 		note("latchIfFails", plan.legacySettingsMigrationPendingIfRewriteFails,
 			c.latchIfRewriteFails);
+		note("profileRewrite", plan.profileRewriteNeeded, c.profileRewrite);
 		if (plan.gate != c.gate)
 		{
 			bad += bad.empty() ? "" : ",";
