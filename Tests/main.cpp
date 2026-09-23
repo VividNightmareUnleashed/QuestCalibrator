@@ -69,6 +69,7 @@ bool ContinuousWindowDiagnosticsScenario();
 bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
 void RunHookInjectorScenarios(void (*check)(const char *, bool, const char *));
+void RunUniverseVerdictScenarios(void (*check)(const char *, bool, const char *));
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
 #ifdef QUESTCAL_VIRTUAL_QUEST
 void RunVirtualQuestScenarios(void (*check)(const char *, bool, const char *));
@@ -9281,6 +9282,7 @@ int main(int argc, char **argv)
 	// ---- Universe-jump detection ----
 	RunJumpScenarios();
 	RunTrackingRecoveryScenarios(Check);
+	RunUniverseVerdictScenarios(Check);
 #ifdef QUESTCAL_VIRTUAL_QUEST
 	// The simulated headset (the VirtualQuest submodule), when checked out.
 	RunVirtualQuestScenarios(Check);

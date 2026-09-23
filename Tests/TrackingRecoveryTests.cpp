@@ -279,6 +279,35 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 		check("recovery: moderate headset step waits for the follow-up too", count == 1 && std::abs(recovered - .15) < 1e-8, "tight agreement, 12 s apart");
 		count = Replay([](int f, uint32_t) { return f >= 150 ? .4 : 0.; }, {0}, nullptr, 3500);
 		check("recovery: large solo step still applies at once", count == 1, "no controller to wait for");
+		// Two headset steps 3 s apart, each followed by the controller 12 s
+		// later: accepting the first must not discard the second, which is
+		// still waiting for its own confirmation.
+		{
+			double total = 0.0;
+			JumpDetector detector(QpcSeconds);
+			count = 0;
+			for (int frame = 0; frame <= 3500; ++frame)
+			{
+				for (uint32_t id : { 0u, 1u })
+				{
+					const int first = id == 0 ? 150 : 1350, second = id == 0 ? 450 : 1650;
+					auto s = Sample(id, 1.0 + frame * 0.01,
+						(frame >= first ? .4 : 0.) + (frame >= second ? .4 : 0.));
+					s.position[2] = 1e-5 * std::sin(700.0 * (1.0 + frame * 0.01) + id);
+					detector.Push(s);
+				}
+				JumpDetector::UniverseDelta delta;
+				while (detector.PollDelta(delta))
+				{
+					++count;
+					total += delta.translation.x();
+				}
+			}
+			char detail[96];
+			snprintf(detail, sizeof detail, "%d deltas, %.3f m of 0.800 m compensated", count, total);
+			check("recovery: a second held headset step survives the first's confirmation",
+				count == 2 && std::abs(total - .8) < 1e-6, detail);
+		}
 	}
 
 	// Headset-only: below the solo floor a persistent HMD step is applied on
