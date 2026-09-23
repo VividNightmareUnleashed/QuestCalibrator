@@ -7,3 +7,6 @@ __pycache__/
 # produce are published to the public releases repository, never committed.
 install/out/
 install/test-out/
+
+# Local secrets (VirusTotal key for install/release.ps1)
+.env
