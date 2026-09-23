@@ -13,7 +13,11 @@ param(
     [string]$Tag = '',
     # Stop before touching the public repository.
     [switch]$DryRun,
-    [switch]$SkipScan
+    [switch]$SkipScan,
+    # Markdown for the top of the release notes (title line, changes, limits,
+    # validation). The generated Download and VirusTotal sections follow it.
+    # Without it the notes start with a Changes section taken from the tag message.
+    [string]$NotesFile = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +48,10 @@ try {
     if ($tagCommit -ne $head) { throw "$Tag points at $tagCommit, but HEAD is $head. Check out the tag first." }
 
     $remote = @(git ls-remote origin "refs/tags/$Tag" "refs/tags/$Tag^{}") | ForEach-Object { ($_ -split '\s+')[0] }
-    if ($remote -notcontains $head) { throw "$Tag is not on origin yet. Push it first: git push origin $Tag" }
+    if ($remote -notcontains $head) {
+        if (-not $DryRun) { throw "$Tag is not on origin yet. Push it first: git push origin $Tag" }
+        Write-Host "$Tag is not on origin yet; fine for a dry run." -ForegroundColor Yellow
+    }
 
     if (-not $DryRun) {
         gh release view $Tag --repo $publicRepo --json tagName 2>$null | Out-Null
@@ -102,10 +109,13 @@ try {
     $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
     $message = (git tag -l --format='%(contents:body)' $Tag) -join "`n"
     $notesPath = Join-Path ([IO.Path]::GetTempPath()) "QuestCalibrator-$version-notes.md"
+    $top = if ($NotesFile) {
+        (Get-Content -LiteralPath $NotesFile -Raw).TrimEnd()
+    } else {
+        "## Changes`n`n" + $(if ($message.Trim()) { $message.Trim() } else { '_Write the changes before publishing._' })
+    }
     @(
-        '## Changes'
-        ''
-        $(if ($message.Trim()) { $message.Trim() } else { '_Write the changes before publishing._' })
+        $top
         ''
         '## Download'
         ''
