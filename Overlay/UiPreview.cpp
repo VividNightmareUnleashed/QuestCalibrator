@@ -47,6 +47,9 @@ VRState PreviewVRState()
 	touchPro.serial = "PREVIEW-TOUCH-PRO-RIGHT";
 	touchPro.trackingSystem = "oculus";
 	touchPro.controllerRole = vr::TrackedControllerRole_RightHand;
+	// The Oculus driver ships no Quest controller art; its Touch icons are
+	// the Rift S set.
+	touchPro.iconPath = PreviewIconPath("oculus\\resources\\icons\\rifts_right_controller_ready_2x.png");
 	touchPro.battery = 0.75f;
 	touchPro.tracking = true;
 	state.devices.push_back(touchPro);
