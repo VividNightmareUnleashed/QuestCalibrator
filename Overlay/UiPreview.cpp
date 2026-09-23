@@ -37,6 +37,7 @@ VRState PreviewVRState()
 	hmd.serial = "1PASH5D1P17365";
 	hmd.trackingSystem = "oculus";
 	hmd.iconPath = PreviewIconPath("oculus\\resources\\icons\\quest_headset_ready_2x.png");
+	hmd.offIconPath = PreviewIconPath("oculus\\resources\\icons\\quest_headset_off_2x.png");
 	hmd.tracking = true;
 	state.devices.push_back(hmd);
 
@@ -48,6 +49,7 @@ VRState PreviewVRState()
 	touchPro.trackingSystem = "oculus";
 	touchPro.controllerRole = vr::TrackedControllerRole_RightHand;
 	touchPro.battery = 0.75f;
+	touchPro.offIconPath = PreviewIconPath("oculus\\resources\\icons\\rifts_right_controller_off_2x.png");
 	touchPro.tracking = true;
 	state.devices.push_back(touchPro);
 
@@ -99,6 +101,87 @@ VRState PreviewVRState()
 			"htc\\resources\\icons\\tracker_status_ready.png"; // no 2x ready ships
 		tracker.iconPath = PreviewIconPath(art);
 		state.devices.push_back(tracker);
+	}
+
+	// Where everything stands, for the 3D View's feed: the player in the middle of
+	// the play area facing forward, the left hand reaching out towards the
+	// wall it is down to one station at, the trackers on the body.
+	auto facingYaw = [](double degrees)
+	{
+		const double r = degrees * EIGEN_PI / 180.0;
+		return Eigen::Vector3d(-std::sin(r), 0.0, -std::cos(r));
+	};
+	const std::map<std::string, Eigen::Vector3d> spots = {
+		{ "1PASH5D1P17365", { 0.15, 1.62, 0.05 } },
+		{ "PREVIEW-TOUCH-PRO-RIGHT", { 0.45, 1.20, -0.20 } },
+		{ "LHR-A3C36EA5", { 0.50, 1.15, -0.25 } },
+		{ "LHR-841C98C3", { -0.75, 1.30, 0.55 } },
+		{ "LHR-77E5A211", { 0.15, 1.72, 0.12 } },
+		{ "LHR-77E5A212", { 0.12, 1.00, 0.10 } },
+		{ "LHR-77E5A213", { 0.02, 0.10, 0.12 } },
+		{ "LHR-77E5A214", { 0.30, 0.10, 0.08 } },
+		{ "LHR-77E5A215", { 0.72, 0.85, -0.55 } },
+	};
+	for (auto &dev : state.devices)
+	{
+		auto spot = spots.find(dev.serial);
+		if (spot == spots.end() || !dev.connected)
+			continue;
+		dev.placed = true;
+		dev.position = spot->second;
+		dev.facing = facingYaw(dev.id == 0 ? 20.0 : 0.0);
+	}
+
+	// Four stations high in the corners of a 4.4 by 3.8 m room, each aimed at
+	// a point a metre above the middle; the ids match the log lines below.
+	struct PreviewStation { const char *serial; const char *mode; Eigen::Vector3d at; };
+	const PreviewStation stations[] = {
+		{ "LHB-D3D4E73B", "5", { -2.1, 2.25, -1.8 } },
+		{ "LHB-170EE067", "8", { 2.2, 2.10, -1.7 } },
+		{ "LHB-F210FBA6", "9", { 2.0, 2.30, 1.9 } },
+		{ "LHB-04D47FB4", "16", { -1.9, 1.35, 1.8 } },
+	};
+	for (int i = 0; i < 4; ++i)
+	{
+		VRStation st;
+		st.id = 20 + i;
+		st.serial = stations[i].serial;
+		st.modeLabel = stations[i].mode;
+		st.iconPath = PreviewIconPath("lighthouse\\resources\\icons\\base2_status_ready_2x.png");
+		st.connected = true;
+		st.placed = true;
+		st.position = stations[i].at;
+		st.facing = (Eigen::Vector3d(0.0, 1.0, 0.0) - st.position).normalized();
+		state.stations.push_back(st);
+	}
+	// The last station is mounted low and turned away from the middle.
+	state.stations.back().facing = (Eigen::Vector3d(1.4, 0.9, -1.2) - state.stations.back().position).normalized();
+	// -uipreview-lighthouse-conflict: a fifth station left on channel 8, so
+	// two of the player's stations share it.
+	if (g_uiPreviewScenario == PreviewScenario::LighthouseConflict)
+	{
+		VRStation extra = state.stations[1];
+		extra.id = 24;
+		extra.serial = "LHB-2A91C0D4";
+		extra.position = Eigen::Vector3d(0.1, 2.2, -1.9);
+		extra.facing = (Eigen::Vector3d(0.0, 1.0, 0.0) - extra.position).normalized();
+		state.stations.push_back(extra);
+	}
+	// Upright mounts: no roll, so right is level and up follows the tilt.
+	for (auto &st : state.stations)
+	{
+		st.right = st.facing.cross(Eigen::Vector3d::UnitY()).normalized();
+		st.up = st.right.cross(st.facing).normalized();
+	}
+
+	// An irregular boundary around a 2.1 by 2.4 m play area.
+	const ImVec2 outline[] = {
+		{ -1.05f, -1.20f }, { 0.70f, -1.20f }, { 1.05f, -0.85f }, { 1.05f, 1.20f },
+		{ -0.60f, 1.20f }, { -1.05f, 0.75f } };
+	for (int k = 0; k < 6; ++k)
+	{
+		state.floorEdges.push_back(outline[k]);
+		state.floorEdges.push_back(outline[(k + 1) % 6]);
 	}
 
 	return state;
@@ -219,6 +302,15 @@ void SetupPreviewState()
 		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 16, { 5, 8, 9 }), 0.0);
 		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 8, { 5, 9 }), 0.0);
 		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 5, { 9 }), 0.0);
+		// And one live drop half a second ago, so the tab shows a fresh
+		// loss next to the ones that have lasted.
+		LARGE_INTEGER frequency, counter;
+		if (QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&counter) && frequency.QuadPart != 0)
+		{
+			auto fresh = line(K::StationDropped, "LHR-A3C36EA5", 8, { 5, 9, 16 });
+			fresh.historical = false;
+			vis.Apply(fresh, static_cast<double>(counter.QuadPart) / static_cast<double>(frequency.QuadPart) - 0.5);
+		}
 		CalCtx.lighthouseLogAvailable = true;
 		CalCtx.lighthouseLogPath = lighthouselog::DefaultLogPath();
 	}
@@ -266,6 +358,7 @@ void SetupPreviewState()
 		CalCtx.autoCorrectionsApplied = 0;
 		break;
 	case PreviewScenario::Lighthouse:
+	case PreviewScenario::LighthouseConflict:
 		s_mainTab = MainTab::Lighthouse;
 		break;
 	case PreviewScenario::Failed:

@@ -572,6 +572,20 @@ VRState LoadVRState()
 	vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
 	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(
 		vr::TrackingUniverseRawAndUncalibrated, 0.0f, poses, vr::k_unMaxTrackedDeviceCount);
+	// And one in the standing universe for the 3D View's feed, the space the
+	// boundary is drawn in.
+	vr::TrackedDevicePose_t standing[vr::k_unMaxTrackedDeviceCount];
+	vr::VRSystem()->GetDeviceToAbsoluteTrackingPose(
+		vr::TrackingUniverseStanding, 0.0f, standing, vr::k_unMaxTrackedDeviceCount);
+	auto place = [&](uint32_t id, bool &placed, Eigen::Vector3d &position, Eigen::Vector3d &facing)
+	{
+		placed = standing[id].bPoseIsValid;
+		if (!placed)
+			return;
+		const vr::HmdMatrix34_t &m = standing[id].mDeviceToAbsoluteTracking;
+		position = Eigen::Vector3d(m.m[0][3], m.m[1][3], m.m[2][3]);
+		facing = Eigen::Vector3d(-m.m[0][2], -m.m[1][2], -m.m[2][2]);
+	};
 
 	auto &trackingSystems = state.trackingSystems;
 	auto readStringProperty = [](uint32_t id, vr::ETrackedDeviceProperty property)
@@ -584,6 +598,19 @@ VRState LoadVRState()
 			value[size - 1] != '\0')
 			return std::string();
 		return std::string(value, size - 1);
+	};
+
+	// "{driver}/icons/x.png" resolves through IVRResources.
+	auto resolveIcon = [&](uint32_t id, vr::ETrackedDeviceProperty prop) -> std::string {
+		std::string resource = readStringProperty(id, prop);
+		if (resource.empty() || !vr::VRResources())
+			return std::string();
+		char fullPath[MAX_PATH] = {};
+		uint32_t len = vr::VRResources()->GetResourceFullPath(
+			resource.c_str(), "", fullPath, MAX_PATH);
+		if (len == 0 || len >= MAX_PATH || !FileExists(fullPath))
+			return std::string();
+		return Prefer2x(fullPath);
 	};
 
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
@@ -628,6 +655,7 @@ VRState LoadVRState()
 				device.connected = vr::VRSystem()->IsTrackedDeviceConnected(id);
 				device.tracking = device.connected && poses[id].bPoseIsValid &&
 					poses[id].eTrackingResult == vr::TrackingResult_Running_OK;
+				place(id, device.placed, device.position, device.facing);
 
 				vr::ETrackedPropertyError perr = vr::TrackedProp_Success;
 				if (vr::VRSystem()->GetBoolTrackedDeviceProperty(id, vr::Prop_DeviceProvidesBatteryStatus_Bool, &perr) && perr == vr::TrackedProp_Success)
@@ -642,27 +670,16 @@ VRState LoadVRState()
 				// art while connected, red low-battery art below kLowBattery,
 				// gray "off" art when the device drops out. Falls back down
 				// the chain when a driver doesn't ship a variant.
-				// "{driver}/icons/x.png" resolves through IVRResources.
-				auto resolveIcon = [&](vr::ETrackedDeviceProperty prop) -> std::string {
-					std::string resource = readStringProperty(id, prop);
-					if (resource.empty() || !vr::VRResources())
-						return std::string();
-					char fullPath[MAX_PATH] = {};
-					uint32_t len = vr::VRResources()->GetResourceFullPath(
-						resource.c_str(), "", fullPath, MAX_PATH);
-					if (len == 0 || len >= MAX_PATH || !FileExists(fullPath))
-						return std::string();
-					return Prefer2x(fullPath);
-				};
-
 				if (!device.connected)
-					device.iconPath = resolveIcon(vr::Prop_NamedIconPathDeviceOff_String);
+					device.iconPath = resolveIcon(id, vr::Prop_NamedIconPathDeviceOff_String);
 				else if (device.battery >= 0.0f && device.battery < kLowBattery && !device.charging)
-					device.iconPath = resolveIcon(vr::Prop_NamedIconPathDeviceAlertLow_String);
+					device.iconPath = resolveIcon(id, vr::Prop_NamedIconPathDeviceAlertLow_String);
 				if (device.iconPath.empty())
-					device.iconPath = resolveIcon(vr::Prop_NamedIconPathDeviceReady_String);
+					device.iconPath = resolveIcon(id, vr::Prop_NamedIconPathDeviceReady_String);
 				if (device.iconPath.empty())
-					device.iconPath = resolveIcon(vr::Prop_NamedIconPathDeviceOff_String);
+					device.iconPath = resolveIcon(id, vr::Prop_NamedIconPathDeviceOff_String);
+				if (system != "lighthouse")
+					device.offIconPath = resolveIcon(id, vr::Prop_NamedIconPathDeviceOff_String);
 
 				state.devices.push_back(device);
 			}
@@ -681,6 +698,71 @@ VRState LoadVRState()
 				}
 			}
 		}
+		else
+		{
+			VRStation station;
+			station.id = static_cast<int>(id);
+			station.serial = readStringProperty(id, vr::Prop_SerialNumber_String);
+			station.modeLabel = readStringProperty(id, vr::Prop_ModeLabel_String);
+			station.connected = vr::VRSystem()->IsTrackedDeviceConnected(id);
+			place(id, station.placed, station.position, station.facing);
+			// The station art SteamVR shows in its own status window.
+			station.iconPath = resolveIcon(id, station.connected
+				? vr::Prop_NamedIconPathDeviceReady_String : vr::Prop_NamedIconPathDeviceOff_String);
+			if (station.iconPath.empty())
+				station.iconPath = resolveIcon(id, vr::Prop_NamedIconPathDeviceReady_String);
+			auto readFloat = [id](vr::ETrackedDeviceProperty property, float &value)
+			{
+				vr::ETrackedPropertyError error = vr::TrackedProp_Success;
+				float read = vr::VRSystem()->GetFloatTrackedDeviceProperty(id, property, &error);
+				if (error == vr::TrackedProp_Success && std::isfinite(read) && read > 0.0f)
+					value = read;
+			};
+			readFloat(vr::Prop_FieldOfViewLeftDegrees_Float, station.fovLeft);
+			readFloat(vr::Prop_FieldOfViewRightDegrees_Float, station.fovRight);
+			readFloat(vr::Prop_FieldOfViewTopDegrees_Float, station.fovTop);
+			readFloat(vr::Prop_FieldOfViewBottomDegrees_Float, station.fovBottom);
+			if (station.placed)
+			{
+				const vr::HmdMatrix34_t &m = standing[id].mDeviceToAbsoluteTracking;
+				station.right = Eigen::Vector3d(m.m[0][0], m.m[1][0], m.m[2][0]);
+				station.up = Eigen::Vector3d(m.m[0][1], m.m[1][1], m.m[2][1]);
+			}
+			readFloat(vr::Prop_TrackingRangeMaximumMeters_Float, station.rangeMax);
+			state.stations.push_back(station);
+		}
+	}
+
+	// The boundary's floor edges: the two lowest corners of every wall quad.
+	if (auto *setup = vr::VRChaperoneSetup())
+	{
+		uint32_t count = 0;
+		if (setup->GetLiveCollisionBoundsInfo(nullptr, &count) && count > 0 && count <= 4096)
+		{
+			std::vector<vr::HmdQuad_t> quads(count);
+			if (setup->GetLiveCollisionBoundsInfo(quads.data(), &count) && count <= quads.size())
+			{
+				for (uint32_t q = 0; q < count; ++q)
+				{
+					const vr::HmdVector3_t *c = quads[q].vCorners;
+					int order[4] = { 0, 1, 2, 3 };
+					std::sort(order, order + 4, [c](int a, int b) { return c[a].v[1] < c[b].v[1]; });
+					state.floorEdges.push_back(ImVec2(c[order[0]].v[0], c[order[0]].v[2]));
+					state.floorEdges.push_back(ImVec2(c[order[1]].v[0], c[order[1]].v[2]));
+				}
+			}
+		}
+	}
+	if (state.floorEdges.empty() && vr::VRChaperone())
+	{
+		vr::HmdQuad_t rect;
+		if (vr::VRChaperone()->GetPlayAreaRect(&rect))
+			for (int k = 0; k < 4; ++k)
+			{
+				const vr::HmdVector3_t &a = rect.vCorners[k], &b = rect.vCorners[(k + 1) % 4];
+				state.floorEdges.push_back(ImVec2(a.v[0], a.v[2]));
+				state.floorEdges.push_back(ImVec2(b.v[0], b.v[2]));
+			}
 	}
 
 	return state;

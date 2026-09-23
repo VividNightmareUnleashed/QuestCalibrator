@@ -286,6 +286,30 @@ void VisibilityScenarios(Check check)
 		ranked.size() == 3 && ranked[0].channel == 5 && ranked[0].drops == 2 &&
 		vis.StationName(5) == "S-5 (0000A005)", detail);
 
+	// Lost stations: a drop is remembered with its time until the station
+	// comes back; a full loss marks everything it had; replayed drops carry
+	// no time; a station never had is not lost.
+	{
+		LighthouseVisibility lv;
+		lv.Apply(Made(K::StationAdded, "LHR-3", 5, { 5, 8, 9 }, true), 0.0);
+		lv.Apply(Made(K::StationDropped, "LHR-3", 9, { 5, 8 }, true), 0.0);
+		const bool replayed = lv.Find("LHR-3")->lost.count(9) == 1 &&
+			lv.Find("LHR-3")->lost.at(9) <= -1e8;
+		lv.Apply(Made(K::StationDropped, "LHR-3", 8, { 5 }), 50.0);
+		const bool dropped = lv.Find("LHR-3")->lost.count(8) == 1 && lv.Find("LHR-3")->lost.at(8) == 50.0;
+		lv.Apply(Made(K::NoneSeen, "LHR-3", -1, {}), 51.0);
+		const auto &gone = lv.Find("LHR-3")->lost;
+		const bool emptied = gone.size() == 3 && gone.at(5) == 51.0 && gone.at(8) == 50.0;
+		lv.Apply(Made(K::StationAdded, "LHR-3", 8, { 8 }), 60.0);
+		lv.Apply(Made(K::StationAdded, "LHR-3", 16, { 8, 16 }), 61.0);
+		const auto &after = lv.Find("LHR-3")->lost;
+		snprintf(detail, sizeof detail, "replayed %d dropped %d emptied %d, lost after %zu",
+			replayed, dropped, emptied, after.size());
+		check("lighthouse state: lost stations are held until they come back",
+			replayed && dropped && emptied && after.size() == 2 && after.count(5) == 1 &&
+			after.count(9) == 1 && after.count(8) == 0 && after.count(16) == 0, detail);
+	}
+
 	vis.Reset();
 	check("lighthouse state: reset forgets everything",
 		vis.Devices().empty() && vis.StationCount() == 0, "");

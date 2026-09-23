@@ -40,17 +40,52 @@ struct VRDevice
 	std::string serial;
 	std::string trackingSystem;
 	std::string iconPath;   // absolute path to the SteamVR device icon, matched to state (ready/low/off)
+	// The driver's grey "off" art, whatever the state, for drawing devices
+	// outside the lighthouse system as context only (the 3D View's feed).
+	std::string offIconPath;
 	vr::ETrackedControllerRole controllerRole = vr::TrackedControllerRole_Invalid;
 	bool connected = true;
 	bool tracking = false;       // pose valid and Running_OK at the last 1 Hz refresh
 	float battery = -1.0f;       // 0..1, or -1 when the device reports none
 	bool charging = false;
+	// Standing-universe pose at the last refresh, for the 3D View's feed;
+	// placed is false while the pose is invalid.
+	bool placed = false;
+	Eigen::Vector3d position{ 0, 0, 0 };
+	Eigen::Vector3d facing{ 0, 0, -1 };   // the device's -Z
+};
+
+// A base station as OpenVR lists it. Its serial is "LHB-" and the same hex
+// id the lighthouse log prints, which is how a log channel finds its pose.
+// Lighthouse devices are target-side, so the driver moves stations with the
+// calibration and a calibrated station stands in the headset's space.
+struct VRStation
+{
+	int id = -1;
+	std::string serial;
+	std::string modeLabel;       // Prop_ModeLabel_String
+	std::string iconPath;        // SteamVR's station art, ready or off
+	bool connected = false;
+	bool placed = false;
+	Eigen::Vector3d position{ 0, 0, 0 };
+	Eigen::Vector3d facing{ 0, 0, -1 };   // the optical axis, the pose's -Z
+	Eigen::Vector3d right{ 1, 0, 0 };     // the pose's +X
+	Eigen::Vector3d up{ 0, 1, 0 };        // the pose's +Y
+	// Degrees off the axis to each edge of the view; base station 2.0's
+	// 160 by 115 degrees until SteamVR reports its own.
+	float fovLeft = 80.0f, fovRight = 80.0f, fovTop = 57.5f, fovBottom = 57.5f;
+	float rangeMax = 7.0f;       // metres
 };
 
 struct VRState
 {
 	std::vector<std::string> trackingSystems;
 	std::vector<VRDevice> devices;
+	std::vector<VRStation> stations;
+	// The live boundary's floor edges as (x, z) pairs in the standing
+	// universe, two points per edge; the play area rectangle when SteamVR has
+	// no boundary.
+	std::vector<ImVec2> floorEdges;
 };
 
 // Below this level the device icon swaps to its red low-battery art and the

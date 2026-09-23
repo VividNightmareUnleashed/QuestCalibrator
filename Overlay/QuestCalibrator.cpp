@@ -1018,11 +1018,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		g_uiPreviewScenario = cmd == L"-uipreview-frozen" ? PreviewScenario::Frozen
 			: cmd == L"-uipreview-failed" ? PreviewScenario::Failed : PreviewScenario::Empty;
 	}
-	else if (cmd == L"-uipreview-lighthouse")
+	else if (cmd == L"-uipreview-lighthouse" || cmd == L"-uipreview-lighthouse-conflict")
 	{
 		g_uiPreviewMode = true;
 		g_uiPreviewMany = true;
-		g_uiPreviewScenario = PreviewScenario::Lighthouse;
+		g_uiPreviewScenario = cmd == L"-uipreview-lighthouse" ? PreviewScenario::Lighthouse
+			: PreviewScenario::LighthouseConflict;
 	}
 	else if (cmd == L"-openvrpath")
 	{

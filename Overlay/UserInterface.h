@@ -12,7 +12,7 @@ extern bool g_uiPreviewMany;
 // Preview scenarios cover frozen alignment, a failed solve, an empty profile,
 // guide setup, a completed result, and the Lighthouse tab. Each implies
 // -uipreview-many.
-enum class PreviewScenario { Healthy, Frozen, Failed, Empty, Guide, Result, Lighthouse };
+enum class PreviewScenario { Healthy, Frozen, Failed, Empty, Guide, Result, Lighthouse, LighthouseConflict };
 extern PreviewScenario g_uiPreviewScenario;
 
 // Fonts loaded by QuestCalibrator.cpp at window creation.

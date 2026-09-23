@@ -62,6 +62,11 @@ public:
 		// is a single-baseline fit or an IMU coast for as long as this holds.
 		// State, not timing, so replayed lines set it too.
 		bool degraded = false;
+		// Stations this device had and dropped, until it picks each up
+		// again, with the ring time of the drop (-1e9 when the drop was a
+		// replayed line). A station the device never had from where it
+		// stands is not lost, only out of view.
+		std::map<int, double> lost;
 		double lastEvent = -1e9;    // ring seconds; live lines only
 		double lastDisturbance = -1e9;
 		std::string lastDisturbanceText;

@@ -48,19 +48,57 @@ shrank was rotated: SteamVR restarted, and the sets and counters start over.
 
 ## What is shown
 
-- **On the Lighthouse tab:** one card per station (channel, id, how many of
-  the switched-on devices see it, its drops this session), then one row per
-  lighthouse device with a dot per station, filled while it is in view, and
-  the in-view figure (`3 of 4 in view`, red for one or none) with the
-  device's drop count. Hovering a row lists the stations by channel and id
-  and the last change. A station no device sees is outlined in red: that is
-  the one to look at. The Calibration tab's device rows carry none of this.
-  `-uipreview-lighthouse` opens the tab in the preview.
+- **On the Lighthouse tab:** one grid, lighthouse devices down the side and
+  stations across the top in SteamVR's own art (the `NamedIconPath`
+  properties). A cell is a filled dot while the device has the station in
+  view, a red ring while it has lost it, and a faint ring when it is only
+  out of view. A station counts as lost only after the device had it (the
+  `lost` set on each device in `LighthouseVisibility`, fed by drop lines and
+  by a set that empties); one it never had from where it stands is only out
+  of view. A ring lost in the last four seconds glows behind it. Each row
+  ends with the in-view figure (`3 of 4`, red below two), and a row with
+  something to say names it under the device: `Down to one station`,
+  `Lost S-16`, `Lost S-8 just now`, `Dropped a station 7 times`. Rows with
+  a problem come first, devices that are off last. Under each column is how
+  many of the reporting devices see that station, red when none does: that
+  is the one to look at. Hovering a row lists what it sees, its drops and
+  the last change; hovering a station lists its id and drops. The
+  Calibration tab's device rows carry none of this. `-uipreview-lighthouse`
+  opens the tab in the preview.
+- **Channels (same tab):** two stations whose `Prop_ModeLabel_String` is the
+  same channel get in each other's way. The card names the channel, the
+  station to move (the one the log is not naming on that channel) and the
+  lowest channel from 1 to 16 that no listed or logged station uses, with
+  where SteamVR changes it. The "Switch to channel" button is drawn but
+  not built: no OpenVR call for it is known, and setting the channel over
+  Bluetooth, as some third-party tools do, is still to come. A station
+  that drops often is not a channel problem, so drops never lead to a
+  channel suggestion. A neighbour's station on one of the player's channels
+  is not detected yet.
+- **3D View (same tab):** a card for the optional module that will show the
+  room in 3D in a browser. Its button is drawn but not built. The station
+  and device poses and the boundary that `LoadVRState` reads are there for
+  that module; the tab itself no longer draws the room.
 - **In the session log:** one line per disturbance (`LHR-A3C36EA5 down to one
   station S-9 (F210FBA6) after losing S-16 (04D47FB4)`), and, with detailed
   logging on, one line per routine handoff.
 - **In a diagnostics export:** a `[base stations]` section with all of the
   above.
+
+## Where the stations stand
+
+A log channel is joined to an OpenVR base station by its id: the station's
+serial is `LHB-` and the same eight hex digits (`LHB-D3D4E73B` for S-5
+above, as vrserver's "finished adding tracked device" lines show). Until the
+log has printed an id, the station's `Prop_ModeLabel_String` is compared with
+the channel number instead.
+
+Stations are lighthouse devices, so the driver moves them with the
+calibration like any tracker, and their standing-universe poses land in the
+headset's space next to the boundary. Until a calibration is applied they do
+not, and anything drawing them with the boundary has to say so. The optical
+axis is taken as the pose's -Z, the OpenVR convention; this has not yet been
+checked against a physical station.
 
 ## What it changes
 

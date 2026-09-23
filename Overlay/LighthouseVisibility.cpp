@@ -69,6 +69,8 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 	};
 
 	const int before = d.visibleKnown ? static_cast<int>(d.visible.size()) : -1;
+	const bool knewBefore = d.visibleKnown;
+	const std::vector<int> had = d.visible;
 	std::string what;
 	switch (e.kind)
 	{
@@ -123,6 +125,19 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 
 	d.degraded = !d.visibleKnown ||
 		static_cast<int>(d.visible.size()) < config.cleanStations;
+
+	// What it lost: the station a drop line names, and anything else that
+	// left a known set (a "no base stations seen" empties it at once).
+	// Whatever it sees now is not lost.
+	const double lostAt = e.historical ? -1e9 : ringTime;
+	if (e.kind == Event::Kind::StationDropped && e.channel >= 0)
+		d.lost[e.channel] = lostAt;
+	if (knewBefore && d.visibleKnown)
+		for (int channel : had)
+			if (!std::binary_search(d.visible.begin(), d.visible.end(), channel))
+				d.lost[channel] = lostAt;
+	for (int channel : d.visible)
+		d.lost.erase(channel);
 
 	if (what.empty())
 		return std::string();
