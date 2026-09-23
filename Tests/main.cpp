@@ -2197,6 +2197,48 @@ void RunPoseRingDrainStatusScenario()
 		"reset gate and writer death distinguished");
 }
 
+void RunPoseRingTerminalGapInPlaceScenario()
+{
+	// A failed-publish marker the reader sees on an empty queue can be taken by
+	// a producer's claim and replaced by an equal count of later failures in
+	// the moment between the reader's second empty-queue check and its
+	// compare-exchange. Those later failures began after the claimed pose was
+	// published, so they belong after it; a compare-exchange on the count
+	// alone reports them ahead of it instead.
+	PoseRingFixture ring("TerminalGapInPlace");
+	bool opened = ring.Open();
+	protocol::DevicePoseSample pose{};
+	pose.sampleTimeQpc = 15000000;
+	pose.deviceId = 3;
+	pose.rotation.w = 1.0;
+	std::string events;
+	auto onSample = [&](const protocol::DevicePoseSample &sample)
+	{
+		events += sample.sampleTimeQpc == pose.sampleTimeQpc ? "S" : "?";
+	};
+	auto onGap = [&](uint64_t count) { events += "g" + std::to_string(count); };
+	bool interleaved = false;
+	bool published = false;
+	if (opened)
+	{
+		ring.writer.RecordFailedPublishForTest();   // lost before the pose
+		ring.reader.DrainWithTerminalGapHookForTest(onSample, onGap, [&]()
+		{
+			if (interleaved)
+				return;
+			interleaved = true;
+			published = ring.writer.Publish(pose);   // carries the earlier loss
+			ring.writer.RecordFailedPublishForTest();   // lost after the pose
+		});
+		ring.reader.Drain(onSample, onGap);
+	}
+	char detail[160];
+	snprintf(detail, sizeof detail, "opened %d interleaved %d published %d events %s",
+		opened, interleaved, published, events.c_str());
+	Check("pose ring: terminal gap stays behind an earlier pose",
+		opened && interleaved && published && events == "g1Sg1", detail);
+}
+
 void RunPoseRingOverflowScenario()
 {
 	// Let the bounded queue overflow without a reader. Producers safely reclaim
@@ -3352,6 +3394,7 @@ void RunPoseChannelScenarios()
 	RunPoseRingAbandonedWriterScenario();
 	RunPoseRingAbandonedResetOwnerScenario();
 	RunPoseRingOpenResetRaceScenario();
+	RunPoseRingTerminalGapInPlaceScenario();
 	RunPoseHubTerminalGapScenario();
 	RunPoseHubMarkerOverflowScenario();
 	RunPoseHubConsumerIndependenceScenario();
