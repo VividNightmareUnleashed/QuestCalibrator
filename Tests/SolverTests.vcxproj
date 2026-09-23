@@ -102,6 +102,7 @@
     <ClCompile Include="TrackingRecoveryTests.cpp" />
     <ClCompile Include="LighthouseLogTests.cpp" />
     <ClCompile Include="PredictionModelTests.cpp" />
+    <ClCompile Include="PropertyTests.cpp" />
     <ClCompile Include="VirtualLighthouse.cpp" />
     <ClCompile Include="..\VirtualQuest\Tests\VirtualQuest.cpp" Condition="Exists('..\VirtualQuest\Tests\VirtualQuest.cpp')" />
     <ClCompile Include="..\VirtualQuest\Tests\VirtualQuestTests.cpp" Condition="Exists('..\VirtualQuest\Tests\VirtualQuestTests.cpp')" />

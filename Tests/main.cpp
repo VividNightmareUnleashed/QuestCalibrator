@@ -77,6 +77,7 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 void RunVirtualQuestScenarios(void (*check)(const char *, bool, const char *));
 #endif
 void RunLighthouseScenarios(void (*check)(const char *, bool, const char *));
+void RunPropertyScenarios(void (*check)(const char *, bool, const char *), int trials, uint32_t propertySeed);
 void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
@@ -8774,6 +8775,8 @@ int main(int argc, char **argv)
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();
 	RunSolverPropertyScenarios(propertyTrials, propertySeed);
+	// Every untrusted input's properties over mutated seeds, and the float slew.
+	RunPropertyScenarios(Check, propertyTrials, propertySeed);
 
 	// Accuracy bands below are derived, not guessed. Measurement: 12 seeds x
 	// {Debug, Release} on MSVC 14.44. Two results shaped every number here.

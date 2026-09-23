@@ -502,7 +502,7 @@ static void WriteSettings(const SettingsRecord &record,
 static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &stream)
 {
 	picojson::value value;
-	std::string err = picojson::parse(value, stream);
+	std::string err = questcal::ParseRecordJson(value, stream);
 	if (!err.empty())
 		throw std::runtime_error(err);
 	if (!value.is<picojson::object>())

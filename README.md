@@ -218,6 +218,18 @@ the actual named shared-memory pose ring with concurrent publishers.
 For a longer deterministic campaign, pass `--property-trials N` and optionally
 `--property-seed N` to `SolverTests.exe`; the default validation uses 64 trials.
 
+Every untrusted input (the Config record, the update feed, SteamVR's
+`vrserver.txt` and pipe requests into vrserver) has its properties written once
+in `Tests/Fuzz/FuzzTargets.h`: refused cleanly or accepted in a shape the rest
+of the program can live with. The harness replays each target's seeds and
+seeded mutations of them on every run. For the long, coverage-guided search,
+`tools/fuzz.ps1` builds each target with MSVC's libFuzzer and AddressSanitizer
+into `x64\fuzz\` and runs it (60 s per target by default, `-Seconds N`):
+
+```powershell
+tools\fuzz.ps1 -Seconds 600
+```
+
 Repository-aware validation is configured through `cpp-validation.json`:
 
 ```powershell

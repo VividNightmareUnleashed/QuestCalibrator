@@ -166,13 +166,29 @@ struct ProfileParseResult
 	bool suspiciousLegacyScale = false;
 };
 
+// picojson::parse reports malformed text as an error string, but a number past
+// a double's range (1e999) throws std::overflow_error with an empty message
+// instead. The load's catch sees that too, and shows the user a blank reason.
+// Both records parse through here so that value is refused like any other.
+inline std::string ParseRecordJson(picojson::value &v, std::istream &stream)
+{
+	try
+	{
+		return picojson::parse(v, stream);
+	}
+	catch (const std::overflow_error &)
+	{
+		return "a number is out of range";
+	}
+}
+
 // The Config envelope: a one-element array of profile objects. Returned by
 // value so the caller can keep reading the same object (the chaperone snapshot
 // is parsed on top of it by Configuration.cpp).
 inline picojson::value ParseProfileEnvelope(std::istream &stream)
 {
 	picojson::value v;
-	std::string err = picojson::parse(v, stream);
+	std::string err = ParseRecordJson(v, stream);
 	if (!err.empty())
 		throw std::runtime_error(err);
 
