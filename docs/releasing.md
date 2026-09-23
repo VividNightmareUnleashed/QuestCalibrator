@@ -5,9 +5,23 @@ tags must therefore use the unambiguous form
 `questcalibrator-vMAJOR.MINOR.PATCH` (for example,
 `questcalibrator-v1.0.1`). Do not retag or reuse an inherited version tag.
 
-The public repository intentionally ignores `install/`. Official packages are made
-with the private/local packaging tooling and attached as ZIP assets to GitHub Releases;
-packaging sources and outputs must not be committed to the repository.
+This repository is private. Releases are published to the public repository
+[VividNightmareUnleashed/QuestCalibrator](https://github.com/VividNightmareUnleashed/QuestCalibrator),
+which holds only `public/README.md` (as its README), `LICENSE`,
+`THIRD-PARTY-NOTICES.txt`, the releases and the issue tracker. Installed copies
+look for updates there, so that repository must keep that exact name and stay
+public.
+
+Pushing a `questcalibrator-v*` tag runs `.github/workflows/release.yml`. It builds
+the tag on a clean Windows runner, runs the solver tests, checks the version against
+the tag, packages with `install\build-package.ps1`, scans with
+`install\virustotal-scan.ps1`, syncs the public repository's files, and creates a
+**draft** release there with the zip, its `.sha256` and notes carrying the hash and
+the VirusTotal table. It refuses to run if the public repository already has a
+release for the tag. It needs two secrets in this repository:
+`PUBLIC_RELEASE_TOKEN` (a fine-grained token for the public repository only, with
+Contents read and write) and `VT_API_KEY`. Package output in `install/out/` and
+`install/test-out/` is never committed.
 
 ## Source preflight
 
@@ -44,37 +58,35 @@ packaging sources and outputs must not be committed to the repository.
   commit and include the version, validation result, and upstream base in its
   message.
 - Push the tag explicitly and verify that the remote tag resolves to the recorded
-  commit. Never use a force-updated release tag; issue a new patch version instead.
+  commit. Pushing it starts the release workflow. Never use a force-updated release tag; issue a new patch version instead.
 
-## Local package and provenance record
+## Package and provenance record
 
-- Build the package from the exact tagged source commit using the private/local
-  installer tooling. Record the installer script revision or SHA-256 because that
-  tooling is intentionally outside Git history.
-  The default `install\build-package.ps1` command names the ZIP
-  `QuestCalibrator-MAJOR.MINOR.PATCH.zip` from the executable's version resource.
-  Do not override `PackageName` for stable releases; custom names are for test builds.
-- Record the tag, full commit ID, MSVC toolset, Windows SDK, build command, package
-  command, UTC build time, and operator in the private release record.
-- Record SHA-256 hashes for the final archive/installer and the included overlay,
-  driver, OpenVR runtime DLL, manifest, and license/notice bundle.
-- Confirm the executable and driver file properties contain the expected version,
-  and confirm the manifest resolves paths relative to the installed executable.
+- The release workflow builds and packages the pushed tag. Its `BUILD-INFO.txt` in
+  the package records the tag, commit, UTC build time, runner image, Visual Studio
+  version and the workflow run URL; the run also keeps the zip, its `.sha256` and
+  the VirusTotal table as an artifact for 90 days. The default package name is
+  `QuestCalibrator-MAJOR.MINOR.PATCH.zip`, from the executable's version resource.
+- `build-package.ps1` writes the SHA-256 of every packaged file to `SHA256SUMS.txt`
+  inside the package, and the zip's own hash to `<zip>.sha256` beside it.
+- `virustotal-scan.ps1` hashes the executables, DLLs and scripts inside the zip, plus
+  the zip itself, uploads any VirusTotal hasn't seen, and writes
+  `<zip-name>.virustotal.md`, which the workflow puts in the release notes.
+  Investigate any detection before publishing.
 - Test install, SteamVR startup and handshake, calibration, upgrade, and uninstall
-  on a clean supported Windows environment. Confirm the original Space Calibrator
-  driver is disabled so transforms are not applied twice.
-- If artifacts are signed, verify the signatures after final packaging and record
+  on a clean supported Windows environment, using the package from the draft.
+  Confirm the original Space Calibrator driver is disabled so transforms are not
+  applied twice.
+- If artifacts are signed, verify the signatures on the packaged files and record
   their signer and timestamp details.
 
 ## Publish the GitHub Release
 
-- Create a draft GitHub Release from the pushed, annotated QuestCalibrator tag. Use
-  the version as the release title and include the upstream base commit, validation
-  result, installation notes, and user-visible changes in the release notes.
-- Attach only the exact tested and hashed package ZIP. GitHub's automatically generated
-  source archives are not substitutes for the install package.
-- Verify the draft's tag and attached ZIP name, size, and SHA-256 against the provenance
-  record.
+- Open the draft the workflow created in the public repository. Replace the
+  **Changes** section with the user-visible changes; it starts from the tag
+  message. Keep the SHA-256 and VirusTotal sections as generated.
+- The draft carries only the package ZIP and its `.sha256`. Never add, replace or
+  delete assets by hand; if the package must change, tag a new version.
 - Run the install test against the draft and publish only when it passes:
 
   ```powershell
@@ -88,13 +100,13 @@ packaging sources and outputs must not be committed to the repository.
   and what the overlay registered with the runtime. It does not replace the SteamVR,
   handshake, and calibration checks above. Record the run URL, then publish the draft
   and record the final GitHub Release URL.
-- Download the ZIP from the published release and verify its SHA-256 once more. Never
-  replace an asset on an existing release; publish a new patch version if an artifact
-  must change.
+- Download the ZIP from the published release and verify its SHA-256 against the
+  release notes once more.
 
 ### Automatic-update contract
 
-The overlay's opt-in updater reads the public GitHub Releases API without a token.
+The overlay's opt-in updater reads the GitHub Releases API of the public
+`VividNightmareUnleashed/QuestCalibrator` repository without a token.
 Keep these names exact or the release deliberately fails closed:
 
 - Stable tag: `questcalibrator-vMAJOR.MINOR.PATCH` with no suffix.
@@ -105,7 +117,7 @@ Keep these names exact or the release deliberately fails closed:
   the provenance record before publishing.
 
 Drafts, prereleases, inherited `v*` tags, packages without a SHA-256 digest, duplicate
-canonical assets, and download URLs outside this repository are not eligible. The
+canonical assets, and download URLs outside the public repository are not eligible. The
 updater checks and downloads only after the user opts in; applying the package remains
 an explicit action because Steam must be fully closed and Windows must approve the
 elevated installer.
