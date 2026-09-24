@@ -107,6 +107,7 @@
     <ClCompile Include="IPCServerTransportTests.cpp" />
     <ClCompile Include="TrackingRecoveryTests.cpp" />
     <ClCompile Include="LighthouseLogTests.cpp" />
+    <ClCompile Include="LocalizationTests.cpp" />
     <ClCompile Include="PredictionModelTests.cpp" />
     <ClCompile Include="PropertyTests.cpp" />
     <ClCompile Include="VirtualLighthouse.cpp" />
@@ -137,6 +138,13 @@
     <ClCompile Include="..\Overlay\LegacyContinuous.cpp" />
     <ClCompile Include="..\Overlay\DriftMonitor.cpp" />
     <ClCompile Include="..\Overlay\LighthouseLog.cpp" />
+    <ClCompile Include="..\Overlay\Localization.cpp" />
+    <ClCompile Include="..\Overlay\LocalizationJa.cpp">
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="..\Overlay\LocalizationIt.cpp">
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="..\Overlay\LighthouseVisibility.cpp" />
     <ClCompile Include="..\Overlay\JumpDetector.cpp" />
     <ClCompile Include="..\Overlay\PoseStreamHub.cpp" />

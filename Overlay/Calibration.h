@@ -8,6 +8,7 @@
 #include "ProfileValidation.h"
 #include "RingPoseMath.h"
 #include "LighthouseVisibility.h"
+#include "Modules.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -170,6 +171,10 @@ struct CalibrationContext : CalibrationProfileState
 	bool uiAdvanced = false;
 	bool notifyPoorCalibration = true;
 
+	// The overlay's language as a code ("en", "ja"); empty until the player
+	// picks one, meaning "follow Windows". Persisted setting.
+	std::string language;
+
 	// Extra detail for bug reports (continuous-loop decisions, solve numbers),
 	// written to the session log only while on. Off by default: the log is
 	// bounded and the detail is per second.
@@ -259,6 +264,8 @@ struct CalibrationContext : CalibrationProfileState
 	bool lighthouseLogAvailable = false;
 	std::string lighthouseLogPath;
 	uint32_t lighthouseAttributedEvents = 0;
+	// The optional modules the installer put in (Modules.h), read at startup.
+	questcal::Modules modules;
 	// Debounced persistence for runtime compensation updates: dirty records save
 	// after a quiet period and always on shutdown. See PersistenceState.h — the
 	// rules live with the data rather than as loose fields here.
@@ -398,7 +405,12 @@ struct CalibrationContext : CalibrationProfileState
 
 	double CollectionSeconds() const
 	{
-		switch (calibrationSpeed)
+		return CollectionSecondsFor(calibrationSpeed);
+	}
+
+	static double CollectionSecondsFor(Speed speed)
+	{
+		switch (speed)
 		{
 		case FAST:
 			return 10.0;

@@ -48,6 +48,28 @@ void BuildHeader()
 	float cw = ImGui::GetContentRegionAvail().x;
 	const float h = 44.0f;
 	static const char *const tabs[] = { "Calibration", "Lighthouse", "Smoothing" };
+	// Each module's tab, and what it says while greyed out.
+	struct ModuleTab
+	{
+		MainTab tab;
+		questcal::ModuleStatus status;
+		const char *notInstalledTip;
+	};
+	const ModuleTab moduleTabs[] = {
+		{ MainTab::Lighthouse, CalCtx.modules.lighthouse,
+			"Lighthouse module is currently not installed. Select it during installation." },
+		{ MainTab::Smoothing, CalCtx.modules.smoothing, nullptr },
+	};
+	unsigned disabled = 0;
+	const char *disabledTips[3] = {};
+	for (const ModuleTab &m : moduleTabs)
+	{
+		if (questcal::Modules::On(m.status))
+			continue;
+		const int i = static_cast<int>(m.tab);
+		disabled |= 1u << i;
+		disabledTips[i] = m.status == questcal::ModuleStatus::NotBuilt ? "Work in progress" : m.notInstalledTip;
+	}
 
 	// One row: the brand at the left, the gear at the right, and the tab
 	// switch centred on the row as a whole rather than on what is left
@@ -88,10 +110,11 @@ void BuildHeader()
 		Pal::U32(Pal::Text), "QuestCalibrator");
 
 	// The tab switch. Picking a tab is also the way back out of Settings.
+	// A module's tab is greyed out until the installer has put it in.
 	{
 		ImGui::SetCursorScreenPos(fl.Rect(tabsNode).min);
 		const int picked = SegmentedTabs("maintab", static_cast<int>(s_mainTab), tabs, 3,
-			1u << static_cast<int>(MainTab::Smoothing), "Smoothing isn't ready yet.");
+			disabled, disabledTips);
 		if (picked != static_cast<int>(s_mainTab))
 		{
 			s_mainTab = static_cast<MainTab>(picked);
@@ -153,14 +176,14 @@ void BuildFooter(bool runningInOverlay)
 		const bool keyboardHint = io.NavVisible || ImGui::GetTime() - s_lastMouseMove > 6.0;
 		if (!runningInOverlay && keyboardHint)
 		{
-			const char *hint = "Arrow keys move, Enter presses";
+			const char *hint = Tr("Arrow keys to move \xC2\xB7 Enter to select");
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
 		}
 		if (runningInOverlay)
 		{
-			const char *hint = "Close VR overlay to use mouse";
+			const char *hint = Tr("Close the SteamVR dashboard to use the mouse");
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
@@ -215,9 +238,9 @@ void BuildMainWindow(bool runningInOverlay)
 	if (!CalCtx.uiError.empty())
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
-		ImGui::TextWrapped("%s", CalCtx.uiError.c_str());
+		ImGui::TextWrapped("%s", Tr(CalCtx.uiError.c_str()));
 		ImGui::PopStyleColor();
-		if (ImGui::SmallButton("Dismiss error"))
+		if (ImGui::SmallButton((std::string(Tr("Dismiss")) + "###dismisserror").c_str()))
 		{
 			CalCtx.uiError.clear();
 			CalCtx.uiErrorSource = CalibrationContext::ErrorSource::None;
@@ -239,7 +262,7 @@ void BuildMainWindow(bool runningInOverlay)
 	// does: a calibration in progress or the profile editor keeps its
 	// screen whatever the tab says.
 	const bool lighthouseTab = !inSettings && CalCtx.state == CalibrationState::None &&
-		s_mainTab == MainTab::Lighthouse;
+		questcal::Modules::On(CalCtx.modules.lighthouse) && s_mainTab == MainTab::Lighthouse;
 	if (lighthouseTab)
 	{
 		BuildLighthouseScreen(state);

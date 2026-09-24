@@ -83,6 +83,7 @@ int EmitFormalTraces(const char *dir);
 void RunLighthouseScenarios(void (*check)(const char *, bool, const char *));
 void RunPropertyScenarios(void (*check)(const char *, bool, const char *), int trials, uint32_t propertySeed);
 void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *));
+void RunLocalizationScenarios(void (*check)(const char *, bool, const char *));
 
 using namespace questcal;
 
@@ -9325,6 +9326,7 @@ int main(int argc, char **argv)
 	// ---- Drift staleness monitoring ----
 	RunDriftScenarios();
 	RunLighthouseScenarios(Check);
+	RunLocalizationScenarios(Check);
 
 	// ---- Spatial correction field ----
 	RunFieldScenarios();

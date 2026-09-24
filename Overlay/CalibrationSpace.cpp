@@ -441,7 +441,7 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 		{
 			ctx.persistence.MarkSettings(now);
 			ctx.ReportError(
-				"The headset re-centred, so the protected chaperone no longer lines up and was turned off. "
+				"The headset re-centered, so the protected chaperone no longer lines up and was turned off. "
 				"Protect it again from the main screen.\n",
 				CalibrationContext::ErrorSource::Chaperone);
 			SaveSettings(ctx);
@@ -505,7 +505,7 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 		Space.hmd.rotation, Space.hmd.translation))
 	{
 		DisarmChaperoneAndPersist(ctx, now,
-			"The headset re-centred while QuestCalibrator couldn't follow it, so the protected chaperone was switched off. "
+			"The headset re-centered while QuestCalibrator couldn't follow it, so the protected chaperone was switched off. "
 			"Press Protect chaperone again on the main screen.\n");
 		return;
 	}
@@ -688,7 +688,7 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 		ctx, delta.rotation, delta.translation, true, now))
 	{
 		ctx.ReportError(
-			"A headset re-centre was too large to compensate safely. Recalibrate before continuing.\n");
+			"A headset re-center was too large to compensate safely. Recalibrate before continuing.\n");
 		return false;
 	}
 
@@ -819,9 +819,9 @@ void ProfileUniverseTick(CalibrationContext &ctx, double now)
 	if (autoApplyChanged)
 		ctx.persistence.MarkSettings(now);
 	ctx.ReportError(autoApplyChanged
-		? "The headset re-centred while QuestCalibrator couldn't follow it. "
+		? "The headset re-centered while QuestCalibrator couldn't follow it. "
 			"The calibration and the protected chaperone are off until you recalibrate.\n"
-		: "The headset re-centred while QuestCalibrator couldn't follow it. "
+		: "The headset re-centered while QuestCalibrator couldn't follow it. "
 			"The calibration is off until you recalibrate.\n",
 		CalibrationContext::ErrorSource::Chaperone);
 	questcal::SynchronizeCalibrationDriver(ctx);
@@ -869,12 +869,12 @@ bool LoadChaperoneBounds()
 {
 	if (CalCtx.profileUniverseUnsafe)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:run a new base calibration first because the previous profile lost raw-universe continuity\n");
+			"Couldn't protect the chaperone. The headset re-centered since the last calibration. Recalibrate first.\n");
 
 	auto setup = vr::VRChaperoneSetup();
 	if (!setup)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:OpenVR chaperone setup is unavailable\n");
+			"Couldn't protect the chaperone because SteamVR's chaperone isn't available. Restart SteamVR and try again.\n");
 
 	setup->RevertWorkingCopy();
 	CalibrationContext::Chaperone snapshot;
@@ -882,20 +882,19 @@ bool LoadChaperoneBounds()
 	if (!questcal::ReadCurrentHmdIdentity(
 		snapshot.ownerTrackingSystem, snapshot.ownerHmdSerial))
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the current headset/runtime identity is unavailable\n");
+			"Couldn't protect the chaperone because the headset isn't showing up in SteamVR. Try again once it's connected.\n");
 	if (CalCtx.validProfile &&
 		snapshot.ownerTrackingSystem != CalCtx.referenceTrackingSystem)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the active profile uses a different reference "
-			"tracking system than the headset which owns this play area\n");
+			"Couldn't protect the chaperone. The calibration was made with a different headset system. Recalibrate first.\n");
 	if (!CopyCurrentHmdWorldFromDriver(snapshot))
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:no fresh validated HMD raw-universe pose is available yet\n");
+			"Couldn't protect the chaperone because the headset isn't tracking yet. Put it on and try again.\n");
 
 	uint32_t quadCount = 0;
 	if (!setup->GetLiveCollisionBoundsInfo(nullptr, &quadCount) || quadCount > 16384)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:failed to read the live wall count\n");
+			"Couldn't read the chaperone walls from SteamVR. Try again.\n");
 
 	snapshot.geometry.resize(quadCount);
 	uint32_t returnedCount = quadCount;
@@ -904,7 +903,7 @@ bool LoadChaperoneBounds()
 	if (!setup->GetLiveCollisionBoundsInfo(walls, &returnedCount) ||
 		returnedCount != quadCount)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the live walls changed while they were being captured\n");
+			"The chaperone changed while it was being saved. Try again.\n");
 
 	if (!setup->GetWorkingStandingZeroPoseToRawTrackingPose(
 			&snapshot.standingCenter) ||
@@ -913,7 +912,7 @@ bool LoadChaperoneBounds()
 		!questcal::IsPlausibleChaperone(
 			snapshot.geometry, snapshot.standingCenter, snapshot.playSpaceSize))
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:play-area data is missing or invalid\n");
+			"Couldn't protect the chaperone because SteamVR has no usable play area. Set up your room in SteamVR, then try again.\n");
 
 	const std::time_t copyTime = std::time(nullptr);
 	const double copyUnixTime = static_cast<double>(copyTime);
@@ -921,7 +920,7 @@ bool LoadChaperoneBounds()
 		!std::isfinite(copyUnixTime) || copyUnixTime < 0.0 ||
 		copyUnixTime > protocol::limits::MaxPlausibleUnixTimeSeconds)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the capture time is unavailable or invalid\n");
+			"Couldn't protect the chaperone because the PC clock looks wrong. Check the date and time, then try again.\n");
 
 	snapshot.copyUnixTime = copyUnixTime;
 	snapshot.valid = true;
@@ -934,7 +933,7 @@ bool LoadChaperoneBounds()
 		{
 			CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 			CalCtx.ReportError(
-				"Couldn't protect the chaperone: the previous snapshot couldn't be turned off first, "
+				"Couldn't protect the chaperone because the previous one couldn't be switched off first, "
 				"so nothing was changed.\n",
 				CalibrationContext::ErrorSource::Chaperone);
 			return false;
@@ -975,7 +974,7 @@ bool ApplyChaperoneBounds(bool logSuccess)
 		CalCtx.chaperone.playSpaceSize))
 	{
 		CalCtx.ReportError(
-			"Couldn't restore the chaperone: the protected snapshot is damaged. Protect it again.\n",
+			"Couldn't restore the chaperone: the protected chaperone is damaged. Protect it again.\n",
 			CalibrationContext::ErrorSource::Chaperone);
 		return false;
 	}

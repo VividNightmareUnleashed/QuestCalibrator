@@ -356,7 +356,8 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	out << "latency reestimation: " << OnOff(ctx.continuousLatencyReestimation)
 		<< ", require trigger: " << OnOff(ctx.continuousRequireTrigger)
 		<< ", hide headset tracker: " << OnOff(ctx.hideMountedTracker) << "\n";
-	out << "detailed logging: " << OnOff(ctx.detailedLogging) << "\n\n";
+	out << "detailed logging: " << OnOff(ctx.detailedLogging) << "\n";
+	out << "language: " << (ctx.language.empty() ? "follow Windows" : ctx.language) << "\n\n";
 
 	out << "[profile]\n";
 	out << "valid: " << OnOff(ctx.validProfile) << ", enabled: " << OnOff(ctx.enabled) << "\n";
@@ -401,6 +402,10 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 		out << ", " << ctx.chaperone.geometry.size() << " walls, "
 			<< ctx.chaperone.playSpaceSize.v[0] << " x " << ctx.chaperone.playSpaceSize.v[1] << " m";
 	out << "\n\n";
+
+	out << "[modules]\n";
+	out << "lighthouse: " << questcal::ModuleStatusName(ctx.modules.lighthouse) << "\n";
+	out << "smoothing: " << questcal::ModuleStatusName(ctx.modules.smoothing) << "\n\n";
 
 	out << "[base stations]\n";
 	out << "lighthouse log " << (ctx.lighthouseLogAvailable ? "read from " : "not readable at ")

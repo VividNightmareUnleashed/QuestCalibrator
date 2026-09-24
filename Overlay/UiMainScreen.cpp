@@ -62,7 +62,7 @@ const char *ContinuousStateWord(ContinuousStatus status)
 	case ContinuousStatus::Off:        return "Off";
 	case ContinuousStatus::NoTracker:  return "Needs a tracker";
 	case ContinuousStatus::NeedsMount: return "Needs setup";
-	case ContinuousStatus::NotRunning: return "Paused";
+	case ContinuousStatus::NotRunning: return "Waiting";
 	case ContinuousStatus::Tracking:   return "Active";
 	case ContinuousStatus::Coasting:   return "Waiting";
 	case ContinuousStatus::Frozen:     return "Paused";
@@ -71,23 +71,24 @@ const char *ContinuousStateWord(ContinuousStatus status)
 	}
 }
 
-// The rest of the sentence that starts "Continuous calibration", for the
-// main screen's band. Written for the question the player has ("will this
-// fix itself?"): waiting states resolve on their own, paused ones name what
-// they need. One sentence, no colons: the band already has a label.
+// The main screen's line about the loop, as a whole sentence so it reads
+// (and translates) as one. Written for the question the player has ("will
+// this fix itself?"): waiting states resolve on their own, paused ones name
+// what they need. NotRunning covers a sleeping tracker, a disabled
+// calibration and a closed pose channel alike, so it claims no cause.
 const char *ContinuousStatusLine(ContinuousStatus status)
 {
 	switch (status)
 	{
-	case ContinuousStatus::Off:        return " is off.";
-	case ContinuousStatus::NoTracker:  return " needs a headset tracker. Pick one in Settings.";
-	case ContinuousStatus::NeedsMount: return " needs one run with the headset tracker.";
-	case ContinuousStatus::NotRunning: return " paused. The headset tracker is off or asleep.";
-	case ContinuousStatus::Tracking:   return " is active.";
-	case ContinuousStatus::Coasting:   return " is waiting. The headset tracker isn't being seen.";
-	case ContinuousStatus::Frozen:     return " paused. Readings drifted too far to correct.";
-	case ContinuousStatus::Holding:    return " is waiting. Tracking is too noisy here.";
-	default:                           return " is warming up.";
+	case ContinuousStatus::Off:        return "Continuous calibration is off.";
+	case ContinuousStatus::NoTracker:  return "Continuous calibration needs a headset tracker. Pick one in Settings.";
+	case ContinuousStatus::NeedsMount: return "Continuous calibration needs the headset tracker set up. Do it in Settings.";
+	case ContinuousStatus::NotRunning: return "Continuous calibration is waiting. It resumes when tracking is available.";
+	case ContinuousStatus::Tracking:   return "Continuous calibration is active.";
+	case ContinuousStatus::Coasting:   return "Continuous calibration is waiting. The headset tracker isn't being seen.";
+	case ContinuousStatus::Frozen:     return "Continuous calibration is paused. Readings drifted too far to correct.";
+	case ContinuousStatus::Holding:    return "Continuous calibration is waiting. Tracking is too noisy here.";
+	default:                           return "Continuous calibration is warming up.";
 	}
 }
 
@@ -236,8 +237,8 @@ const char *RecalibrationNudge(CalRating rating)
 	if (rating < Rating_Poor)
 		return nullptr;
 	return rating == Rating_VeryPoor
-		? "Your trackers won't line up like this. Run a new calibration."
-		: "Run a new calibration.";
+		? "Your trackers won't line up like this. Recalibrate."
+		: "Recalibrate to tighten the alignment.";
 }
 
 // Empty when the timestamp is unusable. "Unknown" is a property of the data,
@@ -311,16 +312,16 @@ void BuildStatusBand(const VRState &state)
 		ImGui::SetCursorPosY(ImGui::GetWindowHeight() - bandH + 18.0f);
 		const ImVec2 p = ImGui::GetCursorScreenPos();
 		ImGui::PushFont(g_fontTitle);
-		ImGui::TextUnformatted("Continuous calibration paused");
+		ImGui::TextUnformatted(Tr("Continuous calibration paused"));
 		ImGui::PopFont();
 		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - actionW - 36.0f);
-		ImGui::TextWrapped("Tracking no longer matches the saved alignment. Recalibrate with the tracker attached to your headset.");
+		ImGui::TextWrapped("%s", Tr("Tracking no longer matches the saved alignment. Recalibrate with the headset tracker."));
 		ImGui::PopTextWrapPos();
 		ImGui::SetCursorScreenPos(ImVec2(p.x + width - actionW, p.y));
 		if (IconButton("fixmount", "Recalibrate", IconPlay, ImVec2(actionW, 46.0f), BtnKind::Primary))
 			StartMountSetup(state);
 		ImGui::SetCursorScreenPos(ImVec2(p.x + width - actionW, p.y + 54.0f));
-		if (IconButton("stopcont", "Turn off continuous", nullptr, ImVec2(actionW, 38.0f), BtnKind::Ghost))
+		if (IconButton("stopcont", "Turn off continuous calibration", nullptr, ImVec2(actionW, 38.0f), BtnKind::Ghost))
 			SaveProfileFieldEdit(CalCtx, [](questcal::ProfileRecord &candidate) {
 				candidate.continuousEnabled = false;
 			});
@@ -328,9 +329,10 @@ void BuildStatusBand(const VRState &state)
 		if (CalCtx.uiAdvanced && CalCtx.continuousDeviation.valid)
 		{
 			ImGui::PushFont(g_fontSmall);
-			ImGui::TextColored(Pal::Dim, "Difference: %.1f deg yaw, %.1f deg tilt, %.1f cm position",
+			ImGui::TextColored(Pal::Dim, "%s", Tr(FormatString(
+				"Difference: %.1f deg yaw, %.1f deg tilt, %.1f cm position",
 				CalCtx.continuousDeviation.yawDeg, CalCtx.continuousDeviation.tiltDeg,
-				CalCtx.continuousDeviation.posM * 100.0);
+				CalCtx.continuousDeviation.posM * 100.0)).c_str());
 			ImGui::PopFont();
 		}
 		return;
@@ -452,9 +454,10 @@ void BuildStatusBand(const VRState &state)
 			// is information, so it gets Dim rather than Faint.
 			float ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
 			float x = p.x;
-			const char *label = RatingLabel(rating);
-			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), "Tracking quality: ");
-			x += ImGui::CalcTextSize("Tracking quality: ").x;
+			const char *label = Tr(RatingLabel(rating));
+			const char *heading = Tr("Alignment: ");
+			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), heading);
+			x += ImGui::CalcTextSize(heading).x;
 			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(RatingColor(rating)), label);
 			x += ImGui::CalcTextSize(label).x;
 
@@ -474,7 +477,7 @@ void BuildStatusBand(const VRState &state)
 			}
 			dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
 				ImVec2(x + 18.0f, y + lineH * 0.5f - g_fontSmall->LegacySize * 0.5f + 2.0f),
-				Pal::U32(Pal::Dim), ageLine.c_str());
+				Pal::U32(Pal::Dim), Tr(ageLine.c_str()));
 			y += lineH;
 
 			// Advanced mode: the numbers, small and in the colour of the
@@ -483,23 +486,19 @@ void BuildStatusBand(const VRState &state)
 			{
 				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
 					ImVec2(p.x, y + detailH * 0.5f - g_fontSmall->LegacySize * 0.5f),
-					Pal::U32(detail.color), detail.text.c_str());
+					Pal::U32(detail.color), Tr(detail.text.c_str()));
 				y += detailH;
 			}
 			if (!details.empty())
 				y += 4.0f;
 
-			// Line 2: the loop's own state in its own colour and, when it
-			// has paused, the two things the player can do about it.
+			// Line 2: the loop's own state, one sentence in its own colour.
 			if (showContinuous)
 			{
 				y += 4.0f;
 				ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
-				x = p.x;
-				dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), "Continuous calibration");
-				x += ImGui::CalcTextSize("Continuous calibration").x;
-				dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty),
-					Pal::U32(ContinuousStatusColor(continuous)), ContinuousStatusLine(continuous));
+				dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(p.x, ty),
+					Pal::U32(ContinuousStatusColor(continuous)), Tr(ContinuousStatusLine(continuous)));
 				y += lineH;
 			}
 
@@ -509,7 +508,7 @@ void BuildStatusBand(const VRState &state)
 					y += 4.0f;
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Violet), nudge);
+					Pal::U32(Pal::Violet), Tr(nudge));
 			}
 		}
 		else
@@ -517,7 +516,7 @@ void BuildStatusBand(const VRState &state)
 			dl->AddText(g_fontBody, g_fontBody->LegacySize,
 				ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
 				Pal::U32(Pal::Dim),
-				"Not calibrated yet. Pick a device on each side and press Start calibration.");
+				Tr("Not calibrated yet. Pick a device on each side and press Start calibration."));
 		}
 
 		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + stripH));
@@ -543,7 +542,7 @@ void BuildMainScreen(const VRState &state)
 				switch (CalCtx.disableReason)
 				{
 				case Reason::HmdMismatch:
-					why = FormatString("%s headset not detected; calibration disabled until it's back",
+					why = FormatString("%s headset isn't connected. Calibration is off until it's back.",
 						FriendlySystemName(CalCtx.referenceTrackingSystem).c_str());
 					break;
 				case Reason::DriverUnreachable:
@@ -553,10 +552,10 @@ void BuildMainScreen(const VRState &state)
 					why = "The saved calibration doesn't match the connected hardware. Recalibrate.";
 					break;
 				case Reason::InvalidTransform:
-					why = "The saved calibration is corrupt. Recalibrate.";
+					why = "The saved calibration is damaged. Recalibrate.";
 					break;
 				case Reason::UniverseUnsafe:
-					why = "The headset re-centred while QuestCalibrator wasn't watching, so the saved alignment is off. Recalibrate.";
+					why = "The headset re-centered while QuestCalibrator wasn't watching, so the saved alignment is off. Recalibrate.";
 					break;
 				case Reason::None:
 					// Never borrow another cause's sentence: a universe change
@@ -594,7 +593,7 @@ void BuildMainScreen(const VRState &state)
 		// beside it so the whole screen fits without scrolling ----
 		bool haveProfile = CalCtx.validProfile;
 		const float bh = 56.0f;
-		const float clearW = 190.0f;
+		const float clearW = ButtonWidthFor("Clear calibration", true, 190.0f);
 		const float segItemW = 112.0f;
 		const float segW = segItemW * 3.0f + 8.0f;
 		float startW = cw - segW - gap - (haveProfile ? clearW + gap : 0.0f);
@@ -606,7 +605,15 @@ void BuildMainScreen(const VRState &state)
 			OpenGuide(false, false);
 
 		{
-			const char *speeds[] = { "Fast", "Slow", "Very slow" };
+			// Labelled by length: "Slow" read as an instruction to move slowly.
+			std::string speedLabels[3];
+			const char *speeds[3];
+			for (int i = 0; i < 3; ++i)
+			{
+				speedLabels[i] = FormatString("%.0f s", CalibrationContext::CollectionSecondsFor(
+					static_cast<CalibrationContext::Speed>(i)));
+				speeds[i] = speedLabels[i].c_str();
+			}
 			ImVec2 sp = ImVec2(rowA.x + startW + gap, rowA.y);
 			ImGui::SetCursorScreenPos(ImVec2(sp.x, sp.y + (bh - 46.0f) * 0.5f));
 			auto previousSpeed = CalCtx.calibrationSpeed;
@@ -615,7 +622,7 @@ void BuildMainScreen(const VRState &state)
 			if (CalCtx.calibrationSpeed != previousSpeed)
 				SaveSettingOrRestore(CalCtx.calibrationSpeed, previousSpeed);
 			if (ImGui::IsMouseHoveringRect(sp, ImVec2(sp.x + segW, sp.y + bh)) && !ImGui::IsAnyItemActive())
-				ShowTip("Slower calibration collects more tracking data. Move gently at every setting.");
+				ShowTip("How long calibration collects tracking data. Longer can be more accurate.\nMove gently at every setting.");
 		}
 
 		if (haveProfile)
@@ -660,10 +667,10 @@ void BuildMainScreen(const VRState &state)
 			if (ImGui::IsItemHovered())
 			{
 				ShowTip(
-					"Saves your current chaperone bounds (SteamVR's walls) and puts\n"
-					"them back automatically if SteamVR or the headset ever loses them.\n"
-					"Redrew your chaperone? Press again to save the new one.\n"
-					"Prefer the Quest's Guardian imported fresh each session? Don't use this.");
+					"Saves your current chaperone (SteamVR's walls) and puts it\n"
+					"back automatically if SteamVR or the headset ever loses it.\n"
+					"Redrew your chaperone? Press again to protect the new one.\n"
+					"Prefer the Quest boundary imported fresh each session? Don't use this.");
 			}
 			if (anchors)
 			{
@@ -684,7 +691,8 @@ void BuildMainScreen(const VRState &state)
 		ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
 		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Pal::CardHov);
 		ImGui::PushStyleColor(ImGuiCol_HeaderActive, Pal::Inset);
-		const bool showActivity = !CalCtx.activity.empty() && ImGui::CollapsingHeader("Recent activity");
+		const bool showActivity = !CalCtx.activity.empty() && ImGui::CollapsingHeader(
+			(std::string(Tr("Recent activity")) + "###recentactivity").c_str());
 		ImGui::PopStyleColor(3);
 		if (showActivity)
 		{
@@ -700,7 +708,7 @@ void BuildMainScreen(const VRState &state)
 				ImGui::PushFont(g_fontSmall);
 				ImGui::TextColored(Pal::Dim, "%s", stamp);
 				ImGui::PopFont();
-				ImGui::TextWrapped("%s", entry.text.c_str());
+				ImGui::TextWrapped("%s", Tr(entry.text.c_str()));
 				ImGui::Spacing();
 			}
 		}

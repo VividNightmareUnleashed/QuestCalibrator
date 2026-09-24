@@ -2,6 +2,7 @@
 #include "Calibration.h"
 #include "Configuration.h"
 #include "EmbeddedFiles.h"
+#include "Localization.h"
 #include "Updater.h"
 #include "UserInterface.h"
 #include "ImGuiVRInput.h"
@@ -28,6 +29,7 @@
 #include <openvr.h>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -74,7 +76,8 @@ static void ShowVRToast(const char *message)
 		vr::VRNotificationId notifId = 0;
 		vr::VRNotifications()->CreateNotification(
 			overlayMainHandle, 0, vr::EVRNotificationType_Transient,
-			message, vr::EVRNotificationStyle_Application, nullptr, &notifId);
+			questcal::i18n::Tr(std::string(message)).c_str(),
+			vr::EVRNotificationStyle_Application, nullptr, &notifId);
 	}
 }
 static GLuint fboHandle = 0, fboTextureHandle = 0;
@@ -154,6 +157,13 @@ static int g_frameLimit = 0;
 // the picture is the same 1200x800 texture the dashboard would receive.
 static std::wstring g_shotPath;
 
+// -lang CODE: show the overlay in this language for the session, whatever the
+// saved setting says, so a preview can be shot in each language.
+// -i18n-missing PATH: on exit, write the English strings the current language
+// had no translation for, one per line; a translator's checklist.
+static std::string g_langOverride;
+static std::wstring g_missingPath;
+
 static void CliReport(const char *message, bool isError)
 {
 	if (isError)
@@ -209,7 +219,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 			MAX_PATH, &error);
 		if (error != vr::VRApplicationError_None)
 		{
-			result.message = "Failed to locate the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" +
+			result.message = "Couldn't find the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" +
 				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error));
 			return result;
 		}
@@ -242,7 +252,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	{
 		auto error = vr::VRApplications()->RemoveApplicationManifest(oldManifest.c_str());
 		if (error != vr::VRApplicationError_None)
-			return failed("Failed to remove the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
+			return failed("Couldn't remove the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
 				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), false);
 	}
 
@@ -250,7 +260,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	{
 		auto error = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
 		if (error != vr::VRApplicationError_None)
-			return failed("Failed to register the application manifest with SteamVR.\n\n" +
+			return failed("Couldn't register QuestCalibrator with SteamVR.\n\n" +
 				manifestPath + "\n\n" +
 				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), replacing);
 	}
@@ -268,7 +278,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 		{
 			if (adding)
 				vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-			return failed("SteamVR could not set QuestCalibrator auto-launch.\n\n" +
+			return failed("SteamVR couldn't set QuestCalibrator to start automatically.\n\n" +
 				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error)),
 				replacing);
 		}
@@ -278,6 +288,58 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	result.changed = adding || (settingAutoLaunch && wantAutoLaunch != oldAutoLaunch);
 	result.message = "QuestCalibrator registered with SteamVR.\n\n" + manifestPath;
 	return result;
+}
+
+// Japanese is drawn from a font Windows already has rather than a bundled
+// one: Yu Gothic ships with Windows 10 and 11, Meiryo and MS Gothic before it.
+// Read once and shared by every size.
+static const std::vector<char> &JapaneseFontData()
+{
+	static std::vector<char> data;
+	static bool searched = false;
+	if (searched)
+		return data;
+	searched = true;
+	wchar_t windows[MAX_PATH] = {};
+	const UINT len = GetWindowsDirectoryW(windows, MAX_PATH);
+	if (len == 0 || len >= MAX_PATH)
+		return data;
+	for (const wchar_t *name : { L"YuGothM.ttc", L"YuGothR.ttc", L"meiryo.ttc", L"msgothic.ttc" })
+	{
+		std::error_code ec;
+		const std::filesystem::path path = std::filesystem::path(windows) / L"Fonts" / name;
+		const auto size = std::filesystem::file_size(path, ec);
+		if (ec || size == 0 || size > 64u * 1024u * 1024u)
+			continue;
+		std::ifstream in(path, std::ios::binary);
+		data.resize(static_cast<size_t>(size));
+		if (in.read(data.data(), static_cast<std::streamsize>(size)))
+			break;
+		data.clear();
+	}
+	return data;
+}
+
+// One UI face at one size: DroidSans, with the Japanese font merged in as its
+// fallback so Japanese text (the UI's, or a tracker renamed in Japanese)
+// draws. ImGui 1.92 bakes glyphs on first use, so the merge costs nothing
+// until a Japanese glyph is drawn.
+static ImFont *AddUiFont(ImGuiIO &io, float size)
+{
+	ImFont *font = io.Fonts->AddFontFromMemoryCompressedTTF(
+		DroidSans_compressed_data, DroidSans_compressed_size, size);
+	const std::vector<char> &japanese = JapaneseFontData();
+	const bool merged = font && !japanese.empty();
+	if (merged)
+	{
+		ImFontConfig config;
+		config.MergeMode = true;
+		config.FontDataOwnedByAtlas = false;   // shared by all three sizes
+		io.Fonts->AddFontFromMemoryTTF(const_cast<char *>(japanese.data()),
+			static_cast<int>(japanese.size()), size, &config);
+	}
+	questcal::i18n::SetFontAvailable(questcal::i18n::Language::Japanese, merged);
+	return font;
 }
 
 void CreateGLFWWindow()
@@ -292,12 +354,12 @@ void CreateGLFWWindow()
 
 	glfwWindow = glfwCreateWindow(fboTextureWidth, fboTextureHeight, "QuestCalibrator", NULL, NULL);
 	if (!glfwWindow)
-		throw std::runtime_error("Failed to create window");
+		throw std::runtime_error("Couldn't create the window.");
 
 	glfwMakeContextCurrent(glfwWindow);
 	glfwSwapInterval(1);
 	if (gl3wInit() != 0)
-		throw std::runtime_error("Failed to initialize OpenGL functions");
+		throw std::runtime_error("Couldn't start OpenGL. Update your graphics driver.");
 
 	// Dark titlebar on Windows 10 20H1+ (attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE).
 	BOOL darkTitlebar = TRUE;
@@ -310,25 +372,25 @@ void CreateGLFWWindow()
 
 	imguiContextInitialized = ImGui::CreateContext() != nullptr;
 	if (!imguiContextInitialized)
-		throw std::runtime_error("Failed to initialize ImGui");
+		throw std::runtime_error("Couldn't start the user interface (ImGui).");
 	ImGuiIO &io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 	io.IniFilename = nullptr;
-	g_fontBody = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 21.0f);
-	g_fontSmall = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 14.0f);
-	g_fontTitle = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 27.0f);
+	g_fontBody = AddUiFont(io, 21.0f);
+	g_fontSmall = AddUiFont(io, 14.0f);
+	g_fontTitle = AddUiFont(io, 27.0f);
 	io.FontDefault = g_fontBody;
 
 	imguiGlfwInitialized = ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
 	if (!imguiGlfwInitialized)
-		throw std::runtime_error("Failed to initialize the ImGui GLFW backend");
+		throw std::runtime_error("Couldn't start the user interface (ImGui GLFW backend).");
 	glfwSetWindowFocusCallback(glfwWindow, [](GLFWwindow *, int focused) {
 		imgui_vr::DesktopFocusEvent(focused != 0, dashboardOwnsInput);
 	});
 	imguiOpenGLInitialized = ImGui_ImplOpenGL3_Init("#version 330");
 	if (!imguiOpenGLInitialized)
-		throw std::runtime_error("Failed to initialize the ImGui OpenGL backend");
+		throw std::runtime_error("Couldn't start the user interface (ImGui OpenGL backend).");
 
 	ApplyTheme();
 
@@ -504,7 +566,7 @@ static bool SavePreviewShot(const std::wstring &path, std::string &error)
 	if (FAILED(hr))
 	{
 		char buf[128];
-		snprintf(buf, sizeof buf, "Could not write the screenshot (HRESULT 0x%08lX): ", static_cast<unsigned long>(hr));
+		snprintf(buf, sizeof buf, "Couldn't write the screenshot (HRESULT 0x%08lX): ", static_cast<unsigned long>(hr));
 		error = buf + Narrow(path);
 		return false;
 	}
@@ -633,6 +695,7 @@ void RunLoop()
 		io.SetAppAcceptingEvents(true);
 		io.DisplaySize = ImVec2((float) fboTextureWidth, (float) fboTextureHeight);
 		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+		questcal::i18n::BeginFrame();
 		ImGui::NewFrame();
 
 		BuildMainWindow(dashboardVisible);
@@ -848,8 +911,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 			InitCalibrator();
 			calibratorInitialized = true;
 			LoadProfile(CalCtx);
+			CalCtx.modules = questcal::ReadInstalledModules();
 			questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 		}
+		if (!g_langOverride.empty())
+			CalCtx.language = g_langOverride;
+		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(CalCtx.language));
 		RunLoop();
 	}
 	catch (const std::exception &e)
@@ -862,6 +929,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	}
 
 	questcal::update::AppUpdater.Shutdown();
+	if (!g_missingPath.empty())
+		questcal::i18n::WriteMissing(g_missingPath);
 
 	// One shutdown pair for every path, and before the modal dialog below can
 	// block this process indefinitely: ShutdownCalibrator flushes debounced
@@ -911,7 +980,7 @@ static void CliExit(const std::string &message, bool isError)
 
 static std::string InitErrorMessage(vr::EVRInitError vrErr)
 {
-	return std::string("Failed to initialize OpenVR: ")
+	return std::string("Couldn't start OpenVR: ")
 		+ vr::VR_GetVRInitErrorAsEnglishDescription(vrErr)
 		+ "\n\nSteamVR must be installed. If it has never been run on this PC,"
 		" start SteamVR once and try again.";
@@ -976,6 +1045,10 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 			g_frameLimit = _wtoi(args[++i].c_str());
 		else if (arg == L"-shot" && i + 1 < args.size())
 			g_shotPath = args[++i];
+		else if (arg == L"-lang" && i + 1 < args.size())
+			g_langOverride = Narrow(args[++i]);
+		else if (arg == L"-i18n-missing" && i + 1 < args.size())
+			g_missingPath = args[++i];
 		else if (cmd.empty())
 			cmd = arg;
 		else if (unrecognised.empty())
@@ -986,12 +1059,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	// so failing to resolve it must fail loudly here rather than register a
 	// manifest SteamVR will later auto-launch from the wrong place.
 	if (!appDirResolved)
-		CliExit("QuestCalibrator could not determine its own install directory.", true);
+		CliExit("QuestCalibrator couldn't find its own install folder.", true);
 
 	// An extra argument alongside a valid command is as much a mistake as a
 	// mistyped command, and used to be ignored entirely.
 	if (!unrecognised.empty())
-		CliExit("Unrecognised command-line argument: " + Narrow(unrecognised), true);
+		CliExit("Unrecognized command-line argument: " + Narrow(unrecognised), true);
 
 	if (!g_shotPath.empty() && g_frameLimit == 0)
 		g_frameLimit = 30;
@@ -1024,6 +1097,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		g_uiPreviewMany = true;
 		g_uiPreviewScenario = PreviewScenario::Lighthouse;
 	}
+	else if (cmd == L"-uipreview-settings")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = PreviewScenario::Settings;
+	}
 	else if (cmd == L"-openvrpath")
 	{
 		InitVRUtilityOrExit();
@@ -1053,7 +1132,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 			!std::memchr(runtimePath, '\0', runtimePathCapacity) ||
 			runtimePath[0] == '\0')
 		{
-			CliExit("Failed to read the OpenVR runtime path.", true);
+			CliExit("Couldn't read the OpenVR runtime path.", true);
 		}
 
 		// Machine-readable, so no trailing newline: callers capture this on
@@ -1081,7 +1160,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 				manifestPath.c_str());
 			if (vrAppErr != vr::VRApplicationError_None)
 			{
-				CliExit("Failed to deregister QuestCalibrator from SteamVR.\n\n" +
+				CliExit("Couldn't unregister QuestCalibrator from SteamVR.\n\n" +
 					manifestPath + "\n\n" +
 					vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
 			}
@@ -1099,7 +1178,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		}
 		catch (std::runtime_error &e)
 		{
-			CliExit(std::string("Failed to enable SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
+			CliExit(std::string("Couldn't turn on SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
 		}
 		CliExit("SteamVR multiple-driver support enabled.", false);
 	}
@@ -1108,6 +1187,6 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		// A mistyped command used to launch the full GUI and exit 0, which a
 		// scripted install (Start-Process -Wait) cannot tell from success: it
 		// blocks until a human closes a window that is iconified at creation.
-		CliExit("Unrecognised command-line argument: " + Narrow(cmd), true);
+		CliExit("Unrecognized command-line argument: " + Narrow(cmd), true);
 	}
 }
