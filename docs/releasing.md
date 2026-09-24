@@ -15,7 +15,8 @@ public.
 Pushing a `questcalibrator-v*` tag runs `.github/workflows/release.yml` on a clean
 Windows runner. It checks out the tag and the VirtualQuest commit it pins, builds
 with the full solver suite (including the VirtualQuest scenarios and the formal-model
-links), runs the duplicate scan and Clang-Tidy as advisory gates, checks the version
+links), replays the pose hub traces through their TLA+ model, runs the duplicate scan
+as an advisory gate (Clang-Tidy stays local, in the preflight below), checks the version
 against the tag, packages with `install\build-package.ps1`, scans with
 `install\virustotal-scan.ps1`, syncs the public repository's files, creates a
 **draft** release there with the zip, its `.sha256` and notes carrying the hash and

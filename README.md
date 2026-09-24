@@ -257,15 +257,15 @@ Thresholds, solution/configuration, and test executable live in
 
 GitHub Actions runs the same gates (`.github/workflows`):
 
-- **Validation**, on every pull request and push to `alpha`: the Release build
-  and the harness (blocking), the duplicate scan, and on `alpha` the Clang-Tidy
-  pass (both advisory). With the `VIRTUALQUEST_DEPLOY_KEY` secret it also builds
+- **Validation**, on pull requests that change more than documentation: the
+  Release build and the harness (blocking) and the duplicate scan (advisory).
+  Clang-Tidy runs locally only. With the `VIRTUALQUEST_DEPLOY_KEY` secret it also builds
   the private submodule's scenarios and replays the pose hub traces through
   their TLA+ model; without it the run warns and tests the public suite.
 - **Fuzz**, weekly and on demand: `tools/fuzz.ps1` for a minute per target,
   keeping the corpus between runs.
 - **Release**, on pushing a `questcalibrator-v*` tag: the full suite, the
-  package, the VirusTotal scan, a draft in the public releases repository and
+  pose hub trace replay, the package, the VirusTotal scan, a draft in the public releases repository and
   the install test on that draft. Publishing stays a manual step
   (`docs/releasing.md`).
 

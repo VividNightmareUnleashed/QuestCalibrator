@@ -1,10 +1,10 @@
 name: Validation
 
 # The local release gates on pull requests: the Release build and the solver
-# harness (blocking), then the duplicate scan and, when asked for on a run by
-# hand, the Clang-Tidy pass (advisory, as locally: their findings need a
-# human's review, not an automatic veto). Pushes don't trigger it, and neither do pull requests
-# that change only documentation, because minutes cost money in this private
+# harness (blocking), then the duplicate scan (advisory, as locally: its
+# findings need a human's review, not an automatic veto). Clang-Tidy runs
+# locally only. Pushes don't trigger it, and neither do pull requests that
+# change only documentation, because minutes cost money in this private
 # repository; the release workflow runs every gate on the tagged commit anyway.
 #
 # With the VIRTUALQUEST_DEPLOY_KEY secret (a read-only deploy key on the
@@ -23,11 +23,6 @@ on:
       - 'LICENSE'
       - 'THIRD-PARTY-NOTICES.txt'
   workflow_dispatch:
-    inputs:
-      clang_tidy:
-        description: Also run the Clang-Tidy pass (about 20 minutes)
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -102,12 +97,3 @@ jobs:
           npm install --global --no-fund --no-audit jscpd@5.0.12 | Out-Null
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Duplicates
           if ($LASTEXITCODE -ne 0) { Write-Host '::warning::The duplicate scan reported clones; review them.'; exit 1 }
-
-      - name: Clang-Tidy over every translation unit (advisory)
-        if: inputs.clang_tidy
-        timeout-minutes: 40
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Analyze -All
-          if ($LASTEXITCODE -ne 0) { Write-Host '::warning::Clang-Tidy reported findings; review them.'; exit 1 }

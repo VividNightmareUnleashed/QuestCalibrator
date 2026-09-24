@@ -118,24 +118,6 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Duplicates
           if ($LASTEXITCODE -ne 0) { Write-Host '::warning::The duplicate scan reported clones; review them before publishing.'; exit 1 }
 
-      - name: Clang-Tidy over every translation unit (advisory)
-        timeout-minutes: 40
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Analyze -All
-          if ($LASTEXITCODE -ne 0) { Write-Host '::warning::Clang-Tidy reported findings; review them before publishing.'; exit 1 }
-
-      # Analyze rebuilds every project; build the Release binaries once more so
-      # the package is made from the build the tests ran against, not an
-      # analysis build.
-      - name: Rebuild the release binaries
-        timeout-minutes: 30
-        shell: pwsh
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Build
-          if ($LASTEXITCODE -ne 0) { throw 'The rebuild or its solver tests failed.' }
-
       - name: Check the version matches the tag
         timeout-minutes: 2
         id: version
