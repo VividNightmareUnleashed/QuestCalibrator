@@ -69,13 +69,11 @@ jobs:
         run: '"sha=$(git rev-parse HEAD:VirtualQuest)" >> $env:GITHUB_OUTPUT'
 
       - name: Check out VirtualQuest
-        uses: actions/checkout@v4
-        with:
-          repository: VividNightmareUnleashed/VirtualQuest
-          ref: ${{ steps.vq.outputs.sha }}
-          path: VirtualQuest
-          ssh-key: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
-          persist-credentials: false
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools\ci\checkout-virtualquest.ps1
 
       - name: Build and run the full test suite
         id: build

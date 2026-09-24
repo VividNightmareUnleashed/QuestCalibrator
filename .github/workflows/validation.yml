@@ -41,26 +41,22 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Find the pinned VirtualQuest commit
-        id: vq
+      - name: Note a missing VirtualQuest key
+        if: env.HAS_VIRTUALQUEST != 'true'
         shell: pwsh
         run: |
-          "sha=$(git rev-parse HEAD:VirtualQuest)" >> $env:GITHUB_OUTPUT
-          if ($env:HAS_VIRTUALQUEST -ne 'true') {
-            Write-Host '::warning::VIRTUALQUEST_DEPLOY_KEY is not set: the simulated-headset scenarios, the formal-model links and the hub traces are not run.'
-          }
+          Write-Host '::warning::VIRTUALQUEST_DEPLOY_KEY is not set: the simulated-headset scenarios, the formal-model links and the hub traces are not run.'
 
-      # .gitmodules is not the way in: the key only opens VirtualQuest, so it
-      # is checked out on its own at the commit this tree pins.
+      # The key only opens VirtualQuest, so it is checked out on its own at the
+      # commit this tree pins (tools/ci/checkout-virtualquest.ps1 says why not
+      # with actions/checkout).
       - name: Check out VirtualQuest
         if: env.HAS_VIRTUALQUEST == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: VividNightmareUnleashed/VirtualQuest
-          ref: ${{ steps.vq.outputs.sha }}
-          path: VirtualQuest
-          ssh-key: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
-          persist-credentials: false
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools\ci\checkout-virtualquest.ps1
 
       - name: Build and run the solver harness
         shell: pwsh
