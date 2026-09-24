@@ -49,6 +49,23 @@ bool Handshake(HANDLE pipe)
 		read == sizeof response && response.type == protocol::ResponseHandshake;
 }
 
+// The server stamps a connection's activity in the completion routine that
+// runs after its response is written, and reads the clock on every pass of its
+// loop before it blocks. Once the clock has gone unread for a while, every
+// completion has run and the server is blocked in its wait, so advancing the
+// clock cannot land between a response and its stamp.
+bool WaitForServerQuiet(const std::atomic<int> &clockReads)
+{
+	for (int attempt = 0; attempt < 100; ++attempt)
+	{
+		const int before = clockReads.load();
+		Sleep(50);
+		if (clockReads.load() == before)
+			return true;
+	}
+	return false;
+}
+
 void IdleConnectionsDoNotRefuseTheClient(Check check)
 {
 	if (!LogFile)
@@ -57,10 +74,11 @@ void IdleConnectionsDoNotRefuseTheClient(Check check)
 	const std::string name = "\\\\.\\pipe\\QuestCalibratorTransportTest-" +
 		std::to_string(GetCurrentProcessId());
 	std::atomic<ULONGLONG> now{ 1000 };
+	std::atomic<int> clockReads{ 0 };
 
 	IPCServer server;
 	server.SetPipeNameForTest(name.c_str());
-	server.SetClockForTest([&now]() { return now.load(); });
+	server.SetClockForTest([&now, &clockReads]() { ++clockReads; return now.load(); });
 	IPCServer::RequestSink sink;
 	sink.setDeviceTransform = [](const protocol::SetDeviceTransform &) { return true; };
 	sink.setRuntimeState = [](const protocol::SetRuntimeState &) { return true; };
@@ -80,6 +98,7 @@ void IdleConnectionsDoNotRefuseTheClient(Check check)
 	}
 
 	// Past the idle deadline on the server's clock, then the real client.
+	const bool quiet = WaitForServerQuiet(clockReads);
 	now += 30001;
 	HANDLE client = running ? Connect(name) : INVALID_HANDLE_VALUE;
 	const bool clientServed = client != INVALID_HANDLE_VALUE && Handshake(client);
@@ -96,10 +115,10 @@ void IdleConnectionsDoNotRefuseTheClient(Check check)
 	server.Stop();
 
 	char detail[160];
-	snprintf(detail, sizeof detail, "running %d, %zu/%zu stale served then %zu reaped, client served %d",
-		running, served, Cap, reaped, clientServed);
+	snprintf(detail, sizeof detail, "running %d, %zu/%zu stale served then %zu reaped, client served %d, quiet %d",
+		running, served, Cap, reaped, clientServed, quiet);
 	check("ipc server: idle connections do not refuse the client",
-		running && served == Cap && reaped == Cap && clientServed, detail);
+		running && quiet && served == Cap && reaped == Cap && clientServed, detail);
 }
 } // namespace
 
