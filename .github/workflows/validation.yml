@@ -1,9 +1,11 @@
 name: Validation
 
-# The local release gates on every pull request and push to alpha: the Release
-# build and the solver harness (blocking), then the duplicate scan and, on
-# alpha, the Clang-Tidy pass (advisory, as locally: their findings need a
-# human's review, not an automatic veto).
+# The local release gates on pull requests: the Release build and the solver
+# harness (blocking), then the duplicate scan and, when run by hand, the
+# Clang-Tidy pass (advisory, as locally: their findings need a human's review,
+# not an automatic veto). Pushes don't trigger it, and neither do pull requests
+# that change only documentation, because minutes cost money in this private
+# repository; the release workflow runs every gate on the tagged commit anyway.
 #
 # With the VIRTUALQUEST_DEPLOY_KEY secret (a read-only deploy key on the
 # private VirtualQuest repository) the harness also builds the simulated
@@ -13,8 +15,13 @@ name: Validation
 on:
   pull_request:
     branches: [alpha, stable]
-  push:
-    branches: [alpha]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'public/**'
+      - 'math.pdf'
+      - 'LICENSE'
+      - 'THIRD-PARTY-NOTICES.txt'
   workflow_dispatch:
 
 permissions:
