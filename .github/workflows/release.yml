@@ -286,9 +286,32 @@ jobs:
             exit 0
           }
           $global:LASTEXITCODE = 0
+
+          # GitHub dates and orders published releases by the commit their tag
+          # points to. This repository changes only when its docs do, so
+          # releases published without a change between them would share a
+          # commit, tie, and sort in no particular order. Each release gets
+          # its own empty commit, made now, on top of main and reachable only
+          # from its tag. A tag left by an earlier attempt is kept.
+          gh api "repos/$env:PUBLIC_REPO/git/ref/tags/$env:TAG" --silent 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $head = gh api "repos/$env:PUBLIC_REPO/commits/HEAD" | ConvertFrom-Json
+            $commit = @{
+              message = "release: QuestCalibrator ${{ needs.build.outputs.version }}"
+              tree    = $head.commit.tree.sha
+              parents = @($head.sha)
+            } | ConvertTo-Json
+            $sha = $commit | gh api "repos/$env:PUBLIC_REPO/git/commits" --input - --jq .sha
+            if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Creating the release commit for $env:TAG failed." }
+            gh api "repos/$env:PUBLIC_REPO/git/refs" -f ref="refs/tags/$env:TAG" -f sha=$sha --silent
+            if ($LASTEXITCODE -ne 0) { throw "Creating the tag $env:TAG failed." }
+          }
+          $global:LASTEXITCODE = 0
+
           $arguments = @(
             'release', 'create', $env:TAG, $zip, "$zip.sha256",
             '--repo', $env:PUBLIC_REPO,
+            '--verify-tag',
             '--draft',
             '--title', 'QuestCalibrator ${{ needs.build.outputs.version }}',
             '--notes-file', 'package/notes.md'
