@@ -1,9 +1,9 @@
 name: Validation
 
 # The local release gates on pull requests: the Release build and the solver
-# harness (blocking), then the duplicate scan and, when run by hand, the
-# Clang-Tidy pass (advisory, as locally: their findings need a human's review,
-# not an automatic veto). Pushes don't trigger it, and neither do pull requests
+# harness (blocking), then the duplicate scan and, when asked for on a run by
+# hand, the Clang-Tidy pass (advisory, as locally: their findings need a
+# human's review, not an automatic veto). Pushes don't trigger it, and neither do pull requests
 # that change only documentation, because minutes cost money in this private
 # repository; the release workflow runs every gate on the tagged commit anyway.
 #
@@ -23,6 +23,11 @@ on:
       - 'LICENSE'
       - 'THIRD-PARTY-NOTICES.txt'
   workflow_dispatch:
+    inputs:
+      clang_tidy:
+        description: Also run the Clang-Tidy pass (about 20 minutes)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,7 +43,7 @@ env:
 jobs:
   validate:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 75
     env:
       HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
 
@@ -65,7 +70,10 @@ jobs:
           VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
         run: tools\ci\checkout-virtualquest.ps1
 
+      # Every step has its own limit, a few times its usual length, so a hung
+      # step fails in minutes instead of holding the runner to the job limit.
       - name: Build and run the solver harness
+        timeout-minutes: 30
         shell: pwsh
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Build
@@ -73,6 +81,7 @@ jobs:
 
       - name: Replay the pose hub traces through the model
         if: env.HAS_VIRTUALQUEST == 'true'
+        timeout-minutes: 10
         shell: pwsh
         run: |
           $jar = Join-Path $env:RUNNER_TEMP 'tla2tools.jar'
@@ -86,6 +95,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'A recorded hub run is not a behaviour of the model.' }
 
       - name: Duplicate scan (advisory)
+        timeout-minutes: 5
         continue-on-error: true
         shell: pwsh
         run: |
@@ -94,7 +104,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host '::warning::The duplicate scan reported clones; review them.'; exit 1 }
 
       - name: Clang-Tidy over every translation unit (advisory)
-        if: github.event_name != 'pull_request'
+        if: inputs.clang_tidy
+        timeout-minutes: 40
         continue-on-error: true
         shell: pwsh
         run: |
