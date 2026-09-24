@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -122,10 +123,14 @@ bool ParseTimestamp(const std::string &line, double &unixTime)
 	const std::string &clock = field[4];
 	if (clock.size() < 8 || clock[2] != ':' || clock[5] != ':')
 		return false;
-	const long hour = std::strtol(clock.substr(0, 2).c_str(), &stop, 10);
+	// Named, not temporaries: `stop` points into the text strtol read, and a
+	// temporary's buffer is gone by the time it is tested.
+	const std::string hourText = clock.substr(0, 2);
+	const std::string minuteText = clock.substr(3, 2);
+	const long hour = std::strtol(hourText.c_str(), &stop, 10);
 	if (*stop != '\0')
 		return false;
-	const long minute = std::strtol(clock.substr(3, 2).c_str(), &stop, 10);
+	const long minute = std::strtol(minuteText.c_str(), &stop, 10);
 	if (*stop != '\0')
 		return false;
 	const double second = std::strtod(clock.c_str() + 6, &stop);
@@ -137,8 +142,9 @@ bool ParseTimestamp(const std::string &line, double &unixTime)
 	for (int i = 0; i < 12; ++i)
 		if (month == months[i])
 			monthIndex = i;
+	// isfinite first: strtod reads "nan", which fails both range comparisons.
 	if (monthIndex < 0 || day < 1 || day > 31 || year < 2000 || hour < 0 || hour > 23 ||
-		minute < 0 || minute > 59 || second < 0.0 || second >= 61.0)
+		minute < 0 || minute > 59 || !std::isfinite(second) || second < 0.0 || second >= 61.0)
 		return false;
 	std::tm tm{};
 	tm.tm_year = static_cast<int>(year) - 1900;

@@ -52,7 +52,6 @@ static TrackingStreamDigest StreamDigest;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
-static uint64_t MonitorBoundariesSeen = 0;
 
 // Everything the per-tick runtime monitors keep between ticks that does not
 // live inside a detector object. Collected here so "what is the monitor's
@@ -102,7 +101,6 @@ static std::unique_ptr<questcal::ContinuousAlignment> Continuous;
 static int ContinuousConsumer = -1;
 static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
-static uint64_t ContinuousBoundariesSeen = 0;
 
 static void ResetContinuousObservations(CalibrationContext &ctx,
 	questcal::ContinuousAlignment::ResetReason reason)
@@ -123,12 +121,10 @@ static void LegacyReset(CalibrationContext &ctx);
 // neither method applied a correction.
 static bool DrainContinuousInput(CalibrationContext &ctx)
 {
-	// Before the drain, for the reason given in RuntimeMonitorTick.
-	const uint64_t boundaries = PoseHub.StreamBoundaries();
-	const bool crossedBoundary = boundaries != ContinuousBoundariesSeen;
-	ContinuousBoundariesSeen = boundaries;
-
-	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch);
+	// The whole hole in front of the batch, for the reason given in
+	// RuntimeMonitorTick.
+	PoseStreamHub::Hole hole;
+	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch, &hole);
 	auto &diagnostics = ctx.continuousDiagnostics;
 	++diagnostics.batches;
 	diagnostics.samples += ContinuousScratch.size();
@@ -137,7 +133,7 @@ static bool DrainContinuousInput(CalibrationContext &ctx)
 		++diagnostics.gapEvents;
 		diagnostics.reportedLoss += dropped;
 	}
-	return !ringpose::MonitorGapTolerable(dropped, crossedBoundary);
+	return !ringpose::MonitorGapTolerable(hole.size, hole.sessionBoundary);
 }
 
 CalibrationContext CalCtx;
@@ -666,21 +662,17 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		PoseHub.DiscardBacklog(MonitorConsumer);
 		Monitors.ResetObservations();
-		MonitorBoundariesSeen = PoseHub.StreamBoundaries();
 		MonitorActive = true;
 	}
 
-	// A session boundary reaches a drain as a one-sample hole, so the count
-	// is what tells the two apart. Read it before the drain: a boundary that
-	// lands in between is then taken for a small hole this tick and resets
-	// the monitors on the next, where reading it afterwards would reset them
-	// now, feed them this tick's pre-boundary samples and never reset again.
-	const uint64_t boundaries = PoseHub.StreamBoundaries();
-	const bool crossedBoundary = boundaries != MonitorBoundariesSeen;
-	MonitorBoundariesSeen = boundaries;
-
-	uint64_t dropped = PoseHub.Drain(MonitorConsumer, MonitorScratch);
-	if (!ringpose::MonitorGapTolerable(dropped, crossedBoundary))
+	// Judge the whole hole in front of the batch, from the drain itself. A
+	// session boundary reaches the count as a one-sample gap, and any
+	// StreamBoundaries read before or after the drain can land on the wrong
+	// side of it; and a hole that ends one drain and continues into the next
+	// passes the leash share by share.
+	PoseStreamHub::Hole hole;
+	uint64_t dropped = PoseHub.Drain(MonitorConsumer, MonitorScratch, &hole);
+	if (!ringpose::MonitorGapTolerable(hole.size, hole.sessionBoundary))
 	{
 		// We lost part of our own observation window; baselines across the
 		// hole are unsafe. For the drift monitor a drain hole would read as a
@@ -1123,7 +1115,6 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	if (!ContinuousActive)
 	{
 		PoseHub.DiscardBacklog(ContinuousConsumer);
-		ContinuousBoundariesSeen = PoseHub.StreamBoundaries();
 		ContinuousActive = true;
 	}
 
@@ -1708,7 +1699,12 @@ static void FinishCalibration(CalibrationContext &ctx)
 
 	if (asAnchor)
 	{
-		EndCalibrationRun(ctx);
+		// Hand back the devices this run neutralized now, as every other exit
+		// does: StoreFieldAnchor resyncs only for an anchor it accepts and saves,
+		// and a refused one would otherwise leave them uncalibrated until the
+		// next idle scan.
+		if (EndCalibrationRun(ctx) && vr::VRSystem())
+			SynchronizeCalibrationDriver(ctx);
 		ctx.lastRunHint = CalibrationContext::GuideHint::Success;
 		StoreFieldAnchor(ctx, result, targetCentroid);
 		return;

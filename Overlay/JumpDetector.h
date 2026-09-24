@@ -180,6 +180,9 @@ public:
 		// `exact` is the validity discriminator; heuristic deltas leave identity.
 		Eigen::Quaterniond worldFromDriverRotation{ 1, 0, 0, 0 };
 		Eigen::Vector3d worldFromDriverTranslation{ 0, 0, 0 };
+		// The HMD worldFromDriver the exact rebase started from.
+		Eigen::Quaterniond previousWorldFromDriverRotation{ 1, 0, 0, 0 };
+		Eigen::Vector3d previousWorldFromDriverTranslation{ 0, 0, 0 };
 	};
 
 	struct GapEvent
@@ -241,6 +244,12 @@ public:
 	// stall-sized hole or a driver session boundary in the stream, ...).
 	void Reset();
 
+	// Whether a headset heuristic candidate raised at sample time `time` is
+	// still alive: its fit window is filling, or it waits for a device to
+	// confirm it. The profile-universe verdict does not give up on a
+	// worldFromDriver change such a candidate may yet explain.
+	bool HasLiveHeadsetCandidate(double time) const;
+
 private:
 	struct Hist
 	{
@@ -271,6 +280,8 @@ private:
 	{
 		Eigen::Quaterniond rotation{ 1, 0, 0, 0 };
 		Eigen::Vector3d translation{ 0, 0, 0 };
+		Eigen::Quaterniond previousRotation{ 1, 0, 0, 0 };
+		Eigen::Vector3d previousTranslation{ 0, 0, 0 };
 	};
 
 	struct Candidate

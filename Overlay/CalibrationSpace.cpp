@@ -9,6 +9,7 @@
 #include "PoseStreamHub.h"
 #include "ProfileValidation.h"
 #include "RingPoseMath.h"
+#include "UniverseVerdict.h"
 #include "../common/PoseChannel.h"
 
 #include <algorithm>
@@ -73,8 +74,7 @@ struct SpaceState
 	std::unique_ptr<JumpDetector> jumps;
 
 	HmdUniverseObservation hmd;
-	double mismatchSince = -1e9;
-	double compensatedJumpAwaitingEndpoint = -1e9;
+	questcal::UniverseVerdict verdict;
 
 	double lastOwnerCheck = -1e9;
 	std::string checkedTrackingSystem;
@@ -83,13 +83,12 @@ struct SpaceState
 	double lastSetupFailure = -1e9;
 	double lastReadFailure = -1e9;
 
-	bool VerdictPending() const noexcept { return mismatchSince >= 0.0; }
-	void ClearVerdict() noexcept { mismatchSince = -1e9; }
+	bool VerdictPending() const noexcept { return verdict.Pending(); }
+	void ClearVerdict() noexcept { verdict.Clear(); }
 	void ResetContinuity() noexcept
 	{
 		hmd.Reset();
-		mismatchSince = -1e9;
-		compensatedJumpAwaitingEndpoint = -1e9;
+		verdict.Reset();
 	}
 };
 
@@ -97,6 +96,9 @@ struct HmdWorldTransition
 {
 	bool worldChanged = false;
 	bool localPoseContinuous = false;
+	// The composed (world) pose stayed on its trajectory across the change:
+	// the driver re-expressed the local pose, and the world did not move.
+	bool composedPoseContinuous = false;
 	Eigen::Quaterniond previousRotation{ 1, 0, 0, 0 };
 	Eigen::Vector3d previousTranslation{ 0, 0, 0 };
 	Eigen::Quaterniond currentRotation{ 1, 0, 0, 0 };
@@ -104,8 +106,21 @@ struct HmdWorldTransition
 };
 
 SpaceState Space;
-constexpr double UniverseVerdictGraceSeconds = 0.5;
 constexpr float ChaperoneCompareTolerance = 0.002f;
+
+// The same sample expressed in the raw universe: continuity of this is what
+// tells a moved world from a re-expressed local pose.
+ringpose::DriverLocalPoseSample ComposeWithWorldFromDriver(
+	const ringpose::DriverLocalPoseSample &local, const Eigen::Quaterniond &rotation,
+	const Eigen::Vector3d &translation)
+{
+	ringpose::DriverLocalPoseSample world = local;
+	world.rotation = rotation * local.rotation;
+	world.position = rotation * local.position + translation;
+	world.velocity = rotation * local.velocity;
+	world.angularVelocity = rotation * local.angularVelocity;
+	return world;
+}
 
 bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 	HmdWorldTransition &transition)
@@ -140,6 +155,15 @@ bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 		transition.currentTranslation = parts.wfdTrans;
 		transition.localPoseContinuous = Space.hmd.IsUsable() &&
 			ringpose::IsDriverLocalPoseContinuous(Space.hmd.localPose, localPose);
+		transition.composedPoseContinuous = Space.hmd.IsUsable() &&
+			ringpose::IsDriverLocalPoseContinuous(
+				ComposeWithWorldFromDriver(Space.hmd.localPose, Space.hmd.rotation,
+					Space.hmd.translation),
+				ComposeWithWorldFromDriver(localPose, parts.wfdRot, parts.wfdTrans));
+		Space.verdict.NoteTransition(sampleTime,
+			{ transition.previousRotation, transition.previousTranslation },
+			{ transition.currentRotation, transition.currentTranslation },
+			transition.composedPoseContinuous);
 	}
 
 	Space.hmd.Accept(parts.wfdRot, parts.wfdTrans, sampleTime,
@@ -435,6 +459,18 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 			ctx.chaperone.worldFromDriverTranslation,
 			transition.previousRotation, transition.previousTranslation))
 			continue;
+		if (transition.composedPoseContinuous)
+		{
+			// The driver re-expressed the local pose: the room did not move,
+			// so the standing center stays and only the baseline follows.
+			ctx.chaperone.worldFromDriverRotation =
+				transition.currentRotation.normalized();
+			ctx.chaperone.worldFromDriverTranslation = transition.currentTranslation;
+			ctx.chaperone.worldFromDriverValid = true;
+			ctx.chaperone.baselineVerifiedThisSession = true;
+			reanchored = true;
+			continue;
+		}
 		if (!transition.localPoseContinuous)
 		{
 			continuityLost = true;
@@ -627,27 +663,22 @@ bool ApplyCalibrationDelta(CalibrationContext &ctx,
 namespace
 {
 
-bool AdoptObservedUniverseAfterJump(CalibrationContext &ctx, double now)
+// The verdict found the profile's WFD change followed: take it on.
+void AdoptProfileUniverse(CalibrationContext &ctx, const questcal::WorldFromDriver &adopted,
+	double now)
 {
-	if (Space.hmd.sampleTime < Space.compensatedJumpAwaitingEndpoint ||
-		Space.hmd.sampleTime - Space.compensatedJumpAwaitingEndpoint >
-			UniverseVerdictGraceSeconds)
-		return false;
-	Space.compensatedJumpAwaitingEndpoint = -1e9;
-
-	ctx.profileWorldFromDriverRotation = Space.hmd.rotation;
-	ctx.profileWorldFromDriverTranslation = Space.hmd.translation;
+	ctx.profileWorldFromDriverRotation = adopted.rotation;
+	ctx.profileWorldFromDriverTranslation = adopted.translation;
 	ctx.profileUniverseValid = true;
 	ctx.persistence.MarkProfile(now);
 	if (ctx.chaperone.valid)
 	{
-		ctx.chaperone.worldFromDriverRotation = Space.hmd.rotation;
-		ctx.chaperone.worldFromDriverTranslation = Space.hmd.translation;
+		ctx.chaperone.worldFromDriverRotation = adopted.rotation;
+		ctx.chaperone.worldFromDriverTranslation = adopted.translation;
 		ctx.chaperone.worldFromDriverValid = true;
 		ctx.chaperone.baselineVerifiedThisSession = true;
 		ctx.persistence.MarkSettings(now);
 	}
-	return true;
 }
 
 bool ApplyUniverseDelta(CalibrationContext &ctx,
@@ -663,7 +694,12 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 
 	if (delta.exact)
 	{
-		if (ctx.profileUniverseValid)
+		const questcal::WorldFromDriver profile{
+			ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation };
+		const questcal::WorldFromDriver previous{
+			delta.previousWorldFromDriverRotation, delta.previousWorldFromDriverTranslation };
+		if (ctx.profileUniverseValid &&
+			questcal::UniverseVerdict::ExactDeltaRebasesProfile(profile, previous))
 		{
 			ctx.profileWorldFromDriverRotation =
 				delta.worldFromDriverRotation.normalized();
@@ -680,10 +716,9 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 			ctx.chaperone.baselineVerifiedThisSession = true;
 		}
 	}
-	else
-	{
-		Space.compensatedJumpAwaitingEndpoint = delta.time;
-	}
+	// Both paths: the verdict follows the WFD transition at this sample, also
+	// when an exact rebase could not move a profile that was still behind it.
+	Space.verdict.NoteCompensation(delta.time);
 
 	ctx.jumpsCompensated++;
 	const double yawDegrees = 2.0 *
@@ -762,27 +797,18 @@ void ProfileUniverseTick(CalibrationContext &ctx, double now)
 			return;
 	}
 
-	if (!questcal::WorldFromDriverChanged(
-		ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation,
-		Space.hmd.rotation, Space.hmd.translation))
+	const questcal::UniverseVerdict::Decision decision = Space.verdict.Evaluate(now,
+		{ ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation },
+		{ Space.hmd.rotation, Space.hmd.translation },
+		[](double time) { return Space.jumps->HasLiveHeadsetCandidate(time); });
+	if (decision.adopt)
+		AdoptProfileUniverse(ctx, decision.adopted, now);
+	if (!decision.latch)
 	{
-		Space.ClearVerdict();
+		if (Space.VerdictPending())
+			ctx.chaperone.baselineVerifiedThisSession = false;
 		return;
 	}
-	if (AdoptObservedUniverseAfterJump(ctx, now))
-	{
-		Space.ClearVerdict();
-		return;
-	}
-
-	if (!Space.VerdictPending())
-		Space.mismatchSince = now;
-	if (now - Space.mismatchSince < UniverseVerdictGraceSeconds)
-	{
-		ctx.chaperone.baselineVerifiedThisSession = false;
-		return;
-	}
-	Space.ClearVerdict();
 
 	ctx.profileUniverseUnsafe = true;
 	ctx.enabled = false;

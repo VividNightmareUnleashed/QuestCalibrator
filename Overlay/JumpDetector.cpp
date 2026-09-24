@@ -269,7 +269,7 @@ void JumpDetector::DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	c.rot = yawRot;
 	c.trans = dTrans;
 	c.residualTiltRad = tilt;
-	c.endpoint = ExactEndpoint{ newRot, newTrans };
+	c.endpoint = ExactEndpoint{ newRot, newTrans, dev.wfdRot, dev.wfdTrans };
 	candidates.push_back(c);
 
 	notes.push_back(Format("worldFromDriver rebase on device %u: yaw %+.2f deg, shift %.3f m (tilt residual %.2f deg)",
@@ -497,6 +497,8 @@ void JumpDetector::TryAccept()
 		d.residualTiltRad = c.residualTiltRad;
 		d.worldFromDriverRotation = c.endpoint.rotation;
 		d.worldFromDriverTranslation = c.endpoint.translation;
+		d.previousWorldFromDriverRotation = c.endpoint.previousRotation;
+		d.previousWorldFromDriverTranslation = c.endpoint.previousTranslation;
 		d.secondsSinceStreamResume = ResumeAge(devices[c.deviceId], c.t);
 		std::bitset<vr::k_unMaxTrackedDeviceCount> counted;
 		counted.set(c.deviceId);
@@ -609,7 +611,23 @@ void JumpDetector::TryAccept()
 
 			accepted.push_back(d);
 			lastAcceptTime = c0.t;
-			candidates.clear();
+			// Discard this step's evidence: its headset candidates and every
+			// other device's steps up to the last confirmation it used. A later
+			// headset step still waiting for its own confirmation stays, and so
+			// does a later step of another device that may confirm it; clearing
+			// everything lost the second of two held map switches.
+			const double stepTime = c0.t;
+			double evidenceEnd = stepTime;
+			for (const auto *a : agree)
+				evidenceEnd = std::max(evidenceEnd, a->t);
+			candidates.erase(
+				std::remove_if(candidates.begin(), candidates.end(),
+					[&](const Candidate &c) {
+						if (c.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
+							return c.kind != Kind::Heuristic || c.t <= stepTime;
+						return c.t <= evidenceEnd;
+					}),
+				candidates.end());
 			return;
 		}
 
@@ -783,4 +801,13 @@ void JumpDetector::Reset()
 	driftCatchUps = 0;
 	ignoredYaw = 0.0;
 	ignoredTranslation.setZero();
+}
+
+bool JumpDetector::HasLiveHeadsetCandidate(double time) const
+{
+	for (const auto &c : candidates)
+		if (c.deviceId == vr::k_unTrackedDeviceIndex_Hmd && c.kind == Kind::Heuristic &&
+			c.life != Life::Dead && c.t == time)
+			return true;
+	return false;
 }

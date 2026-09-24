@@ -11,7 +11,7 @@
 // A named mapping survives while either process still has it open, so reusing
 // an earlier name after PoseRing changes layout could strand an upgraded driver
 // behind an incompatible overlay-held mapping.
-#define QUESTCALIBRATOR_SHMEM_NAME "Local\\QuestCalibratorPoseRing.v6.layout3"
+#define QUESTCALIBRATOR_SHMEM_NAME "Local\\QuestCalibratorPoseRing.v6.layout4"
 
 namespace protocol
 {

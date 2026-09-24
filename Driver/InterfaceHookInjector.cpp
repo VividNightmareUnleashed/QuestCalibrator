@@ -10,6 +10,10 @@
 #include <tlhelp32.h>
 #include <vector>
 
+#ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
+void (*TryInstallAfterAcceptCheckForTest)() = nullptr;
+#endif
+
 namespace
 {
 
@@ -408,6 +412,10 @@ void TryInstallPoseHook(const char *interfaceVersion, void *originalInterface)
 	std::lock_guard<std::mutex> lock(HookSetupMutex);
 	if (!MinHookInitialized || !AcceptingHookRequests.load(std::memory_order_acquire))
 		return;
+#ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
+	if (TryInstallAfterAcceptCheckForTest)
+		TryInstallAfterAcceptCheckForTest();
+#endif
 
 	if (binding->ready->load(std::memory_order_relaxed))
 		return;
@@ -510,8 +518,6 @@ bool DisableHooks()
 	// mutex. A detour already waiting for the mutex rechecks this flag.
 	AcceptingHookRequests.store(false, std::memory_order_release);
 	Driver.store(nullptr, std::memory_order_release);
-	for (const PoseHookBinding &binding : PoseHookBindings)
-		binding.ready->store(false, std::memory_order_release);
 
 	// Hook removal is only safe after every target is confirmed disabled. If
 	// both the individual and MinHook-wide disable paths fail, keep the benign
@@ -523,6 +529,13 @@ bool DisableHooks()
 	{
 		{
 			std::lock_guard<std::mutex> lock(HookSetupMutex);
+			// Under the mutex, not before it: a detour that passed its accept
+			// check before the store above sets its ready flag while holding
+			// the mutex. Cleared earlier, that flag outlives the hook it names,
+			// and the next Init in this process skips installing the hook while
+			// IsPoseUpdateHookInstalled still reports it.
+			for (const PoseHookBinding &binding : PoseHookBindings)
+				binding.ready->store(false, std::memory_order_release);
 			if (!MinHookInitialized)
 				return true;
 
