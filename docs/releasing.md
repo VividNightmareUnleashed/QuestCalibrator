@@ -29,7 +29,9 @@ fine-grained token for the public repository only, Contents read and write) and
 be repeated for an existing tag from the Actions tab (`workflow_dispatch`).
 
 `install\release.ps1` does the same locally, from the tagged commit with PowerShell 7,
-with your own `gh` login: the fallback when Actions is unavailable. It checks that the
+with your own `gh` login: the fallback when Actions is unavailable, or to save the
+Actions minutes. To keep the tag push from starting the workflow, put `[skip release]`
+in the message of the commit the tag points to (the version bump). It checks that the
 working tree is clean and that the tag is at HEAD and pushed; `-DryRun` stops before
 the public repository. Its VirusTotal key comes from `$env:VT_API_KEY` or the
 git-ignored `.env` at the repository root. Package output in `install/out/` and

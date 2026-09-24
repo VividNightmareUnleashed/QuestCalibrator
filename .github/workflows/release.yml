@@ -40,8 +40,14 @@ env:
 # publish does everything that writes to the public repository, from that kept
 # package. A failed publish is repeated with "Re-run failed jobs" in a minute,
 # without building again.
+#
+# A tag on a commit whose message contains [skip release] starts nothing
+# (publish and the install test need build, so they skip too); cut that
+# release locally with install\release.ps1 instead. A run started by hand
+# always goes ahead.
 jobs:
   build:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
     runs-on: windows-2022
     timeout-minutes: 90
     outputs:
