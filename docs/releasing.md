@@ -12,17 +12,27 @@ which holds only `public/README.md` (as its README), `LICENSE`,
 look for updates there, so that repository must keep that exact name and stay
 public.
 
-Releases are cut locally with `installelease.ps1`, run from the tagged commit
-with PowerShell 7. It checks that the working tree is clean and that the tag is at
-HEAD and pushed, then builds with the full solver suite (including the VirtualQuest
-scenarios), checks the version against the tag, packages with
-`installuild-package.ps1`, scans with `installirustotal-scan.ps1`, syncs the
-public repository's files, and creates a **draft** release there with the zip, its
-`.sha256` and notes carrying the hash and the VirusTotal table. It publishes with
-your own `gh` login and refuses to run if the public repository already has a
-release for the tag. `-DryRun` stops before the public repository. The VirusTotal
-key comes from `$env:VT_API_KEY` or the git-ignored `.env` at the repository root.
-Package output in `install/out/` and `install/test-out/` is never committed.
+Pushing a `questcalibrator-v*` tag runs `.github/workflows/release.yml` on a clean
+Windows runner. It checks out the tag and the VirtualQuest commit it pins, builds
+with the full solver suite (including the VirtualQuest scenarios and the formal-model
+links), runs the duplicate scan and Clang-Tidy as advisory gates, checks the version
+against the tag, packages with `install\build-package.ps1`, scans with
+`install\virustotal-scan.ps1`, syncs the public repository's files, creates a
+**draft** release there with the zip, its `.sha256` and notes carrying the hash and
+the VirusTotal table, and then runs the install test on that draft. It refuses to run
+if the public repository already has a release for the tag. Its secrets:
+`VIRTUALQUEST_DEPLOY_KEY` (a read-only deploy key on VirtualQuest; required, so a
+release is never tested on less than a local build), `PUBLIC_RELEASE_TOKEN` (a
+fine-grained token for the public repository only, Contents read and write) and
+`VT_API_KEY` (without it the scan is skipped and the notes say so). A failed run can
+be repeated for an existing tag from the Actions tab (`workflow_dispatch`).
+
+`install\release.ps1` does the same locally, from the tagged commit with PowerShell 7,
+with your own `gh` login: the fallback when Actions is unavailable. It checks that the
+working tree is clean and that the tag is at HEAD and pushed; `-DryRun` stops before
+the public repository. Its VirusTotal key comes from `$env:VT_API_KEY` or the
+git-ignored `.env` at the repository root. Package output in `install/out/` and
+`install/test-out/` is never committed.
 
 ## Source preflight
 
@@ -64,10 +74,11 @@ Package output in `install/out/` and `install/test-out/` is never committed.
 
 ## Package and provenance record
 
-- Run `installelease.ps1` from the pushed tag. The package's `BUILD-INFO.txt`
-  records the tag, commit, UTC build time, Visual Studio version and the packaging
-  script's SHA-256. Keep the zip, its `.sha256` and the VirusTotal table from
-  `install/out/` in the private release record. The default package name is
+- The release workflow runs on the pushed tag. The package's `BUILD-INFO.txt`
+  records the tag, commit, the VirtualQuest commit, the scenario count, UTC build
+  time, runner image, Visual Studio version, the packaging script's SHA-256 and the
+  workflow run. The run keeps the zip, its `.sha256` and the VirusTotal table as an
+  artifact for 90 days; copy them into the private release record. The default package name is
   `QuestCalibrator-MAJOR.MINOR.PATCH.zip`, from the executable's version resource.
 - `build-package.ps1` writes the SHA-256 of every packaged file to `SHA256SUMS.txt`
   inside the package, and the zip's own hash to `<zip>.sha256` beside it.
@@ -84,15 +95,14 @@ Package output in `install/out/` and `install/test-out/` is never committed.
 
 ## Publish the GitHub Release
 
-- Open the draft `release.ps1` created in the public repository. Replace the
-  **Changes** section with the user-visible changes; it starts from the tag
+- Open the draft the release workflow created in the public repository. Replace
+  the **Changes** section with the user-visible changes; it starts from the tag
   message. Keep the SHA-256 and VirusTotal sections as generated.
 - The draft carries only the package ZIP and its `.sha256`. Never add, replace or
   delete assets by hand; if the package must change, tag a new version.
-- Run the install test against the draft and publish only when it passes. It is
-  the one release step that runs on GitHub Actions, because it needs a clean
-  Windows machine; its `PUBLIC_RELEASE_TOKEN` secret (a fine-grained token for the
-  public repository only, Contents read and write) is what lets it see the draft:
+- Publish only when the install test passed. The release workflow runs it on the
+  draft; run it again by hand to test against another earlier release, or after a
+  local `release.ps1`:
 
   ```powershell
   gh workflow run install-test.yml --ref alpha -f tag=questcalibrator-vMAJOR.MINOR.PATCH
