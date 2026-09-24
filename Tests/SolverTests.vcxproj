@@ -92,6 +92,12 @@
       <PreprocessorDefinitions>QUESTCAL_VIRTUAL_QUEST;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
+  <!-- Links between the code and the formal models (VirtualQuest/formal). -->
+  <ItemDefinitionGroup Condition="Exists('..\VirtualQuest\Tests\FormalConformanceTests.cpp')">
+    <ClCompile>
+      <PreprocessorDefinitions>QUESTCAL_FORMAL_CONFORMANCE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="CalibrationContextTests.cpp" />
     <ClCompile Include="ReviewRegressionTests.cpp" />
@@ -106,6 +112,7 @@
     <ClCompile Include="VirtualLighthouse.cpp" />
     <ClCompile Include="..\VirtualQuest\Tests\VirtualQuest.cpp" Condition="Exists('..\VirtualQuest\Tests\VirtualQuest.cpp')" />
     <ClCompile Include="..\VirtualQuest\Tests\VirtualQuestTests.cpp" Condition="Exists('..\VirtualQuest\Tests\VirtualQuestTests.cpp')" />
+    <ClCompile Include="..\VirtualQuest\Tests\FormalConformanceTests.cpp" Condition="Exists('..\VirtualQuest\Tests\FormalConformanceTests.cpp')" />
     <ClCompile Include="OpenVRLayoutTests.cpp" />
     <ClCompile Include="ImGuiInputTests.cpp" />
     <ClCompile Include="..\lib\imgui\imgui.cpp" />

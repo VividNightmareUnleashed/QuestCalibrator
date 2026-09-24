@@ -29,6 +29,8 @@ public:
 	// Power of two. At a typical aggregate pose rate (a few hundred Hz per
 	// device, a handful of devices) this is tens of seconds of history.
 	static const uint64_t HistoryCapacity = 1 << 15;
+	// Entries a drain copies per hold of the producer mutex.
+	static const uint64_t CopyChunk = 512;
 
 	~PoseStreamHub();
 
@@ -111,6 +113,9 @@ public:
 	void AppendGapForTest(uint64_t count);
 	void AppendSessionBoundaryForTest();
 	void SetDrainChunkHookForTest(std::function<void()> hook);
+	// Shrinks the history and the copy chunk so a short run reaches overflow
+	// and chunk boundaries. Before the first append or Start only.
+	void SetGeometryForTest(uint64_t historyCapacity, uint64_t copyChunk);
 	uint64_t ResetDeferralsForTest() const
 	{
 		return resetDeferralsForTest.load(std::memory_order_acquire);
@@ -156,7 +161,9 @@ private:
 
 	std::mutex mutex;                                   // guards all fields below
 	Diagnostics diagnostics;
-	std::vector<HistoryEntry> history;                  // ring, HistoryCapacity entries
+	std::vector<HistoryEntry> history;                  // ring, `capacity` entries
+	uint64_t capacity = HistoryCapacity;                // fixed but for SetGeometryForTest
+	uint64_t copyChunk = CopyChunk;
 	uint64_t head = 0;                                  // absolute index of next write
 	uint64_t sampleCount = 0;                           // actual samples, excluding gap markers
 	uint64_t sourceDropCount = 0;                       // cumulative source-gap sequence

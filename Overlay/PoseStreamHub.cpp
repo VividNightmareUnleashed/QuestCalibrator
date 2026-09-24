@@ -16,7 +16,7 @@ void PoseStreamHub::Start(const char *shmemName)
 		// thread is running yet: the consumers touched below are readable from
 		// any thread that already holds a consumer id.
 		std::lock_guard<std::mutex> lock(mutex);
-		history.resize(static_cast<size_t>(HistoryCapacity));
+		history.resize(static_cast<size_t>(capacity));
 
 		// A restart is an observation hole of unknown length. Without a boundary
 		// here, post-restart samples would land directly adjacent to
@@ -59,14 +59,14 @@ PoseStreamHub::Diagnostics PoseStreamHub::ReadDiagnostics()
 void PoseStreamHub::AccountForHistoryOverflowLocked(int consumer, uint64_t &dropped)
 {
 	auto &cursor = consumers[consumer];
-	uint64_t oldest = head > HistoryCapacity ? head - HistoryCapacity : 0;
+	uint64_t oldest = head > capacity ? head - capacity : 0;
 	if (cursor.historyPosition >= oldest)
 		return;
 
 	// History also contains standalone gap markers. Count only actual samples
 	// overwritten here; their source-drop payload is accounted independently by
 	// sourceDropCountBefore on the first retained entry.
-	uint64_t oldestSampleCount = history[oldest % HistoryCapacity].sampleCountBefore;
+	uint64_t oldestSampleCount = history[oldest % capacity].sampleCountBefore;
 	dropped += oldestSampleCount - cursor.samplePosition;
 	cursor.holeSize += oldestSampleCount - cursor.samplePosition;
 	cursor.samplePosition = oldestSampleCount;
@@ -139,7 +139,6 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 	// Do not hold the producer mutex through an arbitrarily large backlog copy.
 	// A fixed snapshot makes this loop finite; chunking lets the dedicated
 	// ring-drain thread publish between batches.
-	constexpr uint64_t CopyChunk = 512;
 	for (;;)
 	{
 		bool copyComplete = false;
@@ -161,10 +160,10 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 				// contract - never acknowledge a gap after copying an older
 				// prefix. Reporting it before the NEXT batch's front is what
 				// makes `dropped` always describe out.front().
-				uint64_t oldest = head > HistoryCapacity ? head - HistoryCapacity : 0;
+				uint64_t oldest = head > capacity ? head - capacity : 0;
 				bool overflowPending = cursor < oldest;
 				bool sourcePending = !overflowPending && cursor < end &&
-					history[cursor % HistoryCapacity].sourceDropCountBefore > dropCursor;
+					history[cursor % capacity].sourceDropCountBefore > dropCursor;
 				if ((overflowPending || sourcePending) && out.size() > start)
 					return dropped;
 
@@ -176,15 +175,15 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 				}
 				if (sourcePending)
 				{
-					const auto &gapEntry = history[cursor % HistoryCapacity];
+					const auto &gapEntry = history[cursor % capacity];
 					dropped += gapEntry.sourceDropCountBefore - dropCursor;
 					consumerCursor.holeSize += gapEntry.sourceDropCountBefore - dropCursor;
 					dropCursor = gapEntry.sourceDropCountBefore;
 				}
-				if (cursor >= end || copiedThisChunk >= CopyChunk)
+				if (cursor >= end || copiedThisChunk >= copyChunk)
 					break;
 
-				const auto &entry = history[cursor % HistoryCapacity];
+				const auto &entry = history[cursor % capacity];
 				++cursor;
 				++copiedThisChunk;
 				consumerCursor.samplePosition = entry.sampleCountBefore +
@@ -234,7 +233,7 @@ void PoseStreamHub::AppendSampleLocked(const protocol::DevicePoseSample &sample)
 		device.streamBoundary = diagnostics.streamBoundaries;
 		device.latest = sample;
 	}
-	auto &entry = history[head % HistoryCapacity];
+	auto &entry = history[head % capacity];
 	entry = HistoryEntry{};
 	entry.sample = sample;
 	entry.sourceDropCountBefore = sourceDropCount;
@@ -249,7 +248,7 @@ void PoseStreamHub::AppendGapLocked(uint64_t count)
 	if (count == 0)
 		return;
 	++diagnostics.gapMarkers;
-	auto &entry = history[head % HistoryCapacity];
+	auto &entry = history[head % capacity];
 	entry = HistoryEntry{};
 	entry.sourceDropCountBefore = (sourceDropCount += count);
 	entry.sampleCountBefore = sampleCount;
@@ -275,7 +274,7 @@ void PoseStreamHub::AppendSampleForTest(const protocol::DevicePoseSample &sample
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	if (history.empty())
-		history.resize(static_cast<size_t>(HistoryCapacity));
+		history.resize(static_cast<size_t>(capacity));
 	AppendSampleLocked(sample);
 }
 
@@ -283,7 +282,7 @@ void PoseStreamHub::AppendGapForTest(uint64_t count)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	if (history.empty())
-		history.resize(static_cast<size_t>(HistoryCapacity));
+		history.resize(static_cast<size_t>(capacity));
 	AppendGapLocked(count);
 }
 
@@ -291,7 +290,7 @@ void PoseStreamHub::AppendSessionBoundaryForTest()
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	if (history.empty())
-		history.resize(static_cast<size_t>(HistoryCapacity));
+		history.resize(static_cast<size_t>(capacity));
 	AppendSessionBoundaryLocked();
 }
 
@@ -299,6 +298,16 @@ void PoseStreamHub::SetDrainChunkHookForTest(std::function<void()> hook)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	drainChunkHookForTest = std::move(hook);
+}
+
+void PoseStreamHub::SetGeometryForTest(uint64_t historyCapacity, uint64_t chunk)
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	if (head != 0 || historyCapacity == 0 || chunk == 0)
+		return;
+	capacity = historyCapacity;
+	copyChunk = chunk;
+	history.assign(static_cast<size_t>(capacity), HistoryEntry{});
 }
 #endif
 

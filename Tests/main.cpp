@@ -76,6 +76,10 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 #ifdef QUESTCAL_VIRTUAL_QUEST
 void RunVirtualQuestScenarios(void (*check)(const char *, bool, const char *));
 #endif
+#ifdef QUESTCAL_FORMAL_CONFORMANCE
+void RunFormalConformanceScenarios(void (*check)(const char *, bool, const char *));
+int EmitFormalTraces(const char *dir);
+#endif
 void RunLighthouseScenarios(void (*check)(const char *, bool, const char *));
 void RunPropertyScenarios(void (*check)(const char *, bool, const char *), int trials, uint32_t propertySeed);
 void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *));
@@ -8651,6 +8655,12 @@ int main(int argc, char **argv)
 	for (int i = 1; i < argc; ++i)
 	{
 		std::string arg = argv[i];
+#ifdef QUESTCAL_FORMAL_CONFORMANCE
+		// Records runs of the real code for the formal models' trace checks
+		// (VirtualQuest/formal/check.ps1) and exits.
+		if (arg == "--emit-traces" && i + 1 < argc)
+			return EmitFormalTraces(argv[i + 1]) > 0 ? 0 : 1;
+#endif
 		if ((arg == "--property-trials" || arg == "--property-seed") && i + 1 < argc)
 		{
 			try
@@ -9306,6 +9316,10 @@ int main(int argc, char **argv)
 #ifdef QUESTCAL_VIRTUAL_QUEST
 	// The simulated headset (the VirtualQuest submodule), when checked out.
 	RunVirtualQuestScenarios(Check);
+#endif
+#ifdef QUESTCAL_FORMAL_CONFORMANCE
+	// The code checked against the formal models' own tables.
+	RunFormalConformanceScenarios(Check);
 #endif
 
 	// ---- Drift staleness monitoring ----
