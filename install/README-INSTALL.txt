@@ -32,9 +32,8 @@ OPTION 1: Script install (recommended)
 
 4. Click "Yes" when Windows asks for administrator permission.
 
-5. Accept the license agreement: type R to read it, Y to agree, then Y again
-   to approve its sections 2, 6 and 8 specifically. An update with unchanged
-   terms doesn't ask again.
+5. Accept the license: type R to read it, or Y to agree. An update with
+   unchanged terms doesn't ask again.
 
 6. Answer the optional module question. The Lighthouse module adds base
    station tools, starting with a tab showing each base station and which
@@ -63,12 +62,11 @@ If you use a custom Steam library folder, SteamVR is under
 
 Steps:
 
-0. Read LICENSE in this folder. A manual install accepts it just as the
-   script install does, including the separate approval of its sections 2
-   (Restrictions), 6 (Termination) and 8 (Limitation of liability). If you
-   don't accept it, stop here. QuestCalibrator also shows the agreement
-   in the SteamVR dashboard the first time it starts, and asks for both
-   approvals before you can use it.
+0. QuestCalibrator is free for personal use under the license in LICENSE,
+   in this folder. Installing it by hand means agreeing to it, as the
+   script install does. QuestCalibrator also shows the license in the
+   SteamVR dashboard the first time it starts, and asks you to agree
+   there.
 
 1. Close Steam completely (not just SteamVR).
 

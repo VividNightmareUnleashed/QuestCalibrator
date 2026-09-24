@@ -686,16 +686,13 @@ const Entry kItalian[] = {
 	{ "Jinxxy", "Jinxxy" },
 	{ "OpenVR-SpaceCalibrator", "OpenVR-SpaceCalibrator" },
 
-	// License agreement screen. The agreement itself is English only, so
-	// the section names keep its English headings.
+	// License agreement screen. The agreement itself is English only.
 	{ "License agreement", "Contratto di licenza" },
 	{ "QuestCalibrator is free to use under this agreement. Read it, then agree to continue.",
 		"QuestCalibrator è gratuito e si usa secondo questo contratto. Leggilo, poi accetta per continuare." },
 	{ "The agreement is in English only.", "Il contratto è disponibile solo in inglese." },
 	{ "The license agreement couldn't load. Reinstall QuestCalibrator to restore it.",
 		"Non è stato possibile caricare il contratto di licenza. Reinstalla QuestCalibrator per ripristinarlo." },
-	{ "I specifically approve sections 2 (Restrictions), 6 (Termination) and 8 (Limitation of liability).",
-		"Approvo specificamente le sezioni 2 (Restrictions), 6 (Termination) e 8 (Limitation of liability)." },
 	{ "Decline and quit", "Rifiuta ed esci" },
 	{ "Agree and continue", "Accetta e continua" },
 	{ "Couldn't save your agreement to the license, so QuestCalibrator will ask again next time it starts.",

@@ -18,12 +18,7 @@ bool LicenseScreenWanted()
 
 void BuildLicenseScreen(bool runningInOverlay)
 {
-	// The installer asks the same two questions: the agreement as a whole,
-	// and separately the clauses some legal systems enforce only when
-	// approved on their own.
-	static bool approved = false;
-	const char *const approveLabel =
-		"I specifically approve sections 2 (Restrictions), 6 (Termination) and 8 (Limitation of liability).";
+	// The installer asks the same single question.
 	const char *const quitLabel = "Decline and quit";
 	const char *const agreeLabel = "Agree and continue";
 	const float buttonH = 40.0f;
@@ -39,9 +34,9 @@ void BuildLicenseScreen(bool runningInOverlay)
 	ImGui::PopStyleColor();
 	ImGui::Spacing();
 
-	// The text scrolls in its own inset; the approval, the buttons and the
-	// footer stay pinned under it.
-	const float reserve = 2.0f * ImGui::GetTextLineHeightWithSpacing() + buttonH + 40.0f + 36.0f;
+	// The text scrolls in its own inset; the buttons and the footer stay
+	// pinned under it.
+	const float reserve = buttonH + 40.0f + 36.0f;
 	ImGui::PushStyleColor(ImGuiCol_ChildBg, Pal::Inset);
 	ImGui::PushStyleColor(ImGuiCol_Border, Pal::Border);
 	ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10.0f);
@@ -61,25 +56,12 @@ void BuildLicenseScreen(bool runningInOverlay)
 	ImGui::PopStyleColor(2);
 	ImGui::Spacing();
 
-	// The label toggles the box too; a 24 px target is small in a headset.
-	QCCheckbox("##licenseapprove", &approved);
-	ImGui::SameLine(0.0f, 12.0f);
-	ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 1.0f);
-	ImGui::TextWrapped("%s", Tr(approveLabel));
-	if (ImGui::IsItemClicked())
-		approved = !approved;
-	ImGui::Spacing();
-
 	const float quitW = ButtonWidthFor(quitLabel, false, 180.0f);
 	const float agreeW = ButtonWidthFor(agreeLabel, true, 200.0f);
 	ImGui::SetCursorPosX(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - quitW - gap - agreeW);
 	if (IconButton("##licensequit", quitLabel, nullptr, ImVec2(quitW, buttonH), BtnKind::Ghost))
 		RequestApplicationExit();
 	ImGui::SameLine(0.0f, gap);
-	// Fainter than ImGui's default disabled look, which left the accent
-	// button reading as live.
-	ImGui::PushStyleVar(ImGuiStyleVar_DisabledAlpha, 0.35f);
-	ImGui::BeginDisabled(!approved);
 	if (IconButton("##licenseagree", agreeLabel, IconCheck, ImVec2(agreeW, buttonH), BtnKind::Primary))
 	{
 		if (g_uiPreviewMode)
@@ -100,8 +82,6 @@ void BuildLicenseScreen(bool runningInOverlay)
 			}
 		}
 	}
-	ImGui::EndDisabled();
-	ImGui::PopStyleVar();
 
 	BuildFooter(runningInOverlay);
 }
