@@ -507,7 +507,7 @@ static void WriteSettings(const SettingsRecord &record,
 static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &stream)
 {
 	picojson::value value;
-	std::string err = picojson::parse(value, stream);
+	std::string err = questcal::ParseRecordJson(value, stream);
 	if (!err.empty())
 		throw std::runtime_error(err);
 	if (!value.is<picojson::object>())
@@ -851,6 +851,14 @@ void LoadProfile(CalibrationContext &ctx)
 			"It has been disarmed; capture it again for this profile.\n",
 			CalibrationContext::ErrorSource::Chaperone);
 		break;
+	}
+
+	// A new coupled revision, not the stranded one: if only Config lands, the
+	// two records still differ and the next load still fails closed.
+	if (plan.profileRewriteNeeded)
+	{
+		ctx.persistence.AdvanceRevision();
+		ctx.persistence.MarkProfile(ctx.timeLastTick);
 	}
 
 	if (settingsRewriteNeeded)

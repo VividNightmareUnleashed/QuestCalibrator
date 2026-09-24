@@ -15,12 +15,6 @@
 #include <mutex>
 #include <thread>
 
-// Tests call the real provider without installing hooks into a VR runtime.
-bool InjectHooks(ServerTrackedDeviceProvider *, vr::IVRDriverContext *) { return false; }
-bool IsPoseUpdateHookInstalled() { return false; }
-uint32_t PoseUpdateHookMask() { return 0; }
-bool DisableHooks() { return true; }
-
 namespace
 {
 using Check = void (*)(const char *, bool, const char *);

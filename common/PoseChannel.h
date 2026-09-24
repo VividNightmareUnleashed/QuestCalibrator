@@ -65,7 +65,9 @@ namespace protocol
 
 		static const uint64_t Capacity = 4096;   // power of two
 		static const uint32_t Magic = 0x51435052; // "QCPR"
-		static const uint32_t LayoutVersion = 3;
+		// 4: pendingFailedDrops carries a harvest generation. The size is
+		// unchanged, but a layout-3 reader would read the generation as loss.
+		static const uint32_t LayoutVersion = 4;
 
 		struct Slot
 		{
@@ -95,6 +97,12 @@ namespace protocol
 		std::atomic<uint64_t> discardSequence;
 		std::atomic<uint64_t> discardedLossCount;
 		std::atomic<uint32_t> claimLock;
+		// Failed publishes no slot carries yet: the count in the low 32 bits,
+		// and in the high 32 a generation that every harvest advances (see
+		// PendingDropCount). With the count alone, a harvest followed by an
+		// equal number of new failures looked unchanged to the reader's
+		// compare-exchange, which then reported the newer losses ahead of the
+		// pose that harvest had published.
 		std::atomic<uint64_t> pendingFailedDrops;
 		// A heartbeat would incorrectly declare a writer dead while SteamVR is in
 		// standby. The reader instead holds a process handle for this advertised
@@ -134,15 +142,31 @@ namespace protocol
 			ring->layoutBytes == sizeof(PoseRing);
 	}
 
-	// QUESTCALIBRATOR_SHMEM_NAME ends in ".layout3" and nothing connected the
+	// QUESTCALIBRATOR_SHMEM_NAME ends in ".layout4" and nothing connected the
 	// literal to the value it claims. A named mapping outlives the process that
 	// made it, so growing PoseRing without renaming strands an upgraded driver
 	// behind a smaller section an old overlay still holds: the map-at-new-size
 	// fails, Create returns false, and RunFrame retries once a second forever
 	// with one line inside vrserver as the only evidence. Bump this and the name
 	// together, or not at all.
-	static_assert(PoseRing::LayoutVersion == 3,
+	static_assert(PoseRing::LayoutVersion == 4,
 		"PoseRing::LayoutVersion changed - QUESTCALIBRATOR_SHMEM_NAME must change with it");
+
+	// pendingFailedDrops holds (generation << 32) | count. A harvest replaces it
+	// with the next generation and no count, so a word a reader loaded can only
+	// still be current if nothing was harvested since. The count cannot reach
+	// 2^32 between harvests (weeks of every publish failing at the assumed
+	// rate), and the generation cannot come round in the few instructions a
+	// reader holds a word.
+	inline uint64_t PendingDropCount(uint64_t word)
+	{
+		return word & 0xffffffffull;
+	}
+
+	inline uint64_t PendingDropsAfterHarvest(uint64_t word)
+	{
+		return ((word >> 32) + 1) << 32;
+	}
 
 	class PoseRingWriter
 	{
@@ -379,6 +403,13 @@ namespace protocol
 			return PublishImpl(sample, afterClaim);
 		}
 
+		// What a pose thread does when it cannot take the claim lock.
+		void RecordFailedPublishForTest()
+		{
+			if (ring)
+				RecordFailedPublish();
+		}
+
 		// Simulate a process crash: leave the shared writer-active flag set while
 		// abandoning this process's mapping handle under a known-dead PID.
 		void AbandonForTest(uint32_t staleProcessId, uint64_t staleCreationTime)
@@ -538,8 +569,7 @@ namespace protocol
 
 				if (difference == 0)
 				{
-					uint64_t failedBefore = ring->pendingFailedDrops.exchange(
-						0, std::memory_order_acq_rel);
+					uint64_t failedBefore = HarvestPendingDrops();
 					ring->enqueuePos.store(pos + 1, std::memory_order_relaxed);
 					ReleaseClaimLock();
 					afterClaim();
@@ -588,6 +618,21 @@ namespace protocol
 		{
 			ring->pendingFailedDrops.fetch_add(1, std::memory_order_acq_rel);
 		}
+
+		// Takes the pending markers for the slot being claimed. Only a concurrent
+		// RecordFailedPublish or the reader's terminal harvest can make the
+		// exchange retry, so the loop is as short as the contention it absorbs.
+		uint64_t HarvestPendingDrops()
+		{
+			uint64_t word = ring->pendingFailedDrops.load(std::memory_order_acquire);
+			while (!ring->pendingFailedDrops.compare_exchange_weak(word,
+				PendingDropsAfterHarvest(word),
+				std::memory_order_acq_rel, std::memory_order_acquire))
+			{
+			}
+			return PendingDropCount(word);
+		}
+
 		bool TryDiscardOldest()
 		{
 			uint64_t pos = ring->dequeuePos.load(std::memory_order_relaxed);
@@ -664,6 +709,14 @@ namespace protocol
 			if (ring)
 				ring->resetting.store(inProgress ? 1u : 0u, std::memory_order_seq_cst);
 		}
+
+		// Runs `beforeCas` inside the terminal-gap check, after both empty-queue
+		// observations and immediately before the marker compare-exchange.
+		template<typename F, typename G, typename H>
+		DrainStatus DrainWithTerminalGapHookForTest(F &&fn, G &&gapFn, H beforeCas)
+		{
+			return DrainImpl(fn, gapFn, beforeCas);
+		}
 #endif
 
 		void Close()
@@ -738,6 +791,13 @@ namespace protocol
 		template<typename F, typename G>
 		DrainStatus Drain(F &&fn, G &&gapFn)
 		{
+			return DrainImpl(fn, gapFn, []() { });
+		}
+
+	private:
+		template<typename F, typename G, typename H>
+		DrainStatus DrainImpl(F &fn, G &gapFn, H beforeTerminalCas)
+		{
 			if (ring == nullptr || !WriterAlive())
 				return DrainStatus::WriterDead;
 			if (!BeginRead())
@@ -775,7 +835,7 @@ namespace protocol
 				intptr_t difference = static_cast<intptr_t>(seq - (pos + 1));
 				if (difference < 0)
 				{
-					EmitTerminalGapIfEmpty(gapFn);
+					EmitTerminalGapIfEmpty(gapFn, beforeTerminalCas);
 					break;   // empty, or the head producer has not published yet
 				}
 				if (difference > 0)
@@ -794,7 +854,6 @@ namespace protocol
 			return DrainStatus::Drained;
 		}
 
-	private:
 		template<typename B, typename A>
 		bool OpenImpl(const char *name, B beforeRelease, A afterRelease)
 		{
@@ -866,23 +925,30 @@ namespace protocol
 		// normal priority in a GUI process, and holding that lock while descheduled
 		// (or while the whole process is suspended) would make every vrserver pose
 		// thread fail its claim and drop. Seeing the same empty queue on both sides
-		// of the marker load proves no producer completed a claim in between, and
-		// the compare-exchange then transfers exactly the observed markers: a
-		// producer that wins instead carries them in its own failedDropsBefore, so
-		// they are neither counted twice nor lost.
-		template<typename G>
-		void EmitTerminalGapIfEmpty(G &gapFn)
+		// of the marker load proves no producer completed a claim in between. The
+		// compare-exchange then takes exactly the observed markers only because
+		// the word carries a harvest generation: a producer can still claim after
+		// the second check, take these markers into its slot and publish, and
+		// later failures can bring the count back to the same value. On the count
+		// alone the exchange would succeed and report those later losses ahead of
+		// that pose; with the generation it fails, the producer's slot carries the
+		// markers it took, and the later ones wait for the next drain.
+		template<typename G, typename H>
+		void EmitTerminalGapIfEmpty(G &gapFn, H &beforeCas)
 		{
 			uint64_t emptyAt = ring->dequeuePos.load(std::memory_order_acquire);
 			if (ring->enqueuePos.load(std::memory_order_acquire) != emptyAt)
 				return;
-			uint64_t drops = ring->pendingFailedDrops.load(std::memory_order_acquire);
+			uint64_t word = ring->pendingFailedDrops.load(std::memory_order_acquire);
+			uint64_t drops = PendingDropCount(word);
 			if (drops == 0)
 				return;
 			if (ring->dequeuePos.load(std::memory_order_acquire) != emptyAt ||
 				ring->enqueuePos.load(std::memory_order_acquire) != emptyAt)
 				return;   // a sample was published; its slot carries the markers
-			if (!ring->pendingFailedDrops.compare_exchange_strong(drops, 0,
+			beforeCas();
+			if (!ring->pendingFailedDrops.compare_exchange_strong(word,
+				PendingDropsAfterHarvest(word),
 				std::memory_order_acq_rel, std::memory_order_relaxed))
 				return;   // a producer harvested them, or more arrived; retry next drain
 			gapFn(drops);

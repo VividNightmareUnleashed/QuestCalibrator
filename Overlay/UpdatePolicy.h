@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -212,7 +213,16 @@ inline bool SelectReleaseCandidate(const std::string &json,
 	if (IsPrerelease(current))
 		return true;
 	picojson::value root;
-	const std::string parseError = picojson::parse(root, json);
+	std::string parseError;
+	try
+	{
+		parseError = picojson::parse(root, json);
+	}
+	catch (const std::overflow_error &)
+	{
+		// picojson throws, rather than reports, a number past a double's range.
+		parseError = "number out of range";
+	}
 	if (!parseError.empty() || !root.is<picojson::array>())
 	{
 		error = "GitHub returned an invalid release list.";
