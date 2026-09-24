@@ -255,6 +255,20 @@ changed files; Clang-Tidy and clone findings are advisory pending human review.
 Thresholds, solution/configuration, and test executable live in
 `cpp-validation.json`; the implementation is `tools/validate-cpp.ps1`.
 
+GitHub Actions runs the same gates (`.github/workflows`):
+
+- **Validation**, on every pull request and push to `alpha`: the Release build
+  and the harness (blocking), the duplicate scan, and on `alpha` the Clang-Tidy
+  pass (both advisory). With the `VIRTUALQUEST_DEPLOY_KEY` secret it also builds
+  the private submodule's scenarios and replays the pose hub traces through
+  their TLA+ model; without it the run warns and tests the public suite.
+- **Fuzz**, weekly and on demand: `tools/fuzz.ps1` for a minute per target,
+  keeping the corpus between runs.
+- **Release**, on pushing a `questcalibrator-v*` tag: the full suite, the
+  package, the VirusTotal scan, a draft in the public releases repository and
+  the install test on that draft. Publishing stays a manual step
+  (`docs/releasing.md`).
+
 `compile_flags.txt` contains only target, define, and repository-relative include
 flags for clangd. It intentionally does not pin one developer's Visual Studio or
 Windows SDK directories. Let clangd discover the installed MSVC toolchain, or set
