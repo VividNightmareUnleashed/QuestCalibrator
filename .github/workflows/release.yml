@@ -1,7 +1,8 @@
 name: Release
 
 # Pushing a questcalibrator-v* tag builds it on a clean Windows machine with the
-# full test suite (VirtualQuest included), packages it, scans it on VirusTotal,
+# full test suite (VirtualQuest included) and the pose hub trace replay through
+# its TLA+ model, packages it, scans it on VirusTotal,
 # creates a DRAFT release in the public releases repository, and runs the
 # install test on that draft. Nothing reaches users until the draft is
 # published by hand.
@@ -32,6 +33,8 @@ concurrency:
 env:
   PUBLIC_REPO: VividNightmareUnleashed/QuestCalibrator
   TAG: ${{ inputs.tag || github.ref_name }}
+  TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+  TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
 jobs:
   release:
@@ -83,6 +86,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The build or the solver tests failed.' }
           $count = ($log | Select-String -Pattern 'Solver tests passed: (\d+) scenario' | Select-Object -Last 1).Matches[0].Groups[1].Value
           "scenarios=$count" >> $env:GITHUB_OUTPUT
+
+      - name: Replay the pose hub traces through the model
+        shell: pwsh
+        run: |
+          $jar = Join-Path $env:RUNNER_TEMP 'tla2tools.jar'
+          Invoke-WebRequest -Uri $env:TLA2TOOLS_URL -OutFile $jar
+          $hash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:TLA2TOOLS_SHA256) { throw "tla2tools.jar has SHA-256 $hash, not the pinned one." }
+          $env:TLA2TOOLS_JAR = $jar
+          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
+          $env:Path = "$env:JAVA_HOME_17_X64\bin;$env:Path"
+          pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces
+          if ($LASTEXITCODE -ne 0) { throw 'A recorded hub run is not a behaviour of the model.' }
 
       - name: Duplicate scan (advisory)
         continue-on-error: true
