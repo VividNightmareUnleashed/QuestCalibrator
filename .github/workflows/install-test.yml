@@ -4,7 +4,8 @@ name: Install test
 # PC with SteamVR and earlier installs on it cannot stand in for. Run it
 # against a draft release before publishing. SteamVR is replaced by the fake
 # runtime in tools/fake-openvr-runtime, which records what the overlay
-# registers with it.
+# registers with it. The release workflow runs it on every draft it creates;
+# run it by hand to test a draft again or against another earlier release.
 on:
   workflow_dispatch:
     inputs:
@@ -14,6 +15,17 @@ on:
       previous:
         description: Earlier release tag for the upgrade scenario (default the newest published release)
         required: false
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      previous:
+        type: string
+        required: false
+    secrets:
+      PUBLIC_RELEASE_TOKEN:
+        required: true
 
 permissions:
   contents: read
