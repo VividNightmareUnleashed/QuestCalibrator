@@ -36,12 +36,18 @@ env:
   TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
   TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
+# Two jobs: build tests, packages and scans, and keeps the result with the run;
+# publish does everything that writes to the public repository, from that kept
+# package. A failed publish is repeated with "Re-run failed jobs" in a minute,
+# without building again.
 jobs:
-  release:
+  build:
     runs-on: windows-2022
-    timeout-minutes: 120
+    timeout-minutes: 90
     outputs:
-      tag: ${{ env.TAG }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+      scenarios: ${{ steps.build.outputs.scenarios }}
 
     steps:
       - name: Check out the tagged source
@@ -203,7 +209,40 @@ jobs:
             ''
             $(if (Test-Path -LiteralPath $scan) { Get-Content -LiteralPath $scan } else { '_Not scanned._' })
           )
-          $notes | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'notes.md') -Encoding utf8
+          $notes | Set-Content -LiteralPath install\out\notes.md -Encoding utf8
+
+      - name: Keep the package with this run
+        timeout-minutes: 10
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ env.TAG }}
+          path: |
+            install/out/*.zip
+            install/out/*.sha256
+            install/out/*.virustotal.md
+            install/out/notes.md
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ env.TAG }}
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Fetch the package
+        uses: actions/download-artifact@v4
+        with:
+          name: package-${{ env.TAG }}
+          path: package
 
       - name: Sync the public repository's files
         timeout-minutes: 5
@@ -217,7 +256,7 @@ jobs:
           gh auth setup-git
           gh repo clone $env:PUBLIC_REPO $public -- --quiet --depth 1
           if ($LASTEXITCODE -ne 0) { throw "Cloning $env:PUBLIC_REPO failed." }
-          Copy-Item public\README.md, LICENSE, THIRD-PARTY-NOTICES.txt -Destination $public -Force
+          Copy-Item public/README.md, LICENSE, THIRD-PARTY-NOTICES.txt -Destination $public -Force
           git -C $public add README.md LICENSE THIRD-PARTY-NOTICES.txt
           git -C $public diff --cached --quiet
           if ($LASTEXITCODE -ne 0) {
@@ -234,34 +273,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
         run: |
-          $zip = '${{ steps.package.outputs.zip }}'
+          $zip = (Get-Item package/*.zip).FullName
+          # The build job refused an existing release, so a draft here is this
+          # run's own, left by an attempt that failed partway: finish its
+          # uploads instead of creating a second one.
+          $draft = gh release view $env:TAG --repo $env:PUBLIC_REPO --json isDraft --jq .isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if ($draft -ne 'true') { throw "$env:TAG is already published in $env:PUBLIC_REPO." }
+            gh release upload $env:TAG $zip "$zip.sha256" --repo $env:PUBLIC_REPO --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Uploading to the existing draft failed.' }
+            Write-Host "::notice::Finished the existing draft for $env:TAG."
+            exit 0
+          }
+          $global:LASTEXITCODE = 0
           $arguments = @(
             'release', 'create', $env:TAG, $zip, "$zip.sha256",
             '--repo', $env:PUBLIC_REPO,
             '--draft',
-            '--title', 'QuestCalibrator ${{ steps.version.outputs.version }}',
-            '--notes-file', (Join-Path $env:RUNNER_TEMP 'notes.md')
+            '--title', 'QuestCalibrator ${{ needs.build.outputs.version }}',
+            '--notes-file', 'package/notes.md'
           )
-          if ('${{ steps.version.outputs.prerelease }}' -eq 'true') { $arguments += '--prerelease' }
+          if ('${{ needs.build.outputs.prerelease }}' -eq 'true') { $arguments += '--prerelease' }
           gh @arguments
           if ($LASTEXITCODE -ne 0) { throw 'Creating the draft release failed.' }
-          Write-Host "::notice::Draft release created for $env:TAG from ${{ steps.build.outputs.scenarios }} passing scenarios."
-
-      - name: Keep the package with this run
-        timeout-minutes: 10
-        uses: actions/upload-artifact@v4
-        with:
-          name: package-${{ env.TAG }}
-          path: |
-            install/out/*.zip
-            install/out/*.sha256
-            install/out/*.virustotal.md
-          retention-days: 90
+          Write-Host "::notice::Draft release created for $env:TAG from ${{ needs.build.outputs.scenarios }} passing scenarios."
 
   install-test:
-    needs: release
+    needs: publish
     uses: ./.github/workflows/install-test.yml
     with:
-      tag: ${{ needs.release.outputs.tag }}
+      tag: ${{ needs.publish.outputs.tag }}
     secrets:
       PUBLIC_RELEASE_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
