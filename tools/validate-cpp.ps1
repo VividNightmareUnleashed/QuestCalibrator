@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Build', 'Analyze', 'Duplicates')]
+    [ValidateSet('Build', 'Compile', 'Analyze', 'Duplicates')]
     [string]$Mode = 'Build',
     [string]$Root = '',
     [switch]$All
@@ -274,6 +274,11 @@ switch ($Mode) {
     'Build' {
         Invoke-MSBuildValidation
         Invoke-SolverTests
+    }
+
+    # The Release build alone, without the solver harness.
+    'Compile' {
+        Invoke-MSBuildValidation
     }
 
     'Analyze' {

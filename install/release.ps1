@@ -14,6 +14,8 @@ param(
     # Stop before touching the public repository.
     [switch]$DryRun,
     [switch]$SkipScan,
+    # Build without running the solver tests; the notes say so.
+    [switch]$SkipTests,
     # Markdown for the top of the release notes (title line, changes, limits,
     # validation). The generated Download and VirusTotal sections follow it.
     # Without it the notes start with a Changes section taken from the tag message.
@@ -62,8 +64,9 @@ try {
     }
 
     # --- Build and test --------------------------------------------------------
-    Write-Host "Building $Tag" -ForegroundColor Cyan
-    powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Build
+    Write-Host "Building $Tag$(if ($SkipTests) { ' without the solver tests' })" -ForegroundColor Cyan
+    $buildMode = if ($SkipTests) { 'Compile' } else { 'Build' }
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode $buildMode
     if ($LASTEXITCODE -ne 0) { throw 'The build or the solver tests failed.' }
 
     $version = (Get-Item x64\Release\QuestCalibrator.exe).VersionInfo.ProductVersion
