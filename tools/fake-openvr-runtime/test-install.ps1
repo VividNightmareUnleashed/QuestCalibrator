@@ -140,10 +140,13 @@ function Compare-Tree([string]$name, [hashtable]$expected, [hashtable]$actual) {
 
 function Assert-Installed([string]$packageDir) {
     $expectedApp = Get-Tree (Join-Path $packageDir 'app')
-    foreach ($extra in 'Uninstall.ps1', 'README-INSTALL.txt', 'LICENSE') {
+    foreach ($extra in 'Uninstall.ps1', 'README-INSTALL.txt', 'LICENSE', 'THIRD-PARTY-NOTICES.txt') {
         $source = Join-Path $packageDir $extra
         if (Test-Path $source) { $expectedApp[$extra] = (Get-FileHash $source).Hash }
     }
+    # The notices folder is installed beside the app as it is in the package.
+    $notices = Get-Tree (Join-Path $packageDir 'THIRD-PARTY-NOTICES')
+    foreach ($file in $notices.Keys) { $expectedApp["THIRD-PARTY-NOTICES\$file"] = $notices[$file] }
     Compare-Tree 'install folder matches the package' $expectedApp (Get-Tree $installDir)
     Compare-Tree 'driver folder matches the package' (Get-Tree (Join-Path $packageDir 'driver\01questcalibrator')) (Get-Tree $driverDir)
 
