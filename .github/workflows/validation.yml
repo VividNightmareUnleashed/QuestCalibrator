@@ -1,0 +1,99 @@
+name: Validation
+
+# The local release gates on every pull request and push to alpha: the Release
+# build and the solver harness (blocking), then the duplicate scan and, on
+# alpha, the Clang-Tidy pass (advisory, as locally: their findings need a
+# human's review, not an automatic veto).
+#
+# With the VIRTUALQUEST_DEPLOY_KEY secret (a read-only deploy key on the
+# private VirtualQuest repository) the harness also builds the simulated
+# headset's scenarios and the formal-model links, and the pose hub traces are
+# replayed through their TLA+ model. Without it the run says so and tests the
+# public suite only.
+on:
+  pull_request:
+    branches: [alpha, stable]
+  push:
+    branches: [alpha]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validation-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+  TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+jobs:
+  validate:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Find the pinned VirtualQuest commit
+        id: vq
+        shell: pwsh
+        run: |
+          "sha=$(git rev-parse HEAD:VirtualQuest)" >> $env:GITHUB_OUTPUT
+          if ($env:HAS_VIRTUALQUEST -ne 'true') {
+            Write-Host '::warning::VIRTUALQUEST_DEPLOY_KEY is not set: the simulated-headset scenarios, the formal-model links and the hub traces are not run.'
+          }
+
+      # .gitmodules is not the way in: the key only opens VirtualQuest, so it
+      # is checked out on its own at the commit this tree pins.
+      - name: Check out VirtualQuest
+        if: env.HAS_VIRTUALQUEST == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: VividNightmareUnleashed/VirtualQuest
+          ref: ${{ steps.vq.outputs.sha }}
+          path: VirtualQuest
+          ssh-key: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+          persist-credentials: false
+
+      - name: Build and run the solver harness
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Build
+          if ($LASTEXITCODE -ne 0) { throw 'The build or the solver harness failed.' }
+
+      - name: Replay the pose hub traces through the model
+        if: env.HAS_VIRTUALQUEST == 'true'
+        shell: pwsh
+        run: |
+          $jar = Join-Path $env:RUNNER_TEMP 'tla2tools.jar'
+          Invoke-WebRequest -Uri $env:TLA2TOOLS_URL -OutFile $jar
+          $hash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne $env:TLA2TOOLS_SHA256) { throw "tla2tools.jar has SHA-256 $hash, not the pinned one." }
+          $env:TLA2TOOLS_JAR = $jar
+          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
+          $env:Path = "$env:JAVA_HOME_17_X64\bin;$env:Path"
+          pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces
+          if ($LASTEXITCODE -ne 0) { throw 'A recorded hub run is not a behaviour of the model.' }
+
+      - name: Duplicate scan (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          npm install --global --no-fund --no-audit jscpd@5.0.12 | Out-Null
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Duplicates
+          if ($LASTEXITCODE -ne 0) { Write-Host '::warning::The duplicate scan reported clones; review them.'; exit 1 }
+
+      - name: Clang-Tidy over every translation unit (advisory)
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Analyze -All
+          if ($LASTEXITCODE -ne 0) { Write-Host '::warning::Clang-Tidy reported findings; review them.'; exit 1 }
