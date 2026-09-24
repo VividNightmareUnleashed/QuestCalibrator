@@ -106,7 +106,7 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 	if (!texture)
 	{
 		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(origin.x, origin.y + 24.0f),
-			Pal::U32(Pal::Warn), "Motion demos couldn't load. Reinstall QuestCalibrator to restore them.");
+			Pal::U32(Pal::Warn), Tr("Motion demos couldn't load. Reinstall QuestCalibrator to restore them."));
 		return;
 	}
 	const bool wrist = demo == GuideDemo::Wrist;
@@ -145,7 +145,7 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 			: 120 + static_cast<int>(std::fmod(t - 2.0, 6.0) * 60.0) % 360;
 		drawFrame(frame, ImVec2(origin.x + (size.x - imageW) * 0.5f, origin.y),
 			static_cast<float>(std::clamp(t / 0.2, 0.0, 1.0)));
-		const char *label = t < 2.0 ? "Bring the controller to the wrist tracker" : "Turn and tilt as you move in a figure eight";
+		const char *label = Tr(t < 2.0 ? "Bring the controller to the wrist tracker" : "Turn and tilt as you move in a figure eight");
 		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, label);
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(origin.x + (size.x - textSize.x) * 0.5f, origin.y + imageH + 8.0f), Pal::U32(Pal::Text), label);
@@ -156,7 +156,7 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 		const float opacity = (1.0f - motionAlpha) * static_cast<float>(std::clamp(t / 0.2, 0.0, 1.0));
 		drawFrame(std::min(119, static_cast<int>(t * 60.0)),
 			ImVec2(origin.x + (size.x - imageW) * 0.5f, origin.y), opacity);
-		const char *label = demo == GuideDemo::HeadsetContact ? "Rest the controller against the visor" : "Bring the controller to the wrist tracker";
+		const char *label = Tr(demo == GuideDemo::HeadsetContact ? "Rest the controller against the visor" : "Bring the controller to the wrist tracker");
 		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, label);
 		ImVec4 color = Pal::Text;
 		color.w *= opacity;
@@ -169,7 +169,7 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 		const float x = origin.x + (cellW + gap) * static_cast<float>(axis);
 		const ImVec2 top(x + (cellW - imageW) * 0.5f, origin.y);
 		drawFrame(120 + axis * 240 + frame, top, motionAlpha);
-		const char *label = headLabels[axis];
+		const char *label = Tr(headLabels[axis]);
 		const ImVec2 textSize = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, label);
 		ImVec4 color = Pal::Text;
 		color.w *= motionAlpha;
@@ -185,15 +185,16 @@ void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const quest
 	const char *states[] = {
 		!m.valid ? "Measuring..." : m.coverage >= 0.99 ? "Enough variety" : "Keep turning and tilting",
 		!m.valid ? "Measuring..." : m.gatedFraction < 0.15 ? "Good pace" : "Move more slowly",
-		!m.rigidityValid ? "Measuring..." : m.rigidityDeg < 3.0 ? "Moving together" : "Movement doesn't match"
+		!m.rigidityValid ? "Measuring..." : m.rigidityDeg < 3.0 ? "Moving together"
+			: mountRun ? "Tracker is shifting on the headset" : "Hold them tighter together"
 	};
 	const double values[] = { m.coverage, m.valid ? 1.0 - m.gatedFraction : 0.0,
 		m.rigidityValid ? std::clamp(1.0 - (m.rigidityDeg - 1.0) / 8.0, 0.0, 1.0) : 0.0 };
 	for (int i = 0; i < 3; ++i)
 	{
 		const float x = origin.x + (cellW + 16.0f) * static_cast<float>(i);
-		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, origin.y), Pal::U32(Pal::Text), names[i]);
-		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(x, origin.y + 28.0f), Pal::U32(Pal::Dim), states[i]);
+		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, origin.y), Pal::U32(Pal::Text), Tr(names[i]));
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(x, origin.y + 28.0f), Pal::U32(Pal::Dim), Tr(states[i]));
 		const ImVec2 a(x, origin.y + 50.0f), b(x + cellW, origin.y + 54.0f);
 		dl->AddRectFilled(a, b, Pal::U32(Pal::Border), 2.0f);
 		const float fill = static_cast<float>(std::clamp(values[i], 0.0, 1.0));
@@ -234,8 +235,9 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGui::Spacing();
 		const float gap = 10.0f;
 		const float cancelWidth = 130.0f;
-		const char *saveLabel = transformValid ? "Save profile" : "Fix invalid values before saving";
-		if (IconButton("saveprofile", saveLabel, IconCheck,
+		// Invalid values keep the label and go quiet; the editor's red line
+		// above says what to fix.
+		if (IconButton("saveprofile", "Save calibration", IconCheck,
 			ImVec2(cw - cancelWidth - gap, 52.0f),
 			transformValid ? BtnKind::Primary : BtnKind::Ghost) && transformValid)
 		{
@@ -246,11 +248,13 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				SeedTransformEditorDraft();
 		}
 		ImGui::SameLine(0.0f, gap);
-		if (IconButton("cancelprofile", "Cancel", nullptr,
+		// "Close", not "Cancel": saving keeps the editor open, and leaving
+		// afterwards undoes nothing.
+		if (IconButton("cancelprofile", "Close", nullptr,
 			ImVec2(cancelWidth, 52.0f), BtnKind::Ghost))
 		{
-			// Nothing to discard: leaving Editing is enough, because re-entering
-			// it seeds the draft again.
+			// Unsaved edits are dropped: leaving Editing is enough, because
+			// re-entering it seeds the draft again.
 			CalCtx.state = CalibrationState::None;
 			CalCtx.timeLastScan = -1e9;
 		}
@@ -263,7 +267,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImDrawList *dl = ImGui::GetWindowDrawList();
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(p.x + 20.0f, p.y + 32.0f - g_fontBody->LegacySize * 0.5f),
-			Pal::U32(Pal::Text), "Calibrating...");
+			Pal::U32(Pal::Text), Tr("Calibrating..."));
 		ImGui::SetCursorScreenPos(ImVec2(p.x + cw - 150.0f, p.y + 13.0f));
 		if (IconButton("cancelcard", "Cancel", nullptr, ImVec2(130.0f, 38.0f), BtnKind::Ghost))
 			CancelCalibration();
@@ -349,20 +353,20 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		case GuideStage::GetSet:
 		case GuideStage::Countdown:
 		{
-			ImGui::TextColored(Pal::Dim, "Step 1 of 3");
+			ImGui::TextColored(Pal::Dim, "%s", Tr("Step 1 of 3"));
 			ImGui::Spacing();
 			ImGui::PushFont(g_fontTitle);
-			ImGui::TextWrapped("%s", s_guide.anchor ? "Stand where the trackers look misaligned."
+			ImGui::TextWrapped("%s", Tr(s_guide.anchor ? "Stand where the trackers look misaligned."
 				: s_guide.demo == GuideDemo::HeadsetContact ? "Hold the controller against the visor."
 				: s_guide.demo == GuideDemo::Mounted ? "Keep the tracker fixed to your headset."
-				: "Hold the controller against the wrist tracker.");
+				: "Hold the controller against the wrist tracker."));
 			ImGui::PopFont();
 			const std::string how = s_guide.demo == GuideDemo::HeadsetContact
 				? FormatString("Hold the controller upright, with the trigger side against the front of your headset. Keep it in place as you turn and tilt your head for %.0f seconds.", CalCtx.CollectionSeconds())
 				: s_guide.demo == GuideDemo::Mounted
 				? FormatString("Move your head gently for %.0f seconds, keeping your body relaxed. Keep the tracker sensors uncovered.", CalCtx.CollectionSeconds())
 				: FormatString("Hold the controller against the wrist tracker with your other hand. Move both in a figure eight, gently turning and tilting, for %.0f seconds.", CalCtx.CollectionSeconds());
-			ImGui::TextWrapped("%s", how.c_str());
+			ImGui::TextWrapped("%s", Tr(how.c_str()));
 			ImGui::Spacing();
 			const ImVec2 row = ImGui::GetCursorScreenPos();
 			DrawGuideAnimation(mdl, row, artSize, s_guide.animationTime, s_guide.demo);
@@ -385,7 +389,10 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				const std::string who = picks[i] ? DeviceDisplayName(*picks[i])
 					: std::string(i == 0 ? "Reference device" : "Target device");
 				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + mw - 332.0f);
-				ImGui::TextWrapped("%s is %stracking", who.c_str(), ok ? "" : "not ");
+				if (ok)
+					ImGui::TextWrapped("%s", Tr(FormatString("%s is tracking", who.c_str())).c_str());
+				else
+					ImGui::TextWrapped("%s", Tr(FormatString("%s isn't tracking. Wake it or bring it into view.", who.c_str())).c_str());
 				ImGui::PopTextWrapPos();
 			}
 			const float readinessBottom = ImGui::GetCursorScreenPos().y;
@@ -396,7 +403,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				s_guide.animate = true;
 			}
 			ImGui::SameLine(0.0f, 12.0f);
-			if (IconButton("motiontoggle", s_guide.animate ? "Pause motion" : "Play motion", nullptr,
+			if (IconButton("motiontoggle", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
 				ImVec2(190.0f, 38.0f), BtnKind::Ghost))
 				s_guide.animate = !s_guide.animate;
 			ImGui::SetCursorScreenPos(ImVec2(row.x, std::max(readinessBottom, readiness.y + 38.0f) + 8.0f));
@@ -404,7 +411,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			if (s_guide.stage == GuideStage::Countdown)
 			{
 				int remain = static_cast<int>(std::ceil(kCountdownSeconds - (now - s_guide.countdownStart)));
-				std::string label = FormatString("Starting in %d...", std::max(1, remain));
+				std::string label = Tr(FormatString("Starting in %d...", std::max(1, remain)));
 				ImGui::PushFont(g_fontTitle);
 				ImGui::TextUnformatted(label.c_str());
 				ImGui::PopFont();
@@ -438,7 +445,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			if (g_uiPreviewMode)
 				CalCtx.Progress(static_cast<int>((now - s_guide.countdownStart - kCountdownSeconds) * 100.0),
 					static_cast<int>(CalCtx.CollectionSeconds() * 100.0));
-			ImGui::TextColored(Pal::Dim, "Step 2 of 3");
+			ImGui::TextColored(Pal::Dim, "%s", Tr("Step 2 of 3"));
 			ImGui::Spacing();
 			// Live feedback from the run's own buffers, at 5 Hz.
 			if (!g_uiPreviewMode && CalCtx.state == CalibrationState::Collecting &&
@@ -453,11 +460,11 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				if (message.kind == Msg::Instruction)
 				{
 					ImGui::PushFont(g_fontTitle);
-					ImGui::TextWrapped("%s", message.str.c_str());
+					ImGui::TextWrapped("%s", Tr(message.str.c_str()));
 					ImGui::PopFont();
 				}
 				else if (message.kind == Msg::Info)
-					ImGui::TextWrapped("%s", message.str.c_str());
+					ImGui::TextWrapped("%s", Tr(message.str.c_str()));
 			}
 			ImGui::Spacing();
 			ImVec2 row = ImGui::GetCursorScreenPos();
@@ -481,7 +488,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 				// Progress counts hundredths of a second (see CalibrationTick).
 				double secondsLeft = std::max(0.0, (message.target - message.progress) / 100.0);
 				ImGui::PushFont(g_fontSmall);
-				ImGui::TextColored(Pal::Dim, "%.0f s left", std::ceil(secondsLeft));
+				ImGui::TextColored(Pal::Dim, "%s", Tr(FormatString("%.0f s left", std::ceil(secondsLeft))).c_str());
 				ImGui::PopFont();
 			}
 			ImGui::Spacing();
@@ -496,7 +503,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 					CancelCalibration();
 			}
 			ImGui::SameLine(0.0f, 12.0f);
-			if (IconButton("runningmotion", s_guide.animate ? "Pause motion" : "Play motion", nullptr,
+			if (IconButton("runningmotion", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
 				ImVec2(190.0f, 46.0f), BtnKind::Ghost))
 				s_guide.animate = !s_guide.animate;
 			break;
@@ -521,19 +528,19 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 					if (i < outcomeStart)
 						break;
 					ImGui::PushFont(g_fontTitle);
-					ImGui::TextWrapped("%s", message.str.c_str());
+					ImGui::TextWrapped("%s", Tr(message.str.c_str()));
 					ImGui::PopFont();
 					ImGui::Spacing();
 					break;
 				case Msg::Info:
 					if (i > outcomeStart)
-						ImGui::TextWrapped("%s", message.str.c_str());
+						ImGui::TextWrapped("%s", Tr(message.str.c_str()));
 					break;
 				case Msg::Action:
 					if (i > outcomeStart)
 					{
 						ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
-						ImGui::TextWrapped("%s", message.str.c_str());
+						ImGui::TextWrapped("%s", Tr(message.str.c_str()));
 						ImGui::PopStyleColor();
 					}
 					break;
@@ -611,10 +618,11 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
 		ImGui::PushFont(g_fontTitle);
-		ImGui::TextUnformatted("Clear this calibration?");
+		ImGui::TextUnformatted(Tr("Clear this calibration?"));
 		ImGui::PopFont();
 		ImGui::Spacing();
-		ImGui::TextWrapped("This also removes the saved field anchors and headset tracker setup.");
+		ImGui::TextWrapped("%s", Tr("Your trackers won't line up until you calibrate again. "
+			"This also removes the field anchors and the headset tracker setup."));
 		ImGui::Spacing();
 		ImGui::Spacing();
 		float bw = ImGui::GetContentRegionAvail().x;
@@ -622,10 +630,10 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		// one is outlined in the error colour, so a laser pointer that lands
 		// on the big blue button keeps the calibration.
 		float clearW = 210.0f, bgap = 12.0f;
-		if (IconButton("clearkeep", "Keep", nullptr, ImVec2(bw - clearW - bgap, 46.0f), BtnKind::Primary) || EscapePressed())
+		if (IconButton("clearkeep", "Keep calibration", nullptr, ImVec2(bw - clearW - bgap, 46.0f), BtnKind::Primary) || EscapePressed())
 			ImGui::CloseCurrentPopup();
 		ImGui::SameLine(0.0f, bgap);
-		if (IconButton("clearconfirm", "Clear", IconTrash, ImVec2(clearW, 46.0f), BtnKind::Danger))
+		if (IconButton("clearconfirm", "Clear calibration", IconTrash, ImVec2(clearW, 46.0f), BtnKind::Danger))
 		{
 			// The write can be refused; a destructive button that did nothing
 			// has to say so instead of leaving the screen unchanged.
@@ -649,27 +657,29 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
 		ImGui::PushFont(g_fontTitle);
-		ImGui::TextUnformatted("Check your room boundaries");
+		ImGui::TextUnformatted(Tr("Check your room boundaries"));
 		ImGui::PopFont();
 		ImGui::Spacing();
 
-		ImGui::TextWrapped(
+		ImGui::TextWrapped("%s", Tr(
 			"QuestCalibrator saves and restores your SteamVR chaperone. "
-			"Tracking drift can still move those virtual walls away from the real room boundaries.");
+			"Tracking drift can still move the chaperone walls away from your real walls."));
 		ImGui::Spacing();
-		ImGui::TextWrapped(
-			"Keep the Quest's own boundary enabled too. A saved chaperone "
-			"doesn't guarantee that your play area is clear or correctly aligned.");
+		ImGui::TextWrapped("%s", Tr(
+			"Keep the Quest boundary turned on too. A protected chaperone "
+			"doesn't guarantee that your play area is clear or correctly aligned."));
 		ImGui::Spacing();
 		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
-		ImGui::TextWrapped(
-			"Before playing, check that the virtual walls match your room and leave "
-			"enough space to move safely, especially when dancing.");
+		ImGui::TextWrapped("%s", Tr(
+			"Before playing, check that the chaperone walls match your room and leave "
+			"enough space to move safely, especially when dancing."));
 		ImGui::PopStyleColor();
 		if (!CalCtx.uiError.empty())
 		{
 			ImGui::Spacing();
-			ImGui::TextColored(Pal::Bad, "%s", CalCtx.uiError.c_str());
+			ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
+			ImGui::TextWrapped("%s", Tr(CalCtx.uiError.c_str()));
+			ImGui::PopStyleColor();
 		}
 		ImGui::Spacing();
 		ImGui::Spacing();
@@ -685,14 +695,16 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			ImDrawList *mdl = ImGui::GetWindowDrawList();
 			mdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Card), 10.0f);
 			mdl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Border), 10.0f);
-			std::string lbl = FormatString("I understand (%d s)", remain);
+			std::string lbl = Tr(FormatString("Protect chaperone (%d s)", remain));
 			ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
 			mdl->AddText(g_fontBody, g_fontBody->LegacySize,
 				ImVec2(p.x + (sz.x - ts.x) * 0.5f, p.y + sz.y * 0.5f - g_fontBody->LegacySize * 0.5f),
 				Pal::U32(Pal::Dim), lbl.c_str());
 			ImGui::Dummy(sz);
 		}
-		else if (IconButton("chapwarnok", "I understand", nullptr, ImVec2(bw - cancelW - bgap, 46.0f), BtnKind::Primary))
+		// Named for what it does: accepting the caveat is what saves the
+		// chaperone.
+		else if (IconButton("chapwarnok", "Protect chaperone", nullptr, ImVec2(bw - cancelW - bgap, 46.0f), BtnKind::Primary))
 		{
 			bool previousAck = CalCtx.chaperoneWarningAck;
 			CalCtx.chaperoneWarningAck = true;

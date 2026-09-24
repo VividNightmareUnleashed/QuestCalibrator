@@ -85,6 +85,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
       <AdditionalLibraryDirectories>..\lib\openvr\lib\win64</AdditionalLibraryDirectories>
       <AdditionalDependencies>opengl32.lib;openvr_api.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
@@ -102,6 +103,8 @@
     <ClInclude Include="UiInternal.h" />
     <ClInclude Include="ImGuiVRInput.h" />
     <ClInclude Include="Diagnostics.h" />
+    <ClInclude Include="Localization.h" />
+    <ClInclude Include="LocalizationTables.h" />
     <ClInclude Include="LegacyContinuous.h" />
     <ClInclude Include="UpdatePolicy.h" />
     <ClInclude Include="Updater.h" />
@@ -116,6 +119,7 @@
     <ClInclude Include="DriftMonitor.h" />
     <ClInclude Include="LighthouseLog.h" />
     <ClInclude Include="LighthouseVisibility.h" />
+    <ClInclude Include="Modules.h" />
     <ClInclude Include="TrackingStreamDigest.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
@@ -366,6 +370,17 @@
     <ClCompile Include="CalibrationDriver.cpp" />
     <ClCompile Include="CalibrationSpace.cpp" />
     <ClCompile Include="Diagnostics.cpp" />
+    <ClCompile Include="Localization.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="LocalizationJa.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="LocalizationIt.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
     <ClCompile Include="LegacyContinuous.cpp" />
     <ClCompile Include="Updater.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">
@@ -398,6 +413,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="Modules.cpp" />
     <ClCompile Include="UserInterface.cpp" />
     <ClCompile Include="UiWidgets.cpp" />
     <ClCompile Include="UiMainScreen.cpp" />

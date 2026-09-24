@@ -91,7 +91,7 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   two stations and for ten seconds after it lost or regained one.
   Nothing changes when the log is unavailable. See
   [docs/lighthouse-visibility.md](docs/lighthouse-visibility.md).
-- **Spatial correction field** — multi-point calibration interpolated by each
+- **Field anchors (spatial correction field)** — multi-point calibration interpolated by each
   device's own position (Gaussian RBF blending in the driver), correcting SLAM map
   deformation that a single rigid transform cannot represent.
 - **Continuous calibration** — with a spare lighthouse tracker mounted firmly on the
@@ -104,6 +104,11 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   mounted tracker can be hidden from games so full-body setups never mistake it for
   a body tracker. Optional (off by default): online re-estimation of the
   inter-system time offset from the same rigid pair.
+- **Languages** — English, Italian and Japanese, picked in Settings (Windows' display
+  language is the default). The translations may not be accurate;
+  corrections are welcome as GitHub issues. Japanese text is drawn with a font
+  Windows already has (Yu Gothic, Meiryo or MS Gothic), and the session log and
+  diagnostics stay in English.
 
 Quest continuous mode smooths rotation and translation together at each device's
 position, so a yaw correction about that device does not temporarily push it
@@ -278,7 +283,8 @@ alignment, weighting, and validation described above.
 Source-available: build and modify it for your own use; redistribution needs
 permission first, and selling it isn't allowed — see `LICENSE` for the exact terms. Portions inherited from OpenVR-SpaceCalibrator,
 Copyright (c) 2020 Justin Li (pushrax), remain under their original MIT License
-(included in `LICENSE`).
+(included in `LICENSE`). `THIRD-PARTY-NOTICES.txt` reproduces it with every
+other third-party notice.
 Several solver-quality ideas (outlier rejection, axis-variance conditioning,
 raw-driver-pose sampling) were inspired by the
 [hyblocker fork](https://github.com/hyblocker/OpenVR-SpaceCalibrator) and

@@ -140,7 +140,7 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 
 	// The state in words, next to the glyphs that only hint at it: a dimmer
 	// row and a red pill are not something a player can be expected to read.
-	const char *stateWord = !dev.connected ? "Off" : (low ? "Low battery" : nullptr);
+	const char *stateWord = !dev.connected ? Tr("Off") : (low ? Tr("Low battery") : nullptr);
 	if (stateWord)
 	{
 		ImGui::PushFont(g_fontSmall);
@@ -226,7 +226,7 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		ImGui::PopItemWidth();
 		if (s_renameBuf[0] == '\0')
 			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(tx, p.y + 6.0f),
-				Pal::U32(Pal::Faint), "Hip, Left foot, Chest...");
+				Pal::U32(Pal::Faint), Tr("Hip, Left foot, Chest..."));
 		std::string sub = dev.model + "  " + dev.serial;
 		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(tx, p.y + 31.0f),
 			Pal::U32(Pal::Dim), sub.c_str(), nullptr, 0.0f, &clip);
@@ -325,7 +325,7 @@ void BuildDeviceList(const VRState &state, uint32_t &selected, const std::string
 		ImVec2 b = ImVec2(origin.x + paneW, origin.y + rowH);
 		dl->AddRectFilled(origin, b, Pal::U32(Pal::Card), 12.0f);
 		dl->AddRect(origin, b, Pal::U32(Pal::Border), 12.0f);
-		const char *msg = "No devices connected";
+		const char *msg = Tr("No devices connected");
 		ImVec2 ts = ImGui::CalcTextSize(msg);
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(origin.x + (paneW - ts.x) * 0.5f, origin.y + (rowH - ts.y) * 0.5f),
@@ -437,7 +437,7 @@ void BuildSpacesSection(const VRState &state)
 		ImVec2 p = BeginRowCard(h);
 		ImDrawList *dl = ImGui::GetWindowDrawList();
 		float cw = ImGui::GetContentRegionAvail().x;
-		const char *msg = "No tracked devices found";
+		const char *msg = Tr("No tracked devices found");
 		ImVec2 ts = ImGui::CalcTextSize(msg);
 		IconHMD(dl, ImVec2(p.x + cw * 0.5f, p.y + 42.0f), 16.0f, Pal::U32(Pal::Faint));
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
@@ -472,7 +472,7 @@ void BuildSpacesSection(const VRState &state)
 	// ---- Left pane: reference space ----
 	ImGui::SetCursorScreenPos(top);
 	ImGui::BeginGroup();
-	SectionLabel("REFERENCE SPACE");
+	SectionLabel("REFERENCE SYSTEM");
 	PickTrackingSystem("##ReferenceTrackingSystem", state.trackingSystems,
 		firstReferenceSystemNotTargetSystem, paneW, CalCtx.pendingReferenceTrackingSystem);
 
@@ -496,7 +496,7 @@ void BuildSpacesSection(const VRState &state)
 
 	ImGui::SetCursorScreenPos(ImVec2(top.x + paneW + paneGap, top.y));
 	ImGui::BeginGroup();
-	SectionLabel("TARGET SPACE");
+	SectionLabel("TARGET SYSTEM");
 	if (!targetSystems.empty())
 	{
 		// An emptied pick (the collision rule above) settles on the first
@@ -511,7 +511,9 @@ void BuildSpacesSection(const VRState &state)
 	}
 	else
 	{
-		ImGui::TextColored(Pal::Dim, "No trackers found. Turn on a tracker and make sure SteamVR sees it.");
+		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + paneW);
+		ImGui::TextColored(Pal::Dim, "%s", Tr("No trackers found. Turn on a tracker and make sure SteamVR sees it."));
+		ImGui::PopTextWrapPos();
 		// The pane is showing nothing, so nothing may stay selected: this id is
 		// what the identify pulse buzzes and what StartCalibration freezes.
 		CalCtx.targetID = vr::k_unTrackedDeviceIndexInvalid;
@@ -523,11 +525,13 @@ void BuildSpacesSection(const VRState &state)
 	ImGui::Dummy(ImVec2(0, 0));
 
 	// ---- What happens next, then Identify ----
+	// How to move depends on the picks (figure eight, looking around), and
+	// the guide shows it; this line only sets the length.
 	ImGui::Spacing();
 	{
-		std::string hint = FormatString(
-			"Hold both devices together and rotate them for %.0f seconds.",
-			CalCtx.CollectionSeconds());
+		std::string hint = Tr(FormatString(
+			"Calibration takes %.0f seconds. The next screen shows how to move.",
+			CalCtx.CollectionSeconds()));
 		ImGui::PushFont(g_fontSmall);
 		ImVec2 hs = ImGui::CalcTextSize(hint.c_str());
 		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, (cw - hs.x) * 0.5f));

@@ -90,10 +90,19 @@ baseline for this upgrade.
 - Preserve every checked-in license header and standalone notice verbatim.
 - Before distributing binaries, verify the upstream terms for every component and
   include the corresponding standalone license and notice material.
-- Include the repository `LICENSE`, `lib/MinHook/LICENSE`,
+- Include the repository `LICENSE` and
+  `THIRD-PARTY-NOTICES.txt`, plus `lib/MinHook/LICENSE`,
   `lib/openvr/LICENSE`, `lib/Eigen/COPYING.*`, `lib/imgui/LICENSE.txt`,
   `lib/glfw/COPYING.txt`, and `lib/yoga/LICENSE` in the release notice bundle,
   together with any verified notices added for the remaining components.
+- `THIRD-PARTY-NOTICES.txt` reproduces every notice verbatim in one file. It
+  also covers code with no standalone license file: the Droid Sans font embedded
+  in `Overlay/EmbeddedFiles.cpp` (Apache 2.0), the ProggyClean and ProggyForever
+  fonts compiled into `imgui_draw.cpp` (MIT), the BSD and Apache portions of the
+  Eigen headers the build compiles (`Half.h`, `BFloat16.h`, `AlignedBox.h`), and
+  the guidance-model credits. Update it in the same change as any dependency or
+  embedded asset, and keep the Eigen source link on the vendored release (MPL 2.0
+  section 3.2).
 - Compare the packaged DLLs and libraries with this inventory. A binary that is not
   explained here should block release until its source, version, and notice are
   recorded.

@@ -2,6 +2,7 @@
 #include "stdafx.h"
 #include "UiInternal.h"
 #include "Diagnostics.h"
+#include "LocalizationTables.h"
 
 void BuildSettingsScreen(const VRState &state)
 {
@@ -13,6 +14,58 @@ void BuildSettingsScreen(const VRState &state)
 		// No "SETTINGS" eyebrow: the lit gear in the pinned header and the
 		// list of switches already say where this is.
 		ImGui::Spacing();
+
+		// Language. Each choice is written in its own language, so a player
+		// who cannot read the current one still finds theirs. A translation
+		// says it may be imperfect and where corrections go.
+		{
+			using questcal::i18n::Language;
+			const bool japaneseFont = questcal::i18n::FontAvailable(Language::Japanese);
+			const Language chosen = questcal::i18n::LanguageFromCode(CalCtx.language);
+			const bool translated = chosen != Language::English;
+			RowCard row(kRowHeight + (translated ? kRowSubLineH + 26.0f : 0.0f));
+			const ImVec2 p = row.pos;
+			RowIconLabel(p, IconGlobe, "Language");
+
+			// Without a Japanese font its name would draw as boxes.
+			const Language order[] = { Language::English, Language::Italian, Language::Japanese };
+			const char *languages[] = { "English", questcal::i18n::kItalianNativeName,
+				japaneseFont ? questcal::i18n::kJapaneseNativeName : "Japanese" };
+			const int count = 3;
+			const float segItemW = 130.0f, segH = 34.0f;
+			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - (segItemW * count + 8.0f), p.y + 9.0f));
+			int current = 0;
+			for (int i = 0; i < count; ++i)
+				if (order[i] == chosen)
+					current = i;
+			const int picked = Segmented("language", current, languages, count, segItemW, segH);
+			if (picked != current)
+			{
+				if (order[picked] == Language::Japanese && !japaneseFont)
+				{
+					CalCtx.ReportError("Japanese needs a Japanese font, and Windows doesn't have one installed. "
+						"Add the Japanese Supplemental Fonts in Windows Settings > System > Optional features.\n");
+				}
+				else
+				{
+					const std::string previous = CalCtx.language;
+					CalCtx.language = questcal::i18n::LanguageCode(order[picked]);
+					SaveSettingOrRestore(CalCtx.language, previous);
+					questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(CalCtx.language));
+				}
+			}
+
+			if (translated)
+			{
+				RowSubLine(p, "This translation may not be accurate.");
+				ImGui::SetCursorScreenPos(ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH - 4.0f));
+				ImGui::PushFont(g_fontSmall);
+				ImGui::TextColored(Pal::Dim, "%s", Tr("Feel free to send any feedback:"));
+				ImGui::SameLine(0.0f, 8.0f);
+				LinkText("Report on GitHub", "https://github.com/VividNightmareUnleashed/QuestCalibrator/issues");
+				ImGui::PopFont();
+			}
+		}
 
 		// Advanced mode
 		{
@@ -54,21 +107,49 @@ void BuildSettingsScreen(const VRState &state)
 					true))
 					ResyncDriverState();
 			}
-			RowIconLabel(p, IconField, "Spatial correction field");
-			RowSubLine(p, "Uses saved field anchors to correct alignment in different parts of the room.");
+			RowIconLabel(p, IconField, "Field anchors");
+			RowSubLine(p, "Corrects the alignment in the spots where you added an anchor.");
 
 			if (anchorCount > 0)
 			{
-				float btnW = 150.0f;
+				float btnW = ButtonWidthFor("Clear anchors", true, 150.0f);
 				ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
+				// Irreversible like Clear calibration, so confirmed like it.
 				if (IconButton("clearanchors", "Clear anchors", IconTrash, ImVec2(btnW, 34.0f), BtnKind::Ghost))
+					ImGui::OpenPopup("Clear anchors?");
+				const float modalW = 660.0f;
+				const ImVec2 display = ImGui::GetIO().DisplaySize;
+				ImGui::SetNextWindowPos(ImVec2((display.x - modalW) * 0.5f, 180.0f), ImGuiCond_Always);
+				ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiCond_Always);
+				if (ImGui::BeginPopupModal("Clear anchors?", nullptr,
+					ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 				{
-					if (SaveProfileFieldEdit(CalCtx,
-						[](questcal::ProfileRecord &candidate) {
-							candidate.fieldAnchors.clear();
-						},
-						true))
-						ResyncDriverState();
+					ImGui::PushFont(g_fontTitle);
+					ImGui::TextUnformatted(Tr(anchorCount == 1 ? std::string("Clear 1 field anchor?")
+						: FormatString("Clear %zu field anchors?", anchorCount)).c_str());
+					ImGui::PopFont();
+					ImGui::Spacing();
+					ImGui::TextWrapped("%s", Tr(anchorCount == 1
+						? "That spot goes back to the main calibration. The calibration itself is kept."
+						: "Those spots go back to the main calibration. The calibration itself is kept."));
+					ImGui::Spacing();
+					ImGui::Spacing();
+					const float bw = ImGui::GetContentRegionAvail().x;
+					const float clearW = 210.0f, bgap = 12.0f;
+					if (IconButton("anchorskeep", "Keep anchors", nullptr, ImVec2(bw - clearW - bgap, 46.0f), BtnKind::Primary) || EscapePressed())
+						ImGui::CloseCurrentPopup();
+					ImGui::SameLine(0.0f, bgap);
+					if (IconButton("anchorsclear", "Clear anchors", IconTrash, ImVec2(clearW, 46.0f), BtnKind::Danger))
+					{
+						if (SaveProfileFieldEdit(CalCtx,
+							[](questcal::ProfileRecord &candidate) {
+								candidate.fieldAnchors.clear();
+							},
+							true))
+							ResyncDriverState();
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::EndPopup();
 				}
 
 				ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -76,7 +157,7 @@ void BuildSettingsScreen(const VRState &state)
 				{
 					std::string line = FormatString("%zu anchor%s saved", anchorCount, anchorCount == 1 ? "" : "s");
 					dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH), Pal::U32(Pal::Dim), line.c_str());
+						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH), Pal::U32(Pal::Dim), Tr(line.c_str()));
 				}
 				for (size_t i = 0; CalCtx.uiAdvanced && i < CalCtx.fieldAnchors.size(); ++i)
 				{
@@ -89,7 +170,7 @@ void BuildSettingsScreen(const VRState &state)
 					std::string line = FormatString("Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base",
 						i + 1, a.position.x(), a.position.z(), posDeltaCm, rotDeltaDeg);
 					dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH + i * 24.0f), Pal::U32(Pal::Dim), line.c_str());
+						ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH + i * 24.0f), Pal::U32(Pal::Dim), Tr(line.c_str()));
 				}
 			}
 		}
@@ -114,8 +195,8 @@ void BuildSettingsScreen(const VRState &state)
 			bool previous = CalCtx.applyTimeOffset;
 			if (QCCheckbox("##applyTimeOffset", &CalCtx.applyTimeOffset))
 				SaveSettingOrRestore(CalCtx.applyTimeOffset, previous);
-			RowIconLabel(p, IconClock, "Apply time offset");
-			RowSubLine(p, "Compensates for the tracking delay measured during calibration.");
+			RowIconLabel(p, IconClock, "Correct for tracking delay");
+			RowSubLine(p, "Uses the delay between the two systems measured during calibration.");
 
 			// The number is for the advanced reader; the switch is the setting.
 			if (CalCtx.uiAdvanced && CalCtx.validProfile && (CalCtx.applyTimeOffset || CalCtx.useManualTimeOffset))
@@ -140,7 +221,7 @@ void BuildSettingsScreen(const VRState &state)
 				QCCheckbox("##manualOverride", &CalCtx.useManualTimeOffset);
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(np.x + 48.0f, (np.y + nb.y) * 0.5f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Text), "Manual time offset override (debug)");
+					Pal::U32(Pal::Text), Tr("Manual tracking delay override (debug)"));
 
 				ImVec2 msSize = ImGui::CalcTextSize("ms");
 				float inputW = 110.0f;
@@ -184,14 +265,14 @@ void BuildSettingsScreen(const VRState &state)
 						candidate.continuousEnabled = continuousEnabled;
 					});
 			RowIconLabel(p, IconCrosshair, "Continuous calibration");
-			RowSubLine(p, "Uses a tracker attached to your headset to keep devices aligned while you play.");
+			RowSubLine(p, "Keeps devices aligned while you play, using a tracker strapped to your headset.");
 
 			if (CalCtx.continuousEnabled)
 			{
 				// The toggle above changes what the loop is doing; the row height
 				// for this frame is already committed, but the text is not.
 				continuous = ContinuousStatusNow();
-				const char *status = ContinuousStateWord(continuous);
+				const char *status = Tr(ContinuousStateWord(continuous));
 				ImVec2 ts = ImGui::CalcTextSize(status);
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->LegacySize * 0.5f),
@@ -205,7 +286,7 @@ void BuildSettingsScreen(const VRState &state)
 
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(np.x + 12.0f, np.y + 17.0f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Text), "Headset tracker");
+					Pal::U32(Pal::Text), Tr("Headset tracker"));
 
 				// Candidates: every target-system device except the HMD. A
 				// disconnected one stays listed (it is still the pick) and
@@ -223,13 +304,13 @@ void BuildSettingsScreen(const VRState &state)
 				for (size_t i = 0; i < candidates.size(); ++i)
 				{
 					labels.push_back(DeviceDisplayName(*candidates[i]) + "  " + candidates[i]->serial +
-						(candidates[i]->connected ? "" : "  Off"));
+						(candidates[i]->connected ? "" : std::string("  ") + Tr("Off")));
 					if (candidates[i]->serial == CalCtx.continuousTrackerSerial)
 						sel = (int)i;
 				}
 				if (sel < 0 && !CalCtx.continuousTrackerSerial.empty())
 				{
-					labels.push_back(CalCtx.continuousTrackerSerial + "  Off");
+					labels.push_back(CalCtx.continuousTrackerSerial + "  " + Tr("Off"));
 					sel = (int)labels.size() - 1;
 				}
 				std::vector<const char *> items;
@@ -274,18 +355,18 @@ void BuildSettingsScreen(const VRState &state)
 					const float rowY = np.y + 40.0f;
 					dl->AddText(g_fontBody, g_fontBody->LegacySize,
 						ImVec2(np.x + 12.0f, rowY + segH * 0.5f - g_fontBody->LegacySize * 0.5f),
-						Pal::U32(Pal::Text), "Method");
+						Pal::U32(Pal::Text), Tr("Method"));
 					const ImVec2 segPos(nb.x - 14.0f - (segItemW * 2.0f + 8.0f), rowY);
 					ImGui::SetCursorScreenPos(segPos);
-					const char *methods[] = { "QuestCalibrator", "Legacy" };
+					const char *methods[] = { "Standard", "Legacy" };
 					const int mode = CalCtx.continuousMode == ContinuousMode::Legacy ? 1 : 0;
 					const int picked = Segmented("contMethod", mode, methods, 2, segItemW, segH);
 					if (ImGui::IsMouseHoveringRect(segPos,
 						ImVec2(segPos.x + segItemW * 2.0f + 8.0f, rowY + segH)))
 						// Beside the cursor, not below it: below is the rest of the inset.
-						ShowTip("QuestCalibrator measures where the tracker sits on the headset once,\n"
+						ShowTip("Standard measures where the tracker sits on the headset once,\n"
 							"then corrects from every pose. Legacy is OpenVR-SpaceCalibrator's\n"
-							"method: it re-solves from head movement. Try it if the other keeps pausing.", true);
+							"method: it re-solves from head movement. Try it if Standard keeps pausing.", true);
 					if (picked != mode)
 						SaveProfileFieldEdit(CalCtx,
 							[&](questcal::ProfileRecord &candidate) {
@@ -305,9 +386,9 @@ void BuildSettingsScreen(const VRState &state)
 
 				bool latencyReestimation = CalCtx.continuousLatencyReestimation;
 				if (NestedToggle("##contLatency", ImVec2(np.x + 12.0f, np.y + 114.0f), nestedW,
-					"Re-estimate time offset continuously", latencyReestimation,
-					"Also keeps the solved time offset up to date during play, measured\n"
-					"from the headset tracker. Off keeps the value from calibration."))
+					"Keep tracking delay up to date", latencyReestimation,
+					"Re-measures the delay between the two systems during play, using\n"
+					"the headset tracker. Off keeps the value from calibration."))
 					SaveProfileFieldEdit(CalCtx,
 						[&](questcal::ProfileRecord &candidate) {
 							candidate.continuousLatencyReestimation = latencyReestimation;
@@ -317,7 +398,7 @@ void BuildSettingsScreen(const VRState &state)
 				if (NestedToggle("##contTrigger", ImVec2(np.x + 12.0f, np.y + 146.0f), nestedW,
 					"Ask before applying each correction", requireTrigger,
 					"Each correction waits until you pull a controller trigger.\n"
-					"The main screen shows when one is waiting."))
+					"Recent activity on the main screen lists each one."))
 					SaveProfileFieldEdit(CalCtx,
 						[&](questcal::ProfileRecord &candidate) {
 							candidate.continuousRequireTrigger = requireTrigger;
@@ -332,7 +413,7 @@ void BuildSettingsScreen(const VRState &state)
 					{
 						dl->AddText(g_fontBody, g_fontBody->LegacySize,
 							ImVec2(ap.x, ap.y + 8.0f), Pal::U32(Pal::Violet),
-							"Strap a spare tracker to the headset and pick it above.");
+							Tr("Strap a tracker to your headset and pick it above."));
 					}
 					else
 					{
@@ -340,7 +421,7 @@ void BuildSettingsScreen(const VRState &state)
 						std::string label = FormatString(
 							continuous == ContinuousStatus::Frozen
 								? "Recalibrate with the headset tracker (%.0f s)"
-								: "Measure the tracker position (%.0f s)",
+								: "Set up headset tracker (%.0f s)",
 							CalCtx.CollectionSeconds());
 						if (IconButton("mountsetup", label.c_str(), IconPlay,
 							ImVec2(cw - kRowInsetX * 2.0f, 38.0f), BtnKind::Primary))
@@ -370,29 +451,29 @@ void BuildSettingsScreen(const VRState &state)
 			if (ImGui::IsItemHovered())
 			{
 				ShowTip(
-					"Turn off to let the Quest's Guardian import win each session;\n"
-					"the saved chaperone then only applies when you press Restore.");
+					"Turn off to let the Quest boundary import win each session;\n"
+					"the protected chaperone then only applies when you press Restore.");
 			}
-			RowIconLabel(p, IconCopy, "Automatically restore saved chaperone");
+			RowIconLabel(p, IconCopy, "Restore protected chaperone automatically");
 
 			std::string info;
 			if (CalCtx.chaperone.geometry.empty())
 			{
-				info = "Snapshot: play area center only (no chaperone walls) -- nothing to restore automatically";
+				info = "Only the play area center was saved (no walls), so there's nothing to restore automatically.";
 			}
 			else
 			{
 				auto copied = FormatUnixAge(CalCtx.chaperone.copyUnixTime);
 				size_t walls = CalCtx.chaperone.geometry.size();
-				info = FormatString("%zu wall%s, %.1f x %.1f m, saved %s",
+				info = FormatString("%zu wall%s, %.1f x %.1f m, protected %s",
 					walls, walls == 1 ? "" : "s",
 					CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1],
 					copied ? copied->c_str() : "age unknown");
 			}
 			ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
-				ImVec2(p.x + 92.0f, p.y + 46.0f), Pal::U32(Pal::Dim), info.c_str());
+				ImVec2(p.x + 92.0f, p.y + 46.0f), Pal::U32(Pal::Dim), Tr(info.c_str()));
 
-			float btnW = 224.0f;
+			float btnW = ButtonWidthFor("Restore chaperone now", true, 224.0f);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
 			if (IconButton("pastechap", "Restore chaperone now", IconCopy, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 				ApplyChaperoneBounds();
@@ -428,7 +509,7 @@ void BuildSettingsScreen(const VRState &state)
 				switch (update.state)
 				{
 				case questcal::update::State::Checking:
-					status = "Checking GitHub";
+					status = "Checking for updates...";
 					break;
 				case questcal::update::State::Downloading:
 				{
@@ -438,7 +519,7 @@ void BuildSettingsScreen(const VRState &state)
 					break;
 				}
 				case questcal::update::State::UpToDate:
-					status = "Version " + update.version + " is current";
+					status = "You're up to date (" + update.version + ")";
 					color = Pal::Good;
 					break;
 				case questcal::update::State::Ready:
@@ -446,20 +527,20 @@ void BuildSettingsScreen(const VRState &state)
 					color = Pal::Good;
 					break;
 				case questcal::update::State::Failed:
-					status = "Update check failed";
+					status = update.message.empty() ? std::string("Update check failed")
+						: "Update check failed: " + update.message;
 					color = Pal::Bad;
 					break;
 				case questcal::update::State::Prerelease:
-					status = "Prerelease " + update.version +
-						"; install a stable release by hand";
+					status = update.version + " is a test build and doesn't update itself";
 					color = Pal::Warn;
 					break;
 				default:
-					status = "Ready to check";
+					status = "Not checked yet";
 					break;
 				}
 				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-					ImVec2(p.x + 92.0f, actionY + 10.0f), Pal::U32(color), status.c_str());
+					ImVec2(p.x + 92.0f, actionY + 10.0f), Pal::U32(color), Tr(status.c_str()));
 
 				const bool installReady = update.state == questcal::update::State::Ready;
 				const bool canRetry = update.state == questcal::update::State::Failed ||
@@ -509,7 +590,7 @@ void BuildSettingsScreen(const VRState &state)
 			RowIconLabel(p, IconInfo, "Detailed calibration logging");
 			RowSubLine(p, "Records extra tracking and calibration details. Saved diagnostics remove your name and folder paths.");
 
-			const float btnW = 210.0f;
+			const float btnW = ButtonWidthFor("Save diagnostics file", true, 210.0f);
 			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + kRowHeight * 0.5f - 17.0f));
 			if (IconButton("savediag", "Save diagnostics file", IconCopy, ImVec2(btnW, 34.0f), BtnKind::Ghost))
 			{
@@ -526,7 +607,7 @@ void BuildSettingsScreen(const VRState &state)
 		}
 
 		ImGui::Spacing();
-		if (ImGui::CollapsingHeader("Motion demo credits"))
+		if (ImGui::CollapsingHeader((std::string(Tr("Motion demo credits")) + "###democredits").c_str()))
 			ImGui::TextWrapped("%s", GuideModelCredits().c_str());
 
 		// Raw transform editor -- power users only.
@@ -585,11 +666,11 @@ bool BuildProfileEditor()
 
 	ImGui::PushItemWidth(widthF);
 	bool rotationEdited = false;
-	rotationEdited |= ImGui::InputDouble("Yaw##Yaw", &g_transformDraft.rotationEuler(1), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble((std::string(Tr("Yaw")) + "##Yaw").c_str(), &g_transformDraft.rotationEuler(1), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	rotationEdited |= ImGui::InputDouble("Pitch##Pitch", &g_transformDraft.rotationEuler(2), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble((std::string(Tr("Pitch")) + "##Pitch").c_str(), &g_transformDraft.rotationEuler(2), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	rotationEdited |= ImGui::InputDouble("Roll##Roll", &g_transformDraft.rotationEuler(0), 0.1, 1.0, "%.8f");
+	rotationEdited |= ImGui::InputDouble((std::string(Tr("Roll")) + "##Roll").c_str(), &g_transformDraft.rotationEuler(0), 0.1, 1.0, "%.8f");
 
 	ImGui::Spacing();
 	SectionLabel("TRANSLATION (CENTIMETERS)");
@@ -640,8 +721,9 @@ bool BuildProfileEditor()
 	if (!g_transformDraft.valid)
 	{
 		ImGui::Spacing();
-		ImGui::TextColored(Pal::Bad,
-			"These values can't be applied. Use plain numbers within range. The saved profile is unchanged.");
+		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
+		ImGui::TextWrapped("%s", Tr("These values can't be applied. Use plain numbers within range. The saved calibration is unchanged."));
+		ImGui::PopStyleColor();
 	}
 	return g_transformDraft.valid;
 }

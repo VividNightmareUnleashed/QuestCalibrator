@@ -48,6 +48,12 @@
     <ClInclude Include="Diagnostics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Localization.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LocalizationTables.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="LegacyContinuous.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -105,6 +111,9 @@
     <ClInclude Include="LighthouseVisibility.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Modules.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="TrackingStreamDigest.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -155,6 +164,15 @@
     <ClCompile Include="Diagnostics.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Localization.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LocalizationJa.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LocalizationIt.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="LegacyContinuous.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -177,6 +195,9 @@
       <Filter>Source Files\ImGui</Filter>
     </ClCompile>
     <ClCompile Include="EmbeddedFiles.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Modules.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UserInterface.cpp">

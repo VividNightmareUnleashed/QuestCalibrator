@@ -8,7 +8,7 @@
 
 void LinkText(const char *label, const char *url)
 {
-	ImGui::TextColored(Pal::Dim, label);
+	ImGui::TextColored(Pal::Dim, "%s", Tr(label));
 	if (ImGui::IsItemHovered())
 	{
 		ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
@@ -105,11 +105,29 @@ void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, con
 	}
 }
 
-// Section label ("REFERENCE SPACE") as an inline widget.
-void SectionLabel(const char *text)
+// Letter spacing walks single bytes, so it is for ASCII only; translated
+// text is drawn as it is.
+static bool IsAscii(const char *text)
 {
+	for (const char *p = text; *p; ++p)
+		if (static_cast<unsigned char>(*p) >= 0x80)
+			return false;
+	return true;
+}
+
+// Section label ("REFERENCE SYSTEM") as an inline widget.
+void SectionLabel(const char *english)
+{
+	const char *text = Tr(english);
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	ImVec2 p = ImGui::GetCursorScreenPos();
+	if (!IsAscii(text))
+	{
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, p, Pal::U32(Pal::Dim), text);
+		ImGui::Dummy(ImVec2(g_fontSmall->CalcTextSizeA(g_fontSmall->LegacySize, FLT_MAX, 0.0f, text).x,
+			g_fontSmall->LegacySize + 4.0f));
+		return;
+	}
 	LetterSpacedTextAt(dl, g_fontSmall, p, Pal::U32(Pal::Dim), text, 2.0f);
 	ImGui::Dummy(ImVec2(LetterSpacedWidth(g_fontSmall, text, 2.0f), g_fontSmall->LegacySize + 4.0f));
 }
@@ -280,6 +298,15 @@ void IconField(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	dl->AddLine(ImVec2(c.x, c.y + s * 0.04f), ImVec2(c.x, c.y + s * 0.44f), col, 2.0f);
 	dl->PathArcTo(ImVec2(c.x, c.y + s * 0.44f), s * 0.55f, IM_PI * 0.15f, IM_PI * 0.85f, 12);
 	dl->PathStroke(col, 2.0f, ImDrawFlags_None);
+}
+
+void IconGlobe(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
+{
+	// Outline, one meridian as an ellipse, and the equator.
+	const float r = s * 0.82f;
+	dl->AddCircle(c, r, col, 24, 2.0f);
+	dl->AddEllipse(c, ImVec2(r * 0.42f, r), col, 0.0f, 20, 2.0f);
+	dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), col, 2.0f);
 }
 
 void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -483,8 +510,10 @@ void DrawFocusRing(ImDrawList *dl, ImVec2 a, ImVec2 b, float rounding)
 			Pal::U32(Pal::Accent), rounding + 2.0f, 2.0f, ImDrawFlags_RoundCornersAll);
 }
 
-bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, BtnKind kind, bool smallCaps)
+bool IconButton(const char *id, const char *english, IconFn icon, ImVec2 size, BtnKind kind, bool smallCaps)
 {
+	const char *label = Tr(english);
+	const bool spaced = smallCaps && IsAscii(label);
 	ImVec2 p = ImGui::GetCursorScreenPos();
 	bool pressed = ImGui::InvisibleButton(id, size, ImGuiButtonFlags_EnableNav);
 	bool hov = ImGui::IsItemHovered();
@@ -523,10 +552,22 @@ bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, Btn
 		dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), Pal::U32(Pal::VeryBad), 10.0f);
 
 	ImFont *font = smallCaps ? g_fontSmall : g_fontBody;
-	float spacing = smallCaps ? 2.0f : 0.0f;
-	float textW = smallCaps ? LetterSpacedWidth(font, label, spacing) : ImGui::CalcTextSize(label).x;
+	float fontSize = font->LegacySize;
+	float spacing = spaced ? 2.0f : 0.0f;
+	float textW = spaced ? LetterSpacedWidth(font, label, spacing)
+		: font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, label).x;
 	float iconS = 9.0f;
 	float iconBlock = icon ? iconS * 2.0f + 10.0f : 0.0f;
+	// A translation longer than the button was laid out for shrinks to fit
+	// rather than spilling past the edge. Callers size buttons whose labels
+	// run long with ButtonWidthFor; this is the backstop.
+	const float room = size.x - 24.0f - iconBlock;
+	if (!spaced && textW > room && room > 0.0f)
+	{
+		const float scale = std::max(0.72f, room / textW);
+		fontSize *= scale;
+		textW *= scale;
+	}
 	float cx = p.x + (size.x - textW - iconBlock) * 0.5f;
 	float cy = p.y + size.y * 0.5f;
 	ImU32 tcol = Pal::U32(txt);
@@ -536,12 +577,18 @@ bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, Btn
 		icon(dl, ImVec2(cx + iconS, cy), iconS, tcol);
 		cx += iconBlock;
 	}
-	if (smallCaps)
+	if (spaced)
 		LetterSpacedTextAt(dl, font, ImVec2(cx, cy - font->LegacySize * 0.5f), tcol, label, spacing);
 	else
-		dl->AddText(font, font->LegacySize, ImVec2(cx, cy - font->LegacySize * 0.5f), tcol, label);
+		dl->AddText(font, fontSize, ImVec2(cx, cy - fontSize * 0.5f), tcol, label);
 
 	return pressed;
+}
+
+float ButtonWidthFor(const char *english, bool withIcon, float minWidth)
+{
+	const float text = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, Tr(english)).x;
+	return std::max(minWidth, text + (withIcon ? 28.0f : 0.0f) + 36.0f);
 }
 
 bool QCCheckbox(const char *id, bool *v)
@@ -598,7 +645,7 @@ void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
 	icon(dl, iconC, 9.0f, Pal::U32(Pal::Dim));
 	dl->AddText(g_fontBody, g_fontBody->LegacySize,
 		ImVec2(rowPos.x + 92.0f, rowPos.y + 26.0f - g_fontBody->LegacySize * 0.5f),
-		Pal::U32(Pal::Text), label);
+		Pal::U32(Pal::Text), Tr(label));
 }
 
 // Settings-row geometry, stated once: every row is this tall and puts its
@@ -608,7 +655,7 @@ void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
 void RowSubLine(ImVec2 rowPos, const char *text)
 {
 	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
-		ImVec2(rowPos.x + 92.0f, rowPos.y + kRowHeight - 6.0f), Pal::U32(Pal::Dim), text);
+		ImVec2(rowPos.x + 92.0f, rowPos.y + kRowHeight - 6.0f), Pal::U32(Pal::Dim), Tr(text));
 }
 
 // A plain settings toggle, whole: card, checkbox at the shared inset, icon +
@@ -635,8 +682,9 @@ bool EscapePressed()
 	return ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 }
 
-void ShowTip(const char *text, bool leftOfCursor)
+void ShowTip(const char *english, bool leftOfCursor)
 {
+	const char *text = Tr(english);
 	// Nothing behind a modal may raise a tooltip: a rect-based hover test does
 	// not know the modal is there, and a tooltip window appearing takes focus
 	// from it.
@@ -684,7 +732,7 @@ bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bo
 	bool hovered = ImGui::IsItemHovered();
 	ImGui::GetWindowDrawList()->AddText(g_fontBody, g_fontBody->LegacySize,
 		ImVec2(pos.x + 36.0f, pos.y + 12.0f - g_fontBody->LegacySize * 0.5f),
-		Pal::U32(Pal::Text), label);
+		Pal::U32(Pal::Text), Tr(label));
 	ImGui::SetCursorScreenPos(ImVec2(pos.x + 30.0f, pos.y - 4.0f));
 	std::string labelId = std::string(id) + "_label";
 	if (ImGui::InvisibleButton(labelId.c_str(), ImVec2(width - 30.0f, 32.0f), ImGuiButtonFlags_EnableNav))
@@ -715,7 +763,7 @@ static float TabCellWidth(const char *label)
 {
 	const float px = 12.0f * kTabScale;
 	return g_fontBody->CalcTextSizeA(g_fontBody->LegacySize,
-		std::numeric_limits<float>::max(), 0.0f, label).x + px * 2.0f;
+		std::numeric_limits<float>::max(), 0.0f, Tr(label)).x + px * 2.0f;
 }
 
 float SegmentedTabsWidth(const char *const items[], int count)
@@ -732,7 +780,7 @@ float SegmentedTabsHeight()
 }
 
 int SegmentedTabs(const char *id, int value, const char *const items[], int count,
-	unsigned disabledMask, const char *disabledTip)
+	unsigned disabledMask, const char *const disabledTips[])
 {
 	const float h = 28.0f * kTabScale;
 	const float pad = 1.0f * kTabScale;
@@ -818,8 +866,8 @@ int SegmentedTabs(const char *id, int value, const char *const items[], int coun
 		else
 		{
 			ImGui::Dummy(ImVec2(widths[i], c1.y - c0.y));
-			if (disabledTip && ImGui::IsItemHovered())
-				ShowTip(disabledTip);
+			if (disabledTips && disabledTips[i] && ImGui::IsItemHovered())
+				ShowTip(disabledTips[i]);
 		}
 		// Muted at rest, primary when chosen or hovered; a disabled cell
 		// keeps its colour at the reference's 0.4 opacity.
@@ -828,7 +876,7 @@ int SegmentedTabs(const char *id, int value, const char *const items[], int coun
 			col.w = 0.4f;
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(x + px, c0.y + (c1.y - c0.y - g_fontBody->LegacySize) * 0.5f),
-			Pal::U32(col), items[i]);
+			Pal::U32(col), Tr(items[i]));
 		x += widths[i];
 		ImGui::PopID();
 	}
@@ -870,10 +918,11 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 			dl->AddRectFilled(ip, ImVec2(ip.x + isz.x, ip.y + isz.y), Pal::U32(ImVec4(1, 1, 1, 0.04f)), 5.0f);
 		DrawFocusRing(dl, ip, ImVec2(ip.x + isz.x, ip.y + isz.y), 5.0f);
 
-		ImVec2 ts = ImGui::CalcTextSize(items[i]);
+		const char *item = Tr(items[i]);
+		ImVec2 ts = ImGui::CalcTextSize(item);
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(ip.x + (isz.x - ts.x) * 0.5f, ip.y + (isz.y - g_fontBody->LegacySize) * 0.5f),
-			Pal::U32(i == value ? Pal::Text : Pal::Dim), items[i]);
+			Pal::U32(i == value ? Pal::Text : Pal::Dim), item);
 		ImGui::PopID();
 	}
 
@@ -907,7 +956,7 @@ void DrawStatusCard(const std::vector<StatusRowData> &rows)
 		r.icon(dl, c, 8.5f, Pal::U32(r.color));
 		dl->AddText(g_fontBody, g_fontBody->LegacySize,
 			ImVec2(c.x + 23.0f, cy - g_fontBody->LegacySize * 0.5f),
-			Pal::U32(r.color), r.text.c_str());
+			Pal::U32(r.color), Tr(r.text.c_str()));
 	}
 
 	EndRowCard(p, h);
