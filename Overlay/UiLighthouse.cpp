@@ -294,7 +294,7 @@ std::string RowNote(const LighthouseVisibility::Device *seen, bool reporting, in
 	if (!lasting.empty())
 		return "Lost " + lasting;
 	if (seen->drops >= 5)
-		return FormatString("Dropped a station %u times", seen->drops);
+		return FormatString("Lost a station %u times", seen->drops);
 	return {};
 }
 
@@ -600,8 +600,8 @@ void BuildLighthouseScreen(const VRState &state)
 		if (ImGui::IsItemHovered())
 		{
 			std::string tip = CalCtx.lighthouse.StationName(s.channel);
-			tip += s.drops == 0 ? std::string("\nNo drops this session")
-				: FormatString("\nDropped %u time%s this session", s.drops, s.drops == 1 ? "" : "s");
+			tip += s.drops == 0 ? std::string("\nNot lost this session")
+				: FormatString("\nLost %u time%s this session", s.drops, s.drops == 1 ? "" : "s");
 			if (s.losses > 0)
 				tip += FormatString("\nThe last station a device lost %u time%s", s.losses, s.losses == 1 ? "" : "s");
 			ShowTip(tip.c_str(), true);
@@ -634,7 +634,12 @@ void BuildLighthouseScreen(const VRState &state)
 
 		RowDeviceIcon(dl, dev, ImVec2(p.x + padL + 18.0f, p.y + rowH * 0.5f), Pal::U32(Pal::Dim));
 		ImVec4 noteColor;
-		const std::string note = RowNote(seen, reporting, clean, now, noteColor);
+		// SteamVR only knows the device is gone, not whether it was switched off
+		// or carried out of range, so the note says both and no figure repeats it.
+		std::string note = "Off or out of range";
+		noteColor = Pal::Dim;
+		if (dev.connected)
+			note = RowNote(seen, reporting, clean, now, noteColor);
 		const std::string name = DeviceDisplayName(dev);
 		dl->PushClipRect(ImVec2(p.x + nameX, p.y), ImVec2(nameEnd, b.y), true);
 		const float nameY = note.empty() ? p.y + (rowH - g_fontBody->LegacySize) * 0.5f - 1.0f : p.y + 7.0f;
@@ -663,11 +668,9 @@ void BuildLighthouseScreen(const VRState &state)
 
 		std::string figure;
 		ImVec4 figureColor = Pal::Dim;
-		if (!dev.connected)
-			figure = "Off";
-		else if (!reporting)
+		if (dev.connected && !reporting)
 			figure = "Not logged";
-		else
+		else if (dev.connected)
 		{
 			const int inView = static_cast<int>(seen->visible.size());
 			figure = FormatString("%d of %d", inView, std::max(CalCtx.lighthouse.StationCount(), inView));
@@ -686,8 +689,8 @@ void BuildLighthouseScreen(const VRState &state)
 				tip += " " + CalCtx.lighthouse.StationName(c);
 			if ((int)seen->visible.size() < clean)
 				tip += "\nWith fewer than two stations in view its tracking can drift.";
-			tip += seen->drops == 0 ? std::string("\nNo drops this session")
-				: FormatString("\nDropped a station %u time%s this session", seen->drops, seen->drops == 1 ? "" : "s");
+			tip += seen->drops == 0 ? std::string("\nNo station lost this session")
+				: FormatString("\nLost a station %u time%s this session", seen->drops, seen->drops == 1 ? "" : "s");
 			if (seen->losses > 0)
 				tip += FormatString(", lost all of them %u time%s", seen->losses, seen->losses == 1 ? "" : "s");
 			if (seen->bootstraps > 0)

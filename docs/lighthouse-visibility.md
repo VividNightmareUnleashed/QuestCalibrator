@@ -58,7 +58,9 @@ shrank was rotated: SteamVR restarted, and the sets and counters start over.
   of view. A ring lost in the last four seconds glows behind it. Each row
   ends with the in-view figure (`3 of 4`, red below two), and a row with
   something to say names it under the device: `Down to one station`,
-  `Lost S-16`, `Lost S-8 just now`, `Dropped a station 7 times`. Rows with
+  `Lost S-16`, `Lost S-8 just now`, `Lost a station 7 times`, and
+  `Off or out of range` for a device SteamVR has lost, which then shows no
+  figure. The copy says "lost" for every loss, never "dropped". Rows with
   a problem come first, devices that are off last. Under each column is how
   many of the reporting devices see that station, red when none does: that
   is the one to look at. Hovering a row lists what it sees, its drops and
