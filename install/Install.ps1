@@ -79,7 +79,15 @@ $licensePath = Join-Path $PSScriptRoot 'LICENSE'
 if (-not (Test-Path -LiteralPath $licensePath)) {
     Fail "LICENSE is missing from the package. Extract the whole zip and run this again."
 }
-$licenseHash = (Get-FileHash -LiteralPath $licensePath -Algorithm SHA256).Hash
+# Hashed with .NET, not Get-FileHash: started from PowerShell 7, Windows
+# PowerShell inherits a module path under which Get-FileHash cannot load.
+# Uppercase hex, as Get-FileHash and the overlay write it.
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+    $licenseHash = [BitConverter]::ToString($sha256.ComputeHash([IO.File]::ReadAllBytes($licensePath))) -replace '-', ''
+} finally {
+    $sha256.Dispose()
+}
 $licenseKey  = 'HKLM:\Software\QuestCalibrator\License'
 $agreedHash  = (Get-ItemProperty $licenseKey -ErrorAction SilentlyContinue).AcceptedSha256
 
