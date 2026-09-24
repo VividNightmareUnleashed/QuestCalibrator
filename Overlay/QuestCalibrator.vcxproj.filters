@@ -114,6 +114,9 @@
     <ClInclude Include="Modules.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="LicenseAgreement.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="TrackingStreamDigest.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -198,6 +201,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="Modules.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LicenseAgreement.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UiLicense.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UserInterface.cpp">
@@ -322,6 +331,9 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="QuestCalibrator.rc">
+      <Filter>Resource Files</Filter>
+    </ResourceCompile>
+    <ResourceCompile Include="License.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
   </ItemGroup>

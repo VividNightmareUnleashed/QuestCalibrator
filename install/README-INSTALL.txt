@@ -66,7 +66,9 @@ Steps:
 0. Read LICENSE in this folder. A manual install accepts it just as the
    script install does, including the separate approval of its sections 2
    (Restrictions), 6 (Termination) and 8 (Limitation of liability). If you
-   don't accept it, stop here.
+   don't accept it, stop here. QuestCalibrator also shows the agreement
+   in the SteamVR dashboard the first time it starts, and asks for both
+   approvals before you can use it.
 
 1. Close Steam completely (not just SteamVR).
 

@@ -675,6 +675,21 @@ const Entry kJapanese[] = {
 	{ "Base station changes haven't affected drift checks this session.",
 		"このセッションでは、ベースステーションの変化はドリフト確認に影響していません。" },
 	{ "Read from %s", "読み込み元：{0}" },
+
+	// License agreement screen. The agreement itself is English only, so
+	// the section names keep its English headings.
+	{ "License agreement", "使用許諾契約" },
+	{ "QuestCalibrator is free to use under this agreement. Read it, then agree to continue.",
+		"QuestCalibrator はこの契約のもとで無料で使えます。お読みのうえ、同意して続けてください。" },
+	{ "The agreement is in English only.", "契約書は英語のみです。" },
+	{ "The license agreement couldn't load. Reinstall QuestCalibrator to restore it.",
+		"使用許諾契約を読み込めませんでした。QuestCalibrator を再インストールして復元してください。" },
+	{ "I specifically approve sections 2 (Restrictions), 6 (Termination) and 8 (Limitation of liability).",
+		"第 2 条（Restrictions）、第 6 条（Termination）、第 8 条（Limitation of liability）を個別に承認します。" },
+	{ "Decline and quit", "同意せずに終了" },
+	{ "Agree and continue", "同意して続ける" },
+	{ "Couldn't save your agreement to the license, so QuestCalibrator will ask again next time it starts.",
+		"使用許諾への同意を保存できなかったため、次回の起動時に QuestCalibrator がもう一度確認します。" },
 };
 
 const size_t kJapaneseCount = sizeof kJapanese / sizeof kJapanese[0];

@@ -120,6 +120,7 @@
     <ClInclude Include="LighthouseLog.h" />
     <ClInclude Include="LighthouseVisibility.h" />
     <ClInclude Include="Modules.h" />
+    <ClInclude Include="LicenseAgreement.h" />
     <ClInclude Include="TrackingStreamDigest.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
@@ -414,6 +415,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="Modules.cpp" />
+    <ClCompile Include="LicenseAgreement.cpp" />
     <ClCompile Include="UserInterface.cpp" />
     <ClCompile Include="UiWidgets.cpp" />
     <ClCompile Include="UiMainScreen.cpp" />
@@ -423,6 +425,7 @@
     <ClCompile Include="UiGuide.cpp" />
     <ClCompile Include="UiSettings.cpp" />
     <ClCompile Include="UiPreview.cpp" />
+    <ClCompile Include="UiLicense.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="QuestCalibrator.ico" />
@@ -430,6 +433,7 @@
   <ItemGroup>
     <ResourceCompile Include="QuestCalibrator.rc" />
     <ResourceCompile Include="Guidance.rc" />
+    <ResourceCompile Include="License.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="..\tools\clang-tidy-first-party.targets" />

@@ -219,6 +219,14 @@ void BuildMainWindow(bool runningInOverlay)
 		return;
 	}
 
+	// Nothing else is reachable until the player has agreed to the license.
+	if (LicenseScreenWanted())
+	{
+		BuildLicenseScreen(runningInOverlay);
+		ImGui::End();
+		return;
+	}
+
 	// The device list changes on the order of minutes, but this runs at the
 	// ~90 Hz dashboard frame rate — re-querying vrserver's properties (plus
 	// per-device icon disk stats) every frame is a cross-process call storm.

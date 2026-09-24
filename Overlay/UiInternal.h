@@ -326,5 +326,7 @@ std::string PreviewIconPath(const char *driverRelative);
 void UpdateIdentifyPulse(double now);
 void BuildHeader();
 void BuildFooter(bool runningInOverlay);
+bool LicenseScreenWanted();
+void BuildLicenseScreen(bool runningInOverlay);
 VRState LoadVRState();
 VRState PreviewVRState();

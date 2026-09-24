@@ -1103,6 +1103,12 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		g_uiPreviewMany = true;
 		g_uiPreviewScenario = PreviewScenario::Settings;
 	}
+	else if (cmd == L"-uipreview-license")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = PreviewScenario::License;
+	}
 	else if (cmd == L"-openvrpath")
 	{
 		InitVRUtilityOrExit();

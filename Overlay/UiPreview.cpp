@@ -277,6 +277,7 @@ void SetupPreviewState()
 		break;
 	case PreviewScenario::Failed:
 	case PreviewScenario::Healthy:
+	case PreviewScenario::License:
 		break;
 	}
 }

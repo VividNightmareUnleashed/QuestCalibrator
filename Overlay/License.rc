@@ -1,0 +1,3 @@
+// The end user license agreement, byte for byte, so the overlay can show it
+// and fingerprint it the way Install.ps1 does (LicenseAgreement.h).
+LICENSE_TEXT RCDATA "..\\LICENSE"
