@@ -24,8 +24,8 @@ void UpdateIdentifyPulse(double now)
 		return;
 	}
 
-	// Main-loop ownership makes shutdown safe. Wake at the original 5 ms
-	// cadence without creating detached workers or overlapping pulse trains.
+	// Driven by the main loop, so shutdown is safe and pulse trains never
+	// overlap; it asks to be woken every 5 ms while pulsing.
 	CalCtx.wantedUpdateInterval = std::min(CalCtx.wantedUpdateInterval, 0.005);
 	if (now < g_identifyPulse.nextPulseTime)
 		return;
@@ -100,7 +100,6 @@ void BuildHeader()
 	YGNodeStyleSetHeight(gear, 38.0f);
 	fl.Compute(p, cw, h);
 
-	// Logo mark
 	const FlexRect lr = fl.Rect(logo);
 	dl->AddRectFilled(lr.min, lr.max, Pal::U32(Pal::Card), 11.0f);
 	dl->AddRect(lr.min, lr.max, Pal::U32(Pal::Border), 11.0f);
@@ -122,7 +121,6 @@ void BuildHeader()
 		}
 	}
 
-	// Gear (settings) toggle at the far right
 	const FlexRect gr = fl.Rect(gear);
 	ImGui::SetCursorScreenPos(gr.min);
 	if (ImGui::InvisibleButton("##settingsgear", gr.Size(), ImGuiButtonFlags_EnableNav))
@@ -146,7 +144,6 @@ void BuildFooter(bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
 	float cw = ImGui::GetContentRegionAvail().x;
-	// ---- Footer ----
 	{
 		float footerY = ImGui::GetWindowHeight() - 40.0f;
 		if (ImGui::GetCursorPosY() < footerY)
@@ -219,10 +216,8 @@ void BuildMainWindow(bool runningInOverlay)
 		return;
 	}
 
-	// The device list changes on the order of minutes, but this runs at the
-	// ~90 Hz dashboard frame rate — re-querying vrserver's properties (plus
-	// per-device icon disk stats) every frame is a cross-process call storm.
-	// A 1 Hz refresh keeps the panes current without it.
+	// Refreshed at 1 Hz: re-querying vrserver's properties and the icon files
+	// at the ~90 Hz dashboard frame rate would be a cross-process call storm.
 	static VRState state;
 	static double lastStateRefresh = -1e9;
 	double now = ImGui::GetTime();
@@ -255,8 +250,7 @@ void BuildMainWindow(bool runningInOverlay)
 	ImGui::BeginChild("##content",
 		ImVec2(0.0f, ImGui::GetWindowHeight() - ImGui::GetCursorPosY() - s_bottomReserve),
 		ImGuiChildFlags_NavFlattened);
-	// The settings screen replaces the whole content area; keeping the device
-	// panes above it buried the settings below the fold for no benefit.
+	// The settings screen replaces the whole content area.
 	bool inSettings = (CalCtx.state == CalibrationState::None && s_showSettings);
 	// The Lighthouse tab owns the content area only while nothing else
 	// does: a calibration in progress or the profile editor keeps its

@@ -193,8 +193,7 @@ std::optional<std::string> MatchPattern(const Table &table, const std::string &t
 			if (t[i] == '{' && i + 2 < t.size() && t[i + 1] >= '0' && t[i + 1] <= '9' && t[i + 2] == '}')
 			{
 				const size_t group = static_cast<size_t>(t[i + 1] - '0') + 1;
-				if (group < m.size())
-					out += TranslateCapture(table, m[group].str(), depth);
+				out += TranslateCapture(table, m[group].str(), depth);
 				i += 2;
 				continue;
 			}
@@ -380,7 +379,7 @@ bool FontAvailable(Language language)
 const char *Tr(const char *english)
 {
 	const Table *table = TableFor(g_language);
-	if (!table || !english || !*english)
+	if (!table || !*english)
 		return english;
 	auto cached = g_cache.find(english);
 	if (cached != g_cache.end())

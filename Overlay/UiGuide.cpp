@@ -8,7 +8,8 @@ GuideState s_guide;
 static GLuint s_guideTexture = 0;
 static int s_guideTextureKind = -1;
 
-// Initialize diagnostic detail visibility from the advanced-mode preference.
+// Whether the result modal shows its detail lines; OpenGuide seeds it from
+// advanced mode.
 bool s_modalDetails = false;
 
 void OpenGuide(bool anchor, bool mountRun)
@@ -92,18 +93,16 @@ bool BeginGuidedRun()
 // Resources are embedded so a moved executable cannot lose its instructions.
 void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, GuideDemo demo)
 {
-	auto &texture = s_guideTexture;
-	auto &loadedKind = s_guideTextureKind;
 	const int kind = static_cast<int>(demo);
-	if (kind != loadedKind)
+	if (kind != s_guideTextureKind)
 	{
-		if (texture)
-			glDeleteTextures(1, &texture);
-		texture = 0;
-		LoadGuideTexture(demo, &texture);
-		loadedKind = kind;
+		if (s_guideTexture)
+			glDeleteTextures(1, &s_guideTexture);
+		s_guideTexture = 0;
+		LoadGuideTexture(demo, &s_guideTexture);
+		s_guideTextureKind = kind;
 	}
-	if (!texture)
+	if (!s_guideTexture)
 	{
 		dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(origin.x, origin.y + 24.0f),
 			Pal::U32(Pal::Warn), Tr("Motion demos couldn't load. Reinstall QuestCalibrator to restore them."));
@@ -126,16 +125,14 @@ void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, Gu
 	const float motionAlpha = blend * blend * (3.0f - 2.0f * blend);
 	auto drawFrame = [&](int index, ImVec2 top, float opacity)
 	{
-		// The captured reference aliases the static texture handle for this call.
-		// NOLINTNEXTLINE(clang-analyzer-core.NullDereference)
-		if (!texture || opacity <= 0.0f)
+		if (opacity <= 0.0f)
 			return;
 		const int column = index % columns;
 		const int row = index / columns;
 		// Half-texel inset keeps linear filtering inside this frame.
 		const ImVec2 uv0((column * frameW + 0.5f) / atlasW, (row * frameH + 0.5f) / atlasH);
 		const ImVec2 uv1((column * frameW + frameW - 0.5f) / atlasW, (row * frameH + frameH - 0.5f) / atlasH);
-		dl->AddImage(static_cast<ImTextureID>(texture), top,
+		dl->AddImage(static_cast<ImTextureID>(s_guideTexture), top,
 			ImVec2(top.x + imageW, top.y + imageH), uv0, uv1,
 			ImGui::ColorConvertFloat4ToU32(ImVec4(1, 1, 1, opacity)));
 	};
@@ -197,17 +194,11 @@ void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const quest
 		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, ImVec2(x, origin.y + 28.0f), Pal::U32(Pal::Dim), Tr(states[i]));
 		const ImVec2 a(x, origin.y + 50.0f), b(x + cellW, origin.y + 54.0f);
 		dl->AddRectFilled(a, b, Pal::U32(Pal::Border), 2.0f);
-		const float fill = static_cast<float>(std::clamp(values[i], 0.0, 1.0));
+		const float fill = static_cast<float>(values[i]);
 		if (fill > 0.0f)
 			dl->AddRectFilled(a, ImVec2(x + cellW * fill, b.y), Pal::U32(Pal::Accent), 2.0f);
 	}
 }
-
-// The bottom band: the verdict, the advanced detail lines, the
-// continuous-calibration line and the nudge. Rendered by BuildMainWindow
-// after the scrolling content child, so it never scrolls away or loses
-// its surface when the screen is busy. Its height goes through
-// s_bottomReserve so the next frame's child leaves room for it.
 
 void BuildMenu(const VRState &state, bool runningInOverlay)
 {
@@ -240,16 +231,8 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 		if (IconButton("saveprofile", "Save calibration", IconCheck,
 			ImVec2(cw - cancelWidth - gap, 52.0f),
 			transformValid ? BtnKind::Primary : BtnKind::Ghost) && transformValid)
-		{
-			// Saving keeps the editor open, so re-seed from the context the save
-			// just wrote: the fields then show the stored values (persistence may
-			// have normalized them) and the sticky rotation-edited flag clears.
-			if (SaveProfileEditorDraft())
-				SeedTransformEditorDraft();
-		}
+			SaveProfileEditorDraft();
 		ImGui::SameLine(0.0f, gap);
-		// "Close", not "Cancel": saving keeps the editor open, and leaving
-		// afterwards undoes nothing.
 		if (IconButton("cancelprofile", "Close", nullptr,
 			ImVec2(cancelWidth, 52.0f), BtnKind::Ghost))
 		{
@@ -411,7 +394,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			if (s_guide.stage == GuideStage::Countdown)
 			{
 				int remain = static_cast<int>(std::ceil(kCountdownSeconds - (now - s_guide.countdownStart)));
-				std::string label = Tr(FormatString("Starting in %d...", std::max(1, remain)));
+				std::string label = Tr(FormatString("Starting in %d...", remain));
 				ImGui::PushFont(g_fontTitle);
 				ImGui::TextUnformatted(label.c_str());
 				ImGui::PopFont();
@@ -476,8 +459,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay)
 			{
 				if (message.kind != Msg::Progress)
 					continue;
-				float fraction = message.target > 0
-					? (float)message.progress / (float)message.target : 0.0f;
+				float fraction = (float)message.progress / (float)message.target;
 				ImGui::Spacing();
 				ImGui::PushStyleColor(ImGuiCol_FrameBg, Pal::Inset);
 				ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);

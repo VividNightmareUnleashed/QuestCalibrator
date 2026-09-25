@@ -6,6 +6,7 @@
 // Palette + theme
 // ---------------------------------------------------------------------------
 
+// Inline text that opens url in the default browser; underlined on hover.
 void LinkText(const char *label, const char *url)
 {
 	ImGui::TextColored(Pal::Dim, "%s", Tr(label));
@@ -84,14 +85,10 @@ float LetterSpacedWidth(ImFont *font, const char *text, float spacing)
 {
 	float w = 0.0f;
 	for (const char *p = text; *p; ++p)
-	{
-		const ImFontGlyph *g = font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p);
-		w += (g ? g->AdvanceX : font->LegacySize * 0.5f) + spacing;
-	}
+		w += font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p)->AdvanceX + spacing;
 	return w > 0.0f ? w - spacing : 0.0f;
 }
 
-// Labels must be ASCII; non-ASCII text needs UTF-8 decoding before glyph lookup.
 void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, const char *text, float spacing)
 {
 	float x = pos.x;
@@ -100,8 +97,7 @@ void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, con
 	{
 		buf[0] = *p;
 		dl->AddText(font, font->LegacySize, ImVec2(x, pos.y), col, buf);
-		const ImFontGlyph *g = font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p);
-		x += (g ? g->AdvanceX : font->LegacySize * 0.5f) + spacing;
+		x += font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p)->AdvanceX + spacing;
 	}
 }
 
@@ -189,7 +185,7 @@ void IconPlay(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 void IconPencil(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	// Heavier body and a longer tip than the other glyphs: at row size a thin
-	// diagonal read as a stray stroke, not a pencil.
+	// diagonal reads as a stray stroke, not a pencil.
 	ImVec2 tip = ImVec2(c.x - s * 0.62f, c.y + s * 0.62f);
 	ImVec2 top = ImVec2(c.x + s * 0.50f, c.y - s * 0.50f);
 	dl->AddLine(ImVec2(tip.x + s * 0.30f, tip.y - s * 0.10f), top, col, 3.0f);
@@ -326,9 +322,8 @@ void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 // SteamVR device icon textures
 // ---------------------------------------------------------------------------
 
-// Owns one COM interface for the rest of its scope. Each acquisition below is
-// then one line plus one guard: a new step cannot land its Release in the
-// wrong place, because there is no unwinding ladder to place it in.
+// Owns one COM interface for the rest of its scope, so each acquisition below
+// is one line plus one guard.
 template<typename T>
 struct ComScoped
 {
@@ -358,8 +353,9 @@ static bool DecodeTexture(IWICImagingFactory *factory, IWICBitmapDecoder *decode
 		WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
 		return false;
 
-	// External device icons retain their small allocation bound. The embedded
-	// guides have fixed, bounded atlas layouts for the wrist and head demos.
+	// Device icons come from driver folders and get a small allocation bound.
+	// An embedded guide must be one of the two atlas layouts UiGuide.cpp's UVs
+	// assume.
 	UINT w = 0, h = 0;
 	if (FAILED(conv->GetSize(&w, &h)))
 		return false;
@@ -562,7 +558,7 @@ bool IconButton(const char *id, const char *english, IconFn icon, ImVec2 size, B
 	// rather than spilling past the edge. Callers size buttons whose labels
 	// run long with ButtonWidthFor; this is the backstop.
 	const float room = size.x - 24.0f - iconBlock;
-	if (!spaced && textW > room && room > 0.0f)
+	if (!spaced && textW > room)
 	{
 		const float scale = std::max(0.72f, room / textW);
 		fontSize *= scale;
@@ -648,20 +644,14 @@ void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
 		Pal::U32(Pal::Text), Tr(label));
 }
 
-// Settings-row geometry, stated once: every row is this tall and puts its
-// control at this inset. Taller composite rows add their extra body to the
-// same base instead of restating it.
-
 void RowSubLine(ImVec2 rowPos, const char *text)
 {
 	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
 		ImVec2(rowPos.x + 92.0f, rowPos.y + kRowHeight - 6.0f), Pal::U32(Pal::Dim), Tr(text));
 }
 
-// A plain settings toggle, whole: card, checkbox at the shared inset, icon +
-// label, optional sub-line. Returns whether the value changed this frame --
-// persisting it stays with the caller, since the settings and profile
-// save-or-restore paths are different templates.
+// A whole settings toggle row: card, checkbox, icon + label, optional
+// sub-line. Returns whether the value changed; persisting it is the caller's.
 bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, const char *subline)
 {
 	RowCard row(kRowHeight + (subline ? kRowSubLineH : 0.0f));
@@ -673,10 +663,7 @@ bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, cons
 	return changed;
 }
 
-// A tooltip that stays out of the way: above the cursor when the cursor is in
-// the lower half of the window, so it cannot cover the controls beneath it.
-// Escape as the keyboard form of a modal's Cancel / Keep / Close: every
-// modal has one, and a key that visibly does nothing reads as a hang.
+// Escape as the keyboard form of a modal's Cancel / Keep / Close.
 bool EscapePressed()
 {
 	return ImGui::IsKeyPressed(ImGuiKey_Escape, false);
@@ -690,8 +677,7 @@ void ShowTip(const char *english, bool leftOfCursor)
 	// from it.
 	if (ImGuiWindow *modal = ImGui::GetTopMostPopupModal())
 	{
-		ImGuiWindow *current = ImGui::GetCurrentWindowRead();
-		if (!current || current->RootWindow != modal->RootWindow)
+		if (ImGui::GetCurrentWindowRead()->RootWindow != modal->RootWindow)
 			return;
 	}
 	ImGuiIO &io = ImGui::GetIO();
@@ -750,13 +736,10 @@ bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bo
 // Segmented tabs
 // ---------------------------------------------------------------------------
 
-// The top-level tab switch, after the segmented surface picker in the design
-// reference (its "Chat / Cowork" control): a translucent track, a thumb that
-// slides to the chosen cell, and labels going from muted to primary. It is a
-// 28 px control with a 1 px track inset, 12 px cell padding, 7/6/5 px radii
-// and 14 px text. It is drawn at kTabScale so the 14 px text becomes the
-// body face and a cell is big enough for a laser pointer; every measure
-// below is the reference's times that scale.
+// The top-level tab switch: a translucent track, a thumb that slides to the
+// chosen cell, and labels going from muted to primary. Every measure below is
+// the design reference's times kTabScale, so its 14 px text becomes the body
+// face and a cell is big enough for a laser pointer.
 static const float kTabScale = 1.5f;
 
 static float TabCellWidth(const char *label)
@@ -804,11 +787,10 @@ int SegmentedTabs(const char *id, int value, const char *const items[], int coun
 	}
 	const ImVec2 b = ImVec2(p.x + total, p.y + h);
 
-	// Track: white at 5 %.
 	dl->AddRectFilled(p, b, Pal::U32(ImVec4(1, 1, 1, 0.05f)), rTrack);
 
-	// The thumb eases to the chosen cell, as the reference's does. Its
-	// position lives in the window's storage so the slide survives frames.
+	// The thumb eases to the chosen cell; its position lives in the window's
+	// storage so the slide survives frames.
 	float targetX = pad;
 	for (int i = 0; i < value && i < count; ++i)
 		targetX += widths[i];
@@ -833,19 +815,15 @@ int SegmentedTabs(const char *id, int value, const char *const items[], int coun
 	}
 	storage->SetFloat(keyX, tx);
 	storage->SetFloat(keyW, tw);
-	if (targetW > 0.0f)
-	{
-		const ImVec2 t0 = ImVec2(p.x + tx, p.y + pad);
-		const ImVec2 t1 = ImVec2(p.x + tx + tw, b.y - pad);
-		// Its shadow (0 1px 2px, black at 5 %), then white at 10 % with a
-		// 1 px inset ring at 10 %.
-		dl->AddRectFilled(ImVec2(t0.x, t0.y + ring), ImVec2(t1.x, t1.y + ring),
-			Pal::U32(ImVec4(0, 0, 0, 0.05f)), rThumb);
-		dl->AddRectFilled(t0, t1, Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb);
-		dl->AddRect(ImVec2(t0.x + ring * 0.5f, t0.y + ring * 0.5f),
-			ImVec2(t1.x - ring * 0.5f, t1.y - ring * 0.5f),
-			Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb - ring * 0.5f, ImDrawFlags_RoundCornersAll, ring);
-	}
+	const ImVec2 t0 = ImVec2(p.x + tx, p.y + pad);
+	const ImVec2 t1 = ImVec2(p.x + tx + tw, b.y - pad);
+	// Shadow, fill, then a 1 px inset ring.
+	dl->AddRectFilled(ImVec2(t0.x, t0.y + ring), ImVec2(t1.x, t1.y + ring),
+		Pal::U32(ImVec4(0, 0, 0, 0.05f)), rThumb);
+	dl->AddRectFilled(t0, t1, Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb);
+	dl->AddRect(ImVec2(t0.x + ring * 0.5f, t0.y + ring * 0.5f),
+		ImVec2(t1.x - ring * 0.5f, t1.y - ring * 0.5f),
+		Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb - ring * 0.5f, ImDrawFlags_RoundCornersAll, ring);
 
 	float x = p.x + pad;
 	for (int i = 0; i < count; ++i)
@@ -866,11 +844,9 @@ int SegmentedTabs(const char *id, int value, const char *const items[], int coun
 		else
 		{
 			ImGui::Dummy(ImVec2(widths[i], c1.y - c0.y));
-			if (disabledTips && disabledTips[i] && ImGui::IsItemHovered())
+			if (disabledTips[i] && ImGui::IsItemHovered())
 				ShowTip(disabledTips[i]);
 		}
-		// Muted at rest, primary when chosen or hovered; a disabled cell
-		// keeps its colour at the reference's 0.4 opacity.
 		ImVec4 col = (i == value || hov) ? Pal::TabTextOn : Pal::TabTextOff;
 		if (disabled)
 			col.w = 0.4f;
@@ -909,7 +885,7 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 
 		if (i == value)
 		{
-			// Fill plus an accent rail: the fill alone was a 1.3:1 state cue.
+			// Fill plus an accent rail: the fill alone is a 1.3:1 state cue.
 			dl->AddRectFilled(ip, ImVec2(ip.x + isz.x, ip.y + isz.y), Pal::U32(ImVec4(1, 1, 1, 0.18f)), 5.0f);
 			dl->AddRectFilled(ImVec2(ip.x + 8.0f, ip.y + isz.y - 3.0f), ImVec2(ip.x + isz.x - 8.0f, ip.y + isz.y - 1.0f),
 				Pal::U32(Pal::Accent), 1.0f);
@@ -938,9 +914,6 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 
 void DrawStatusCard(const std::vector<StatusRowData> &rows)
 {
-	if (rows.empty())
-		return;
-
 	const float rowH = 34.0f, padY = 12.0f, padX = 16.0f;
 	float h = padY * 2.0f + rowH * (float)rows.size();
 	ImVec2 p = BeginRowCard(h);

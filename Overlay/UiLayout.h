@@ -3,19 +3,14 @@
 #include <imgui/imgui.h>
 #include <yoga/Yoga.h>
 
-// Flex layout for the screens, computed by Yoga (the flexbox engine behind
-// React Native) and read back as screen rectangles that the ImGui draw list
-// and widgets are then placed at. A screen that is designed on the web comes
-// with its own flex, gap, padding and size values; those go on the nodes
-// verbatim, with the Yoga calls named after the CSS properties, instead of
-// being turned into offset arithmetic by hand. Web defaults are on, so a node
-// is a row that can shrink, as it would be in a browser.
+// Flex layout for the screens, computed by Yoga and read back as screen
+// rectangles that ImGui widgets and draw-list calls are placed at. A web
+// reference's flex, gap, padding and size values go on the nodes verbatim,
+// through the Yoga calls named after the CSS properties; web defaults are on,
+// so a node is a row that can shrink, as in a browser.
 //
-// The tree is built once per frame, laid out, read, and thrown away; Yoga
-// lays out a few dozen nodes in microseconds, and a persistent tree would
-// have to be kept in step with widgets that ImGui already rebuilds each
-// frame. Nothing here draws: a node is a place, and what stands there is the
-// caller's business.
+// The tree is built, laid out and thrown away each frame, like the ImGui
+// widgets it places. Nothing here draws.
 
 struct FlexRect
 {
@@ -39,7 +34,6 @@ public:
 	// A new child appended to parent. The layout owns every node it hands out.
 	YGNodeRef Add(YGNodeRef parent);
 	YGNodeRef Row(YGNodeRef parent);
-	YGNodeRef Column(YGNodeRef parent);
 	// A leaf the size of one line of text in font; the caller draws the text.
 	YGNodeRef Text(YGNodeRef parent, ImFont *font, const char *text);
 

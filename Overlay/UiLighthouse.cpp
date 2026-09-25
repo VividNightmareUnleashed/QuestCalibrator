@@ -20,10 +20,10 @@ std::vector<LighthouseVisibility::Station> StationsByChannel()
 	return stations;
 }
 
-bool Sees(const LighthouseVisibility::Device *seen, int channel)
+// Only for a device with visibleKnown set.
+bool Sees(const LighthouseVisibility::Device &seen, int channel)
 {
-	return seen && seen->visibleKnown &&
-		std::find(seen->visible.begin(), seen->visible.end(), channel) != seen->visible.end();
+	return std::find(seen.visible.begin(), seen.visible.end(), channel) != seen.visible.end();
 }
 
 float TextWidth(ImFont *font, const char *text)
@@ -49,25 +49,6 @@ void MessageCard(IconFn icon, const char *english, const std::string &englishBod
 		ImVec2(p.x + (cw - TextWidth(g_fontSmall, body.c_str())) * 0.5f, p.y + 90.0f),
 		Pal::U32(Pal::Dim), body.c_str());
 	EndRowCard(p, h);
-}
-
-// The device icon as DeviceRow draws it: SteamVR's own art when it resolves,
-// the vector glyph otherwise.
-void RowDeviceIcon(ImDrawList *dl, const VRDevice &dev, ImVec2 c, ImU32 fallback)
-{
-	const DeviceIconTex *tex = GetDeviceIconTex(dev.iconPath);
-	if (!tex)
-	{
-		DeviceIcon(dl, dev, c, 13.0f, fallback);
-		return;
-	}
-	const float boxW = 40.0f, boxH = 34.0f;
-	float scale = boxW / (float)tex->w;
-	if (scale * (float)tex->h > boxH)
-		scale = boxH / (float)tex->h;
-	ImVec2 half = ImVec2(tex->w * scale * 0.5f, tex->h * scale * 0.5f);
-	dl->AddImage((ImTextureID)(intptr_t)tex->tex,
-		ImVec2(c.x - half.x, c.y - half.y), ImVec2(c.x + half.x, c.y + half.y));
 }
 
 } // namespace
@@ -129,7 +110,7 @@ void BuildLighthouseScreen(const VRState &state)
 				if (!seen || !seen->visibleKnown)
 					continue;
 				++reporting;
-				if (Sees(seen, s.channel))
+				if (Sees(*seen, s.channel))
 					++seeing;
 			}
 			// A station no device sees is the one to look at: blocked,
@@ -212,7 +193,7 @@ void BuildLighthouseScreen(const VRState &state)
 		{
 			const int channel = stations[k].channel;
 			const ImVec2 c = ImVec2(dotsX + dotStep * (float)k + dotStep * 0.5f, p.y + 18.0f);
-			if (reporting && Sees(seen, channel))
+			if (reporting && Sees(*seen, channel))
 				dl->AddCircleFilled(c, 5.5f, Pal::U32(Pal::Good), 20);
 			else
 				dl->AddCircle(c, 5.5f, Pal::U32(reporting ? Pal::Dim : Pal::Faint), 20, 1.5f);
