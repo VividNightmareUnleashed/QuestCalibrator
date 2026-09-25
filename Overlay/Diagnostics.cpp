@@ -239,9 +239,9 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 		else
 			out << "unavailable";
 	};
-	out << "continuous input diagnostics v1 (session totals across both methods; device counts cover the selected pair)\n";
+	out << "continuous input diagnostics v1 (session totals; device counts cover the selected pair)\n";
 	out << "loop eligible: " << OnOff(ctx.ContinuousShouldRun())
-		<< ", method: " << (ctx.continuousMode == ContinuousMode::Legacy ? "legacy" : "questcalibrator")
+		<< ", don't pause: " << OnOff(ctx.continuousNoPause)
 		<< ", calibration state: " << static_cast<int>(ctx.state)
 		<< ", HMD is reference: " << OnOff(ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd])
 		<< ", tracker slot: " << ctx.continuousTrackerId
@@ -282,15 +282,9 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 	auto resets = [&](Reason reason) { return engine.resets[static_cast<size_t>(reason)]; };
 	out << "Quest window resets: stream gap " << resets(Reason::StreamGap)
 		<< ", universe jump " << resets(Reason::UniverseJump) << ", suspended " << resets(Reason::Suspended)
-		<< ", mode changed " << resets(Reason::ModeChanged) << ", requested " << resets(Reason::Requested)
+		<< ", requested " << resets(Reason::Requested)
 		<< ", headset tracker lighthouse " << resets(Reason::TargetResolved)
 		<< ", observation discontinuity " << engine.jumpGuardResets << "\n";
-	const auto &legacy = input.legacy;
-	out << "Legacy window: samples " << legacy.samples << ", valid solve " << OnOff(legacy.valid)
-		<< "; totals: solve attempts " << legacy.solveAttempts << ", accepted " << legacy.solvesAccepted
-		<< ", pair skew rejected " << legacy.pairSkewRejected << "\n";
-	out << "Legacy resets: total " << legacy.resets << ", stream gap " << legacy.gapResets
-		<< ", binding changed " << legacy.bindingResets << ", stale input " << legacy.staleResets << "\n";
 	return out.str();
 }
 
@@ -306,6 +300,33 @@ std::string AnonymiseDiagnosticsText(const std::string &text,
 	if (computerName.size() >= 2)
 		ReplaceAllNoCase(out, computerName, "<pc>");
 	return out;
+}
+
+std::string ShortenUserPath(const std::string &path,
+	const std::string &localAppData, const std::string &userProfileDir)
+{
+	auto startsWithFolder = [&](const std::string &prefix)
+	{
+		if (prefix.size() < 3 || path.size() < prefix.size())
+			return false;
+		for (size_t i = 0; i < prefix.size(); ++i)
+			if (std::tolower(static_cast<unsigned char>(path[i])) !=
+				std::tolower(static_cast<unsigned char>(prefix[i])))
+				return false;
+		// A whole folder only: C:\Users\jo is not the start of C:\Users\joanna.
+		return path.size() == prefix.size() || path[prefix.size()] == '\\' || path[prefix.size()] == '/';
+	};
+	// %LOCALAPPDATA% first: it sits inside the profile directory.
+	if (startsWithFolder(localAppData))
+		return "%LOCALAPPDATA%" + path.substr(localAppData.size());
+	if (startsWithFolder(userProfileDir))
+		return "%USERPROFILE%" + path.substr(userProfileDir.size());
+	return path;
+}
+
+std::string PathForLog(const std::string &utf8Path)
+{
+	return ShortenUserPath(utf8Path, Utf8(EnvW(L"LOCALAPPDATA")), Utf8(EnvW(L"USERPROFILE")));
 }
 
 bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, std::string &error,
@@ -430,7 +451,11 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			out << "; last: " << d.lastDisturbanceText;
 		out << "\n";
 	}
-	out << "drift events attributed to base stations: " << ctx.lighthouseAttributedEvents << "\n\n";
+	out << "drift events attributed to base stations: " << ctx.lighthouseAttributedEvents << "\n";
+	out << "lighthouse frame moves: " << ctx.lighthouseFrameMoves;
+	if (!ctx.lastLighthouseFrameMove.empty())
+		out << " (last: " << ctx.lastLighthouseFrameMove << ")";
+	out << "\n\n";
 
 	out << "[driver synchronization]\n";
 	const auto &sync = capture.driverSync;
@@ -441,7 +466,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 
 	out << "[continuous calibration]\n";
 	out << "enabled: " << OnOff(ctx.continuousEnabled)
-		<< ", method: " << (ctx.continuousMode == ContinuousMode::Legacy ? "legacy" : "questcalibrator") << "\n";
+		<< ", don't pause: " << OnOff(ctx.continuousNoPause) << "\n";
 	out << "headset tracker: " << (ctx.continuousTrackerSerial.empty() ? "(none)" : ctx.continuousTrackerSerial) << "\n";
 	out << "mount measured: " << OnOff(ctx.mountExtrinsic.valid);
 	if (ctx.mountExtrinsic.valid)
@@ -453,7 +478,8 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			<< " " << mount.rot.y() << " " << mount.rot.z() << "; position (m): " << mount.pos.transpose();
 	}
 	out << "\n";
-	out << "state: " << static_cast<int>(ctx.continuousState) << ", corrections applied: " << ctx.autoCorrectionsApplied << "\n";
+	out << "state: " << static_cast<int>(ctx.continuousState) << ", corrections applied: " << ctx.autoCorrectionsApplied
+		<< ", re-anchors: " << ctx.continuousReanchors << " (undone: " << ctx.continuousReanchorsUndone << ")\n";
 	if (ctx.continuousDeviation.valid)
 		out << "deviation: yaw " << ctx.continuousDeviation.yawDeg << " deg, tilt " << ctx.continuousDeviation.tiltDeg
 			<< " deg, position " << ctx.continuousDeviation.posM * 100.0 << " cm; scatter "
@@ -485,7 +511,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	std::ofstream file(path.c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
 	if (!file.is_open())
 	{
-		error = "Couldn't create the diagnostics file in " + Utf8(dir) + ".";
+		error = "Couldn't create the diagnostics file in " + PathForLog(Utf8(dir)) + ".";
 		return false;
 	}
 	file.write(text.data(), static_cast<std::streamsize>(text.size()));

@@ -592,7 +592,7 @@ void RebindCalibrationUniverse(CalibrationContext &ctx,
 
 bool ApplyCalibrationDelta(CalibrationContext &ctx,
 	const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translation,
-	bool snap, double now)
+	bool snap, double now, bool moveChaperone)
 {
 	if (!IsValidRotation(rotation) ||
 		!IsBoundedVector(translation, protocol::limits::MaxAbsTranslationMeters))
@@ -620,7 +620,7 @@ bool ApplyCalibrationDelta(CalibrationContext &ctx,
 	}
 
 	vr::HmdMatrix34_t newStandingCenter{};
-	if (snap && ctx.chaperone.valid)
+	if (moveChaperone && ctx.chaperone.valid)
 	{
 		newStandingCenter = DeltaTimesPose(
 			rotation, translation, ctx.chaperone.standingCenter);
@@ -643,7 +643,7 @@ bool ApplyCalibrationDelta(CalibrationContext &ctx,
 		if (!ctx.fieldAnchors.empty())
 			ctx.fieldGeneration++;
 		ctx.persistence.AdvanceRevision();
-		if (ctx.chaperone.valid)
+		if (moveChaperone && ctx.chaperone.valid)
 			ctx.chaperone.standingCenter = newStandingCenter;
 		ctx.persistence.MarkSettings(now);
 	}
@@ -685,7 +685,7 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 	const JumpDetector::UniverseDelta &delta, double now)
 {
 	if (!questcal::ApplyCalibrationDelta(
-		ctx, delta.rotation, delta.translation, true, now))
+		ctx, delta.rotation, delta.translation, true, now, /*moveChaperone=*/true))
 	{
 		ctx.ReportError(
 			"A headset re-center was too large to compensate safely. Recalibrate before continuing.\n");

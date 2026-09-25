@@ -47,7 +47,10 @@ ContinuousStatus ContinuousStatusNow()
 	{
 	case CA::State::Tracking: return ContinuousStatus::Tracking;
 	case CA::State::Coasting: return ContinuousStatus::Coasting;
-	case CA::State::Frozen:   return ContinuousStatus::Frozen;
+	// "Don't pause" follows a freeze within seconds, so it is a wait, not a
+	// pause that asks the player for anything.
+	case CA::State::Frozen:
+		return CalCtx.continuousNoPause ? ContinuousStatus::Holding : ContinuousStatus::Frozen;
 	case CA::State::Holding:  return ContinuousStatus::Holding;
 	default:                  return ContinuousStatus::Gathering;
 	}
@@ -87,7 +90,7 @@ const char *ContinuousStatusLine(ContinuousStatus status)
 	case ContinuousStatus::Tracking:   return "Continuous calibration is active.";
 	case ContinuousStatus::Coasting:   return "Continuous calibration is waiting. The headset tracker isn't being seen.";
 	case ContinuousStatus::Frozen:     return "Continuous calibration is paused. Readings drifted too far to correct.";
-	case ContinuousStatus::Holding:    return "Continuous calibration is waiting. Tracking is too noisy here.";
+	case ContinuousStatus::Holding:    return "Continuous calibration is waiting. It resumes when tracking settles.";
 	default:                           return "Continuous calibration is warming up.";
 	}
 }

@@ -40,3 +40,11 @@ void RevealInExplorer(const std::string &utf8Path);
 // The substitution the file applies, exposed for the test harness.
 std::string AnonymiseDiagnosticsText(const std::string &text,
 	const std::string &userProfileDir, const std::string &userName, const std::string &computerName);
+
+// A path for the session log and the screen: under %LOCALAPPDATA% or
+// %USERPROFILE% it is written with the variable, which still pastes into
+// Explorer but carries no account name. The raw log gets shared as often as
+// the diagnostics file.
+std::string PathForLog(const std::string &utf8Path);
+std::string ShortenUserPath(const std::string &path,
+	const std::string &localAppData, const std::string &userProfileDir);
