@@ -11,15 +11,8 @@ namespace questcal
 		bool AllSaved() const { return profileSaved && settingsSaved; }
 	};
 
-	// When the two registry records get written, and which of them. This was
-	// eight loose fields plus their methods on CalibrationContext, reachable by
-	// every file that touched the context; it is one closed state machine
-	// touched only by the persistence path, so it is a member instead. Nothing
-	// here knows about OpenVR or the UI, which is also what lets the harness
-	// compile it — as loose fields on the context these rules had no direct
-	// coverage at all, because Calibration.h cannot be compiled by the tests.
-	//
-	// What the callers own, and this type does not: performing the ordered
+	// When the two registry records get written, and which of them. Free of
+	// OpenVR and the UI so the harness can compile it. Callers own the ordered
 	// writes (see SavePendingChanges) and deciding that a failure should Retry.
 	struct PersistenceState
 	{
@@ -31,8 +24,7 @@ namespace questcal
 		static constexpr double QuietPeriodSeconds = 5.0;
 		static constexpr double MaxDirtyAgeSeconds = 60.0;
 
-		// Independent, and deliberately so: a partial write must leave exactly
-		// the record that failed still dirty, so it can be retried alone.
+		// Independent: a partial write leaves only the failed record dirty.
 		bool profileDirty = false;
 		bool settingsDirty = false;
 		// One shared clock for both records: any persistent mutation restarts
@@ -41,7 +33,7 @@ namespace questcal
 		double dirtyTime = 0.0;
 		// When the current dirty streak began, for the ceiling above.
 		double firstDirtyTime = 0.0;
-		uint32_t revision = 0;
+		uint32_t revision = 0;   // LoadProfile sets it before any write
 		// A universe rebase writes the calibration and the protected standing
 		// center as one revision: the Settings half must not land without the
 		// Config half. Independent dirty bits carry no such ordering rule.
@@ -50,12 +42,9 @@ namespace questcal
 		// Settings write succeeds, SaveProfile must not replace that only copy.
 		bool legacySettingsMigrationPending = false;
 
-		// "A persisted revision is never zero" lives here and nowhere else. The
-		// reader rejects anything below 1, so 0 means "absent" on the way in; a
-		// record written with 0 would read back revisionless, which is exactly
-		// the partial-write mismatch the shared revision exists to detect. Both
-		// record writers re-apply this rule to the live value immediately
-		// before serializing, and the wrap case goes through it too.
+		// A persisted revision is never zero: the reader treats 0 as absent, so
+		// a record written with 0 would read back revisionless. Every write of
+		// `revision`, the wrap in AdvanceRevision included, goes through here.
 		void SetRevision(uint32_t value)
 		{
 			revision = value == 0 ? 1u : value;
@@ -128,17 +117,12 @@ namespace questcal
 		// passed.
 		void Retry(double now)
 		{
-			if (!HasDirty())
-				return;
 			dirtyTime = now;
 			firstDirtyTime = now;
 		}
 
-		// Clearing a calibration discards the profile, so its pending write is
-		// moot. Everything else survives on purpose: the Settings record is not
-		// part of the calibration being discarded, and dropping the revision or
-		// the migration flag here would lose partial-write and legacy-copy state
-		// that outlives any single calibration.
+		// Clearing a calibration makes only the profile's pending write moot;
+		// Settings, the revision and the migration flag outlive it.
 		void OnProfileDiscarded()
 		{
 			profileDirty = false;

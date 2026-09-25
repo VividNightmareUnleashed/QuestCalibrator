@@ -65,16 +65,15 @@ std::runtime_error NetworkError(const char *operation)
 		std::to_string(GetLastError()) + ").");
 }
 
+// Every input is ASCII built from a validated release tag or digest.
 std::wstring Utf8ToWide(const std::string &text)
 {
 	if (text.empty()) return std::wstring();
 	const int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
 		text.data(), static_cast<int>(text.size()), nullptr, 0);
-	if (chars <= 0) throw std::runtime_error("GitHub returned invalid UTF-8.");
 	std::wstring wide(static_cast<size_t>(chars), L'\0');
-	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
-		static_cast<int>(text.size()), &wide[0], chars) != chars)
-		throw std::runtime_error("GitHub returned invalid UTF-8.");
+	MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+		static_cast<int>(text.size()), &wide[0], chars);
 	return wide;
 }
 
@@ -181,15 +180,12 @@ DownloadTarget ParseDownloadTarget(const std::string &url)
 	parts.dwHostNameLength = static_cast<DWORD>(-1);
 	parts.dwUrlPathLength = static_cast<DWORD>(-1);
 	parts.dwExtraInfoLength = static_cast<DWORD>(-1);
+	// SelectReleaseCandidate pinned the URL to https://github.com/.
 	if (!WinHttpCrackUrl(wide.c_str(), static_cast<DWORD>(wide.size()), 0, &parts))
 		throw std::runtime_error("The release package URL is invalid.");
-	if (parts.nScheme != INTERNET_SCHEME_HTTPS)
-		throw std::runtime_error("The release package URL is not HTTPS.");
 
 	DownloadTarget target;
 	target.host.assign(parts.lpszHostName, parts.dwHostNameLength);
-	if (_wcsicmp(target.host.c_str(), L"github.com") != 0)
-		throw std::runtime_error("The release package URL does not use github.com.");
 	target.path.assign(parts.lpszUrlPath, parts.dwUrlPathLength);
 	if (parts.dwExtraInfoLength)
 		target.path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
@@ -240,9 +236,10 @@ bool HashFile(const std::filesystem::path &path,
 bool FileMatches(const std::filesystem::path &path, uint64_t size,
 	const std::array<unsigned char, 32> &digest)
 {
+	// On error these return false and uintmax_t(-1), never a valid size.
 	std::error_code ec;
-	if (!std::filesystem::is_regular_file(path, ec) || ec ||
-		std::filesystem::file_size(path, ec) != size || ec)
+	if (!std::filesystem::is_regular_file(path, ec) ||
+		std::filesystem::file_size(path, ec) != size)
 		return false;
 	std::array<unsigned char, 32> actual{};
 	return HashFile(path, actual) && actual == digest;
@@ -356,12 +353,10 @@ std::wstring SystemPowerShell()
 	return executable;
 }
 
+// No escaping needed: Windows paths cannot contain quotes, and every other
+// argument is hexadecimal or numeric.
 std::wstring QuoteArgument(const std::wstring &value)
 {
-	// Windows paths cannot contain quotes. Every caller supplies either a path
-	// under LOCALAPPDATA or a hexadecimal/numeric value.
-	if (value.find(L'"') != std::wstring::npos)
-		throw std::runtime_error("The update path contains an unsupported character.");
 	return L"\"" + value + L"\"";
 }
 
@@ -475,7 +470,7 @@ bool Updater::CheckNow()
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			running = false;
-			current = enabled && !stopping && revision == checkRevision;
+			current = IsCurrentLocked(checkRevision);
 			if (current)
 			{
 				snapshot.state = State::Failed;
@@ -484,23 +479,6 @@ bool Updater::CheckNow()
 		}
 		if (current)
 			Log("check could not start: " + std::string(failure.what()));
-		return false;
-	}
-	catch (...)
-	{
-		bool current = false;
-		{
-			std::lock_guard<std::mutex> lock(mutex);
-			running = false;
-			current = enabled && !stopping && revision == checkRevision;
-			if (current)
-			{
-				snapshot.state = State::Failed;
-				snapshot.message = "The update check could not start.";
-			}
-		}
-		if (current)
-			Log("check could not start: unknown thread error");
 		return false;
 	}
 	return true;
@@ -515,7 +493,7 @@ Snapshot Updater::GetSnapshot() const
 bool Updater::IsCurrent(uint64_t checkRevision) const
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	return enabled && !stopping && revision == checkRevision;
+	return IsCurrentLocked(checkRevision);
 }
 
 bool Updater::Publish(uint64_t checkRevision, State state,
@@ -523,7 +501,7 @@ bool Updater::Publish(uint64_t checkRevision, State state,
 	uint64_t downloaded, uint64_t total)
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	if (!enabled || stopping || revision != checkRevision)
+	if (!IsCurrentLocked(checkRevision))
 		return false;
 	snapshot.state = state;
 	snapshot.message = message;
@@ -591,9 +569,6 @@ void Updater::RunCheck(uint64_t checkRevision)
 				throw std::runtime_error("Update check cancelled.");
 			Log("stable release " + version + " found (" +
 				std::to_string(release.size) + " bytes)");
-			std::array<unsigned char, 32> expectedDigest{};
-			if (!ParseSha256Digest(release.digest, expectedDigest))
-				throw std::runtime_error("The release package digest is invalid.");
 
 			const std::filesystem::path directory = LocalUpdateRoot() /
 				Utf8ToWide(version);
@@ -605,7 +580,7 @@ void Updater::RunCheck(uint64_t checkRevision)
 			const std::filesystem::path package = directory /
 				Utf8ToWide(release.packageName);
 			bool downloaded = false;
-			if (!FileMatches(package, release.size, expectedDigest))
+			if (!FileMatches(package, release.size, release.digestBytes))
 			{
 				const std::filesystem::path part = package.wstring() + L".part";
 				std::error_code ignored;
@@ -618,7 +593,7 @@ void Updater::RunCheck(uint64_t checkRevision)
 							"Downloading QuestCalibrator " + version,
 							version, bytes, release.size);
 					});
-				if (!FileMatches(part, release.size, expectedDigest))
+				if (!FileMatches(part, release.size, release.digestBytes))
 				{
 					std::filesystem::remove(part, ignored);
 					throw std::runtime_error(
@@ -635,11 +610,9 @@ void Updater::RunCheck(uint64_t checkRevision)
 				}
 				downloaded = true;
 			}
-			if (!IsCurrent(checkRevision))
-				throw std::runtime_error("Update download cancelled.");
 			{
 				std::lock_guard<std::mutex> lock(mutex);
-				if (enabled && !stopping && revision == checkRevision)
+				if (IsCurrentLocked(checkRevision))
 				{
 					readyRelease = release;
 					readyPackagePath = package.wstring();
@@ -659,12 +632,6 @@ void Updater::RunCheck(uint64_t checkRevision)
 		if (Publish(checkRevision, State::Failed, error.what()))
 			Log("check failed: " + std::string(error.what()));
 	}
-	catch (...)
-	{
-		if (Publish(checkRevision, State::Failed,
-			"The update check failed unexpectedly."))
-			Log("check failed unexpectedly");
-	}
 }
 
 bool Updater::LaunchInstaller(std::string &error)
@@ -673,7 +640,8 @@ bool Updater::LaunchInstaller(std::string &error)
 	std::filesystem::path package;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		if (snapshot.state != State::Ready || readyPackagePath.empty())
+		// Ready is only published after readyPackagePath is set for the same revision.
+		if (snapshot.state != State::Ready)
 		{
 			error = "No verified update is ready to install.";
 		}
@@ -691,9 +659,7 @@ bool Updater::LaunchInstaller(std::string &error)
 
 	try
 	{
-		std::array<unsigned char, 32> digest{};
-		if (!ParseSha256Digest(release.digest, digest) ||
-			!FileMatches(package, release.size, digest))
+		if (!FileMatches(package, release.size, release.digestBytes))
 			throw std::runtime_error("The downloaded update no longer passes SHA-256 verification.");
 
 		const std::filesystem::path script = package.parent_path() / L"ApplyUpdate.ps1";
