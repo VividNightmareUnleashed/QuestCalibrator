@@ -18,10 +18,22 @@ $known = "$key.known_hosts"
 # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 [IO.File]::WriteAllText($known,
     "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl`n")
+# On Linux (the input-validation job) ssh ignores a key others can read, so the
+# file is made private before the key goes into it.
+[IO.File]::WriteAllText($key, '')
+if ($IsLinux -or $IsMacOS)
+{
+    chmod 600 $key
+    if ($LASTEXITCODE -ne 0) { throw 'Making the key file private failed.' }
+}
 [IO.File]::WriteAllText($key, (($env:VIRTUALQUEST_DEPLOY_KEY -replace "`r", '').Trim() + "`n"))
 
-$ssh = Join-Path ${env:ProgramFiles} 'Git\usr\bin\ssh.exe'
-if (-not (Test-Path $ssh)) { $ssh = 'ssh' }
+$ssh = 'ssh'
+if ($env:ProgramFiles)
+{
+    $gitSsh = Join-Path $env:ProgramFiles 'Git\usr\bin\ssh.exe'
+    if (Test-Path $gitSsh) { $ssh = $gitSsh }
+}
 $unix = { param($p) $p -replace '\\', '/' }
 $env:GIT_SSH_COMMAND = ('"{0}" -i "{1}" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="{2}" -o ConnectTimeout=30' -f
     (& $unix $ssh), (& $unix $key), (& $unix $known))
