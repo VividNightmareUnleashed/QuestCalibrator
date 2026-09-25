@@ -22,6 +22,25 @@ void DeviceIcon(ImDrawList *dl, const VRDevice &dev, ImVec2 c, float s, ImU32 co
 	}
 }
 
+// A device row's icon: SteamVR's own art when it resolves, the vector glyph
+// in the fallback colour otherwise.
+void RowDeviceIcon(ImDrawList *dl, const VRDevice &dev, ImVec2 c, ImU32 fallback)
+{
+	const DeviceIconTex *tex = GetDeviceIconTex(dev.iconPath);
+	if (!tex)
+	{
+		DeviceIcon(dl, dev, c, 13.0f, fallback);
+		return;
+	}
+	const float boxW = 40.0f, boxH = 34.0f;
+	float scale = boxW / (float)tex->w;
+	if (scale * (float)tex->h > boxH)
+		scale = boxH / (float)tex->h;
+	ImVec2 half = ImVec2(tex->w * scale * 0.5f, tex->h * scale * 0.5f);
+	dl->AddImage((ImTextureID)(intptr_t)tex->tex,
+		ImVec2(c.x - half.x, c.y - half.y), ImVec2(c.x + half.x, c.y + half.y));
+}
+
 // Player-given names. The row shows the name in place of the model, with
 // the model and serial beneath; everywhere else a device is named, the same
 // lookup applies so "Hip" is "Hip" in the tracker pick and the guide too.
@@ -62,6 +81,11 @@ void CommitDeviceName(const VRDevice &dev, const char *text)
 		SaveSettingOrRestore(CalCtx.deviceNames, previous);
 }
 
+static void StartIdentifyPulse(uint32_t targetId, uint32_t referenceId)
+{
+	g_identifyPulse = { true, targetId, referenceId, 100, ImGui::GetTime() };
+}
+
 // A flat row inside the list container: no chrome of its own — an inset
 // divider above (except the first), a hover wash, and selection as an accent
 // rail + tint. Rounding only ever belongs to the container's outer corners.
@@ -97,24 +121,8 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		dl->AddRectFilled(p, b, Pal::U32(ImVec4(1, 1, 1, 0.03f)), 11.0f, corners);
 	}
 
-	// Device icon: real SteamVR icon when resolvable, vector fallback otherwise.
 	ImVec2 iconC = ImVec2(p.x + 30.0f, p.y + h * 0.5f);
-	const DeviceIconTex *tex = GetDeviceIconTex(dev.iconPath);
-	if (tex)
-	{
-		const float boxW = 40.0f, boxH = 34.0f;
-		float scale = boxW / (float)tex->w;
-		if (scale * (float)tex->h > boxH)
-			scale = boxH / (float)tex->h;
-		ImVec2 half = ImVec2(tex->w * scale * 0.5f, tex->h * scale * 0.5f);
-		dl->AddImage((ImTextureID)(intptr_t)tex->tex,
-			ImVec2(iconC.x - half.x, iconC.y - half.y),
-			ImVec2(iconC.x + half.x, iconC.y + half.y));
-	}
-	else
-	{
-		DeviceIcon(dl, dev, iconC, 13.0f, Pal::U32(selected ? Pal::Text : Pal::Dim));
-	}
+	RowDeviceIcon(dl, dev, iconC, Pal::U32(selected ? Pal::Text : Pal::Dim));
 
 	// Battery, right-aligned where a device reports one: a small glyph whose
 	// fill is the level, red at the same threshold that swaps the device icon
@@ -153,9 +161,6 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 		textRight = sx - 10.0f;
 	}
 
-	// What the device sees of its base stations is the Lighthouse tab's
-	// business; the row here stays about the calibration pick.
-
 	// Two small tools, quiet at rest and bright on hover: rename, and buzz
 	// this one device. With six identical trackers these are what tell the
 	// rows apart.
@@ -192,13 +197,7 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 			s_renameFocus = true;
 		}
 		if (canBuzz && tool("buzz", IconCrosshair, 7.5f, "Vibrate or blink this device"))
-		{
-			g_identifyPulse.active = true;
-			g_identifyPulse.targetId = static_cast<uint32_t>(dev.id);
-			g_identifyPulse.referenceId = vr::k_unTrackedDeviceIndexInvalid;
-			g_identifyPulse.pulsesRemaining = 100;
-			g_identifyPulse.nextPulseTime = ImGui::GetTime();
-		}
+			StartIdentifyPulse(static_cast<uint32_t>(dev.id), vr::k_unTrackedDeviceIndexInvalid);
 		textRight -= toolsW + 10.0f;
 	}
 
@@ -257,16 +256,14 @@ bool DeviceRow(const VRDevice &dev, bool selected, float w, bool first, bool las
 			Pal::U32(Pal::Accent), 6.0f, 2.0f, ImDrawFlags_RoundCornersAll);
 
 	// The tools and the rename field moved the cursor; the next row starts
-	// where this one ends, as it did when the row was a single button.
+	// where this one ends.
 	ImGui::SetCursorScreenPos(ImVec2(p.x, b.y));
 	ImGui::PopID();
 	return pressed;
 }
 
-// Preferred default: left-hand controller, else first device of the system.
-// Reconciles the context's selection against the live device list in place --
-// it is the only owner of that selection, so there is no mirror to go stale
-// when a tracking system disappears between frames.
+// Drops a selection that is no longer in the system's device list, then
+// defaults to the left-hand controller, else the system's first device.
 void EnsureDeviceSelection(const VRState &state, uint32_t &selected, const std::string &system)
 {
 	const uint32_t none = vr::k_unTrackedDeviceIndexInvalid;
@@ -376,11 +373,9 @@ std::string FriendlySystemName(const std::string &raw)
 	return raw;
 }
 
-// Both space panes are the same control over a different candidate list: the
-// friendly labels, the index recovery for the current pick, the Combo, and the
-// write-back. `fallback` is the index to commit when `selection` is not among
-// the candidates (-1 to leave it alone) -- that is how an emptied or vanished
-// pick settles onto a real system instead of lingering as a name nothing shows.
+// The picker behind both space panes. `fallback` is the candidate index to
+// commit when `selection` is not among the candidates (-1 to leave it alone),
+// so an emptied or vanished pick settles onto a real system.
 void PickTrackingSystem(const char *id, const std::vector<std::string> &candidates, int fallback, float width, std::string &selection)
 {
 	int current = -1;
@@ -413,10 +408,9 @@ void PickTrackingSystem(const char *id, const std::vector<std::string> &candidat
 		dl->AddRectFilled(p, ImVec2(p.x + width, p.y + h), Pal::U32(Pal::Card), 9.0f);
 		dl->AddRect(p, ImVec2(p.x + width, p.y + h), Pal::U32(Pal::Border), 9.0f);
 		ImGui::Dummy(ImVec2(width, h));
-		if (!items.empty())
-			dl->AddText(g_fontBody, g_fontBody->LegacySize,
-				ImVec2(p.x + 14.0f, p.y + (h - g_fontBody->LegacySize) * 0.5f),
-				Pal::U32(Pal::Text), items[0]);
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(p.x + 14.0f, p.y + (h - g_fontBody->LegacySize) * 0.5f),
+			Pal::U32(Pal::Text), items[0]);
 	}
 	else
 	{
@@ -425,7 +419,7 @@ void PickTrackingSystem(const char *id, const std::vector<std::string> &candidat
 		ImGui::PopItemWidth();
 	}
 
-	if (current >= 0 && current < (int)candidates.size())
+	if (current >= 0)
 		selection = candidates[current];
 }
 
@@ -540,9 +534,7 @@ void BuildSpacesSection(const VRState &state)
 	}
 }
 
-// Vibrate or blink the two picks. A real button on the main screen: styled
-// as a caption it was the one tool that tells six identical trackers apart,
-// and it read as a section label.
+// Vibrate or blink the two picks.
 void IdentifyButton(ImVec2 size)
 {
 	bool identifyPressed = IconButton("identify", "Identify selected devices", IconCrosshair,
@@ -550,13 +542,7 @@ void IdentifyButton(ImVec2 size)
 	if (ImGui::IsItemHovered())
 		ShowTip("Vibrates or blinks the two selected devices so you can tell which is which.");
 	if (identifyPressed)
-	{
-		g_identifyPulse.active = true;
-		g_identifyPulse.targetId = CalCtx.targetID;
-		g_identifyPulse.referenceId = CalCtx.referenceID;
-		g_identifyPulse.pulsesRemaining = 100;
-		g_identifyPulse.nextPulseTime = ImGui::GetTime();
-	}
+		StartIdentifyPulse(CalCtx.targetID, CalCtx.referenceID);
 }
 
 VRState LoadVRState()
@@ -672,9 +658,7 @@ VRState LoadVRState()
 			}
 			else
 			{
-				// The Release build is a GUI binary, so stdout goes nowhere --
-				// the session log is the only channel a user or a bug report can
-				// read. This loader runs once a second, so report each device
+				// This loader runs once a second, so each device is reported
 				// once: the latch records what has been said, not device state.
 				static bool reportedMissingSystem[vr::k_unMaxTrackedDeviceCount] = {};
 				if (!reportedMissingSystem[id])
