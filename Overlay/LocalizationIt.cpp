@@ -372,9 +372,6 @@ const Entry kItalian[] = {
 	{ "Playspace scale couldn't be determined from this motion.", "Da questo movimento non è stato possibile determinare la scala dello spazio di gioco." },
 	{ "Cover a larger area, or turn off Solve playspace scale in Settings.",
 		"Copri un'area più ampia, oppure disattiva Stima la scala dello spazio di gioco nelle Impostazioni." },
-	{ "Something went wrong inside QuestCalibrator.", "Si è verificato un errore interno in QuestCalibrator." },
-	{ "Save a diagnostics file in Settings and send it with your report.",
-		"Salva un file di diagnostica nelle Impostazioni e invialo con la segnalazione." },
 	{ "The calibration result wasn't usable.", "Il risultato della calibrazione non era utilizzabile." },
 	{ "Try again with smooth motion around the room.", "Riprova con movimenti fluidi nella stanza." },
 
@@ -491,8 +488,6 @@ const Entry kItalian[] = {
 		"Impossibile leggere il chaperone attuale, quindi quello protetto non è stato modificato." },
 	{ "The protected chaperone was saved for a different headset, so it was switched off. Press Protect chaperone again on the main screen.",
 		"Il chaperone protetto era stato salvato per un altro visore, quindi è stato disattivato. Premi di nuovo Proteggi il chaperone nella schermata principale." },
-	{ "The protected chaperone is missing information about the room it was saved in, so it was switched off. Press Protect chaperone again on the main screen.",
-		"Al chaperone protetto mancano informazioni sulla stanza in cui è stato salvato, quindi è stato disattivato. Premi di nuovo Proteggi il chaperone nella schermata principale." },
 	{ "The headset re-centered, so the protected chaperone no longer lines up and was turned off. Protect it again from the main screen.",
 		"Il visore si è ricentrato e il chaperone protetto non è più allineato, quindi è stato disattivato. Proteggilo di nuovo dalla schermata principale." },
 	{ "The headset re-centered while QuestCalibrator couldn't follow it, so the protected chaperone was switched off. Press Protect chaperone again on the main screen.",

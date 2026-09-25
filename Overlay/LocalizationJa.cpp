@@ -369,9 +369,6 @@ const Entry kJapanese[] = {
 	{ "Playspace scale couldn't be determined from this motion.", "この動きからはプレイスペースのスケールを求められませんでした。" },
 	{ "Cover a larger area, or turn off Solve playspace scale in Settings.",
 		"もっと広い範囲を動かすか、設定で「プレイスペースのスケールを推定」をオフにしてください。" },
-	{ "Something went wrong inside QuestCalibrator.", "QuestCalibrator 内部で問題が発生しました。" },
-	{ "Save a diagnostics file in Settings and send it with your report.",
-		"設定で診断ファイルを保存し、報告に添えて送ってください。" },
 	{ "The calibration result wasn't usable.", "キャリブレーション結果が使用できませんでした。" },
 	{ "Try again with smooth motion around the room.", "部屋の中でなめらかに動かして、もう一度お試しください。" },
 
@@ -485,8 +482,6 @@ const Entry kJapanese[] = {
 		"現在のシャペロンを読み取れなかったため、保護したシャペロンは変更していません。" },
 	{ "The protected chaperone was saved for a different headset, so it was switched off. Press Protect chaperone again on the main screen.",
 		"保護したシャペロンは別のヘッドセット用に保存されていたため、オフにしました。メイン画面で「シャペロンを保護」をもう一度押してください。" },
-	{ "The protected chaperone is missing information about the room it was saved in, so it was switched off. Press Protect chaperone again on the main screen.",
-		"保護したシャペロンに保存時の部屋の情報がないため、オフにしました。メイン画面で「シャペロンを保護」をもう一度押してください。" },
 	{ "The headset re-centered, so the protected chaperone no longer lines up and was turned off. Protect it again from the main screen.",
 		"ヘッドセットが再センタリングされ、保護したシャペロンの位置が合わなくなったため、オフにしました。メイン画面からもう一度保護してください。" },
 	{ "The headset re-centered while QuestCalibrator couldn't follow it, so the protected chaperone was switched off. Press Protect chaperone again on the main screen.",

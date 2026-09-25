@@ -227,13 +227,10 @@ struct CalibrationContext : CalibrationProfileState
 	ContinuousMode continuousMode = ContinuousMode::Quest;  // persisted; which loop runs
 
 	// The feature is armed only when the tracker pick and the mount offset
-	// learned for that tracker are both present — picking a tracker in the
-	// combo persists a serial and deliberately clears the extrinsic, so the two
-	// halves are routinely out of step. Every consumer must ask the same
-	// question: gating the driver-side hide on the weaker half displaced the
-	// tracker out of every game while nothing maintained the alignment.
-	// The legacy loop measures its own tracker offset, so for it the pick
-	// alone arms the feature.
+	// learned for that tracker are both present (picking a tracker clears the
+	// extrinsic), and every consumer, the driver-side hide included, must ask
+	// this. The legacy loop measures its own tracker offset, so for it the
+	// pick alone arms the feature.
 	bool ContinuousArmed() const
 	{
 		if (!continuousEnabled)
@@ -246,8 +243,7 @@ struct CalibrationContext : CalibrationProfileState
 	// Driver pose-channel health, refreshed every tick. Losing the ring parks
 	// universe-jump compensation, drift staleness, continuous calibration and
 	// chaperone universe verification, and drops collection back to tick-rate
-	// runtime poses — all of it silently, so the UI reports it as a first-class
-	// status instead of the overlay looking healthy with its monitors off.
+	// runtime poses, so the UI reports it as a first-class status.
 	bool poseRingOpen = false;
 	uint32_t driverPoseHookMask = 0;
 
@@ -267,8 +263,7 @@ struct CalibrationContext : CalibrationProfileState
 	// The optional modules the installer put in (Modules.h), read at startup.
 	questcal::Modules modules;
 	// Debounced persistence for runtime compensation updates: dirty records save
-	// after a quiet period and always on shutdown. See PersistenceState.h — the
-	// rules live with the data rather than as loose fields here.
+	// after a quiet period and always on shutdown (PersistenceState.h).
 	questcal::PersistenceState persistence;
 	// Missing, successfully loaded, and unreadable are deliberately closed
 	// states. In particular, unreadable is not absence: automatic migration must
@@ -336,8 +331,6 @@ struct CalibrationContext : CalibrationProfileState
 		double lastRestoreTime = 0.0;  // last auto-restore attempt (runtime cooldown)
 	} chaperone;
 
-	// See PersistenceState.h for the revision rule, the debounce and the retry.
-
 	void DisarmChaperone()
 	{
 		chaperone.valid = false;
@@ -386,13 +379,9 @@ struct CalibrationContext : CalibrationProfileState
 			Eigen::AngleAxisd(e(2), Eigen::Vector3d::UnitX());
 	}
 
-	// Persisted profile mutations are transactions owned by Configuration.cpp
-	// (SaveProfileFieldEdit / SaveProfileTransformEdit), never by this struct:
-	// they persist a candidate record and only then apply it, so a refused write
-	// leaves live state untouched. A mutate-then-save helper here would have to
-	// roll back on failure, and no rollback held by a caller can undo what a
-	// failed write leaves behind in the persistence layer — which is why there
-	// is deliberately no such helper to add the next toggle to.
+	// Persisted profile mutations are transactions in Configuration.cpp
+	// (SaveProfileFieldEdit / SaveProfileTransformEdit): they persist a
+	// candidate record and only then apply it.
 
 	void Clear()
 	{
@@ -478,14 +467,11 @@ struct CalibrationContext : CalibrationProfileState
 		WaitForTracking,  // the headset re-centred mid-run
 	};
 	GuideHint lastRunHint = GuideHint::None;
-	// The pane is the bug-report surface for a GUI binary with no stderr, so it
-	// keeps recent history — but the runtime monitors log for the whole session
-	// and a driver that rebases at pose rate grows it at MB/minute. Bound it the
-	// way AppendSessionLog bounds the file. Entries are capped too: without that
-	// the whole session is one std::string, which nothing can trim and which
-	// ImGui::TextWrapped re-wraps every frame while the modal is open.
-	// StartCalibration clears the pane, so trimming only ever drops backlog the
-	// calibration modal does not render.
+	// The pane keeps recent history for bug reports, bounded because a driver
+	// that rebases at pose rate grows it at MB/minute. Entries are capped too,
+	// so no single string grows unboundedly for ImGui::TextWrapped to re-wrap
+	// every frame. StartCalibration clears the pane, so trimming only drops
+	// backlog the calibration modal does not render.
 	static constexpr size_t MessageEntryMaxBytes = 8 * 1024;
 	static constexpr size_t MessagePaneMaxBytes = 256 * 1024;
 	static constexpr size_t UiErrorMaxBytes = 8 * 1024;
@@ -664,10 +650,7 @@ bool ApplyChaperoneBounds(bool logSuccess = true);
 // is not applying yet.
 void ResyncDriverState();
 
-// How this layer raises a VR toast. The shell installs it at startup: the
-// notification target is a presentation-layer resource (the dashboard overlay)
-// created and owned by QuestCalibrator.cpp, and reaching up for its handle was
-// the calibration domain's only dependency on the app shell. A sink that was
-// never installed degrades to log-only, exactly as a not-yet-created overlay
-// handle did — the log line runs first and unconditionally either way.
+// How this layer raises a VR toast. The shell installs it at startup (the
+// dashboard overlay belongs to QuestCalibrator.cpp); without a sink, toasts
+// degrade to the log line, which is always written.
 void SetToastSink(std::function<void(const char *)> sink);

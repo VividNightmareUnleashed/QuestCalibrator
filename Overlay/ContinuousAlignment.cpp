@@ -720,12 +720,8 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 		CompactWindows();
 		EngineConfig engineCfg;
 		double measured = 0.0;
-		// No input validation: the two push methods are the only way into
-		// these windows and already enforce the monotonicity IsValidStream
-		// re-scans, while the caller gates usability at ingestion. Re-scanning
-		// ~20 s of both streams here costs a frame on the render thread.
 		if (CalibrationEngine::EstimateTimeOffset(refWindow, targetWindow, engineCfg,
-			measured, nullptr, nullptr, false))
+			measured))
 			pendingTimeOffset = measured;
 	}
 }

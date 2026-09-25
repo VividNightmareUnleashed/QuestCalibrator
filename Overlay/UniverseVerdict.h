@@ -94,7 +94,6 @@ public:
 		transitions.clear();
 		compensated.clear();
 	}
-	void Reset() { Clear(); }
 
 	// One ProfileUniverseTick past its gates: `observed` is the HMD's newest
 	// WFD; `candidateLiveAt(t)` says whether the jump detector still holds a
@@ -127,7 +126,7 @@ public:
 				it = transitions.erase(it);
 				continue;
 			}
-			waiting = candidateLiveAt && candidateLiveAt(it->time);
+			waiting = candidateLiveAt(it->time);
 			break;
 		}
 
