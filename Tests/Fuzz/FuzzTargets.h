@@ -101,7 +101,7 @@ inline std::string ProfileDifference(const questcal::ProfileRecord &a, const que
 	if (a.continuousTrackerSerial != b.continuousTrackerSerial) note("continuousSerial");
 	if (a.continuousLatencyReestimation != b.continuousLatencyReestimation) note("continuousLatency");
 	if (a.continuousRequireTrigger != b.continuousRequireTrigger) note("continuousTrigger");
-	if (a.continuousMode != b.continuousMode) note("continuousMode");
+	if (a.continuousNoPause != b.continuousNoPause) note("continuousNoPause");
 	if (a.hideMountedTracker != b.hideMountedTracker) note("hideMountedTracker");
 	if (a.mountExtrinsic.valid != b.mountExtrinsic.valid) note("mount.valid");
 	else if (a.mountExtrinsic.valid &&

@@ -3,9 +3,9 @@
 #include "CalibrationDriver.h"
 #include "CalibrationEngine.h"
 #include "CalibrationSpace.h"
-#include "LegacyContinuous.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
+#include "LighthouseFrameWatch.h"
 #include "LighthouseLog.h"
 #include "TrackingStreamDigest.h"
 
@@ -58,6 +58,7 @@ static uint64_t LighthouseRotationsSeen = 0;
 static bool LighthouseAnnounced = false;
 static VisibilityDigest LighthouseDigest;
 static TrackingStreamDigest StreamDigest;
+static LighthouseFrameWatch FrameWatch;
 static int MonitorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> MonitorScratch;
 static bool MonitorActive = false;
@@ -121,7 +122,6 @@ static void ResetContinuousObservations(CalibrationContext &ctx,
 	ctx.continuousCorrectionGate.Clear();
 }
 
-static void LegacyReset(CalibrationContext &ctx);
 
 // Returns whether the drain crossed a hole the loops' windows must not span:
 // a stall-sized one or a driver session boundary. The driver's isolated
@@ -706,6 +706,11 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 			if (ctx.detailedLogging)
 				StreamDigest.Note(s, QpcToSeconds);
 		}
+		else
+		{
+			FrameWatch.Note(s, QpcToSeconds,
+				DeviceClasses[s.deviceId] == vr::TrackedDeviceClass_TrackingReference);
+		}
 
 		questcal::PoseSample sample;
 		if (!TryComposeRingSample(s, QpcToSeconds, sample))
@@ -751,6 +756,25 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		for (const auto &line : StreamDigest.Flush(now))
 			ctx.Diag(line);
 
+	// Lighthouse frame moves are rare and are the evidence a "the whole
+	// calibration jumped" report needs, so one is always logged; a pose merely
+	// re-expressed in another station's frame, or refined in place, only in
+	// detail.
+	for (const auto &report : FrameWatch.Flush())
+	{
+		const std::string line = LighthouseFrameWatch::Describe(report, ctx.continuousTrackerId);
+		if (LighthouseFrameWatch::Notable(report))
+		{
+			ctx.lighthouseFrameMoves++;
+			ctx.lastLighthouseFrameMove = line;
+			ctx.Log(line + "\n");
+		}
+		else
+		{
+			ctx.Diag(line);
+		}
+	}
+
 	// A compensated jump moved the raw stream under the drift windows; it was
 	// corrected, so it is not staleness evidence. Jump acceptance lands before
 	// a slide window can conclude (~0.25 s vs ~2.5 s), so dropping the window
@@ -760,10 +784,6 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		Drift->Reset();
 		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::UniverseJump);
-		// A legacy re-solve across the rebase would pull the corrected
-		// calibration halfway back (7.5 cm for a simulated 15 cm reset).
-		if (ctx.continuousMode == ContinuousMode::Legacy)
-			LegacyReset(ctx);
 	}
 
 	DriftMonitor::Event drift;
@@ -810,254 +830,6 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 // ---------------------------------------------------------------------------
 // Continuous calibration (HMD-mounted tracker)
 
-// ---- Legacy loop: hyblocker's calculator driven the way its overlay drove
-// it. The latest reference and tracker poses are paired at 20 Hz, the window
-// is the calibration duration's sample count (100 / 250 / 500), every full
-// window is re-solved, and a tenth of it is dropped afterwards. An accepted
-// solve is applied as a delta over the current calibration through the same
-// slewing path as the QuestCalibrator loop's corrections.
-static questcal::legacy::CalibrationCalc LegacyCalc;
-static double LegacyLastSampleTime = -1e9;
-static bool LegacyHaveRef = false, LegacyHaveTarget = false;
-static bool LegacyRefFresh = false, LegacyTargetFresh = false;
-static double LegacyLastRefArrival = -1e9, LegacyLastTargetArrival = -1e9;
-static questcal::PoseSample LegacyRef, LegacyTarget;
-static Eigen::Vector3d LegacyPrevHmdPos = Eigen::Vector3d::Zero();
-static Eigen::Quaterniond LegacyPrevHmdRot{ 1, 0, 0, 0 };
-static bool LegacyHavePrevHmd = false;
-static bool LegacyWaitingTrigger = false;
-static ContinuousMode LastContinuousMode = ContinuousMode::Quest;
-static bool LegacyBindingValid = false;
-static uint32_t LegacyBoundTrackerId = vr::k_unTrackedDeviceIndexInvalid;
-static uint32_t LegacyBoundBaseGeneration = 0;
-static std::string LegacyBoundTrackerSerial;
-static constexpr double LegacyPoseStaleSeconds = 0.5;
-static constexpr double LegacyMaxPairSkewSeconds = 0.1;
-
-static size_t LegacySampleWindow(const CalibrationContext &ctx)
-{
-	switch (ctx.calibrationSpeed)
-	{
-	case CalibrationContext::FAST: return 100;
-	case CalibrationContext::SLOW: return 250;
-	default: return 500;
-	}
-}
-
-static void LegacyReset(CalibrationContext &ctx)
-{
-	++ctx.continuousDiagnostics.legacy.resets;
-	ctx.continuousDiagnostics.legacy.samples = 0;
-	ctx.continuousDiagnostics.legacy.valid = false;
-	LegacyCalc.Clear();
-	LegacyHaveRef = LegacyHaveTarget = false;
-	LegacyRefFresh = LegacyTargetFresh = false;
-	LegacyLastRefArrival = LegacyLastTargetArrival = -1e9;
-	LegacyLastSampleTime = -1e9;
-	LegacyPrevHmdPos = Eigen::Vector3d::Zero();
-	LegacyPrevHmdRot = Eigen::Quaterniond::Identity();
-	LegacyHavePrevHmd = false;
-	LegacyWaitingTrigger = false;
-	LegacyBindingValid = false;
-}
-
-static bool AnyControllerTriggerPressed();
-
-// Takes the gate's pending correction once the trigger policy allows it and
-// applies it through the slewing path. `announced` says whether the player was
-// already told a correction is waiting for a trigger. Returns true when applied.
-static bool TakeGatedCorrection(CalibrationContext &ctx, bool triggerPressed,
-	bool &announced, double now, questcal::ContinuousAlignment::Correction &correction)
-{
-	if (!ctx.continuousCorrectionGate.Take(
-		ctx.continuousRequireTrigger, triggerPressed, correction))
-	{
-		if (!announced)
-			ctx.Tell("Correction ready. Pull a trigger to apply it.\n");
-		announced = true;
-		return false;
-	}
-	announced = false;
-	if (ctx.continuousRequireTrigger)
-		ctx.Tell("Trigger pulled; applying the correction.\n");
-	if (!questcal::ApplyCalibrationDelta(ctx, correction.rotation,
-		correction.translation, /*snap=*/false, now))
-	{
-		ctx.ReportError("A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.\n");
-		return false;
-	}
-	ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
-	ctx.autoCorrectionsApplied++;
-	// The drift evidence was just acted on; the monitor windows stay valid
-	// because a correction never moves raw poses.
-	ctx.driftSlideEvents = 0;
-	ctx.driftMaxSlideM = 0.0;
-	ctx.discontinuousLossEvents = 0;
-	return true;
-}
-
-static void LegacyContinuousTick(CalibrationContext &ctx, double now)
-{
-	auto bindCurrentProfile = [&]()
-	{
-		LegacyBoundTrackerId = ctx.continuousTrackerId;
-		LegacyBoundBaseGeneration = ctx.baseGeneration;
-		LegacyBoundTrackerSerial = ctx.continuousTrackerSerial;
-		LegacyBindingValid = true;
-	};
-	if (!LegacyBindingValid ||
-		LegacyBoundTrackerId != ctx.continuousTrackerId ||
-		LegacyBoundBaseGeneration != ctx.baseGeneration ||
-		LegacyBoundTrackerSerial != ctx.continuousTrackerSerial)
-	{
-		++ctx.continuousDiagnostics.legacy.bindingResets;
-		LegacyReset(ctx);
-		ctx.continuousCorrectionGate.Clear();
-		bindCurrentProfile();
-	}
-
-	if (DrainContinuousInput(ctx))
-	{
-		++ctx.continuousDiagnostics.legacy.gapResets;
-		LegacyReset(ctx);
-		ctx.continuousCorrectionGate.Clear();
-		bindCurrentProfile();
-	}
-	for (const auto &s : ContinuousScratch)
-	{
-		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
-			continue;
-		questcal::PoseSample sample;
-		if (s.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
-		{
-			if (ctx.continuousDiagnostics.devices[s.deviceId].Compose(s, QpcToSeconds, sample))
-			{
-				LegacyRef = sample;
-				LegacyHaveRef = true;
-				LegacyRefFresh = true;
-				LegacyLastRefArrival = now;
-			}
-		}
-		else if (s.deviceId == ctx.continuousTrackerId)
-		{
-			if (ctx.continuousDiagnostics.devices[s.deviceId].Compose(s, QpcToSeconds, sample))
-			{
-				LegacyTarget = sample;
-				LegacyHaveTarget = true;
-				LegacyTargetFresh = true;
-				LegacyLastTargetArrival = now;
-			}
-		}
-	}
-	if (!LegacyHaveRef || !LegacyHaveTarget ||
-		now - LegacyLastRefArrival > LegacyPoseStaleSeconds ||
-		now - LegacyLastTargetArrival > LegacyPoseStaleSeconds)
-	{
-		if (LegacyHaveRef || LegacyHaveTarget)
-		{
-			++ctx.continuousDiagnostics.legacy.staleResets;
-			LegacyReset(ctx);
-			ctx.continuousCorrectionGate.Clear();
-			bindCurrentProfile();
-		}
-		ctx.continuousState = questcal::ContinuousAlignment::State::Inactive;
-		return;
-	}
-
-	const bool triggerPressed = ctx.continuousRequireTrigger &&
-		AnyControllerTriggerPressed();
-	questcal::ContinuousAlignment::Correction correction;
-	if (ctx.continuousCorrectionGate.HasPending())
-	{
-		TakeGatedCorrection(ctx, triggerPressed, LegacyWaitingTrigger, now, correction);
-		return;
-	}
-
-	if (!LegacyRefFresh || !LegacyTargetFresh)
-		return;
-
-	const double pairSkew = LegacyRef.time - LegacyTarget.time;
-	if (std::abs(pairSkew) > LegacyMaxPairSkewSeconds)
-	{
-		++ctx.continuousDiagnostics.legacy.pairSkewRejected;
-		// Keep the newer observation and wait for the lagging device to catch up.
-		if (pairSkew < 0.0)
-			LegacyRefFresh = false;
-		else
-			LegacyTargetFresh = false;
-		return;
-	}
-
-	if (now - LegacyLastSampleTime < CalibrationContext::ContinuousInputInterval)
-		return;
-	LegacyLastSampleTime = now;
-	LegacyRefFresh = LegacyTargetFresh = false;
-
-	// The original skipped a tick whose headset pose had not moved at all. Check
-	// the complete pose so rotation-only calibration motion is not discarded.
-	if (LegacyHavePrevHmd && LegacyRef.pos == LegacyPrevHmdPos &&
-		LegacyRef.rot.coeffs() == LegacyPrevHmdRot.coeffs())
-		return;
-	LegacyPrevHmdPos = LegacyRef.pos;
-	LegacyPrevHmdRot = LegacyRef.rot;
-	LegacyHavePrevHmd = true;
-
-	// Target positions pre-scaled, as everywhere else the calibration is
-	// composed with a solved scale; the original had no scale.
-	LegacyCalc.PushSample(questcal::legacy::Sample(
-		questcal::legacy::Pose(LegacyRef.rot, LegacyRef.pos),
-		questcal::legacy::Pose(LegacyTarget.rot, LegacyTarget.pos * ctx.transform.scale),
-		now));
-
-	const size_t window = LegacySampleWindow(ctx);
-	if (LegacyCalc.SampleCount() < window)
-	{
-		ctx.continuousState = LegacyCalc.isValid()
-			? questcal::ContinuousAlignment::State::Tracking
-			: questcal::ContinuousAlignment::State::Inactive;
-		return;
-	}
-	while (LegacyCalc.SampleCount() > window)
-		LegacyCalc.ShiftSample();
-
-	bool lerp = false;
-	LegacyCalc.enableStaticRecalibration = false;   // the original's default
-	const bool updated = LegacyCalc.ComputeIncremental(lerp, 1.5, 0.005, false);
-	++ctx.continuousDiagnostics.legacy.solveAttempts;
-
-	if (updated && LegacyCalc.isValid())
-	{
-		++ctx.continuousDiagnostics.legacy.solvesAccepted;
-		const Eigen::AffineCompact3d est = LegacyCalc.Transformation();
-		const Eigen::Quaterniond newRotation(est.rotation());
-		const Eigen::Vector3d newTranslation = est.translation();
-		Eigen::Quaterniond deltaRotation;
-		Eigen::Vector3d deltaTranslation;
-		questcal::legacy::DeltaBetweenCalibrations(
-			ctx.transform.rotation, ctx.transform.translationMeters,
-			newRotation, newTranslation, deltaRotation, deltaTranslation);
-		correction.rotation = deltaRotation;
-		correction.translation = deltaTranslation;
-		ctx.continuousCorrectionGate.Offer(correction, triggerPressed);
-		TakeGatedCorrection(ctx, triggerPressed, LegacyWaitingTrigger, now, correction);
-	}
-	ctx.continuousState = LegacyCalc.isValid()
-		? questcal::ContinuousAlignment::State::Tracking
-		: questcal::ContinuousAlignment::State::Inactive;
-
-	char buf[192];
-	char error[48] = "unavailable";
-	if (LegacyCalc.isValid())
-		snprintf(error, sizeof error, "%.1f cm", LegacyCalc.m_lastError * 100.0);
-	snprintf(buf, sizeof buf, "legacy loop: %zu samples, solve %s, error %s, %u corrections",
-		LegacyCalc.SampleCount(), updated ? "accepted" : LegacyCalc.isValid() ? "kept" : "not available", error,
-		ctx.autoCorrectionsApplied);
-	ctx.Diag(buf);
-
-	for (size_t i = 0; i < window / 10; ++i)
-		LegacyCalc.ShiftSample();
-}
-
 static bool AnyControllerTriggerPressed()
 {
 	auto system = vr::VRSystem();
@@ -1087,13 +859,11 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		if (ContinuousActive)
 		{
 			ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::Suspended);
-			LegacyReset(ctx);
 			ContinuousActive = false;
 		}
 		PoseHub.DiscardBacklog(ContinuousConsumer);
 		ctx.continuousCorrectionGate.Clear();
-		ctx.continuousState = ctx.continuousMode == ContinuousMode::Legacy
-			? questcal::ContinuousAlignment::State::Inactive : Continuous->GetState();
+		ctx.continuousState = Continuous->GetState();
 		return;
 	}
 
@@ -1103,26 +873,11 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		ContinuousActive = true;
 	}
 
-	// A method switch starts the other loop from nothing: their windows and
-	// baselines mean different things.
-	if (ctx.continuousMode != LastContinuousMode)
-	{
-		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::ModeChanged);
-		LegacyReset(ctx);
-		LastContinuousMode = ctx.continuousMode;
-	}
-	if (ctx.continuousMode == ContinuousMode::Legacy)
-	{
-		LegacyContinuousTick(ctx, now);
-		ctx.continuousDiagnostics.legacy.samples = LegacyCalc.SampleCount();
-		ctx.continuousDiagnostics.legacy.valid = LegacyCalc.isValid();
-		return;
-	}
-
 	// Cheap unconditional sync: the extrinsic changes only on recalibration
 	// or profile load, but re-copying it every tick needs no bookkeeping.
 	Continuous->SetExtrinsic(ctx.mountExtrinsic);
 	Continuous->SetLatencyReestimation(ctx.continuousLatencyReestimation);
+	Continuous->SetFollowMode(ctx.continuousNoPause);
 
 	auto &diagnostics = ctx.continuousDiagnostics;
 	if (DrainContinuousInput(ctx))
@@ -1199,6 +954,30 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	diagnostics.lastUpdateTime = ringNow;
 	diagnostics.engine = Continuous->GetDiagnostics();
 
+	// A re-anchor (or its undoing) replaces a calibration that is already off
+	// by more than a freeze, so it is applied at once and snapped, without the
+	// per-correction trigger. The lighthouse side moved, not the headset's
+	// space, so the protected chaperone stays where it is.
+	questcal::ContinuousAlignment::Correction reanchor;
+	bool reanchorApplied = false;
+	if (Continuous->PollReanchor(reanchor))
+	{
+		ctx.continuousCorrectionGate.Clear();
+		if (questcal::ApplyCalibrationDelta(ctx, reanchor.rotation, reanchor.translation,
+			/*snap=*/true, now, /*moveChaperone=*/false))
+		{
+			reanchorApplied = true;
+			ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
+			ctx.driftSlideEvents = 0;
+			ctx.driftMaxSlideM = 0.0;
+			ctx.discontinuousLossEvents = 0;
+		}
+		else
+		{
+			ctx.ReportError("A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.\n");
+		}
+	}
+
 	questcal::ContinuousAlignment::Correction corr;
 	bool hadPendingCorrection = ctx.continuousCorrectionGate.HasPending();
 	bool receivedCorrection = false;
@@ -1216,15 +995,39 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	if (receivedCorrection)
 		ctx.continuousCorrectionGate.Offer(corr, triggerPressed);
 
-	// A correction that was already pending has been announced.
-	if (ctx.continuousCorrectionGate.HasPending() &&
-		TakeGatedCorrection(ctx, triggerPressed, hadPendingCorrection, now, corr))
+	if (ctx.continuousCorrectionGate.HasPending())
 	{
-		char buf[128];
-		snprintf(buf, sizeof buf, "correction applied: yaw %.3f deg, position %.1f mm",
-			2.0 * std::asin(std::min(1.0, std::abs(corr.rotation.y()))) * 180.0 / EIGEN_PI,
-			corr.translation.norm() * 1000.0);
-		ctx.Diag(buf);
+		if (!ctx.continuousCorrectionGate.Take(
+			ctx.continuousRequireTrigger, triggerPressed, corr))
+		{
+			if (!hadPendingCorrection)
+				ctx.Tell("Correction ready. Pull a trigger to apply it.\n");
+		}
+		else
+		{
+			if (ctx.continuousRequireTrigger)
+				ctx.Tell("Trigger pulled; applying the correction.\n");
+			if (!questcal::ApplyCalibrationDelta(ctx, corr.rotation, corr.translation,
+				/*snap=*/false, now, /*moveChaperone=*/false))
+			{
+				ctx.ReportError("A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.\n");
+			}
+			else
+			{
+				ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
+				ctx.autoCorrectionsApplied++;
+				// The drift evidence was just acted on; the monitor windows stay
+				// valid because a correction never moves raw poses.
+				ctx.driftSlideEvents = 0;
+				ctx.driftMaxSlideM = 0.0;
+				ctx.discontinuousLossEvents = 0;
+				char buf[128];
+				snprintf(buf, sizeof buf, "correction applied: yaw %.3f deg, position %.1f mm",
+					2.0 * std::asin(std::min(1.0, std::abs(corr.rotation.y()))) * 180.0 / EIGEN_PI,
+					corr.translation.norm() * 1000.0);
+				ctx.Diag(buf);
+			}
+		}
 	}
 
 	ctx.continuousState = Continuous->GetState();
@@ -1262,14 +1065,47 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0,
 				ev.afterTargetResolve ? " -- after the headset tracker's base station tracking restarted" : "");
 			ctx.Log(buf);
+			// "Don't pause" follows it in a few seconds; saying it paused would
+			// be the opposite of what the player chose.
+			if (ctx.continuousNoPause)
+				break;
 			if (ev.afterTargetResolve)
 				NotifyResolveFreeze(ctx);
 			else
 				NotifyOnce(ctx, Monitors.freezeNotified,
-					"Continuous calibration paused: readings drifted too far from the calibration to correct safely.",
+					"Continuous calibration paused: readings moved too far from the calibration. It re-aligns on its own if they hold steady.",
 					CalibrationContext::Tone::Warn,
-					"QuestCalibrator: continuous calibration paused; readings drifted too far to correct safely. Recalibrate with the headset tracker to resume.",
+					"QuestCalibrator: continuous calibration paused; readings moved too far from the calibration. It re-aligns on its own if they hold steady, or recalibrate with the headset tracker.",
 					ctx.notifyPoorCalibration);
+			break;
+		case questcal::ContinuousAlignment::Event::Reanchored:
+			if (!reanchorApplied)
+				break;
+			snprintf(buf, sizeof buf,
+				"Continuous calibration re-anchored: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm%s%s\n",
+				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0,
+				ev.deviation.tiltDeg >= Continuous->GetConfig().holdTiltDeg ? ", tilt included" : "",
+				ev.afterTargetResolve ? " -- followed through the headset tracker's restart" : "");
+			ctx.Log(buf);
+			ctx.continuousReanchors++;
+			Monitors.freezeNotified = false;
+			if (!ctx.continuousNoPause)
+				ctx.Tell("Continuous calibration re-aligned your trackers after the tracking spaces moved apart.\n",
+					CalibrationContext::Tone::Good);
+			break;
+		case questcal::ContinuousAlignment::Event::ReanchorUndone:
+			if (!reanchorApplied)
+				break;
+			snprintf(buf, sizeof buf,
+				"Continuous calibration undid its last re-anchor: the readings fit the calibration before it again "
+				"(against the current one: yaw %.2f deg, tilt %.2f deg, %.1f cm)\n",
+				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
+			ctx.Log(buf);
+			ctx.continuousReanchorsUndone++;
+			Monitors.freezeNotified = false;
+			if (!ctx.continuousNoPause)
+				ctx.Tell("Continuous calibration went back to the alignment it had before it last re-aligned your trackers.\n",
+					CalibrationContext::Tone::Good);
 			break;
 		case questcal::ContinuousAlignment::Event::ObservationsUnstable:
 			snprintf(buf, sizeof buf,
@@ -1283,7 +1119,10 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				ctx.notifyPoorCalibration);
 			break;
 		case questcal::ContinuousAlignment::Event::Resumed:
-			ctx.Tell("Continuous calibration resumed.\n", CalibrationContext::Tone::Good);
+			if (ctx.continuousNoPause)
+				ctx.Log("Continuous calibration resumed.\n");
+			else
+				ctx.Tell("Continuous calibration resumed.\n", CalibrationContext::Tone::Good);
 			Monitors.freezeNotified = false;
 			break;
 		case questcal::ContinuousAlignment::Event::TrackerLost:
@@ -1512,6 +1351,12 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// target samples pre-scaled by it, so its absolute transform composes with
 	// the driver's scale-then-transform application unchanged.
 	config.solveScale = ctx.solveScale && !asAnchor;
+	// A latency the correlation cannot measure this time is the last measured
+	// one (continuous re-estimation refines it), or zero before any: the
+	// residual gates still judge the solve. Both measured on this setup were
+	// within 3.5 ms of zero, a third of a degree at a brisk head turn.
+	config.useFallbackTimeOffset = true;
+	config.fallbackTimeOffset = ctx.validProfile ? ctx.transform.timeOffset : 0.0;
 	if (asAnchor && ctx.transform.scale != 1.0)
 	{
 		for (auto &s : run.targetSamples)
@@ -1555,6 +1400,15 @@ static void FinishCalibration(CalibrationContext &ctx)
 
 	questcal::EngineResult result = questcal::CalibrationEngine::Solve(
 		run.referenceSamples, run.targetSamples, config);
+	if (result.timeOffsetFellBack)
+	{
+		snprintf(buf, sizeof buf,
+			"Time offset not measured (%s; best correlation %.2f, peak margin %.4f); using %s %+.1f ms\n",
+			result.timeOffsetFailure.c_str(), result.timeOffsetScore, result.timeOffsetPeakMargin,
+			ctx.validProfile ? "the previous calibration's" : "the default",
+			config.fallbackTimeOffset * 1000.0);
+		ctx.Log(buf);
+	}
 
 	// Used only after a valid solve, which had at least 8 target samples.
 	Eigen::Vector3d targetCentroid = Eigen::Vector3d::Zero();
@@ -1633,11 +1487,17 @@ static void FinishCalibration(CalibrationContext &ctx)
 		return;
 	}
 
+	char offsetEvidence[64];
+	if (result.timeOffsetFellBack)
+		snprintf(offsetEvidence, sizeof offsetEvidence, "not measured");
+	else
+		snprintf(offsetEvidence, sizeof offsetEvidence, "correlation %.2f, peak margin %.4f",
+			result.timeOffsetScore, result.timeOffsetPeakMargin);
 	snprintf(buf, sizeof buf,
 		"Rotation residual %.2f deg, position residual %.1f cm\n"
-		"Time offset %+.1f ms, axis spread %.3f, %zu pairs (%zu rejected), %zu samples gated\n",
+		"Time offset %+.1f ms (%s), axis spread %.3f, %zu pairs (%zu rejected), %zu samples gated\n",
 		result.rotationRmsDeg, result.translationRmsMeters * 100.0,
-		result.timeOffset * 1000.0, result.axisSpread,
+		result.timeOffset * 1000.0, offsetEvidence, result.axisSpread,
 		result.pairsUsed, result.pairsRejected, result.samplesGated);
 	ctx.Log(buf);
 
@@ -1727,6 +1587,8 @@ static void FinishCalibration(CalibrationContext &ctx)
 	Monitors.ReArmNotifications();
 	ctx.lastAutoCorrectionUnixTime = 0.0;
 	ctx.autoCorrectionsApplied = 0;
+	ctx.continuousReanchors = 0;
+	ctx.continuousReanchorsUndone = 0;
 	Drift->Reset();
 
 	bool priorUniverseUnsafe = ctx.profileUniverseUnsafe;

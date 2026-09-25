@@ -17,11 +17,14 @@
 // through the field calibration expected at that observation's own target-raw
 // position, so movement across anchor gradients never reads as drift. Small deviations are
 // emitted as yaw+translation corrections for the caller to auto-apply (the
-// driver slews them); large or tilted sustained deviations mean a tracking
-// fault and freeze auto-apply instead. Noisy windows only hold corrections
-// until tracking settles; scatter never freezes. Tilt is never applied: both
-// runtimes are gravity-aligned, so a tilt deviation is tracker orientation
-// bias or noise, not universe drift. The yaw-only correction pivots at the
+// driver slews them); large sustained deviations at the head freeze auto-apply
+// instead. Noisy or tilted windows only hold corrections until tracking
+// settles; neither freezes. A freeze or tilt hold whose estimate then stays
+// put, with no restart of the tracker's own tracking to explain it, is the
+// universes having moved apart, and the estimate is re-anchored as the
+// calibration (Config: re-anchor). Corrections never apply tilt: both
+// runtimes are gravity-aligned, so a small tilt deviation is tracker
+// orientation bias or noise, not universe drift. The yaw-only correction pivots at the
 // head, so the position there is still corrected in full: dropping the tilt
 // about any other point leaves tilt x lever arm at the head uncorrected.
 //
@@ -95,8 +98,16 @@ public:
 		double maxStepYawDeg = 0.5;        // per-correction clamp
 		double maxStepPosM = 0.01;
 		double freezeYawDeg = 2.0;         // at/above (sustained): freeze + event
-		double freezeTiltDeg = 1.5;        // tilt alone also freezes
 		double freezePosM = 0.05;
+		// Tilt at/above this holds: nothing is corrected from a window whose
+		// orientation disagrees this much, but it never freezes or warns. Tilt
+		// is never applied, and on a glued mount it moves with the tracker's
+		// lighthouse solution (live 2026-09-25: 0.84 deg median while tracking,
+		// 1.86 deg at most; five freezes on tilt alone at 1.7 to 2.4 deg, with
+		// 2.7 cm or less at the head). A real universe move comes with yaw and
+		// position at the head, which freeze on their own; a tilt that stays
+		// put re-anchors (below).
+		double holdTiltDeg = 1.5;
 		double freezeConfirmSeconds = 6.0;
 		double resumeFactor = 0.5;         // unfreeze below freeze*factor ...
 		double resumeConfirmSeconds = 5.0; // ... sustained this long
@@ -109,6 +120,29 @@ public:
 		// A freeze confirmed this soon after the target's own tracking restarted
 		// (NoteTargetResolved) is reported as that, not as universe drift.
 		double resolveAttributionSeconds = 30.0;
+
+		// --- re-anchor: a freeze or a tilt hold whose estimate holds still for
+		// reanchorConfirmSeconds, from a settled target that did not restart
+		// within resolveAttributionSeconds before the episode began (or since),
+		// is the universes having moved apart, and the estimate becomes the
+		// calibration. A glued mount does not move; a tracker whose own
+		// lighthouse solution went bad does, and that restart is in the log.
+		// Live 2026-09-24: the lighthouse side moved 62 deg / 78.6 deg of tilt
+		// with no restart of the headset tracker, rigid for an hour, and the
+		// body trackers stayed 5 m off until a recalibration nobody ran. The
+		// tilt is applied too when it is at least holdTiltDeg; below that the
+		// re-anchor turns about the head like a correction, uncapped ---
+		double reanchorConfirmSeconds = 30.0;
+		double reanchorSteadyDeg = 1.0;    // yaw or tilt the estimate may wander by during the confirm
+		double reanchorSteadyPosM = 0.05;  // at the head
+		// Follow mode ("don't pause", OpenVR-SpaceCalibrator's behaviour): every
+		// stuck episode re-anchors after this, restart or not. A bad lighthouse
+		// fix of the headset tracker then moves the body trackers until it clears.
+		double followConfirmSeconds = 10.0;
+		// A re-anchor is undone when a later stuck episode's readings fit the
+		// calibration it replaced inside the resume band for
+		// resumeConfirmSeconds, restart or not: a fault of the target that no
+		// restart explained was followed, and has cleared.
 		double coastGapSeconds = 2.0;      // no fresh obs -> coasting
 		double maxStreamGapSeconds = 0.2; // never estimate across a tracking hiatus
 
@@ -131,8 +165,8 @@ public:
 		Inactive,   // no valid extrinsic or not enough observations yet
 		Tracking,   // fresh estimate available, corrections flowing
 		Coasting,   // tracker occluded/off; calibration holds, resumes cleanly
-		Frozen,     // sustained large deviation; nothing applied until resolved
-		Holding,    // observations too noisy, or the target's tracking unsettled; resumes when they settle
+		Frozen,     // sustained large deviation; nothing applied until it resolves or re-anchors
+		Holding,    // observations too noisy or tilted, or the target's tracking unsettled; resumes when they settle
 	};
 
 	// Left delta over the current calibration: newCal = D o oldCal. Rotation is
@@ -163,6 +197,8 @@ public:
 			TrackerLost,
 			TrackerRecovered,
 			ObservationsUnstable,   // sustained scatter; informational
+			Reanchored,             // the estimate became the calibration (PollReanchor)
+			ReanchorUndone,         // the calibration before it fits again and is back (PollReanchor)
 		} type = FrozenLargeDeviation;
 		// Each event carries its own evidence, so one message never needs a
 		// second data source: the deviation for FrozenLargeDeviation, the
@@ -172,7 +208,8 @@ public:
 		double scatterPosM = 0.0;
 		// FrozenLargeDeviation: confirmed within resolveAttributionSeconds of a
 		// NoteTargetResolved, so the target's tracking restart is the likely
-		// cause and the next restart the likely cure.
+		// cause and the next restart the likely cure. Reanchored: the episode
+		// was attributed so, and follow mode re-anchored anyway.
 		bool afterTargetResolve = false;
 	};
 
@@ -181,7 +218,7 @@ public:
 		Eigen::Quaterniond &rotationOut,
 		Eigen::Vector3d &translationOut)>;
 
-	enum class ResetReason { Requested, StreamGap, UniverseJump, Suspended, ModeChanged, TargetResolved, Count };
+	enum class ResetReason { Requested, StreamGap, UniverseJump, Suspended, TargetResolved, Count };
 
 	// Counters last for this engine's lifetime, including across Reset(). Window
 	// sizes and timestamps in GetDiagnostics() describe the current window only.
@@ -204,6 +241,7 @@ public:
 	Diagnostics GetDiagnostics() const;
 
 	void SetConfig(const Config &c) { config = c; }
+	const Config &GetConfig() const { return config; }
 	void SetExtrinsic(const MountExtrinsic &e) { extrinsic = e; }
 	const MountExtrinsic &Extrinsic() const { return extrinsic; }
 	void SetLatencyReestimation(bool on) { config.latencyReestimation = on; }
@@ -225,6 +263,11 @@ public:
 	            const ExpectedCalibrationAt &expectedAt = ExpectedCalibrationAt());
 
 	bool PollCorrection(Correction &out);
+	// A re-anchor, or the way back from one: the whole delta to the measured
+	// estimate or to the calibration before it, to be applied at once (snapped,
+	// not slewed) and without the per-correction confirmation, since the
+	// calibration it replaces is already wrong by more than a freeze.
+	bool PollReanchor(Correction &out);
 	// The most recent decision still permits a correction. Unlike the one-shot
 	// output, this remains true between evaluations and revokes queued approval
 	// immediately when a later decision settles or starts confirming a fault.
@@ -259,6 +302,10 @@ public:
 	// is drawn from such a pose: no correction, no freeze, no resume; the
 	// state shows Holding unless it is already Frozen.
 	void SetTargetSettling(bool settling) { targetSettling = settling; }
+
+	// "Don't pause": re-anchor every stuck episode after followConfirmSeconds,
+	// whether or not the target's tracking restarted.
+	void SetFollowMode(bool follow) { followMode = follow; }
 
 	// Derive the mount extrinsic from a manual calibration's sample buffers
 	// and its solved (valid) result. The per-pair spread doubles as the
@@ -306,6 +353,12 @@ private:
 	                           const Eigen::Vector3d &calTranslationMeters,
 	                           double &yawAngleOut, Eigen::Vector3d &headStepOut,
 	                           Eigen::Vector3d &headPosOut) const;
+	// A stuck episode (Frozen, or held on tilt) that may re-anchor.
+	void TryReanchor(double now, const WindowEstimate &est,
+	                 const Eigen::Quaterniond &calRotation,
+	                 const Eigen::Vector3d &calTranslationMeters,
+	                 double yawAngle, const Eigen::Vector3d &headStep,
+	                 const Eigen::Vector3d &headPos);
 	void EnterState(State s);
 	void ClearConfirmMarks();
 
@@ -337,6 +390,30 @@ private:
 
 	bool targetSettling = false;
 	double lastTargetResolveTime = -1e9;
+	bool followMode = false;
+
+	// The stuck episode: when the freeze confirmed, or when the tilt hold
+	// began. It survives what Frozen survives (a gap, a target restart) and is
+	// what a restart is attributed against. reanchorSince starts the steady
+	// run a re-anchor needs, measured against reanchorRef.
+	double episodeSince = -1.0;
+	double reanchorSince = -1.0;
+	WindowEstimate reanchorRef;
+
+	// The calibration the last re-anchor replaced, and the run of readings
+	// that fit it again. A re-anchor can follow a fault of the target that no
+	// restart explains (live 2026-09-25 01:25: a single-station solution of
+	// the headset tracker read 6 deg of tilt 71 s after it started, and the
+	// next restart cleared it); the calibration comes back when the readings
+	// return to it. Kept through what Frozen survives; any other reset
+	// (a recalibration suspends the loop) drops it.
+	struct Replaced
+	{
+		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
+		Eigen::Vector3d trans{ 0, 0, 0 };
+	};
+	std::optional<Replaced> replaced;
+	double undoSince = -1.0;
 
 	// How long the degraded episode has been running. It survives a coast:
 	// the degraded tracking it reports is exactly what produces the gaps.
@@ -349,6 +426,7 @@ private:
 	std::optional<Observation> pendingObs;
 
 	std::optional<Correction> pendingCorrection;
+	std::optional<Correction> pendingReanchor;
 	bool correctionEligible = false;
 	std::deque<Event> events;
 

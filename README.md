@@ -99,8 +99,10 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   head-referenced calibration learns the mount offset (with a rigidity gate), after
   which every time-aligned HMD+tracker pose pair directly measures the universe
   transform with no motion required. Small yaw+translation corrections are
-  auto-applied and smoothed by the driver; large or tilted deviations
-  (a bumped mount, a tracking fault) freeze auto-apply and notify instead. The
+  auto-applied and smoothed by the driver. A large deviation (a tracking fault,
+  the lighthouse side moving) pauses auto-apply, and one that then holds still
+  becomes the new calibration; **Don't pause** in Settings follows the headset
+  tracker through its own faults too, as OpenVR-SpaceCalibrator does. The
   mounted tracker can be hidden from games so full-body setups never mistake it for
   a body tracker. Optional (off by default): online re-estimation of the
   inter-system time offset from the same rigid pair.
@@ -115,10 +117,16 @@ position, so a yaw correction about that device does not temporarily push it
 sideways. Derived angular speeds are timestamped at their interval midpoints to
 avoid introducing latency when the two devices report at different rates.
 
-A frozen Quest loop does not correct its way out of a large disagreement. Automatic
-resume requires stable readings below 1° yaw, 0.75° tilt and 2.5 cm for five seconds
-with the default configuration. If tracking is clean but alignment stays wrong,
-use **Recalibrate with the headset tracker**. Waiting in a particular posture is
+A paused Quest loop does not correct its way out of a large disagreement. With the
+default configuration it resumes after five seconds of readings below 1° yaw and
+2.5 cm at the head, or thirty seconds below the 2° / 5 cm that paused it. Readings
+that stay off but hold still for thirty seconds become the calibration instead,
+unless the headset tracker restarted its lighthouse tracking around the time they
+moved: that tracker's own fault waits for the resume. If the readings later return
+to the calibration it replaced, that one comes back. Tilt of 1.5° or more waits
+without pausing, and becomes the calibration the same way if it holds still. If
+tracking is clean but alignment stays wrong, use **Recalibrate with the headset
+tracker**. Waiting in a particular posture is
 not a calibration step. Manual profile editing changes the base transform; it does
 not relearn the mounted tracker relationship.
 
@@ -139,9 +147,9 @@ For continuous-calibration failures, turn on **Detailed logging** in Settings,
 then use **Save diagnostics file** once while alignment looks correct and again
 after the problem appears, before recalibrating or restarting. Keep the devices
 still while exporting. The report includes per-device input counts and freshness,
-stream gaps, window resets, Quest observation gates, Legacy solve status, and a
-snapshot of connected devices relative to SteamVR's floor. Counters survive
-recalibration and method changes for the session. Exports also include raw driver
+stream gaps, window resets, Quest observation gates, re-anchors, lighthouse frame
+moves, and a snapshot of connected devices relative to SteamVR's floor. Counters
+survive recalibration for the session. Exports also include raw driver
 poses for every device, scale and timing confidence, mount and field transforms,
 driver synchronization status, and executable hashes to identify the build. The
 raw stream is sampled independently of continuous mode. Detailed-log snapshots are

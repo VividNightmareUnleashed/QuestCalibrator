@@ -361,11 +361,14 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 
 	if (HasTypedValue<bool>(obj, "hide_mounted_tracker"))
 		profile.hideMountedTracker = obj.at("hide_mounted_tracker").get<bool>();
-	// A name rather than a number, so a hand-edited profile reads, and an
-	// unknown one falls back to the default loop instead of an out-of-range
-	// enum.
+	// A name rather than a flag, so a hand-edited profile reads and an unknown
+	// value is the default. "legacy" is the method "don't pause" replaced:
+	// players picked it to stop the pausing.
 	if (HasTypedValue<std::string>(obj, "continuous_mode"))
-		profile.continuousMode = obj.at("continuous_mode").get<std::string>() == "legacy" ? 1 : 0;
+	{
+		const std::string mode = obj.at("continuous_mode").get<std::string>();
+		profile.continuousNoPause = mode == "no_pause" || mode == "legacy";
+	}
 
 	// Presence makes the mount extrinsic part of the profile contract. Reject
 	// malformed data instead of normalizing a degenerate quaternion and
@@ -523,7 +526,7 @@ inline void WriteProfile(const ProfileRecord &record,
 	profile["continuous_latency_reestimation"].set<bool>(record.continuousLatencyReestimation);
 	profile["continuous_require_trigger"].set<bool>(record.continuousRequireTrigger);
 	profile["hide_mounted_tracker"].set<bool>(record.hideMountedTracker);
-	profile["continuous_mode"].set<std::string>(record.continuousMode == 1 ? "legacy" : "questcalibrator");
+	profile["continuous_mode"].set<std::string>(record.continuousNoPause ? "no_pause" : "questcalibrator");
 
 	if (record.mountExtrinsic.valid)
 	{
