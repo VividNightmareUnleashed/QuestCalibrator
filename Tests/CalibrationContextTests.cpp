@@ -288,52 +288,44 @@ bool ControllerTriggerAxisScenario()
 bool CalibrationContextCadenceScenario()
 {
 	CalibrationContext ctx;
-	if (ctx.IdleUpdateInterval() != 1.0)
-		return false;
+	bool ok = true;
+	auto expect = [&](double interval) { ok = ok && ctx.IdleUpdateInterval() == interval; };
+	expect(1.0);
 	ctx.enabled = ctx.validProfile = ctx.poseRingOpen = true;
 	ctx.continuousEnabled = true;
 	ctx.continuousTrackerSerial = "tracker";
 	ctx.continuousTrackerId = 3;
 	ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd] = true;
 	ctx.continuousMode = ContinuousMode::Legacy;
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.poseRingOpen = false;
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.poseRingOpen = true;
 	ctx.continuousTrackerSerial.clear();
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 
 	ctx.continuousMode = ContinuousMode::Quest;
 	ctx.mountExtrinsic.valid = true;
 	ctx.continuousRequireTrigger = true;
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.continuousCorrectionGate.Offer({}, false);
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.continuousRequireTrigger = false;
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.continuousRequireTrigger = true;
 	ctx.state = CalibrationState::Editing;
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.state = CalibrationState::None;
 	ctx.continuousCorrectionGate.Clear();
 	ctx.continuousEnabled = false;
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.enabled = false;
-	if (ctx.IdleUpdateInterval() != 1.0)
-		return false;
+	expect(1.0);
 	ctx.chaperone.valid = true;
-	if (ctx.IdleUpdateInterval() != 0.05)
-		return false;
+	expect(0.05);
 	ctx.chaperone.autoApply = false;
-	return ctx.IdleUpdateInterval() == 1.0;
+	expect(1.0);
+	return ok;
 }
 
 bool CalibrationContextCorrectionBasisScenario()

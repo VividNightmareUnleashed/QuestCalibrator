@@ -4,23 +4,14 @@
 // lines QuestCalibrator sees from one tracker while its base stations come
 // and go. Test-only.
 //
-// What is reproduced is the shape of the failure, not Valve's tracking code
-// (which is closed): a device with two or more stations in view reports the
-// truth plus optical noise; with one station its solution has a single
-// baseline and is allowed to swim slowly along that station's line of
-// sight; with none it coasts on the IMU for a short while, then reports its
-// pose invalid and out of range; when a station returns, the optical
-// solution snaps back to the truth. Every visibility change also produces
-// the log lines the real driver writes for it, so a scenario can drive the
-// drift monitor and the visibility state exactly as the overlay does.
-//
-// Where the numbers come from: the timing of real losses (how often a
-// station drops out, how long it stays lost, how many remain) is read from
-// a session's vrserver.txt and is documented with the scenarios. The pose
-// behaviour while a station is missing (swim rate, coast bias, how long a
-// coasting pose stays valid) is assumed and named as such in Config; the
-// scenarios that depend on it only need the failure to exist, not its exact
-// size.
+// It reproduces the shape of the failure, not Valve's closed tracking code:
+// with two or more stations in view the device reports the truth plus
+// optical noise; with one its single-baseline solution swims slowly along
+// that station's line of sight; with none it coasts on the IMU, then goes
+// invalid and out of range; a returning station snaps it back to the truth.
+// Every visibility change also produces the driver's log lines for it. The
+// pose behaviour while a station is missing is assumed (named so in Config);
+// the scenarios only need the failure to exist, not its exact size.
 
 #include "../Overlay/LighthouseLog.h"
 #include "../common/Protocol.h"
@@ -85,8 +76,6 @@ Truth DriftFrom(const Eigen::Vector3d &from, const Eigen::Vector3d &velocity, do
 struct Frame
 {
 	double time = 0.0;
-	int stations = 0;
-	bool optical = true;         // the pose came from the stations, not the IMU
 	protocol::DevicePoseSample sample;
 };
 
@@ -103,6 +92,6 @@ struct Output
 };
 
 Output Run(const Config &config, const Truth &truth,
-	const std::vector<VisibilityChange> &schedule, double duration, unsigned seed = 1);
+	const std::vector<VisibilityChange> &schedule, double duration);
 
 } // namespace vlighthouse

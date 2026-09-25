@@ -1,4 +1,3 @@
-
 #include "Fuzz/FuzzTargets.h"
 #include "../Driver/AlignmentField.h"
 #include "../Driver/PoseTransform.h"
