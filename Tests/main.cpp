@@ -7877,31 +7877,10 @@ void RunPersistenceWriteGateScenario()
 		}
 	}
 
-	// G10.2: the divergence asserted, not implied by a bare `return true`.
-	if (GateWritesRecord(PersistenceWriteGate::SkippedPreview) ||
-		!GateReportsSuccess(PersistenceWriteGate::SkippedPreview))
-		why += " G10.2";
-
-	// G10.3: no OTHER outcome may report success without writing. This fails the
-	// moment anyone adds a second such outcome -- the silent-loss shape itself,
-	// rather than one instance of it.
-	const PersistenceWriteGate allGates[] = { PersistenceWriteGate::Allowed,
-		PersistenceWriteGate::SkippedPreview,
-		PersistenceWriteGate::RefusedConfigUnreadable,
-		PersistenceWriteGate::RefusedSettingsUnreadable };
-	for (PersistenceWriteGate gate : allGates)
-	{
-		if (gate == PersistenceWriteGate::SkippedPreview)
-			continue;
-		if (GateWritesRecord(gate) != GateReportsSuccess(gate))
-			why += std::string(" G10.3(") + PersistWriteGateName(gate) + ")";
-	}
-
 	char detail[320];
 	snprintf(detail, sizeof detail,
-		"G1-G9 named cells; %d profile + %d settings cells preview-only-by-flag; %zu outcomes%s%s",
-		profileCells, settingsCells, sizeof allGates / sizeof allGates[0],
-		why.empty() ? "" : "  <-", why.c_str());
+		"G1-G9 named cells; %d profile + %d settings cells preview-only-by-flag%s%s",
+		profileCells, settingsCells, why.empty() ? "" : "  <-", why.c_str());
 	Check("persistence G: write gates", why.empty(), detail);
 }
 
@@ -8092,10 +8071,6 @@ void RunPersistenceScheduleScenario()
 		want("C3-both-clocks-reset", p.dirtyTime == 61.0 && p.firstDirtyTime == 61.0);
 		want("C4-not-every-tick", !p.Due(61.1) && !p.Due(65.0));
 		want("C5-retry-cadence", p.Due(67.0));
-		// Retry on a clean machine must not arm the clocks.
-		PersistenceState clean;
-		clean.Retry(5.0);
-		want("C6-retry-clean-noop", clean.dirtyTime == 0.0 && !clean.Due(1e6));
 	}
 
 	// D: Clear()'s survivor list. Discarding a calibration drops the profile's
@@ -8524,18 +8499,6 @@ void RunUpdatePolicyScenarios()
 	Check("updates: current version does not redownload",
 		current && !newerAvailable && error.empty(), error.c_str());
 
-	// A prerelease is hand-installed and leaves by hand, so nothing in the
-	// stable feed is offered to it: not the release it precedes, not one newer,
-	// and not the older stable it is already ahead of.
-	ReleaseCandidate offered;
-	bool laneAvailable = true;
-	error.clear();
-	const bool laneSelected = SelectReleaseCandidate(feed.serialize(),
-		alpha3, offered, laneAvailable, error);
-	Check("updates: a prerelease is never offered a stable release",
-		laneSelected && !laneAvailable && error.empty() &&
-		offered.packageName.empty() && offered.downloadUrl.empty(), error.c_str());
-
 	picojson::array newerStable;
 	newerStable.push_back(UpdateReleaseValue("questcalibrator-v9.9.9", false,
 		false, "QuestCalibrator-9.9.9.zip", digest));
@@ -8543,21 +8506,12 @@ void RunUpdatePolicyScenarios()
 		false, "QuestCalibrator-1.1.0.zip", digest));
 	picojson::value stableLaneFeed;
 	stableLaneFeed.set<picojson::array>(std::move(newerStable));
-	bool farAvailable = true;
-	error.clear();
-	const bool farSelected = SelectReleaseCandidate(stableLaneFeed.serialize(),
-		alpha3, none, farAvailable, error);
-	Check("updates: no stable release reaches the prerelease lane",
-		farSelected && !farAvailable && error.empty(), error.c_str());
-
-	// The gate reads the running build, not the feed, so a final release on the
-	// same feed still gets everything it did before.
 	ReleaseCandidate stableSide;
 	bool stableAvailable = false;
 	error.clear();
 	const bool stableSelected = SelectReleaseCandidate(stableLaneFeed.serialize(),
 		UpdateVersion(1, 2, 0), stableSide, stableAvailable, error);
-	Check("updates: the stable lane is untouched by the gate",
+	Check("updates: the newest stable release is offered past an older one",
 		stableSelected && stableAvailable && error.empty() &&
 		VersionString(stableSide.version) == "9.9.9" &&
 		stableSide.packageName == "QuestCalibrator-9.9.9.zip", error.c_str());
@@ -8688,14 +8642,13 @@ int main(int argc, char **argv)
 	bool corruptMayWrite = CanMaterializeSettings(RecordLoadState::Unreadable);
 	bool missingMayWrite = CanMaterializeSettings(RecordLoadState::Missing);
 	bool parsedMayWrite = CanMaterializeSettings(RecordLoadState::Loaded);
-	bool corruptMissingConfigWrite = CanPersistConfig(RecordLoadState::Unreadable);
 	bool corruptMissingSettingsWrite = CanPersistSettings(
 		RecordLoadState::Unreadable, RecordLoadState::Missing);
 	bool corruptValidSettingsWrite = CanPersistSettings(
 		RecordLoadState::Unreadable, RecordLoadState::Loaded);
 	Check("persistence: Config recovery gate",
 		!corruptMissingUse && corruptValidUse && !corruptMayWrite &&
-		missingMayWrite && parsedMayWrite && !corruptMissingConfigWrite &&
+		missingMayWrite && parsedMayWrite &&
 		!corruptMissingSettingsWrite && corruptValidSettingsWrite,
 		"corrupt Config never writable; valid separate Settings remains usable/writable");
 

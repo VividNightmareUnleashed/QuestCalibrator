@@ -54,11 +54,9 @@ std::wstring EnvW(const wchar_t *name)
 }
 
 // Case-insensitive replace of every occurrence: Windows paths arrive in
-// whatever case the writer used.
+// whatever case the writer used. `needle` must not be empty.
 void ReplaceAllNoCase(std::string &text, const std::string &needle, const std::string &with)
 {
-	if (needle.empty())
-		return;
 	std::string lowerText = text, lowerNeedle = needle;
 	std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(),
 		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -467,7 +465,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	const double qpcNow = capture.sampleClock;
 	out << DescribeContinuousDiagnostics(ctx, qpcNow) << "\n";
 	DescribeRawPoses(out, capture.poseStream, qpcNow,
-		frequency.QuadPart > 0 ? 1.0 / static_cast<double>(frequency.QuadPart) : 0.0);
+		1.0 / static_cast<double>(frequency.QuadPart));
 	out << runtimePoses.str();
 
 	out << "[recent]\n";

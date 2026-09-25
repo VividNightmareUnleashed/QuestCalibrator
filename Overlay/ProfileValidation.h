@@ -39,11 +39,6 @@ inline bool CanMaterializeSettings(RecordLoadState config)
 	return config != RecordLoadState::Unreadable;
 }
 
-inline bool CanPersistConfig(RecordLoadState config)
-{
-	return config != RecordLoadState::Unreadable;
-}
-
 inline bool CanPersistSettings(
 	RecordLoadState config, RecordLoadState settings)
 {
@@ -152,9 +147,6 @@ inline bool ProfileHmdIdentityMatches(
 }
 
 // A raw-space snapshot belongs to the headset/universe that produced it.
-// Asked in three places - the load path disarms a snapshot without it, the
-// writer refuses to persist one, and the restore path will not apply one - so
-// it is one predicate rather than three copies of the same conjunction.
 inline bool IsCompleteChaperoneOwner(const std::string &ownerTrackingSystem,
 	const std::string &ownerHmdSerial, bool worldFromDriverValid)
 {
@@ -162,12 +154,9 @@ inline bool IsCompleteChaperoneOwner(const std::string &ownerTrackingSystem,
 		worldFromDriverValid;
 }
 
-// Mirrors CalibrationContext::Speed (FAST=0, SLOW=1, VERY_SLOW=2). The record
-// layer deliberately does not include Calibration.h: that header pulls in
-// openvr.h, while the test harness translation unit already carries the
-// incompatible openvr_driver.h, so depending on it is what made this whole
-// state machine unreachable from a test. Configuration.cpp static_asserts that
-// the two spellings still agree.
+// Mirrors CalibrationContext::Speed. This header cannot include Calibration.h:
+// it pulls in openvr.h, which conflicts with the openvr_driver.h the test
+// harness already carries. Configuration.cpp static_asserts that they agree.
 enum class PersistedCalibrationSpeed
 {
 	Fast = 0,
@@ -193,9 +182,9 @@ struct PersistedRevision
 	uint32_t value = 0;
 };
 
-// The profile record as it exists on disk. It intentionally duplicates
-// CalibrationContext::FieldAnchor rather than reusing it: see
-// PersistedCalibrationSpeed above for why nothing here may name that header.
+// The profile record as it exists on disk. The anchor mirrors
+// CalibrationContext::FieldAnchor for the reason given at
+// PersistedCalibrationSpeed.
 struct PersistedFieldAnchor
 {
 	Eigen::Vector3d position{ 0, 0, 0 };
@@ -241,17 +230,10 @@ struct ProfileRecord
 	MountExtrinsicRecord mountExtrinsic;
 };
 
-// The parser and the writer have to agree on what a well-formed profile is.
-// They used to hold two copies of these six checks, seven hundred lines apart
-// and free to drift: tighten one and you get a record that loads but can never
-// be written back (every later edit silently lost), or one that writes but
-// will not load (the profile is gone at the next launch). One definition, one
-// reason string; the caller decides whether to throw it or show it.
-//
-// `maxAnchors` is a parameter rather than a direct use of
-// protocol::SetAlignmentField::MaxAnchors because Protocol.h reaches for
-// openvr_driver.h - see PersistedCalibrationSpeed. Both call sites in
-// Configuration.cpp pass that constant.
+// The one definition of a well-formed profile, shared by the parser and the
+// writer so a record that loads can be written back and vice versa.
+// `maxAnchors` is a parameter because Protocol.h pulls in openvr_driver.h (see
+// PersistedCalibrationSpeed); callers pass SetAlignmentField::MaxAnchors.
 inline bool ValidateProfileRecord(
 	const ProfileRecord &record, size_t maxAnchors, std::string &why)
 {
@@ -298,9 +280,8 @@ inline bool ValidateProfileRecord(
 			return false;
 		}
 	}
-	// Deliberately outside the valid gate, as in the writer this replaces: an
-	// anchor set is checked against whatever base transform the record carries
-	// even when the record itself claims nothing.
+	// Outside the valid gate: anchors are checked against whatever base
+	// transform the record carries, even when the record claims nothing.
 	for (const auto &anchor : record.fieldAnchors)
 	{
 		if (!IsValidFieldAnchor(anchor.position, anchor.rotation,
@@ -320,14 +301,9 @@ inline bool ValidateProfileRecord(
 enum class PersistenceWriteGate
 {
 	Allowed,
-	// -uipreview drives the entire UI from fabricated state (and -frames N runs
-	// that unattended as a smoke test), so it must never touch HKCU. It is the only
-	// outcome that reports success without writing, and that combination is
-	// exactly what would turn a mis-set preview flag on a normal launch into
-	// total silent persistence loss - the user recalibrates, the UI says
-	// "saved", and the profile is gone on restart. It is a named outcome here,
-	// not an early `return true`, so the guard can be asserted rather than
-	// assumed.
+	// -uipreview runs the UI on fabricated state and must never touch HKCU.
+	// The only outcome that reports success without writing, so a preview flag
+	// set on a normal launch would silently lose every save.
 	SkippedPreview,
 	RefusedConfigUnreadable,
 	RefusedSettingsUnreadable,
@@ -339,7 +315,7 @@ inline PersistenceWriteGate GateProfileWrite(bool previewMode,
 {
 	if (previewMode)
 		return PersistenceWriteGate::SkippedPreview;
-	if (!CanPersistConfig(config))
+	if (config == RecordLoadState::Unreadable)
 		return PersistenceWriteGate::RefusedConfigUnreadable;
 	// The one-time migration materializes Settings as part of the profile
 	// write, so an unreadable Settings record blocks the profile write too:
@@ -360,20 +336,6 @@ inline PersistenceWriteGate GateSettingsWrite(
 	if (settings == RecordLoadState::Unreadable)
 		return PersistenceWriteGate::RefusedSettingsUnreadable;
 	return PersistenceWriteGate::Allowed;
-}
-
-// "Did this touch the registry?" and "did the caller see success?" are
-// different questions for exactly one gate. Keeping them as two functions is
-// what makes the divergence visible instead of implied by a bare `return true`.
-inline bool GateWritesRecord(PersistenceWriteGate gate)
-{
-	return gate == PersistenceWriteGate::Allowed;
-}
-
-inline bool GateReportsSuccess(PersistenceWriteGate gate)
-{
-	return gate == PersistenceWriteGate::Allowed ||
-		gate == PersistenceWriteGate::SkippedPreview;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,9 +396,9 @@ struct PersistenceLoadPlan
 	bool profileRewriteNeeded = false;
 };
 
-// The whole load-time state machine over {profile} x {settings} x {revision},
-// as a function of facts rather than of CalibrationContext. Nothing here reads
-// the registry, so every cell of the matrix is reachable from a test.
+// The load-time state machine over {profile} x {settings} x {revision}, pure so
+// every cell is testable. VirtualQuest's FormalConformanceTests compares it
+// cell by cell with the Lean model (VirtualQuest/formal/lean/LoadPlan.lean).
 inline PersistenceLoadPlan PlanPersistenceLoad(const PersistenceLoadFacts &facts)
 {
 	PersistenceLoadPlan plan;
