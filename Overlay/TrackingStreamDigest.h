@@ -34,8 +34,6 @@ class TrackingStreamDigest
 public:
 	void Note(const protocol::DevicePoseSample &s, double qpcToSeconds)
 	{
-		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
-			return;
 		Device &d = devices[s.deviceId];
 		++d.samples;
 		questcal::PoseSample p;
@@ -181,10 +179,9 @@ private:
 		return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
 	}
 
+	// Only called for a device with valid samples, each of which added a value.
 	static double Percentile(std::vector<double> &v, double q)
 	{
-		if (v.empty())
-			return 0.0;
 		const size_t k = static_cast<size_t>(q * (v.size() - 1) + 0.5);
 		std::nth_element(v.begin(), v.begin() + k, v.end());
 		return v[k];

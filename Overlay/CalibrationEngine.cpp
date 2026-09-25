@@ -15,105 +15,13 @@ const Eigen::Vector3d kUp(0.0, 1.0, 0.0);
 // squared-norm tolerance admits ordinary floating-point drift (~0.05% in the
 // norm) while rejecting scaled representations that would corrupt the solve.
 constexpr double MaxQuaternionNormSquaredError = 1e-3;
-constexpr size_t MaxSolverSampleBudget = 1000000;
-constexpr size_t MaxSolverPairBudget = 1000000;
-constexpr double MaxTimeOffsetSearchSteps = 100000.0;
+// Caps the correlation's resampling grid: stream timestamps come from the
+// driver, so a malformed stream can span any time range.
 constexpr double MaxResampledPointCount = 1000000.0;
-constexpr double MaxCorrelationWork = 100000000.0;
 
-// Returns nullptr when the config is usable, else the field or relation that
-// failed. The alternative on this path is a calibration that silently does not
-// run, so the refusal has to name the knob: only two of these vary in
-// production today, which means the first real failure will belong to whoever
-// adds the next one. Grouped by what each check defends.
-const char *ConfigError(const EngineConfig &config)
+inline double HuberWeight(double residual, double knee)
 {
-	auto finiteNonnegative = [](double value)
-	{
-		return std::isfinite(value) && value >= 0.0;
-	};
-	auto finitePositive = [](double value)
-	{
-		return std::isfinite(value) && value > 0.0;
-	};
-
-	// --- per-field bounds ---
-	if (!finiteNonnegative(config.timeOffsetRange) ||
-		config.timeOffsetRange > protocol::limits::MaxAbsTimeOffsetSeconds)
-		return "timeOffsetRange";
-	if (!finitePositive(config.timeOffsetStep))
-		return "timeOffsetStep";
-	if (!std::isfinite(config.fallbackTimeOffset) ||
-		std::abs(config.fallbackTimeOffset) > protocol::limits::MaxAbsTimeOffsetSeconds)
-		return "fallbackTimeOffset";
-	if (!finiteNonnegative(config.maxLinearSpeed) ||
-		config.maxLinearSpeed > protocol::limits::MaxAbsLinearVelocityMetersPerSecond)
-		return "maxLinearSpeed";
-	if (!finiteNonnegative(config.maxAngularSpeed) ||
-		config.maxAngularSpeed > protocol::limits::MaxAbsAngularVelocityRadiansPerSecond)
-		return "maxAngularSpeed";
-	if (!finiteNonnegative(config.maxInterpolationGap) ||
-		config.maxInterpolationGap > protocol::limits::MaxAbsTimeOffsetSeconds)
-		return "maxInterpolationGap";
-	if (config.maxAlignedSamples < 8)
-		return "maxAlignedSamples";
-	if (!finiteNonnegative(config.minPairAngle))
-		return "minPairAngle";
-	if (!std::isfinite(config.maxPairAngle) || config.maxPairAngle > EIGEN_PI)
-		return "maxPairAngle";
-	if (config.minPairs < 3)
-		return "minPairs";
-	if (!finiteNonnegative(config.gravityPriorRatio) ||
-		config.gravityPriorRatio > 1000000.0)
-		return "gravityPriorRatio";
-	if (config.irlsIterations < 0 || config.irlsIterations > 100)
-		return "irlsIterations";
-	if (!finitePositive(config.huberRotation))
-		return "huberRotation";
-	if (!finitePositive(config.huberTranslation))
-		return "huberTranslation";
-	if (config.refineIterations < 0 || config.refineIterations > 100)
-		return "refineIterations";
-	if (!finitePositive(config.gainSplitSeconds) || config.gainSplitSeconds > 3600.0)
-		return "gainSplitSeconds";
-	if (!finiteNonnegative(config.gainSmoothingMargin))
-		return "gainSmoothingMargin";
-	if (!finiteNonnegative(config.maxCleanGrossDeviation))
-		return "maxCleanGrossDeviation";
-	if (!finiteNonnegative(config.maxRotationRms))
-		return "maxRotationRms";
-	if (!finiteNonnegative(config.maxTranslationRms))
-		return "maxTranslationRms";
-	if (!finiteNonnegative(config.minAxisSpread) || config.minAxisSpread > 1.0)
-		return "minAxisSpread";
-	if (!finiteNonnegative(config.minTransEigRatio) || config.minTransEigRatio > 1.0)
-		return "minTransEigRatio";
-	if (!finiteNonnegative(config.minScaleCondition) || config.minScaleCondition > 1.0)
-		return "minScaleCondition";
-	if (!finiteNonnegative(config.maxScaleStdDev))
-		return "maxScaleStdDev";
-
-	// --- ordering relations between fields ---
-	if (!(config.maxPairAngle > config.minPairAngle))
-		return "maxPairAngle must exceed minPairAngle";
-	if (!(config.maxPairs >= config.minPairs))
-		return "maxPairs must be at least minPairs";
-	// A scale search that can reach below the protocol's own floor would solve
-	// a scale the driver is not allowed to apply.
-	if (!finiteNonnegative(config.scaleSearchRange) ||
-		config.scaleSearchRange > 1.0 - protocol::limits::MinScale)
-		return "scaleSearchRange exceeds the protocol minimum scale";
-
-	// --- work budgets (bounded above by the field checks, so divisions here
-	//     are already safe) ---
-	if (config.timeOffsetRange / config.timeOffsetStep > MaxTimeOffsetSearchSteps)
-		return "timeOffsetRange / timeOffsetStep exceeds the search-step budget";
-	if (config.maxAlignedSamples > MaxSolverSampleBudget)
-		return "maxAlignedSamples exceeds the solver sample budget";
-	if (config.maxPairs > MaxSolverPairBudget)
-		return "maxPairs exceeds the solver pair budget";
-
-	return nullptr;
+	return residual <= knee ? 1.0 : knee / residual;
 }
 
 bool IsFinitePose(const PoseSample &sample)
@@ -147,21 +55,6 @@ bool IsValidStream(const std::vector<PoseSample> &stream)
 	return true;
 }
 
-bool IsValidAlignedSamples(const std::vector<AlignedSample> &samples)
-{
-	for (size_t i = 0; i < samples.size(); ++i)
-	{
-		if (!std::isfinite(samples[i].time) ||
-		    std::abs(samples[i].time) > protocol::limits::MaxAbsPoseTimestampSeconds ||
-		    !IsFinitePose(samples[i].ref) ||
-		    !IsFinitePose(samples[i].target))
-			return false;
-		if (i > 0 && !(samples[i].time > samples[i - 1].time))
-			return false;
-	}
-	return true;
-}
-
 // Shortest-arc axis/angle of a delta rotation, via quaternions.
 // Quaternion extraction keeps the axis well-conditioned even near 180 degrees,
 // where the matrix off-diagonal method degrades.
@@ -175,10 +68,10 @@ bool DeltaAxis(const Eigen::Quaterniond &from, const Eigen::Quaterniond &to,
 
 	double sinHalf = dq.vec().norm();
 	double angle = 2.0 * std::atan2(sinHalf, dq.w());
-	if (angle < minAngle || sinHalf < 1e-9)
+	if (angle < minAngle)
 		return false;
 
-	axisOut = dq.vec() / sinHalf;
+	axisOut = dq.vec() / sinHalf;   // sinHalf >= sin(minAngle / 2) > 0
 	angleOut = angle;
 	return true;
 }
@@ -188,11 +81,9 @@ struct AxisPair
 	Eigen::Vector3d ref;
 	Eigen::Vector3d target;
 	double weight = 1.0;
-	// Inverse-variance base weight: the axis direction of a noisy delta
-	// rotation carries noise ~ sigma/theta, so a near-threshold pair's axis is
-	// several times noisier than a wide sweep's yet would otherwise vote
-	// equally (Park & Martin's insight, applied to the axis-pair form). The
-	// Huber IRLS factor multiplies on top of this rather than replacing it.
+	// Inverse-variance base weight: a delta rotation's axis carries noise
+	// ~ sigma/theta (Park & Martin, applied to the axis-pair form). The Huber
+	// IRLS factor multiplies on top of this.
 	double base = 1.0;
 };
 
@@ -222,18 +113,14 @@ struct SpeedSample
 };
 
 // OpenVR has no angular-velocity availability flag. Preserve reported nonzero
-// speeds; otherwise derive an interval average and timestamp it at its midpoint.
-// Assigning that average to the left endpoint biases lag by half a sample period.
+// speeds; otherwise derive an interval average and timestamp it at its midpoint
+// (the left endpoint would bias lag by half a sample period).
 //
-// A reported speed is only used from a stream that never repeats one. A gyro
-// reading does not come back bit for bit, so a repeat is a transport holding
-// the previous value: Virtual Desktop re-predicts about 8 % of headset frames
-// from the previous sample, repeating its velocities, and a stale stream can
-// hold them for a whole run. A held value is the profile one frame late, and
-// correlating it moved the measured offset by about the held share of a frame
-// (-4.5 ms at 30 %, simulated), differently on every run. The rotations of
-// such a stream are what gets paired afterwards, so its speed is derived from
-// them throughout; one repeat in twenty is enough to call it.
+// A gyro reading never repeats bit for bit, so a repeat is a transport holding
+// the previous value (Virtual Desktop re-predicts about 8 % of headset frames).
+// A held value is the profile one frame late and moved the measured offset by
+// about the held share of a frame (-4.5 ms at 30 %, simulated), so a stream
+// with more than one repeat in twenty has its speed derived from its rotations.
 std::vector<SpeedSample> BuildSpeedProfile(const std::vector<PoseSample> &stream, double maxGap)
 {
 	size_t reportedCount = 0, repeatedCount = 0;
@@ -296,8 +183,6 @@ ResampledSpeed ResampleSpeed(const std::vector<SpeedSample> &speed,
 	ResampledSpeed out;
 	out.values.resize(count, 0.0);
 	out.valid.resize(count, 0);
-	if (speed.size() < 2)
-		return out;
 
 	size_t j = 0;
 	for (size_t i = 0; i < count; ++i)
@@ -329,36 +214,32 @@ ResampledSpeed ResampleSpeed(const std::vector<SpeedSample> &speed,
 	}
 	return out;
 }
+
 // Frequency-split amplitude gain of the reference stream's position track
-// relative to the target's, over a time-aligned uniform resampling. The
-// comparison track is the SOLVED MODEL's prediction of the reference device's
-// position (R(s p_B) + T - Q_A d, with the mount arm d estimated from the
-// data): comparing against the raw target track instead would read the
-// rotation-driven mount-lever motion — which the target has and the reference
-// lacks — as a phantom frequency tilt. Gains are reported in ref-vs-target
-// terms (the solved scale times the measured ratio), so under a genuine
-// metric difference both bands sit at the true scale. See
-// EngineConfig::gainSplitSeconds for what the two bands mean.
+// relative to the target's, over a time-aligned uniform resampling (see
+// EngineConfig::gainSplitSeconds). The comparison track is the solved model's
+// prediction of the reference device's position (R(s p_B) + T - Q_A d, with
+// the mount arm d estimated from the data): the raw target track would read
+// the rotation-driven mount-lever motion as a phantom frequency tilt. Gains
+// are the solved scale times the measured ratio, so under a genuine metric
+// difference both bands sit at the true scale.
+//
+// With the time offset estimated (always, in production), its resampling cap
+// at a 1 ms grid over the same span also bounds this 20 ms one.
 bool EstimateMotionGain(const std::vector<PoseSample> &refStream,
                         const std::vector<PoseSample> &targetStream,
                         double offset, const EngineConfig &config,
                         const EngineResult &solved,
                         double &lowOut, double &highOut)
 {
-	if (refStream.size() < 2 || targetStream.size() < 2)
-		return false;
-
 	const double dt = 0.02;
 	double start = std::max(refStream.front().time + offset, targetStream.front().time);
 	double end = std::min(refStream.back().time + offset, targetStream.back().time);
 	if (end - start < 5.0)
 		return false;
-	double resampledCount = (end - start) / dt + 1.0;
-	if (!std::isfinite(resampledCount) || resampledCount > MaxResampledPointCount)
-		return false;
 
 	std::vector<PoseSample> refAt, tgtAt;
-	refAt.reserve(static_cast<size_t>(resampledCount));
+	refAt.reserve(static_cast<size_t>((end - start) / dt + 1.0));
 	tgtAt.reserve(refAt.capacity());
 	for (double t = start; t <= end; t += dt)
 	{
@@ -376,8 +257,7 @@ bool EstimateMotionGain(const std::vector<PoseSample> &refStream,
 		return false;
 
 	// Mount arm from the reference device to the target, in the reference body
-	// frame; rough is fine (the possibly contaminated solved scale moves it by
-	// millimeters, second-order here).
+	// frame; rough is fine (a contaminated scale moves it by millimeters).
 	Eigen::Vector3d arm = Eigen::Vector3d::Zero();
 	for (size_t i = 0; i < n; ++i)
 		arm += refAt[i].rot.conjugate() *
@@ -411,8 +291,8 @@ bool EstimateMotionGain(const std::vector<PoseSample> &refStream,
 			sqLow += (ma - meanAll).squaredNorm();
 			++m;
 		}
-		lowRms = m ? std::sqrt(sqLow / static_cast<double>(m)) : 0.0;
-		highRms = m ? std::sqrt(sqHigh / static_cast<double>(m)) : 0.0;
+		lowRms = std::sqrt(sqLow / static_cast<double>(m));   // m = n - 2W >= 2W
+		highRms = std::sqrt(sqHigh / static_cast<double>(m));
 	};
 
 	double rLow = 0.0, rHigh = 0.0, tLow = 0.0, tHigh = 0.0;
@@ -424,10 +304,7 @@ bool EstimateMotionGain(const std::vector<PoseSample> &refStream,
 	if (tLow < 0.03 || tHigh < 0.008)
 		return false;
 
-	// The predicted track already carries the solved scale, so fold it back in
-	// to report gains in ref-vs-target terms: under a genuine metric
-	// difference both bands read the true scale, under smoothing the fine
-	// band reads below the gross band.
+	// The predicted track already carries the solved scale; fold it back in.
 	lowOut = solved.scale * (rLow / tLow);
 	highOut = solved.scale * (rHigh / tHigh);
 	return true;
@@ -450,16 +327,11 @@ Eigen::Vector3d LogVec(const Eigen::Quaterniond &q)
 // eq. 6/8 formulations eliminate), and optional scale, on BOTH residual sets:
 //   position:    e_p = pA_i - R (s pB_i) - t - QA_i d
 //   orientation: e_r = kRot * Log(QA_i^T R QB_i C)
-// plus the same gravity prior the Kabsch stage uses (as a virtual residual),
-// so the polish fuses the two information sources instead of trading one for
-// the other. The sequential pipeline treats the Kabsch rotation as exact in
-// the translation solve, so its residual error otherwise leaks into t as a
-// bias whose lever arm is the play-space size; positions alone, though, carry
-// far less rotation information than the orientations (short mount lever) and
-// a position-only polish would chase position noise away from the
-// orientation-optimal rotation. kRot converts radians to meters so one Huber
-// knee (huberTranslation) governs both sets. Writes back and returns true
-// only when the combined robust cost improved.
+// plus the Kabsch stage's gravity prior as a virtual residual. Positions alone
+// carry far less rotation information than the orientations (short mount
+// lever), so a position-only polish would chase position noise. kRot converts
+// radians to meters so one Huber knee (huberTranslation) governs both sets.
+// Writes back and returns true only when the combined robust cost improved.
 bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &config,
                  double gravityRatio,
                  Eigen::Matrix3d &rotInOut, Eigen::Vector3d &transInOut, double &scaleInOut)
@@ -500,10 +372,9 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 		for (const auto &a : samples)
 		{
 			double resP = (a.ref.pos - Rc * (sc * a.target.pos) - tc - a.ref.rot * dc).norm();
-			double wP = (resP <= config.huberTranslation) ? 1.0 : config.huberTranslation / resP;
 			double resR = kRot * LogVec(a.ref.rot.conjugate() * (Rq * a.target.rot * Cc)).norm();
-			double wR = (resR <= config.huberTranslation) ? 1.0 : config.huberTranslation / resR;
-			sq += wP * resP * resP + wR * resR * resR;
+			sq += HuberWeight(resP, config.huberTranslation) * resP * resP +
+				HuberWeight(resR, config.huberTranslation) * resR * resR;
 		}
 		sq += gravityWeight * (kRot * kRot) * (Rc * up - up).squaredNorm();
 		return sq;
@@ -521,8 +392,7 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 
 		auto addResidual = [&](const Eigen::Matrix<double, 3, 13> &J, const Eigen::Vector3d &e)
 		{
-			double res = e.norm();
-			double w = (res <= config.huberTranslation) ? 1.0 : config.huberTranslation / res;
+			double w = HuberWeight(e.norm(), config.huberTranslation);
 			H += w * (J.leftCols(dim).transpose() * J.leftCols(dim));
 			g += w * (J.leftCols(dim).transpose() * e);
 		};
@@ -602,8 +472,7 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 	R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
 
 	double after = robustCost(R, t, d, C, s);
-	if (!std::isfinite(after) || after >= before || !R.allFinite() ||
-		!t.allFinite() || !d.allFinite() || !C.coeffs().allFinite() || !std::isfinite(s))
+	if (!std::isfinite(after) || after >= before)
 		return false;
 	rotInOut = R;
 	transInOut = t;
@@ -616,7 +485,7 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 bool CalibrationEngine::InterpolateAt(const std::vector<PoseSample> &stream, double t,
                                       double maxGap, PoseSample &out)
 {
-	if (stream.size() < 2 || !std::isfinite(t) || !std::isfinite(maxGap) || maxGap < 0.0 ||
+	if (stream.size() < 2 || !std::isfinite(t) ||
 	    t < stream.front().time || t > stream.back().time)
 		return false;
 
@@ -646,8 +515,8 @@ bool CalibrationEngine::InterpolateAt(const std::vector<PoseSample> &stream, dou
 	if (gap > maxGap)
 		return false;   // tracking dropout; do not bridge it
 
-	double f = (gap > 1e-9) ? (t - a.time) / gap : 0.0;
-	f = std::min(1.0, std::max(0.0, f));
+	// a.time < t <= b.time, neither within 1e-9 of t, so f lies in (0, 1).
+	double f = (t - a.time) / gap;
 
 	out.time = t;
 	out.rot = a.rot.slerp(f, b.rot);
@@ -663,7 +532,6 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
                                             double &offsetOut,
                                             double *scoreOut,
                                             double *peakMarginOut,
-                                            bool validateInputs,
                                             std::string *failureOut)
 {
 	offsetOut = 0.0;
@@ -677,41 +545,22 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	};
 	if (refStream.size() < 8 || targetStream.size() < 8)
 		return refuse("fewer than 8 samples on a side");
-	if (ConfigError(config))
-		return refuse("invalid configuration");
-	if (validateInputs && (!IsValidStream(refStream) || !IsValidStream(targetStream)))
-		return refuse("invalid stream");
 
 	double start = std::max(refStream.front().time, targetStream.front().time) + config.timeOffsetRange;
 	double end = std::min(refStream.back().time, targetStream.back().time) - config.timeOffsetRange;
 	if (end - start < 0.5)
 		return refuse("the streams overlap for under 0.5 s");
 
-	// The reference profile is resampled ONCE below, onto a grid every lag's
-	// window is a whole-slot slice of. That requires the lag step to be an exact
-	// integer multiple of the grid spacing, so the spacing is DERIVED from the
-	// step instead of being clamped independently of it: both divisions here are
-	// exact in IEEE arithmetic (a power-of-two divisor, or the identity), which
-	// makes the precondition structural rather than an assumption a config could
-	// quietly break. At or above a 2 ms step this is the previous
-	// max(1e-3, step * 0.5) exactly, so the shipped default (2 ms step, 1 ms
-	// grid) is unchanged; below it the grid follows the step itself rather than
-	// the old 1 ms clamp, and the work budgets below still bound the result.
+	// The reference profile is resampled once, onto a grid every lag's window
+	// is a whole-slot slice of, so the grid spacing is derived from the lag step
+	// by an exact IEEE division (a power-of-two divisor, or the identity).
 	const int subdiv = (config.timeOffsetStep >= 2e-3) ? 2 : 1;
 	const double dt = config.timeOffsetStep / subdiv;
-	double resampledCount = (end - start) / dt;
-	if (!std::isfinite(resampledCount) || resampledCount < 64.0 ||
-		resampledCount > MaxResampledPointCount)
-		return refuse("the overlap is outside the resampling budget");
-	double searchSteps = config.timeOffsetRange / config.timeOffsetStep;
-	if ((2.0 * searchSteps + 1.0) * resampledCount > MaxCorrelationWork)
-		return refuse("the search is outside the work budget");
-	size_t count = static_cast<size_t>(resampledCount);
+	size_t count = static_cast<size_t>((end - start) / dt);
 
 	int steps = static_cast<int>(config.timeOffsetRange / config.timeOffsetStep);
 	// The shared grid spans the union of every lag's window: `steps` whole steps
-	// of lead-in and the same of run-out. It is what actually gets allocated, so
-	// it carries the same cap the per-lag window count does.
+	// of lead-in and the same of run-out.
 	double gridPointCount = static_cast<double>(count) +
 		2.0 * static_cast<double>(steps) * static_cast<double>(subdiv);
 	if (gridPointCount > MaxResampledPointCount)
@@ -724,15 +573,13 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 
 	// The reference profile over that shared grid. Lag k's window starts at
 	// start - k*step == gridStart + (steps - k)*step, and step == subdiv*dt
-	// exactly, so the window is the slice beginning at whole slot
-	// (steps - k)*subdiv — the lag-dependent part of this is an array index.
+	// exactly, so it is the slice beginning at whole slot (steps - k)*subdiv.
 	//
-	// The grid also stays inside both streams: gridStart >= max(front times)
-	// because steps*step <= timeOffsetRange, and the last grid point sits at
-	// start + steps*step + dt*(count - 1) <= min(back times) - dt. So every
-	// point is within the pose support. Derived speeds begin half an interval
-	// later; ResampleSpeed marks that unsupported leading edge invalid and holds
-	// the final speed through the last pose timestamp.
+	// The grid stays inside both streams: gridStart >= max(front times) because
+	// steps*step <= timeOffsetRange, and the last point sits at
+	// start + steps*step + dt*(count - 1) <= min(back times) - dt. Derived speeds
+	// begin half an interval later; ResampleSpeed marks that leading edge
+	// invalid and holds the final speed through the last pose timestamp.
 	const double gridStart = start - static_cast<double>(steps) * config.timeOffsetStep;
 	const ResampledSpeed refGrid = ResampleSpeed(
 		BuildSpeedProfile(refStream, config.maxInterpolationGap), gridStart, dt, gridCount,
@@ -828,29 +675,14 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 }
 
 EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &samples,
-                                             const EngineConfig &config,
-                                             bool validateInputs)
+                                             const EngineConfig &config)
 {
 	EngineResult result;
 	result.samplesUsed = samples.size();
-	if (const char *configError = ConfigError(config))
-	{
-		result.failure = EngineFailure::Config;
-		result.message = "Invalid calibration engine configuration: " +
-			std::string(configError) + ".";
-		return result;
-	}
-
 	if (samples.size() < 8)
 	{
 		result.failure = EngineFailure::NotEnoughSamples;
 		result.message = "Not enough samples collected.";
-		return result;
-	}
-	if (validateInputs && !IsValidAlignedSamples(samples))
-	{
-		result.failure = EngineFailure::InvalidSamples;
-		result.message = "Pose samples contain an invalid or out-of-range value, or non-increasing timestamps.";
 		return result;
 	}
 
@@ -880,9 +712,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				continue;
 			}
 
-			// Near a half turn the two streams' independent shortest-arc choices
-			// can land on opposite hemispheres, feeding Kabsch an anti-aligned
-			// pair the angle-mismatch gate below cannot catch (both angles ~pi).
+			// Ambiguous shortest-arc hemisphere (see EngineConfig::maxPairAngle).
 			if (refAngle > config.maxPairAngle || targetAngle > config.maxPairAngle)
 			{
 				result.pairsRejected++;
@@ -911,11 +741,12 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 
 	// Normalize the angle weights to mean 1 so the gravity-prior ratio and the
 	// Huber knee keep their configured meaning regardless of motion scale.
+	// Each base is at least minPairAngle^2, so the sum is positive.
 	{
 		double sum = 0.0;
 		for (const auto &p : pairs)
 			sum += p.base;
-		double inv = static_cast<double>(pairs.size()) / std::max(1e-12, sum);
+		double inv = static_cast<double>(pairs.size()) / sum;
 		for (auto &p : pairs)
 		{
 			p.base *= inv;
@@ -930,8 +761,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	for (const auto &p : pairs)
 		axisCov += p.ref * p.ref.transpose();
 	Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> axisEig(axisCov);
-	// Eigenvalues ascend: [2] is largest.
-	result.axisSpread = axisEig.eigenvalues()(1) / std::max(1e-12, axisEig.eigenvalues()(2));
+	// Eigenvalues ascend; the largest is at least trace/3 = pairs/3.
+	result.axisSpread = axisEig.eigenvalues()(1) / axisEig.eigenvalues()(2);
 
 	// ---- rotation: weighted Kabsch + gravity prior + IRLS ------------------
 	// The prior is scaled by how well the data itself constrains tilt: with rich
@@ -953,8 +784,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		{
 			double c = (rot * p.target).dot(p.ref);
 			double residual = std::acos(std::min(1.0, std::max(-1.0, c)));
-			p.weight = p.base *
-				((residual <= config.huberRotation) ? 1.0 : config.huberRotation / residual);
+			p.weight = p.base * HuberWeight(residual, config.huberRotation);
 		}
 		double wsum = 0.0;
 		for (const auto &p : pairs) wsum += p.weight;
@@ -972,13 +802,13 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			rotResidualSq += p.weight * residual * residual;
 			rotWeight += p.weight;
 		}
-		return std::sqrt(rotResidualSq / std::max(1e-12, rotWeight)) * 180.0 / EIGEN_PI;
+		return std::sqrt(rotResidualSq / rotWeight) * 180.0 / EIGEN_PI;
 	};
 
 	// ---- translation (+ optional scale): weighted linear least squares -----
 	// math.pdf eq. 8 over sample pairs, with the target universe pre-rotated by
-	// the solved rotation. Row blocks are linear in the scale, so scale search
-	// reuses the same decomposition inputs.
+	// the solved rotation. Rows are linear in the scale, so the joint (t, s)
+	// solve reuses them.
 	struct TransRow
 	{
 		Eigen::Matrix3d dQ;
@@ -993,10 +823,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	auto buildRows = [&samples, &rows](const Eigen::Matrix3d &rotM)
 	{
 		rows.clear();
-		// Each of these is a property of ONE sample, so derive it once per
-		// sample rather than once per pair: the multi-lag pairing below visits
-		// most samples several times and would otherwise rebuild the same
-		// rotation matrices on every visit.
+		// Per-sample terms, derived once: the multi-lag pairing visits most
+		// samples several times.
 		const size_t n = samples.size();
 		std::vector<Eigen::Matrix3d> qA(n), qB(n);
 		std::vector<Eigen::Vector3d> tgt(n);
@@ -1040,13 +868,11 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	};
 	buildRows(rot);
 
-	// Conditioning of the system the translation is actually solved from: see
-	// minTransEigRatio. Measured on the IRLS-WEIGHTED normal matrix, because a
-	// row the robust pass drives toward zero weight does not constrain t - an
-	// unweighted ratio can pass this gate on the strength of glitched rows
-	// whose diverse dQ never survives the reweighting, which is exactly the
-	// silent failure the gate exists to prevent. Called after every solve or
-	// rebuild of the rows, so it always describes the transform that ships.
+	// Conditioning of the system the translation is solved from (see
+	// minTransEigRatio), on the IRLS-weighted normal matrix: a row the robust
+	// pass drives toward zero weight does not constrain t, so glitched rows with
+	// diverse dQ must not pass the gate. Re-measured after every solve or
+	// rebuild of the rows.
 	auto weightedTransEigRatio = [&rows]() -> double
 	{
 		Eigen::Matrix3d ata = Eigen::Matrix3d::Zero();
@@ -1056,26 +882,14 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		return eig.eigenvalues()(0) / std::max(1e-12, eig.eigenvalues()(2));
 	};
 
-	// The Huber weighting rule and the weighted score, each written once. Both
-	// the IRLS loop below and the joint-refinement block need them, and
-	// transRms is what the maxTranslationRms gate judges - so with the rule
-	// copied, a change to the knee, the weight form or the 1e-12 floor applied
-	// to one leaves the other (the path that ships whenever refineIterations >
-	// 0, the default) gated on a residual computed under the old rule, both
-	// numbers finite and plausible.
-	//
-	// They stay SEPARATE on purpose. solveTranslation scores with the weights
-	// its last reweight produced - its loop solves and then breaks without
-	// reweighting - while the refinement block reweights at the refined
-	// transform first. Fusing them into one reweight-and-score would quietly
-	// change the solver's own scores.
+	// Shared by the IRLS loop and the refinement block. Kept separate:
+	// solveTranslation scores with the weights of its last reweight, while the
+	// refinement block reweights at the refined transform before scoring.
 	auto reweightRows = [&rows, &config](const Eigen::Vector3d &t, double scale)
 	{
 		for (auto &r : rows)
-		{
-			double residual = (r.dQ * t - (r.base + scale * r.scalePart)).norm();
-			r.weight = (residual <= config.huberTranslation) ? 1.0 : config.huberTranslation / residual;
-		}
+			r.weight = HuberWeight((r.dQ * t - (r.base + scale * r.scalePart)).norm(),
+				config.huberTranslation);
 	};
 	auto weightedRms = [&rows](const Eigen::Vector3d &t, double scale) -> double
 	{
@@ -1086,7 +900,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			sq += r.weight * residual * residual;
 			wsum += r.weight;
 		}
-		return std::sqrt(sq / std::max(1e-12, wsum));
+		return std::sqrt(sq / wsum);   // every Huber weight is positive
 	};
 
 	auto solveTranslation = [&rows, &config, &reweightRows, &weightedRms](
@@ -1119,44 +933,51 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	Eigen::Vector3d translation;
 	double transRms = solveTranslation(1.0, translation);
 
+	// Normal equations of the joint (t, s) system, leaving out every row that
+	// touches a sample in [skipBegin, skipEnd) (the jackknife's blocks).
+	auto jointNormalEquations = [&rows](size_t skipBegin, size_t skipEnd,
+		Eigen::Matrix4d &ata, Eigen::Vector4d &atb)
+	{
+		ata.setZero();
+		atb.setZero();
+		for (const auto &r : rows)
+		{
+			if ((r.first >= skipBegin && r.first < skipEnd) ||
+				(r.second >= skipBegin && r.second < skipEnd))
+				continue;
+			Eigen::Matrix<double, 3, 4> a;
+			a.leftCols<3>() = r.dQ;
+			a.col(3) = -r.scalePart;
+			ata += r.weight * a.transpose() * a;
+			atb += r.weight * a.transpose() * r.base;
+		}
+	};
+
 	if (config.solveScale)
 	{
-		// Translation and scale are one linear system. Solving them jointly avoids
-		// a nested 1-D search whose objective inherited a different IRLS history at
-		// each candidate and exposes the conditional scale information directly.
-		// Seed the joint system with the robust fixed-scale translation solve
-		// above. Starting scale in an unweighted errors-in-variables system lets a
-		// handful of corrupted target positions drag both the scale column and RHS
-		// to a search bound before IRLS has identified them.
+		// Translation and scale are one linear system, seeded with the robust
+		// fixed-scale solve above: an unweighted start would let a handful of
+		// corrupted target positions drag the scale to a bound before IRLS has
+		// identified them.
 		auto reweightJointRows = [&rows, &config](
 			const Eigen::Vector3d &t, double candidateScale)
 		{
 			for (auto &r : rows)
 			{
-				double residual = (r.dQ * t -
-					(r.base + candidateScale * r.scalePart)).norm();
-				double ratio = residual <= config.huberTranslation
-					? 1.0 : config.huberTranslation / residual;
+				double ratio = HuberWeight((r.dQ * t -
+					(r.base + candidateScale * r.scalePart)).norm(), config.huberTranslation);
 				// Scale is an errors-in-variables column: a corrupted target
-				// position increases both its residual and its leverage. Squaring the
-				// Huber ratio bounds that leverage instead of letting one bad point
-				// pull the metric scale through every pair containing it.
+				// position raises both its residual and its leverage, and the
+				// squared ratio bounds that leverage.
 				r.weight = ratio * ratio;
 			}
 		};
 		reweightJointRows(translation, scale);
 		for (int iter = 0; iter <= 2 * config.irlsIterations; ++iter)
 		{
-			Eigen::Matrix4d ata = Eigen::Matrix4d::Zero();
-			Eigen::Vector4d atb = Eigen::Vector4d::Zero();
-			for (const auto &r : rows)
-			{
-				Eigen::Matrix<double, 3, 4> a;
-				a.leftCols<3>() = r.dQ;
-				a.col(3) = -r.scalePart;
-				ata += r.weight * a.transpose() * a;
-				atb += r.weight * a.transpose() * r.base;
-			}
+			Eigen::Matrix4d ata;
+			Eigen::Vector4d atb;
+			jointNormalEquations(0, 0, ata, atb);
 			Eigen::Vector4d solved = ata.ldlt().solve(atb);
 			translation = solved.head<3>();
 			scale = std::min(1.0 + config.scaleSearchRange,
@@ -1177,12 +998,8 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	result.transEigRatio = weightedTransEigRatio();
 
 	// ---- joint refinement (see EngineConfig::refineIterations) -------------
-	// Pareto guard: the polish only optimizes position residuals, which carry
-	// far less rotation information than the axis pairs (short mount lever),
-	// so it is accepted only when it does not measurably worsen the axis-pair
-	// fit — otherwise it would chase position noise away from the
-	// orientation-optimal rotation. Rejected polishes leave the sequential
-	// result untouched.
+	// Pareto guard: the polish is accepted only when it does not measurably
+	// worsen the axis-pair fit; otherwise the sequential result stands.
 	if (config.refineIterations > 0)
 	{
 		Eigen::Matrix3d rotJ = rot;
@@ -1232,16 +1049,13 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		result.scaleStdDev = std::sqrt(variance /
 			std::max(1e-12, conditionalInformation));
 
-		// That is the textbook figure, and it counts every row as an
-		// independent measurement. They are not: a row is a PAIR of samples
-		// and each sample sits in about a dozen of them, and a headset's
-		// position error wanders over a second or more rather than redrawing
-		// every frame. Simulated, the figure understated the real scatter of
-		// the scale 2.2x on white noise and 18x with 2 mm of slow wander, and
-		// one live session reported 0.0007 for a scale the next calibration
-		// contradicted by 0.028. The delete-one-block jackknife makes neither
-		// assumption: re-solve with each stretch of the collection left out
-		// and see how far the scale moves. The larger of the two is reported.
+		// That textbook figure treats every row as independent, but rows are
+		// overlapping sample pairs and a headset's position error wanders over a
+		// second or more: simulated, it understated the scale's real scatter
+		// 2.2x on white noise and 18x with 2 mm of slow wander, and one live
+		// session reported 0.0007 for a scale the next calibration contradicted
+		// by 0.028. The delete-one-block jackknife assumes neither; the larger
+		// of the two is reported.
 		const size_t sampleCount = samples.size();
 		const size_t blocks = config.scaleJackknifeBlocks;
 		if (blocks >= 2 && sampleCount >= 4 * blocks)
@@ -1249,21 +1063,10 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			std::vector<double> leftOut;
 			for (size_t b = 0; b < blocks; ++b)
 			{
-				const size_t begin = b * sampleCount / blocks;
-				const size_t end = (b + 1) * sampleCount / blocks;
-				Eigen::Matrix4d ata = Eigen::Matrix4d::Zero();
-				Eigen::Vector4d atb = Eigen::Vector4d::Zero();
-				for (const auto &r : rows)
-				{
-					if ((r.first >= begin && r.first < end) ||
-						(r.second >= begin && r.second < end))
-						continue;
-					Eigen::Matrix<double, 3, 4> a;
-					a.leftCols<3>() = r.dQ;
-					a.col(3) = -r.scalePart;
-					ata += r.weight * a.transpose() * a;
-					atb += r.weight * a.transpose() * r.base;
-				}
+				Eigen::Matrix4d ata;
+				Eigen::Vector4d atb;
+				jointNormalEquations(b * sampleCount / blocks,
+					(b + 1) * sampleCount / blocks, ata, atb);
 				Eigen::LDLT<Eigen::Matrix4d> factor(ata);
 				if (factor.info() != Eigen::Success || !factor.isPositive())
 					continue;
@@ -1292,8 +1095,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				result.scaleStdDev = std::max(result.scaleStdDev, 1.0);
 			}
 		}
-		result.scaleIdentifiable = std::isfinite(result.scaleCondition) &&
-			std::isfinite(result.scaleStdDev) &&
+		result.scaleIdentifiable =
 			result.scaleCondition >= config.minScaleCondition &&
 			result.scaleStdDev <= config.maxScaleStdDev;
 	}
@@ -1324,9 +1126,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		return result;
 	}
 	if (result.translation.cwiseAbs().maxCoeff() >
-		protocol::limits::MaxAbsTranslationMeters ||
-		result.scale < protocol::limits::MinScale ||
-		result.scale > protocol::limits::MaxScale)
+		protocol::limits::MaxAbsTranslationMeters)
 	{
 		result.failure = EngineFailure::OutOfRange;
 		result.message = "Calibration solve produced a transform outside the supported range.";
@@ -1372,14 +1172,6 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
                                       const EngineConfig &config)
 {
 	EngineResult failure;
-	if (const char *configError = ConfigError(config))
-	{
-		failure.failure = EngineFailure::Config;
-		failure.message = "Invalid calibration engine configuration: " +
-			std::string(configError) + ".";
-		return failure;
-	}
-
 	if (refStream.size() < 8 || targetStream.size() < 8)
 	{
 		failure.failure = EngineFailure::NotEnoughSamples;
@@ -1403,7 +1195,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	if (config.estimateTimeOffset)
 	{
 		offsetKnown = EstimateTimeOffset(refStream, targetStream, config, offset,
-			&offsetScore, &offsetPeakMargin, false, &offsetFailure);
+			&offsetScore, &offsetPeakMargin, &offsetFailure);
 		if (!offsetKnown && config.useFallbackTimeOffset)
 		{
 			offset = config.fallbackTimeOffset;
@@ -1452,16 +1244,11 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 		aligned.swap(thinned);
 	}
 
-	// Streams were validated above and alignment preserves order/finiteness.
-	EngineResult result = SolveAligned(aligned, config, false);
+	EngineResult result = SolveAligned(aligned, config);
 
 	// ---- motion-amplitude gain diagnostic + scale guard --------------------
-	// (see EngineConfig::gainSplitSeconds). When the fine band's gain sits
-	// below the gross band's, the reference stream is low-passing motion and
-	// the least-squares scale is dragged toward the fine-band gain; the
-	// gross-band gain is usable only when it remains near unity. If gross is
-	// attenuated too, neither measured band identifies physical metric scale,
-	// so re-solve at neutral scale rather than applying contaminated motion.
+	// (see EngineConfig::gainSplitSeconds). A contaminated scale is re-solved
+	// at the clean gross-band gain, or at neutral scale.
 	double gainLow = 0.0, gainHigh = 0.0;
 	bool gainValid = result.valid &&
 		EstimateMotionGain(refStream, targetStream, offset, config, result, gainLow, gainHigh);
@@ -1470,15 +1257,10 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	bool bandMismatch = gainValid &&
 		std::abs(gainHigh - gainLow) > config.gainSmoothingMargin;
 
-	// A guard that runs only when its own detector succeeded cannot honour "a
-	// contaminated free-scale fit is never applied". EstimateMotionGain
-	// abstains on six conditions that have nothing to do with whether
-	// smoothing is present, and two of them fire precisely in the
-	// low-translation regime the calibration instructions produce (vary
-	// rotation about two axes, which a user can do largely in place). An
-	// abstention means the scale is not identifiable from this motion, not
-	// that it is clean - so take the same guarded path at neutral scale
-	// instead of committing and persisting the free fit with no log line.
+	// EstimateMotionGain abstains in the low-translation regime the calibration
+	// instructions produce (rotation largely in place). An abstention means the
+	// scale is not identifiable from this motion, not that it is clean, so it
+	// takes the same guarded path at neutral scale.
 	bool scaleNotIdentifiable = !gainValid || !result.scaleIdentifiable;
 
 	if (result.valid && config.solveScale && config.pinScaleOnSmoothing &&
@@ -1503,7 +1285,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 			a.target.pos *= guardedScale;
 			a.target.vel *= guardedScale;
 		}
-		EngineResult r2 = SolveAligned(scaled, pinnedConfig, false);
+		EngineResult r2 = SolveAligned(scaled, pinnedConfig);
 		if (r2.valid)
 		{
 			r2.scaleCondition = result.scaleCondition;
@@ -1524,8 +1306,7 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 		{
 			// Never silently fall back to the contaminated free-scale fit.
 			result.valid = false;
-			result.failure = r2.failure != EngineFailure::None
-				? r2.failure : EngineFailure::ScaleNotIdentifiable;
+			result.failure = r2.failure;
 			result.message = std::string(scaleNotIdentifiable
 					? "Playspace scale could not be identified from this motion"
 					: "Frequency-dependent motion gain was detected") +

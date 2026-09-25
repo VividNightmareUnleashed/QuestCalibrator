@@ -95,10 +95,10 @@ void EmitChange(const Config &cfg, double t, const std::vector<int> &from, const
 } // namespace
 
 Output Run(const Config &cfg, const Truth &truth,
-	const std::vector<VisibilityChange> &schedule, double duration, unsigned seed)
+	const std::vector<VisibilityChange> &schedule, double duration)
 {
 	Output out;
-	std::mt19937 rng(seed);
+	std::mt19937 rng(1);
 	std::uniform_real_distribution<double> jitter(-cfg.positionJitter, cfg.positionJitter);
 
 	std::vector<int> visible;
@@ -146,7 +146,6 @@ Output Run(const Config &cfg, const Truth &truth,
 		const TruthSample now = truth(t);
 		Frame f;
 		f.time = t;
-		f.stations = count;
 		Eigen::Vector3d position = now.position;
 		Eigen::Vector3d velocity = now.velocity;
 		bool valid = true;
@@ -158,7 +157,6 @@ Output Run(const Config &cfg, const Truth &truth,
 		}
 		else if (count == 0)
 		{
-			f.optical = false;
 			const double coasting = t - coastSince;
 			position = coastOrigin + coastVelocity * coasting + 0.5 * cfg.coastBias * coasting * coasting;
 			velocity = coastVelocity + cfg.coastBias * coasting;

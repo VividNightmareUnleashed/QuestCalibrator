@@ -4,7 +4,7 @@
 // program parses or validates. Each takes arbitrary bytes and returns "" when
 // every property holds, or the property that failed. Two drivers run them:
 // Tests/Fuzz/FuzzMain.cpp under libFuzzer and AddressSanitizer
-// (tools/fuzz.ps1), and Tests/FuzzReplayTests.cpp, which replays the seeds
+// (tools/fuzz.ps1), and Tests/PropertyTests.cpp, which replays the seeds
 // below and seeded mutations of them in every harness run. Refusing an input
 // is always allowed; what an input may not do is crash, throw anything but
 // the exception its caller catches, or be accepted in a shape the rest of the

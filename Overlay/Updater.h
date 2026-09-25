@@ -70,6 +70,11 @@ private:
 	void RunChecks(uint64_t revision);
 	void RunCheck(uint64_t revision);
 	bool IsCurrent(uint64_t revision) const;
+	// Requires `mutex`.
+	bool IsCurrentLocked(uint64_t checkRevision) const
+	{
+		return enabled && !stopping && revision == checkRevision;
+	}
 	bool Publish(uint64_t revision, State state, const std::string &message,
 		const std::string &version = std::string(), uint64_t downloaded = 0,
 		uint64_t total = 0);

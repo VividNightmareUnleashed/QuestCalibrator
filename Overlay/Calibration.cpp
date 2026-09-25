@@ -34,6 +34,15 @@ static int CollectorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> CollectorScratch;
 static double QpcToSeconds = 0.0;
 
+// The ring's clock (QPC seconds). QueryPerformanceCounter cannot fail on
+// Windows XP or later.
+static double QpcNowSeconds()
+{
+	LARGE_INTEGER now;
+	QueryPerformanceCounter(&now);
+	return static_cast<double>(now.QuadPart) * QpcToSeconds;
+}
+
 static std::unique_ptr<DriftMonitor> Drift;
 
 // Base station visibility from SteamVR's lighthouse log (LighthouseLog.h):
@@ -76,10 +85,8 @@ struct MonitorState
 	bool freezeNotified = false;
 	bool unstableNotified = false;
 
-	// Only the stream-derived half. The owner cache invalidates on its own key,
-	// the failure cooldowns are session-rate policy, and the one-shot flags are
-	// per-calibration policy -- none of them describe the observation window, so
-	// a drain hole must not clear them.
+	// Only the stream-derived half: the one-shot flags are per-calibration
+	// policy, so a drain hole must not clear them.
 	void ResetObservations()
 	{
 		for (bool &hasTime : hasComposedTime)
@@ -118,15 +125,12 @@ static void ResetContinuousObservations(CalibrationContext &ctx,
 
 // Returns whether the drain crossed a hole the loops' windows must not span:
 // a stall-sized one or a driver session boundary. The driver's isolated
-// contended-publish drops are ridden through, because both loops pair poses
-// by sample time and refuse a pair a lost pose stretched too far. Clearing
-// the window for each one starved them: simulated with a pose lost every
-// 18 s, the legacy loop's 25 s window never filled, and at one every 4 s
-// neither method applied a correction.
+// contended-publish drops are ridden through: both loops pair poses by sample
+// time, and clearing the window for each drop starved them (simulated, a pose
+// lost every 18 s kept the legacy loop's 25 s window from ever filling).
 static bool DrainContinuousInput(CalibrationContext &ctx)
 {
-	// The whole hole in front of the batch, for the reason given in
-	// RuntimeMonitorTick.
+	// The whole hole in front of the batch (see RuntimeMonitorTick).
 	PoseStreamHub::Hole hole;
 	const uint64_t dropped = PoseHub.Drain(ContinuousConsumer, ContinuousScratch, &hole);
 	auto &diagnostics = ctx.continuousDiagnostics;
@@ -145,9 +149,7 @@ CalibrationContext CalCtx;
 DiagnosticCapture CaptureCalibrationDiagnostics()
 {
 	DiagnosticCapture capture{ PoseHub.ReadDiagnostics(), questcal::CaptureDriverSyncDiagnostics() };
-	LARGE_INTEGER now{};
-	if (QueryPerformanceCounter(&now))
-		capture.sampleClock = static_cast<double>(now.QuadPart) * QpcToSeconds;
+	capture.sampleClock = QpcNowSeconds();
 	if (auto settings = vr::VRSettings())
 		capture.steamVrWorldScale = settings->GetFloat(vr::k_pch_SteamVR_Section,
 			vr::k_pch_SteamVR_WorldScale_Float, &capture.worldScaleError);
@@ -260,8 +262,7 @@ void AppendSessionLog(const std::string &msg)
 void InitCalibrator()
 {
 	LARGE_INTEGER freq{};
-	if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0)
-		throw std::runtime_error("QueryPerformanceFrequency failed");
+	QueryPerformanceFrequency(&freq);
 	QpcToSeconds = 1.0 / static_cast<double>(freq.QuadPart);
 
 	// The hub keeps draining the driver's shmem ring on its own thread even
@@ -396,11 +397,9 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 			}
 		}
 		// The composed time folds in the driver's jittery poseTimeOffset, so
-		// the odd inversion occurs in healthy data; drop it here rather than
-		// let the solver fail the whole collection (same policy as
-		// ContinuousAlignment::PushReference). This guard is buffer-relative on
-		// purpose: it compares against this collection's own tail, not any
-		// device-global watermark the monitors keep.
+		// the odd inversion occurs in healthy data; drop it here (relative to
+		// this collection's tail) rather than let the solver refuse the whole
+		// collection.
 		questcal::PoseSample sample;
 		if (s.deviceId == run.referenceId)
 		{
@@ -430,10 +429,9 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 static void CollectFromRuntimePoses(CalibrationContext &ctx, double now)
 {
 	auto &run = ctx.run;
+	// The run's ids were bounds-checked when it began.
 	auto push = [&](uint32_t id, std::vector<questcal::PoseSample> &into, double &lastTime)
 	{
-		if (id >= vr::k_unMaxTrackedDeviceCount)
-			return;
 		const auto &p = ctx.devicePoses[id];
 		if (!p.bPoseIsValid || p.eTrackingResult != vr::TrackingResult_Running_OK)
 			return;
@@ -463,9 +461,7 @@ static void CollectFromRuntimePoses(CalibrationContext &ctx, double now)
 // ---------------------------------------------------------------------------
 // Runtime monitoring: drift staleness (detect + notify only, never corrects)
 
-// Supplied by the app shell (see Calibration.h). An absent sink is a normal
-// state, not an error: -uipreview never installs one, and it degrades to
-// log-only exactly as a not-yet-created overlay handle did.
+// Supplied by the app shell (see Calibration.h); absent under -uipreview.
 static std::function<void(const char *)> ToastSink;
 
 void SetToastSink(std::function<void(const char *)> sink)
@@ -483,20 +479,12 @@ static void NotifyOnce(CalibrationContext &ctx, bool &notified, const char *line
 		return;
 	notified = true;
 
-	// Unconditional and first: "the user turned toasts off" and "there is
-	// nowhere to toast" must both still leave the episode in the session log,
-	// which is the bug-report surface for a GUI binary.
+	// Always logged, even with toasts off or no sink.
 	ctx.Tell(std::string(line) + "\n", tone);
 
 	if (showToast && ToastSink)
 		ToastSink(toast);
 }
-
-// The three one-shot flags live on MonitorState with the rest of the monitors'
-// between-tick state: one notification per calibration (freeze also re-arms on
-// a resume event), and "observations unstable" is benign and self-healing (bad
-// lighthouse geometry while lying down), so the log records every episode but
-// the toast never repeats.
 
 static void NotifyStaleAlignment(CalibrationContext &ctx)
 {
@@ -580,20 +568,18 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 	if (time - LastSerialScan >= 2.0)
 	{
 		LastSerialScan = time;
-		if (auto *system = vr::VRSystem())
+		auto *system = vr::VRSystem();
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 		{
-			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+			DeviceClasses[id] = system->GetTrackedDeviceClass(id);
+			if (DeviceClasses[id] == vr::TrackedDeviceClass_Invalid)
 			{
-				DeviceClasses[id] = system->GetTrackedDeviceClass(id);
-				if (DeviceClasses[id] == vr::TrackedDeviceClass_Invalid)
-				{
-					DeviceSerials[id].clear();
-					continue;
-				}
-				std::string serial;
-				if (ReadTrackedDeviceString(id, vr::Prop_SerialNumber_String, serial))
-					DeviceSerials[id] = serial;
+				DeviceSerials[id].clear();
+				continue;
 			}
+			std::string serial;
+			if (ReadTrackedDeviceString(id, vr::Prop_SerialNumber_String, serial))
+				DeviceSerials[id] = serial;
 		}
 	}
 
@@ -629,9 +615,7 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 		return;
 
 	// The lines carry wall-clock stamps; the monitors run on the ring clock.
-	LARGE_INTEGER qpcNow{};
-	QueryPerformanceCounter(&qpcNow);
-	const double ringNow = static_cast<double>(qpcNow.QuadPart) * QpcToSeconds;
+	const double ringNow = QpcNowSeconds();
 	const double unixNow = std::chrono::duration<double>(
 		std::chrono::system_clock::now().time_since_epoch()).count();
 	for (const auto &e : events)
@@ -682,11 +666,10 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		MonitorActive = true;
 	}
 
-	// Judge the whole hole in front of the batch, from the drain itself. A
-	// session boundary reaches the count as a one-sample gap, and any
+	// Judge the whole hole in front of the batch, from the drain itself: a
 	// StreamBoundaries read before or after the drain can land on the wrong
-	// side of it; and a hole that ends one drain and continues into the next
-	// passes the leash share by share.
+	// side of a session boundary, and a hole split across two drains would
+	// pass the leash share by share.
 	PoseStreamHub::Hole hole;
 	uint64_t dropped = PoseHub.Drain(MonitorConsumer, MonitorScratch, &hole);
 	if (!ringpose::MonitorGapTolerable(hole.size, hole.sessionBoundary))
@@ -732,10 +715,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		questcal::PoseSample sample;
 		if (!TryComposeRingSample(s, QpcToSeconds, sample))
 			continue;
-		// Device-relative monotonicity: this monitor keeps a per-device
-		// watermark across drains, unlike the collector's buffer-relative guard
-		// and the HMD observation's single-endpoint one. Same shape, three
-		// different domain rules — deliberately not one shared guard.
+		// Per-device watermark across drains.
 		double composedTime = sample.time;
 		if (Monitors.hasComposedTime[s.deviceId] &&
 			composedTime <= Monitors.lastComposedTime[s.deviceId])
@@ -795,13 +775,11 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		}
 	}
 
-	// A compensated jump moved the raw stream under the drift windows (an
-	// exact wfd rebase can be small enough to read as a "slide" while still
-	// leaving the window stationary); it was corrected, so it is not
-	// staleness evidence. Jump acceptance always lands before the slide
-	// window can conclude (~0.25 s vs ~2.5 s), so dropping the window here
-	// also discards any queued event from the same discontinuity. The
-	// continuous window straddles the same rebase and must refill too.
+	// A compensated jump moved the raw stream under the drift windows; it was
+	// corrected, so it is not staleness evidence. Jump acceptance lands before
+	// a slide window can conclude (~0.25 s vs ~2.5 s), so dropping the window
+	// also discards any event queued from the same discontinuity. The
+	// continuous windows straddle the same rebase and must refill too.
 	if (jumped)
 	{
 		Drift->Reset();
@@ -927,16 +905,8 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			Continuous->PushTarget(sample);
 	}
 
-	// The engine's clock is the ring's (QPC seconds), not the UI clock. Checked
-	// like every other QueryPerformanceCounter call in this file: the documented
-	// failure return leaves the value indeterminate, and it feeds the window trim
-	// cutoff, the coast-gap freshness test and every confirm timer in Decide.
-	// Drained samples are already in the engine; skipping this tick's update
-	// only defers the decision.
-	LARGE_INTEGER qnow;
-	if (!QueryPerformanceCounter(&qnow))
-		return;
-	double ringNow = static_cast<double>(qnow.QuadPart) * QpcToSeconds;
+	// The engine's clock is the ring's, not the UI clock.
+	const double ringNow = QpcNowSeconds();
 
 	// The headset tracker's own lighthouse tracking (LighthouseVisibility.h).
 	// A new solution or a change of stations can move its pose by centimeters
@@ -963,24 +933,18 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	Continuous->SetTargetSettling(trackerSeen &&
 		ctx.lighthouse.Settling(ctx.continuousTrackerSerial, ringNow));
 
-	// Re-evaluate the current field for each retained observation. Comparing a
+	// Re-evaluate the current field for each retained observation: comparing a
 	// multi-position history with only the latest spot turns healthy anchor
-	// gradients into apparent temporal drift as the user walks through them.
-	// Always passed, from the same active set the driver is blending: with no
-	// active anchors the blend returns the base calibration exactly, so there
-	// is no second way to spell "the field is off" that could disagree.
+	// gradients into apparent drift. With no active anchors the blend returns
+	// the base calibration exactly.
 	auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
 		Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
 	{
-		// The field is looked up at the tracker's BASE-CALIBRATED world
-		// position, so the calibrated scale multiplies the raw position first -
-		// shared with the drift feed's proximity test so there is one spelling
-		// of where that factor goes.
+		// Looked up at the tracker's base-calibrated position, with the width
+		// SendAlignmentField puts on the wire.
 		Eigen::Vector3d basePos = ringpose::BaseCalibratedPosition(
 			ctx.transform.rotation, ctx.transform.translationMeters, ctx.transform.scale,
 			targetRawPos);
-		// Same width SendAlignmentField put on the wire - the expectation has to
-		// be the field the driver is actually applying, not a similar one.
 		questcal::BlendedFieldCalibration(ctx.ActiveFieldAnchors(), ctx.transform.rotation,
 			ctx.transform.translationMeters, basePos, rotationOut, translationOut,
 			questcal::FieldBlendSigmaMeters);
@@ -1052,10 +1016,8 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			{
 				ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
 				ctx.autoCorrectionsApplied++;
-
-				// The evidence these counters accumulated was just acted on (same
-				// rationale as the post-jump reset); the monitor windows themselves
-				// stay valid because a correction never moves raw poses.
+				// The drift evidence was just acted on; the monitor windows stay
+				// valid because a correction never moves raw poses.
 				ctx.driftSlideEvents = 0;
 				ctx.driftMaxSlideM = 0.0;
 				ctx.discontinuousLossEvents = 0;
@@ -1094,11 +1056,9 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		char buf[256];
 		switch (ev.type)
 		{
-		// The freeze keeps its evidence in the detail line. What the player
-		// reads is the fact (the readings disagree with the calibration by more
-		// than the loop will correct on its own), not a diagnosis: a mounted
-		// tracker does not move, and blaming it sent people to check hardware
-		// that was fine.
+		// The freeze keeps its evidence in the detail line. The player reads
+		// the fact, not a diagnosis: a mounted tracker does not move, so
+		// blaming it sends people to check hardware that is fine.
 		case questcal::ContinuousAlignment::Event::FrozenLargeDeviation:
 			snprintf(buf, sizeof buf,
 				"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm%s\n",
@@ -1208,12 +1168,13 @@ static bool EndCalibrationRun(CalibrationContext &ctx)
 	return heldDriver;
 }
 
+// Called only from within CalibrationTick, after its VRSystem() check.
 static void AbortCalibration(CalibrationContext &ctx, const StopReason &reason)
 {
 	ctx.lastRunHint = reason.hint;
 	ctx.Outcome("Calibration stopped", reason.body, reason.action, reason.detail,
 		CalibrationContext::Tone::Warn);
-	if (EndCalibrationRun(ctx) && vr::VRSystem())
+	if (EndCalibrationRun(ctx))
 		SynchronizeCalibrationDriver(ctx);
 }
 
@@ -1240,11 +1201,7 @@ static uint32_t LighthouseRestarts(const CalibrationContext &ctx, const std::str
 
 static bool LighthouseRestartedRecently(const CalibrationContext &ctx, const std::string &serial)
 {
-	LARGE_INTEGER qpcNow{};
-	if (serial.empty() || !QueryPerformanceCounter(&qpcNow))
-		return false;
-	return ctx.lighthouse.RestartedWithin(serial,
-		static_cast<double>(qpcNow.QuadPart) * QpcToSeconds, 5.0);
+	return !serial.empty() && ctx.lighthouse.RestartedWithin(serial, QpcNowSeconds(), 5.0);
 }
 
 // Reading of a refused solve for the modal: what went wrong and what to
@@ -1295,10 +1252,6 @@ static StopReason DescribeSolveFailure(const questcal::EngineResult &result)
 	case EngineFailure::ScaleNotIdentifiable:
 		reason.body = "Playspace scale couldn't be determined from this motion.";
 		reason.action = "Cover a larger area, or turn off Solve playspace scale in Settings.";
-		break;
-	case EngineFailure::Config:
-		reason.body = "Something went wrong inside QuestCalibrator.";
-		reason.action = "Save a diagnostics file in Settings and send it with your report.";
 		break;
 	case EngineFailure::NonFinite:
 	case EngineFailure::OutOfRange:
@@ -1457,23 +1410,18 @@ static void FinishCalibration(CalibrationContext &ctx)
 		ctx.Log(buf);
 	}
 
+	// Used only after a valid solve, which had at least 8 target samples.
 	Eigen::Vector3d targetCentroid = Eigen::Vector3d::Zero();
-	if (!run.targetSamples.empty())
-	{
-		for (const auto &s : run.targetSamples)
-			targetCentroid += s.pos;
-		targetCentroid /= static_cast<double>(run.targetSamples.size());
-	}
+	for (const auto &s : run.targetSamples)
+		targetCentroid += s.pos;
+	targetCentroid /= static_cast<double>(run.targetSamples.size());
 
 	// Mount extrinsic for continuous calibration: a head-referenced base
-	// solve's buffers directly measure the tracker's pose in the HMD frame.
-	// Must run before the buffers are cleared. The rigidity gate keeps a
+	// solve's buffers directly measure the tracker's pose in the HMD frame, so
+	// this runs before the buffers are cleared. The rigidity gate keeps a
 	// hand-held calibration from arming continuous mode; on failure any
-	// previously learned mount (which did not move just because this solve
-	// happened without the tracker) is kept.
-	// What the headset-tracker half of the run achieved. It is folded into the
-	// run's single outcome below: a line emitted here would sit above the
-	// headline, and the result stage only reads from the headline down.
+	// previously learned mount is kept. The outcome is folded into the run's
+	// single outcome below, under the headline.
 	struct
 	{
 		bool attempted = false;
@@ -1515,10 +1463,9 @@ static void FinishCalibration(CalibrationContext &ctx)
 		else if (ctx.continuousEnabled || run.targetSerial == ctx.continuousTrackerSerial)
 		{
 			// Said whenever the pick or the feature says this tracker is meant
-			// to be on the headset: staying silent here is how "not set up yet"
-			// became a permanent status for users who had done exactly that.
-			// A strapped tracker does not move; an inconsistent measurement
-			// means the motion was too fast for the two systems' latency.
+			// to be on the headset. A strapped tracker does not move; an
+			// inconsistent measurement means the motion was too fast for the
+			// two systems' latency.
 			mount.attempted = true;
 			mount.tooFast = true;
 			mount.note = ctx.mountExtrinsic.valid
@@ -1535,7 +1482,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		ctx.lastRunHint = reason.hint;
 		ctx.Outcome("Calibration failed", reason.body, reason.action, reason.detail,
 			CalibrationContext::Tone::Warn);
-		if (EndCalibrationRun(ctx) && vr::VRSystem())
+		if (EndCalibrationRun(ctx))
 			SynchronizeCalibrationDriver(ctx);
 		return;
 	}
@@ -1599,7 +1546,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		// does: StoreFieldAnchor resyncs only for an anchor it accepts and saves,
 		// and a refused one would otherwise leave them uncalibrated until the
 		// next idle scan.
-		if (EndCalibrationRun(ctx) && vr::VRSystem())
+		if (EndCalibrationRun(ctx))
 			SynchronizeCalibrationDriver(ctx);
 		ctx.lastRunHint = CalibrationContext::GuideHint::Success;
 		StoreFieldAnchor(ctx, result, targetCentroid);
@@ -1675,9 +1622,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		: CalibrationContext::Tone::Good;
 	if (mount.attempted)
 	{
-		// A headset-tracker run is judged on what it was for. Its result is
-		// folded into the one outcome the modal shows, instead of a line
-		// that would have landed above the headline and gone unread.
+		// A headset-tracker run is judged on what it was for.
 		if (mount.measured)
 			ctx.Outcome("Calibration complete", quality + " " + mount.note, action, "", tone);
 		else
@@ -1786,15 +1731,11 @@ void CalibrationTick(double time)
 	if (ctx.detailedLogging && ctx.continuousEnabled && time - lastInputDiagTime >= 10.0)
 	{
 		lastInputDiagTime = time;
-		LARGE_INTEGER qpcNow{};
-		const double sampleClock = QueryPerformanceCounter(&qpcNow)
-			? static_cast<double>(qpcNow.QuadPart) * QpcToSeconds : 0.0;
-		ctx.Diag(DescribeContinuousDiagnostics(ctx, sampleClock));
+		ctx.Diag(DescribeContinuousDiagnostics(ctx, QpcNowSeconds()));
 	}
 
-	// Runtime poses are only the compatibility collection source. The normal
-	// raw-ring path and all idle monitors already have timestamped samples, so
-	// querying all 64 slots at 50 Hz outside this narrow window was pure work.
+	// Runtime poses are only the compatibility collection source; the raw-ring
+	// path and the idle monitors have timestamped samples.
 	if (ctx.state == CalibrationState::Begin ||
 		(ctx.state == CalibrationState::Collecting && !ctx.run.usesPoseRing))
 	{
@@ -1856,11 +1797,9 @@ void CalibrationTick(double time)
 	{
 		auto &run = ctx.run;
 
-		// Names first: every stop reason below names the hardware the player
-		// picked (by their own name for it when they gave one), not "the
-		// reference device". A failed read falls back to the pane the pick
-		// came from; the serials are re-read strictly below, where a failure
-		// is its own stop reason.
+		// Names first, so every stop reason below names the hardware the
+		// player picked. A failed read falls back to the role; the serials are
+		// re-read strictly below, where a failure is its own stop reason.
 		if (run.referenceId < vr::k_unMaxTrackedDeviceCount)
 		{
 			ReadTrackedDeviceString(run.referenceId, vr::Prop_ModelNumber_String, run.referenceModel);
@@ -1992,12 +1931,9 @@ void CalibrationTick(double time)
 		run.streamBoundariesAtStart = PoseHub.StreamBoundaries();
 		const uint64_t preflightDropped =
 			PoseHub.DrainThroughGaps(CollectorConsumer, CollectorScratch).loss;
-		LARGE_INTEGER qpcNow{};
-		bool hasClock = QueryPerformanceCounter(&qpcNow) != FALSE;
-		const char *preflightReason = hasClock ? "raw channel closed" : "QPC unavailable";
-		run.usesPoseRing = hasClock && PoseHub.RingOpen() && PreflightPoseRing(
-			run, CollectorScratch,
-			static_cast<double>(qpcNow.QuadPart) * QpcToSeconds, preflightReason);
+		const char *preflightReason = "raw channel closed";
+		run.usesPoseRing = PoseHub.RingOpen() && PreflightPoseRing(
+			run, CollectorScratch, QpcNowSeconds(), preflightReason);
 		// The loss is the idle collector's backlog overflowing since its last
 		// run (every sample of a long session reads as lost), not stream health.
 		snprintf(buf, sizeof buf, "pose preflight: %s; batch %zu samples, dropped while idle %llu",

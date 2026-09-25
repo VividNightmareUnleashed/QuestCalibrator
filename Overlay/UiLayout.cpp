@@ -31,13 +31,6 @@ YGNodeRef FlexLayout::Row(YGNodeRef parent)
 	return node;
 }
 
-YGNodeRef FlexLayout::Column(YGNodeRef parent)
-{
-	YGNodeRef node = Add(parent);
-	YGNodeStyleSetFlexDirection(node, YGFlexDirectionColumn);
-	return node;
-}
-
 YGNodeRef FlexLayout::Text(YGNodeRef parent, ImFont *font, const char *text)
 {
 	YGNodeRef node = Add(parent);

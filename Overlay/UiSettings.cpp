@@ -7,12 +7,8 @@
 void BuildSettingsScreen(const VRState &state)
 {
 	float cw = ImGui::GetContentRegionAvail().x;
-	const float gap = 12.0f;
-	(void)gap;
 
 	{
-		// No "SETTINGS" eyebrow: the lit gear in the pinned header and the
-		// list of switches already say where this is.
 		ImGui::Spacing();
 
 		// Language. Each choice is written in its own language, so a player
@@ -67,7 +63,6 @@ void BuildSettingsScreen(const VRState &state)
 			}
 		}
 
-		// Advanced mode
 		{
 			bool previous = CalCtx.uiAdvanced;
 			if (ToggleRow("##uiAdvanced", IconGauge, "Advanced mode", CalCtx.uiAdvanced,
@@ -175,7 +170,6 @@ void BuildSettingsScreen(const VRState &state)
 			}
 		}
 
-		// Solve playspace scale
 		{
 			bool previous = CalCtx.solveScale;
 			if (ToggleRow("##solveScale", IconScale,
@@ -324,16 +318,13 @@ void BuildSettingsScreen(const VRState &state)
 				ImGui::PushItemWidth(comboW);
 				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 6));
 				if (ImGui::Combo("##contTracker", &sel, items.data(), (int)items.size()) &&
-					sel >= 0 && sel < (int)candidates.size())
+					sel < (int)candidates.size())
 				{
 					if (CalCtx.continuousTrackerSerial != candidates[sel]->serial)
 					{
-						// The serial and the extrinsic are one edit -- the learned
-						// mount offset described the previous tracker, and a
-						// different physical device needs a fresh calibration --
-						// so they land together or not at all. Stating both on the
-						// candidate is what makes that atomic; there is no
-						// two-member rollback left to get wrong.
+						// The serial and the mount extrinsic are one edit: the
+						// learned offset described the previous tracker, so both
+						// land together or not at all.
 						std::string serial = candidates[sel]->serial;
 						SaveProfileFieldEdit(CalCtx,
 							[&](questcal::ProfileRecord &candidate) {
@@ -611,8 +602,6 @@ void BuildSettingsScreen(const VRState &state)
 	}
 }
 
-// Pinned under the content child by BuildMainWindow.
-
 // ---------------------------------------------------------------------------
 // Profile editor
 // ---------------------------------------------------------------------------
@@ -629,11 +618,8 @@ struct TransformEditorDraft
 
 static TransformEditorDraft g_transformDraft;
 
-// Seeding belongs with the state transition that puts the editor on screen:
-// every path into CalibrationState::Editing calls this immediately before
-// setting the state, which is why the draft needs no "is it seeded" flag of
-// its own -- the two used to be separate pieces of state that three call sites
-// had to change together.
+// Every path into CalibrationState::Editing calls this immediately before
+// setting the state, so the draft needs no "is it seeded" flag.
 void SeedTransformEditorDraft()
 {
 	g_transformDraft = TransformEditorDraft();
@@ -716,15 +702,13 @@ bool BuildProfileEditor()
 	return g_transformDraft.valid;
 }
 
-bool SaveProfileEditorDraft()
+// Only for a draft BuildProfileEditor reported valid this frame.
+void SaveProfileEditorDraft()
 {
-	if (!g_transformDraft.valid)
-		return false;
-
 	// Persistence validates and writes a narrow profile candidate before
 	// touching the live transform. Translation/scale-only edits keep the exact
 	// quaternion bits; Euler conversion occurs only after a rotation edit.
-	return SaveProfileTransformEdit(CalCtx, g_transformDraft.rotationQ,
+	SaveProfileTransformEdit(CalCtx, g_transformDraft.rotationQ,
 		g_transformDraft.translationCm * 0.01, g_transformDraft.scale,
 		g_transformDraft.rotationEdited);
 }

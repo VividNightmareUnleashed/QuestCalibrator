@@ -49,12 +49,9 @@ namespace protocol
 	// is dropped instead of blocking a pose thread.
 	struct PoseRing
 	{
-		// Capacity is a SAMPLE count. How many seconds of history it buys is
-		// entirely a function of the aggregate publish rate, and that rate has
-		// never been measured on real hardware - there is no benchmark anywhere
-		// in this repository. So the assumption is stated here and the margin is
-		// derived from it (see the static_assert below) rather than asserted in
-		// prose that silently stops being true on faster hardware.
+		// Capacity is a sample count, so the history it buys depends on the
+		// aggregate publish rate. That rate is unmeasured; it is assumed here and
+		// the margin is checked against it below.
 		static const uint64_t AssumedDeviceCount = 5;
 		static const uint64_t AssumedPerDevicePoseHz = 300;
 		static const uint64_t AssumedAggregatePoseHz =
@@ -65,8 +62,8 @@ namespace protocol
 
 		static const uint64_t Capacity = 4096;   // power of two
 		static const uint32_t Magic = 0x51435052; // "QCPR"
-		// 4: pendingFailedDrops carries a harvest generation. The size is
-		// unchanged, but a layout-3 reader would read the generation as loss.
+		// 4 gave pendingFailedDrops its harvest generation: same size, but a
+		// layout-3 reader would read the generation as loss.
 		static const uint32_t LayoutVersion = 4;
 
 		struct Slot
@@ -97,12 +94,7 @@ namespace protocol
 		std::atomic<uint64_t> discardSequence;
 		std::atomic<uint64_t> discardedLossCount;
 		std::atomic<uint32_t> claimLock;
-		// Failed publishes no slot carries yet: the count in the low 32 bits,
-		// and in the high 32 a generation that every harvest advances (see
-		// PendingDropCount). With the count alone, a harvest followed by an
-		// equal number of new failures looked unchanged to the reader's
-		// compare-exchange, which then reported the newer losses ahead of the
-		// pose that harvest had published.
+		// Failed publishes no slot carries yet (see PendingDropCount).
 		std::atomic<uint64_t> pendingFailedDrops;
 		// A heartbeat would incorrectly declare a writer dead while SteamVR is in
 		// standby. The reader instead holds a process handle for this advertised
@@ -114,50 +106,34 @@ namespace protocol
 	};
 
 	static_assert((PoseRing::Capacity & (PoseRing::Capacity - 1)) == 0, "capacity must be a power of two");
-	// The margin, computed rather than claimed: 4096 samples / 1500 Hz is ~2.7 s
-	// at the assumed rate, and the same 4096 samples are ~0.68 s at 6 devices x
-	// 1000 Hz - the assumption, not the capacity, is what the design rests on.
-	// Raising the assumed rate past ~4 kHz fires this, and the only fix is a
-	// larger Capacity, which changes sizeof(PoseRing) and therefore requires a
-	// PoseRing::LayoutVersion bump AND a new mapping name (a driver reinstall
-	// plus a SteamVR restart for every user). That cost is exactly why the real
-	// rate should be measured before the capacity is changed rather than after.
+	// 4096 samples is ~2.7 s at the assumed 1500 Hz but only ~0.68 s at 6 devices
+	// x 1000 Hz. A larger Capacity changes sizeof(PoseRing), so it needs a
+	// LayoutVersion bump and a new mapping name; measure the real rate first.
 	static_assert(PoseRing::Capacity * 1000 >=
 		PoseRing::DrainStallBudgetMs * PoseRing::AssumedAggregatePoseHz,
 		"PoseRing::Capacity no longer covers DrainStallBudgetMs at the assumed aggregate pose rate");
 	static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
 		"the shared pose queue requires lock-free 64-bit atomics");
 
-	// One spelling of "this mapping is the layout we compiled against". It was
-	// written character-identically at three sites, so a deliberate layout bump
-	// had to be honoured by three separately maintained predicates and an
-	// accidental one by none. Short-circuit order is preserved: magic first, so
-	// a foreign or zeroed section is rejected before its other fields are read.
+	// True once the mapping is initialized with the layout this build expects.
 	inline bool RingHasExpectedLayout(const PoseRing *ring)
 	{
-		return ring != nullptr &&
-			ring->initialized.load(std::memory_order_acquire) == 1 &&
+		return ring->initialized.load(std::memory_order_acquire) == 1 &&
 			ring->magic == PoseRing::Magic &&
 			ring->layoutVersion == PoseRing::LayoutVersion &&
 			ring->layoutBytes == sizeof(PoseRing);
 	}
 
-	// QUESTCALIBRATOR_SHMEM_NAME ends in ".layout4" and nothing connected the
-	// literal to the value it claims. A named mapping outlives the process that
-	// made it, so growing PoseRing without renaming strands an upgraded driver
-	// behind a smaller section an old overlay still holds: the map-at-new-size
-	// fails, Create returns false, and RunFrame retries once a second forever
-	// with one line inside vrserver as the only evidence. Bump this and the name
-	// together, or not at all.
+	// The mapping name literal ends in ".layout4".
 	static_assert(PoseRing::LayoutVersion == 4,
 		"PoseRing::LayoutVersion changed - QUESTCALIBRATOR_SHMEM_NAME must change with it");
 
 	// pendingFailedDrops holds (generation << 32) | count. A harvest replaces it
-	// with the next generation and no count, so a word a reader loaded can only
-	// still be current if nothing was harvested since. The count cannot reach
-	// 2^32 between harvests (weeks of every publish failing at the assumed
-	// rate), and the generation cannot come round in the few instructions a
-	// reader holds a word.
+	// with the next generation and no count, so a word a reader loaded is still
+	// current only if nothing was harvested since, even when later failures bring
+	// the count back to the same value. The count cannot reach 2^32 between
+	// harvests (weeks of every publish failing at the assumed rate), and the
+	// generation cannot come round in the few instructions a reader holds a word.
 	inline uint64_t PendingDropCount(uint64_t word)
 	{
 		return word & 0xffffffffull;
@@ -188,33 +164,16 @@ namespace protocol
 		{
 			if (ring != nullptr)
 				return true;
-			if (name == nullptr || *name == '\0')
-			{
-				SetLastError(ERROR_INVALID_NAME);
-				return false;
-			}
 			uint64_t processCreationTime = 0;
 			if (!QueryProcessCreationTime(GetCurrentProcess(), processCreationTime))
 				return false;
 
-			// A named mutex is the crash-recoverable owner of mapping creation and
-			// reset. The in-mapping `resetting` bit cannot fill that role by itself:
-			// if a writer dies after setting it, no surviving process can prove that
-			// it is stale. Windows abandons an owned mutex when its thread/process
-			// exits, allowing the next writer to take over safely.
-			HANDLE resetMutex = CreateWriterResetMutex(name);
+			// A named mutex, not the in-mapping `resetting` bit, owns creation and
+			// reset: Windows abandons it when its owner dies, so the next writer can
+			// take over, whereas a stale `resetting` bit cannot be proven stale.
+			HANDLE resetMutex = AcquireWriterResetMutex(name, waitBudgetMs);
 			if (resetMutex == nullptr)
 				return false;
-			// An abandoned mutex is still acquired immediately, so a zero budget
-			// costs nothing on the crash-recovery path.
-			DWORD waitResult = WaitForSingleObject(resetMutex, waitBudgetMs);
-			if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_ABANDONED)
-			{
-				DWORD error = waitResult == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
-				CloseHandle(resetMutex);
-				SetLastError(error);
-				return false;
-			}
 			struct ResetMutexGuard
 			{
 				HANDLE handle;
@@ -270,16 +229,8 @@ namespace protocol
 				}
 				ring->initialized.store(1, std::memory_order_release);
 			}
-			// The three codes below are the whole diagnostic value of this
-			// failure: the driver's only consumer is one GetLastError() log
-			// line, and each code means a different user action (reinstall the
-			// driver and restart SteamVR / another live vrserver owns the ring /
-			// readers would not drain). Close() must still run on every path -
-			// no handle or view may leak - but its UnmapViewOfFile and
-			// CloseHandle are permitted to change the thread's last error even
-			// when they succeed, so the code is asserted after the cleanup. Same
-			// preservation the reset-mutex guard performs around its own release,
-			// and that guard then carries this code out past its own teardown.
+			// Each code below is a different user action in the driver log, and
+			// Close() may change the last error, so the code is set after it.
 			else if (!HasExpectedLayout())
 			{
 				Close();
@@ -320,11 +271,9 @@ namespace protocol
 
 		void Close()
 		{
-			// Create's own failure paths call Close while they still hold the reset
-			// mutex. They get here with no owned session and no retained handle
-			// (both are established only on Create's success tail), so the retire
-			// step is skipped rather than re-entered.
-			if (ring != nullptr && ownedSessionEpoch != 0 && writerResetMutex != nullptr)
+			// Create's failure paths get here with no owned session or retained
+			// handle (both are set only on success), so they skip the retire step.
+			if (ownedSessionEpoch != 0 && writerResetMutex != nullptr)
 				RetireWriterIdentity();
 			ownedSessionEpoch = 0;
 			if (writerResetMutex) { CloseHandle(writerResetMutex); writerResetMutex = nullptr; }
@@ -344,17 +293,9 @@ namespace protocol
 		// abandoned-owner state that follows a vrserver crash.
 		static HANDLE AcquireResetOwnershipForTest(const char *name)
 		{
-			HANDLE mutex = CreateWriterResetMutex(name);
+			HANDLE mutex = AcquireWriterResetMutex(name, WriterResetMutexWaitMs);
 			if (mutex == nullptr)
 				return nullptr;
-			DWORD waitResult = WaitForSingleObject(mutex, WriterResetMutexWaitMs);
-			if (waitResult != WAIT_OBJECT_0 && waitResult != WAIT_ABANDONED)
-			{
-				DWORD error = waitResult == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
-				CloseHandle(mutex);
-				SetLastError(error);
-				return nullptr;
-			}
 
 			HANDLE mapping = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
 			if (mapping == nullptr)
@@ -420,21 +361,16 @@ namespace protocol
 				ring->writerProcessCreationTime.store(staleCreationTime,
 					std::memory_order_release);
 			}
-			ownedSessionEpoch = 0;
-			if (writerResetMutex) { CloseHandle(writerResetMutex); writerResetMutex = nullptr; }
-			if (ring) { UnmapViewOfFile(ring); ring = nullptr; }
-			if (hMap) { CloseHandle(hMap); hMap = nullptr; }
+			ownedSessionEpoch = 0;   // so Close skips retiring the identity
+			Close();
 		}
 #endif
 
 	private:
-		// Retiring the advertised owner belongs under the reset mutex exactly like
-		// publishing it. Unlocked, a departing writer that is preempted between its
-		// check and its stores can zero the identity a replacement published in the
-		// meantime, leaving a live writer that every reader reports as dead for the
-		// rest of the session. Skipping the clear when the mutex is contended is
-		// safe: a writer that never runs Close at all is already covered by the
-		// PID + creation-time liveness proof.
+		// Under the reset mutex, like publishing: unlocked, a preempted departing
+		// writer could zero the identity a replacement has just published. Skipping
+		// the clear when the mutex is contended is safe, because the PID +
+		// creation-time liveness proof already covers a writer that never retires.
 		void RetireWriterIdentity()
 		{
 			DWORD waitResult = WaitForSingleObject(writerResetMutex, WriterRetireWaitMs);
@@ -462,11 +398,6 @@ namespace protocol
 
 		static HANDLE CreateWriterResetMutex(const char *mappingName)
 		{
-			if (mappingName == nullptr || *mappingName == '\0')
-			{
-				SetLastError(ERROR_INVALID_NAME);
-				return nullptr;
-			}
 			try
 			{
 				std::string mutexName(mappingName);
@@ -478,6 +409,23 @@ namespace protocol
 				SetLastError(ERROR_NOT_ENOUGH_MEMORY);
 				return nullptr;
 			}
+		}
+
+		// Returns the owned reset mutex, or null with the last error set. An
+		// abandoned mutex is acquired immediately, so a zero budget costs nothing
+		// on the crash-recovery path.
+		static HANDLE AcquireWriterResetMutex(const char *mappingName, DWORD waitMs)
+		{
+			HANDLE mutex = CreateWriterResetMutex(mappingName);
+			if (mutex == nullptr)
+				return nullptr;
+			DWORD waitResult = WaitForSingleObject(mutex, waitMs);
+			if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_ABANDONED)
+				return mutex;
+			DWORD error = waitResult == WAIT_TIMEOUT ? ERROR_BUSY : GetLastError();
+			CloseHandle(mutex);
+			SetLastError(error);
+			return nullptr;
 		}
 
 		bool ExistingWriterAlive() const
@@ -548,9 +496,6 @@ namespace protocol
 		template<typename F>
 		bool PublishImpl(const DevicePoseSample &sample, F afterClaim)
 		{
-			if (ring == nullptr)
-				return false;
-
 			// Serialize only queue-position claims/gap publication, never the pose
 			// copy. Contention fails fast and is itself recorded as a dropped pose;
 			// vrserver pose threads are never blocked behind another device driver.
@@ -733,7 +678,7 @@ namespace protocol
 	private:
 		bool WriterAlive()
 		{
-			if (ring == nullptr || ring->writerActive.load(std::memory_order_acquire) == 0)
+			if (ring->writerActive.load(std::memory_order_acquire) == 0)
 				return false;
 			DWORD processId = ring->writerProcessId.load(std::memory_order_acquire);
 			uint64_t processCreationTime =
@@ -857,9 +802,6 @@ namespace protocol
 		template<typename B, typename A>
 		bool OpenImpl(const char *name, B beforeRelease, A afterRelease)
 		{
-			if (ring != nullptr)
-				return true;
-
 			hMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name);
 			if (hMap == nullptr)
 				return false;
@@ -921,18 +863,12 @@ namespace protocol
 			return false;
 		}
 
-		// The producer claim lock stays producer-only: this drain thread runs at
-		// normal priority in a GUI process, and holding that lock while descheduled
-		// (or while the whole process is suspended) would make every vrserver pose
-		// thread fail its claim and drop. Seeing the same empty queue on both sides
-		// of the marker load proves no producer completed a claim in between. The
-		// compare-exchange then takes exactly the observed markers only because
-		// the word carries a harvest generation: a producer can still claim after
-		// the second check, take these markers into its slot and publish, and
-		// later failures can bring the count back to the same value. On the count
-		// alone the exchange would succeed and report those later losses ahead of
-		// that pose; with the generation it fails, the producer's slot carries the
-		// markers it took, and the later ones wait for the next drain.
+		// Reports failed publishes left on an empty queue without taking the
+		// producer claim lock: a descheduled GUI-process reader holding it would
+		// make every vrserver pose thread drop. The same empty queue on both sides
+		// of the marker load proves no claim completed in between; a producer that
+		// claims after that takes the markers into its slot, and the harvest
+		// generation (see PendingDropCount) makes the exchange below fail.
 		template<typename G, typename H>
 		void EmitTerminalGapIfEmpty(G &gapFn, H &beforeCas)
 		{

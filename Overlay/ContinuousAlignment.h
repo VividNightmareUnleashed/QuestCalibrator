@@ -86,10 +86,7 @@ public:
 		// means the pair is untrustworthy right now — hold, don't correct, and
 		// resume once it settles. Scatter never freezes: headset trackers are
 		// glued or bolted on, and what scatters in practice is lighthouse
-		// tracking (grazing geometry while lying down, partial occlusion). A
-		// freeze on scatter whose error followed the head, meant for a slipped
-		// mount, only ever caught that and a badly measured mount, and told the
-		// player the readings were inconsistent ---
+		// tracking (grazing geometry while lying down, partial occlusion) ---
 		double maxScatterRotDeg = 0.8;
 		double maxScatterPosM = 0.02;
 		double scatterNotifySeconds = 10.0;         // sustained scatter -> one info event
@@ -311,11 +308,10 @@ public:
 	void SetFollowMode(bool follow) { followMode = follow; }
 
 	// Derive the mount extrinsic from a manual calibration's sample buffers
-	// and its solved result. The per-pair spread doubles as the rigidity gate:
-	// a tracker that was not rigid on the HMD fails it and `out` is left
-	// untouched (the caller keeps any previous extrinsic). The speed/interp
-	// gates and the rigidity thresholds are fixed policy — whether continuous
-	// calibration arms at all is not a caller knob — so this takes no config.
+	// and its solved (valid) result. The per-pair spread doubles as the
+	// rigidity gate: a tracker that was not rigid on the HMD fails it and `out`
+	// is left untouched (the caller keeps any previous extrinsic). The gates
+	// are fixed policy, so this takes no config.
 	static bool DeriveMountExtrinsic(const std::vector<PoseSample> &refStream,
 	                                 const std::vector<PoseSample> &targetStream,
 	                                 const EngineResult &calibration,
@@ -330,10 +326,8 @@ private:
 		Eigen::Vector3d targetRawPos{ 0, 0, 0 };
 	};
 
-	// One window's worth of estimate: the robust average plus the scatter
-	// derived in the same pass. Returned as a unit so "are the published
-	// figures stale?" has one answer in one place — Decide copies them to the
-	// members only on success, and a refused estimate publishes nothing at all.
+	// One window's estimate: the robust average plus its scatter. Decide
+	// publishes it to the members only on success.
 	struct WindowEstimate
 	{
 		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
@@ -375,10 +369,9 @@ private:
 
 	std::vector<PoseSample> refWindow;
 	std::vector<PoseSample> targetWindow;
-	// Expired-prefix cursors. A tick retires a handful of samples out of
-	// thousands, so erasing from the front relocated the whole retained window
-	// every tick; consumers work off the live range [head, size) and the dead
-	// prefix is compacted away only when it is worth one move.
+	// Expired-prefix cursors: a tick retires a handful of samples out of
+	// thousands, so consumers work off the live range [head, size) and the
+	// dead prefix is compacted away only when it is worth one move.
 	size_t refHead = 0;
 	size_t targetHead = 0;
 	std::deque<Observation> observations;
@@ -422,20 +415,11 @@ private:
 	std::optional<Replaced> replaced;
 	double undoSince = -1.0;
 
-	// How long the degraded episode has been running. It survives a coast,
-	// because the episode does: the notification it drives is an observation
-	// about tracking quality, not an action taken on the calibration, and the
-	// degraded tracking it reports is exactly what produces the gaps. Only the
-	// settle path and Reset clear it.
+	// How long the degraded episode has been running. It survives a coast:
+	// the degraded tracking it reports is exactly what produces the gaps.
+	// Only the settle path and Reset clear it.
 	double scatterEpisodeSince = -1.0;
 	bool unstableNotified = false;
-
-	// The three one-shot handoffs this class produces, each an optional rather
-	// than a has-X flag beside its payload. Same polled-out convention the
-	// monitors share — the flag is just folded into the value, so an empty
-	// slot cannot hold a stale payload for a reader that forgot to test it,
-	// Reset clears each in one assignment, and a new pending output adds one
-	// member instead of two plus a reset line.
 
 	// Jump-guard candidate: a discontinuous observation awaiting confirmation
 	// by a second one before the window is dropped (vs a one-off glitch).

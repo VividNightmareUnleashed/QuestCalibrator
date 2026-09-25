@@ -1,12 +1,9 @@
 #pragma once
 
-// The diagnostics file: one text file a player can attach to a bug report,
-// written on request from Settings. It holds the version, the settings and
-// profile summary, the recent activity, and the current and previous session
-// logs, with the account name, the profile directories and the computer name
-// replaced before anything is written. Device serials stay: they identify
-// hardware, not people, and a report about "the tracker that keeps pausing"
-// needs them.
+// The diagnostics file a player attaches to a bug report, written on request
+// from Settings: version, settings and profile summary, recent activity and the
+// session logs, with the account name, profile directories and computer name
+// replaced. Device serials stay: they identify hardware, not people.
 
 #include <openvr.h>
 #include <string>
