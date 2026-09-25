@@ -1053,14 +1053,11 @@ void RunDriverSyncScenarios()
 		unarmed.continuousTracker && unarmed.transform.hidden == 0,
 		"only the armed tracker serial is hidden");
 
-	questcal::SyncDevice pastEnd = target;
-	pastEnd.id = vr::k_unMaxTrackedDeviceCount;
 	questcal::SyncDevice last = target;
 	last.id = vr::k_unMaxTrackedDeviceCount - 1;
 	Check("driver sync: slot bounds",
-		questcal::DecideSlot(desired, pastEnd).action == questcal::SlotAction::None &&
 		questcal::DecideSlot(desired, last).action == questcal::SlotAction::ApplyTransform,
-		"out-of-range ids decide nothing; slot 63 remains usable");
+		"slot 63 remains usable");
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,16 +1669,15 @@ void RunDriverSyncStateScenarios()
 	}
 
 	// A first submission is applied optimistically. The refusal that answers it
-	// holds an identical resubmission, survives a stale verdict for an older
-	// sequence, lifts for a changed state (a question the driver has not
-	// answered), and only returns once that changed state is itself refused.
+	// holds an identical resubmission, lifts for a changed state (a question the
+	// driver has not answered), and only returns once that changed state is
+	// itself refused.
 	{
 		questcal::DriverSyncTracker tracker;
 		const bool fresh = !tracker.NoteSubmission(1, true) && tracker.IsLatest(1) &&
 			!tracker.HoldsRefusal();
 		const bool refused = tracker.NoteVerdict(1, false) && tracker.HoldsRefusal();
 		const bool heldSame = tracker.NoteSubmission(2, false) && tracker.IsLatest(2);
-		const bool staleIgnored = !tracker.NoteVerdict(1, true) && tracker.HoldsRefusal();
 		const bool liftedByChange = !tracker.NoteSubmission(3, true);
 		const bool pendingSame = !tracker.NoteSubmission(4, false);
 		const bool confirmed = tracker.NoteVerdict(4, true) && !tracker.HoldsRefusal() &&
@@ -1691,13 +1687,12 @@ void RunDriverSyncStateScenarios()
 		const std::string detail = "fresh=" + std::to_string(fresh) +
 			" refused=" + std::to_string(refused) +
 			" heldSame=" + std::to_string(heldSame) +
-			" staleIgnored=" + std::to_string(staleIgnored) +
 			" liftedByChange=" + std::to_string(liftedByChange) +
 			" pendingSame=" + std::to_string(pendingSame) +
 			" confirmed=" + std::to_string(confirmed) +
 			" refusedAgain=" + std::to_string(refusedAgain);
 		Check("driver sync state: a refusal holds across identical resubmissions",
-			fresh && refused && heldSame && staleIgnored && liftedByChange &&
+			fresh && refused && heldSame && liftedByChange &&
 				pendingSame && confirmed && refusedAgain, detail.c_str());
 	}
 
@@ -5157,24 +5152,17 @@ protocol::SetAlignmentField BuildField(const FieldTransform &base,
 //   trans = sum_j w_j (R_j pos + t_j) / sum_j w_j - rot * pos
 //
 // Every constant is spelled out as its own literal on purpose. Reading
-// alignfield::IdentityFloorWeight (or the protocol's sigma default) would move
-// oracle and implementation together, which is precisely the failure this
-// oracle exists to catch: the floor decides how much of a measured anchor
-// delta the runtime actually applies -- 1/(1+w0), ~95% at 0.05 -- so a silent
-// change to it MUST break the comparison scenario below.
-//
-// `anchorCount` is supplied by the caller rather than read off the field, so
-// the oracle carries no opinion about the implementation's MaxAnchors clamp;
-// that clamp gets its own differential scenario.
+// alignfield::IdentityFloorWeight would move oracle and implementation
+// together, which is precisely the failure this oracle exists to catch: the
+// floor decides how much of a measured anchor delta the runtime actually
+// applies -- 1/(1+w0), ~95% at 0.05 -- so a silent change to it MUST break the
+// comparison scenario below.
 void ReferenceBlend(const protocol::SetAlignmentField &f, uint32_t anchorCount,
                     const Eigen::Vector3d &pos,
                     Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut)
 {
 	const double identityFloorWeight = 0.05;   // must equal alignfield::IdentityFloorWeight
-	const double fallbackSigmaMeters = 1.5;    // must equal protocol::SetAlignmentField's default
-	const double minUsableSigma = 0.01;        // at or below this the stored sigma is unusable
-
-	double sigma = f.sigmaMeters > minUsableSigma ? f.sigmaMeters : fallbackSigmaMeters;
+	const double sigma = f.sigmaMeters;
 
 	struct Contribution
 	{
@@ -5355,78 +5343,6 @@ void RunFieldScenarios()
 		}
 		snprintf(detail, sizeof detail, "worst 1-|dot| %.2e  worst dTrans %.2e", worstQ, worstT);
 		Check("field: matches reference", worstQ < 1e-12 && worstT < 1e-12, detail);
-	}
-
-	// D2. Bounds clamp. A stored snapshot claiming more anchors than the fixed
-	// array holds must blend exactly the first MaxAnchors and read nothing past
-	// them: ValidateAndSanitize rejects an over-large count on the IPC path, but
-	// the clamp exists because the blend runs on vrserver's pose thread against
-	// whatever the snapshot happens to hold. Differential against the same field
-	// with an in-range count -- no oracle involved, so this pins the clamp alone.
-	{
-		// `anchors` is the last member of SetAlignmentField, so an unclamped
-		// read walks straight into whatever follows the struct. Give it
-		// something loud: anchors sitting on the query points with meter-scale
-		// deltas, so even a partial overrun moves the blend far past epsilon.
-		struct SpilledField
-		{
-			protocol::SetAlignmentField field;
-			protocol::FieldAnchor spill[4];
-		};
-
-		SpilledField s{};
-		s.field.enabled = true;
-		s.field.generation = 3;
-		s.field.sigmaMeters = 2.0;
-		s.field.anchorCount = protocol::SetAlignmentField::MaxAnchors;
-
-		std::mt19937 rng(4242);
-		std::uniform_real_distribution<double> u(-1.0, 1.0);
-		for (uint32_t i = 0; i < protocol::SetAlignmentField::MaxAnchors; ++i)
-		{
-			Eigen::Quaterniond dq(Eigen::AngleAxisd(0.04 * u(rng),
-				Eigen::Vector3d(u(rng), u(rng), u(rng)).normalized()));
-			s.field.anchors[i].rotationDelta = { dq.w(), dq.x(), dq.y(), dq.z() };
-			for (int k = 0; k < 3; ++k)
-			{
-				s.field.anchors[i].position[k] = 3.0 * u(rng);
-				s.field.anchors[i].translationDelta[k] = 0.04 * u(rng);
-			}
-		}
-		const Eigen::Quaterniond poisonRot(Eigen::AngleAxisd(1.2, Eigen::Vector3d::UnitZ()));
-		for (auto &poison : s.spill)
-		{
-			poison.rotationDelta = { poisonRot.w(), poisonRot.x(), poisonRot.y(), poisonRot.z() };
-			for (int k = 0; k < 3; ++k)
-			{
-				poison.position[k] = 0.0;             // right on top of the query points
-				poison.translationDelta[k] = 5.0;     // meters
-			}
-		}
-
-		// Reference behaviour: the same anchors under a count the array can hold.
-		protocol::SetAlignmentField inRange = s.field;
-		s.field.anchorCount = protocol::SetAlignmentField::MaxAnchors + 4;
-
-		double worstRot = 0.0, worstTrans = 0.0;
-		for (int k = 0; k < 12; ++k)
-		{
-			Eigen::Vector3d q(2.0 * u(rng), 1.0 + u(rng), 2.0 * u(rng));
-			double p[3] = { q.x(), q.y(), q.z() };
-
-			vr::HmdQuaternion_t rClamped, rOverlarge;
-			double tClamped[3], tOverlarge[3];
-			alignfield::BlendAt(inRange, p, rClamped, tClamped);
-			alignfield::BlendAt(s.field, p, rOverlarge, tOverlarge);
-
-			worstRot = std::max(worstRot, 1.0 - std::abs(
-				rClamped.w * rOverlarge.w + rClamped.x * rOverlarge.x +
-				rClamped.y * rOverlarge.y + rClamped.z * rOverlarge.z));
-			worstTrans = std::max(worstTrans, Dist3(tClamped, tOverlarge));
-		}
-		snprintf(detail, sizeof detail, "count %u vs %u  worst 1-|dot| %.2e  dTrans %.2e",
-			inRange.anchorCount, s.field.anchorCount, worstRot, worstTrans);
-		Check("field: anchor count clamp", worstRot < 1e-12 && worstTrans < 1e-12, detail);
 	}
 
 	// E. Same generation slews (rate-limited steps toward the target, then

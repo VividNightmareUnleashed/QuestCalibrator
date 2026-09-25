@@ -14,12 +14,6 @@ namespace questcal
 namespace atomicsnapshot
 {
 
-// Only Store and Load are ever performed on these scalars, which is exactly
-// what std::atomic<double> defines - none of the float-comparison caveats that
-// would justify hand-rolled bit punning apply, so the library type is the
-// direct mechanism and a reader no longer has to verify a memcpy round trip
-// before trusting the seqlock payload.
-//
 // CAVEAT: std::atomic has no value-initialising default constructor before
 // C++20, so every declaration of this type - here and in the seqlock slots -
 // must carry an explicit initialiser. The neutral non-zero defaults (identity
@@ -31,8 +25,8 @@ static_assert(std::atomic<double>::is_always_lock_free,
 	"64-bit snapshot atoms must always be lock-free");
 static_assert(ATOMIC_INT_LOCK_FREE == 2, "32-bit snapshot atoms must always be lock-free");
 
-// The explicit release/acquire orders below keep the previous semantics: the
-// library default is seq_cst, which would add fences to every pose-thread read.
+// Explicit release/acquire: the seq_cst default would add fences to every
+// pose-thread read.
 struct Vector3
 {
 	Double values[3]{ { 0.0 }, { 0.0 }, { 0.0 } };

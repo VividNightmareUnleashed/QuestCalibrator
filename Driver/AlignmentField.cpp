@@ -18,13 +18,9 @@ void BlendAt(const protocol::SetAlignmentField &field, const double (&basePos)[3
 	double p[3] = { IdentityFloorWeight * basePos[0],
 		IdentityFloorWeight * basePos[1], IdentityFloorWeight * basePos[2] };
 
-	double sigma = field.sigmaMeters > 0.01 ? field.sigmaMeters : 1.5;
-	double invTwoSigmaSq = 1.0 / (2.0 * sigma * sigma);
+	double invTwoSigmaSq = 1.0 / (2.0 * field.sigmaMeters * field.sigmaMeters);
 
-	uint32_t count = field.anchorCount < protocol::SetAlignmentField::MaxAnchors
-		? field.anchorCount : protocol::SetAlignmentField::MaxAnchors;
-
-	for (uint32_t i = 0; i < count; ++i)
+	for (uint32_t i = 0; i < field.anchorCount; ++i)
 	{
 		const protocol::FieldAnchor &a = field.anchors[i];
 

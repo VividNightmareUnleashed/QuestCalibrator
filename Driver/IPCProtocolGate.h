@@ -2,9 +2,8 @@
 
 #include "../common/Protocol.h"
 
-// Pure per-connection protocol gate. Keeping this separate from Win32 pipe
-// callbacks makes the exact-version/handshake trust boundary executable in
-// SolverTests instead of relying only on integration behavior.
+// Pure per-connection protocol gate, kept apart from the Win32 pipe callbacks
+// so the exact-version handshake is testable.
 namespace questcal
 {
 namespace ipc
