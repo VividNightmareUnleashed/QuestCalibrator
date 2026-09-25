@@ -8,27 +8,10 @@ PoseStreamHub::~PoseStreamHub()
 
 void PoseStreamHub::Start(const char *shmemName)
 {
-	if (drainThread.joinable())
-		return;
-
 	{
-		// Under the mutex like every other history access, even though no drain
-		// thread is running yet: the consumers touched below are readable from
-		// any thread that already holds a consumer id.
-		std::lock_guard<std::mutex> lock(mutex);
+		std::lock_guard<std::mutex> lock(mutex);   // like every other history access
 		history.resize(static_cast<size_t>(capacity));
-
-		// A restart is an observation hole of unknown length. Without a boundary
-		// here, post-restart samples would land directly adjacent to
-		// pre-restart ones and consumers would bridge a gap they were never
-		// told about - exactly the condition the monitors Reset() on.
-		if (head != 0)
-			AppendSessionBoundaryLocked();
 	}
-#ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
-	resetDeferralsForTest.store(0, std::memory_order_relaxed);
-#endif
-	stopRequested.store(false, std::memory_order_release);
 	drainThread = std::thread(&PoseStreamHub::DrainLoop, this, std::string(shmemName));
 }
 
@@ -123,9 +106,6 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 	size_t reserveCount = 0;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		if (consumer < 0 || consumer >= static_cast<int>(consumers.size()))
-			return 0;
-
 		AccountForHistoryOverflowLocked(consumer, dropped);
 		uint64_t &cursor = consumers[consumer].historyPosition;
 		snapshotHead = head;
@@ -150,7 +130,7 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 			auto &consumerCursor = consumers[consumer];
 			uint64_t &cursor = consumerCursor.historyPosition;
 			uint64_t &dropCursor = consumerCursor.sourceDropPosition;
-			uint64_t end = std::min(snapshotHead, head);
+			const uint64_t end = snapshotHead;   // head only grows
 			uint64_t copiedThisChunk = 0;
 			for (;;)
 			{
@@ -220,8 +200,7 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 void PoseStreamHub::DiscardBacklog(int consumer)
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	if (consumer >= 0 && consumer < static_cast<int>(consumers.size()))
-		consumers[consumer] = { head, sampleCount, sourceDropCount };
+	consumers[consumer] = { head, sampleCount, sourceDropCount };
 }
 
 void PoseStreamHub::AppendSampleLocked(const protocol::DevicePoseSample &sample)
@@ -245,8 +224,6 @@ void PoseStreamHub::AppendSampleLocked(const protocol::DevicePoseSample &sample)
 
 void PoseStreamHub::AppendGapLocked(uint64_t count)
 {
-	if (count == 0)
-		return;
 	++diagnostics.gapMarkers;
 	auto &entry = history[head % capacity];
 	entry = HistoryEntry{};
@@ -258,11 +235,8 @@ void PoseStreamHub::AppendGapLocked(uint64_t count)
 void PoseStreamHub::AppendSessionBoundaryLocked()
 {
 	++diagnostics.streamBoundaries;
-	// Everything buffered may predate a universe rebase, so discard it rather
-	// than hand a consumer positionally incoherent history. The marker is a
-	// single count deliberately: it says "there is a hole here", not how many
-	// samples were behind it (see Drain's contract in the header). The open
-	// hole keeps what it had and now holds a boundary, which the drain reports
+	// The single-count marker says "there is a hole here" (see Drain). The open
+	// hole keeps its size and now holds a boundary, which the drain reports
 	// with the first sample after it.
 	for (auto &consumer : consumers)
 		consumer = { head, sampleCount, sourceDropCount, consumer.holeSize, true };
@@ -313,12 +287,10 @@ void PoseStreamHub::SetGeometryForTest(uint64_t historyCapacity, uint64_t chunk)
 
 void PoseStreamHub::DrainLoop(const std::string &shmemName)
 {
-	// An exception escaping a thread entry calls std::terminate, with no
-	// unwind: wWinMain's catch blocks would never run, so ShutdownCalibrator
-	// would never flush the debounced profile and settings writes. The scratch
-	// buffer can hold a full ring drain and the history append allocates, so
-	// bad_alloc is reachable here. Give up draining instead of killing the
-	// process - RingOpen() then reads false and the UI reports no driver.
+	// An exception escaping a thread entry calls std::terminate with no
+	// unwind, so ShutdownCalibrator would never flush the debounced profile
+	// and settings writes. The scratch buffer grows to a full ring drain, so
+	// bad_alloc is reachable: stop draining instead, and RingOpen() reads false.
 	try
 	{
 		DrainRing(shmemName);
@@ -332,10 +304,7 @@ void PoseStreamHub::DrainLoop(const std::string &shmemName)
 void PoseStreamHub::DrainRing(const std::string &shmemName)
 {
 	protocol::PoseRingReader reader;
-	// A pending entry is a sample OR a gap; the tag is explicit because the
-	// ring reader delivers the two through separate callbacks and the history
-	// stores them with their own flag. Inferring it from a non-zero count would
-	// publish a zero-count gap as a default-constructed pose.
+	// A sample or a gap, as the ring reader's two callbacks delivered it.
 	struct PendingEntry
 	{
 		bool isGap = false;

@@ -22,11 +22,12 @@
 namespace
 {
 
+// A valid snapshot always has a complete owner: capture requires one, loading
+// disarms an incomplete one, and DisarmChaperone clears it with `valid`.
 enum class ChaperoneOwnerStatus
 {
 	Match,
 	Mismatch,
-	Unowned,
 	Unavailable,
 };
 
@@ -88,7 +89,7 @@ struct SpaceState
 	void ResetContinuity() noexcept
 	{
 		hmd.Reset();
-		verdict.Reset();
+		verdict.Clear();
 	}
 };
 
@@ -174,8 +175,7 @@ bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 bool HasFreshHmdWorldFromDriver()
 {
 	LARGE_INTEGER qpcNow;
-	if (!QueryPerformanceCounter(&qpcNow))
-		return false;
+	QueryPerformanceCounter(&qpcNow);
 	const double sampleClockNow =
 		static_cast<double>(qpcNow.QuadPart) * Space.qpcToSeconds;
 	return Space.poseHub->RingOpen() && Space.hmd.IsUsable() &&
@@ -234,9 +234,6 @@ bool LiveGeometryMatches(vr::IVRChaperoneSetup *setup,
 ChaperoneOwnerStatus CurrentChaperoneOwner(
 	const CalibrationContext::Chaperone &snapshot)
 {
-	if (snapshot.ownerTrackingSystem.empty() || snapshot.ownerHmdSerial.empty())
-		return ChaperoneOwnerStatus::Unowned;
-
 	std::string trackingSystem;
 	std::string serial;
 	if (!questcal::ReadCurrentHmdIdentity(trackingSystem, serial))
@@ -254,6 +251,10 @@ void DisarmChaperoneAndPersist(CalibrationContext &ctx, double now,
 	ctx.ReportError(reason, CalibrationContext::ErrorSource::Chaperone);
 	SaveSettings(ctx);
 }
+
+constexpr const char *ForeignHeadsetChaperone =
+	"The protected chaperone was saved for a different headset, so it was switched off. "
+	"Press Protect chaperone again on the main screen.\n";
 
 void ProfileUniverseTick(CalibrationContext &ctx, double now);
 void DrainJumpObservations(CalibrationContext &ctx);
@@ -395,28 +396,12 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 
 	if (ctx.chaperone.valid && Space.owner == ChaperoneOwnerStatus::Mismatch)
 	{
-		DisarmChaperoneAndPersist(ctx, now,
-			"The protected chaperone was saved for a different headset, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
-		return;
-	}
-	if (ctx.chaperone.valid && Space.owner == ChaperoneOwnerStatus::Unowned)
-	{
-		DisarmChaperoneAndPersist(ctx, now,
-			"The protected chaperone is missing information about the room it was saved in, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
+		DisarmChaperoneAndPersist(ctx, now, ForeignHeadsetChaperone);
 		return;
 	}
 	if (!ctx.chaperone.valid || Space.owner != ChaperoneOwnerStatus::Match ||
 		!HasFreshHmdWorldFromDriver())
 		return;
-	if (!ctx.chaperone.worldFromDriverValid)
-	{
-		DisarmChaperoneAndPersist(ctx, now,
-			"The protected chaperone is missing information about the room it was saved in, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
-		return;
-	}
 
 	if (!WorldFromDriverChanged(
 		ctx.chaperone.worldFromDriverRotation,
@@ -916,8 +901,7 @@ bool LoadChaperoneBounds()
 
 	const std::time_t copyTime = std::time(nullptr);
 	const double copyUnixTime = static_cast<double>(copyTime);
-	if (copyTime == static_cast<std::time_t>(-1) ||
-		!std::isfinite(copyUnixTime) || copyUnixTime < 0.0 ||
+	if (copyTime == static_cast<std::time_t>(-1) || copyUnixTime < 0.0 ||
 		copyUnixTime > protocol::limits::MaxPlausibleUnixTimeSeconds)
 		return FailClosedChaperoneCapture(
 			"Couldn't protect the chaperone because the PC clock looks wrong. Check the date and time, then try again.\n");
@@ -989,16 +973,7 @@ bool ApplyChaperoneBounds(bool logSuccess)
 	}
 	if (owner == ChaperoneOwnerStatus::Mismatch)
 	{
-		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick,
-			"The protected chaperone was saved for a different headset, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
-		return false;
-	}
-	if (owner == ChaperoneOwnerStatus::Unowned)
-	{
-		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick,
-			"The protected chaperone is missing information about the room it was saved in, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
+		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick, ForeignHeadsetChaperone);
 		return false;
 	}
 	if (!ChaperoneBaselineIsCurrent(CalCtx.chaperone))

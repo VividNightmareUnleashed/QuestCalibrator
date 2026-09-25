@@ -103,6 +103,14 @@ struct Calibration
 	Eigen::Vector3d translation;
 	double scale;
 	Eigen::Vector3d Apply(const Eigen::Vector3d &world) const { return rotation * (scale * world) + translation; }
+
+	// The driver's rewrite of `raw` under this calibration and a latency shift.
+	vr::DriverPose_t Rewrite(vr::DriverPose_t pose, double delta = 0.0) const
+	{
+		const double t[3] = { translation.x(), translation.y(), translation.z() };
+		questcal::driverpose::Apply(pose, { rotation.w(), rotation.x(), rotation.y(), rotation.z() }, t, scale, delta);
+		return pose;
+	}
 };
 
 } // namespace
@@ -123,10 +131,7 @@ void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *)
 	{
 		Calibration cal{ RandomRotation(rng), RandomVector(rng, 3.0), scaleDist(rng) };
 		vr::DriverPose_t raw = RandomPose(rng, Eigen::Vector3d::Zero());
-		vr::DriverPose_t rewritten = raw;
-		double t[3] = { cal.translation.x(), cal.translation.y(), cal.translation.z() };
-		vr::HmdQuaternion_t r{ cal.rotation.w(), cal.rotation.x(), cal.rotation.y(), cal.rotation.z() };
-		questcal::driverpose::Apply(rewritten, r, t, cal.scale, 0.0);
+		vr::DriverPose_t rewritten = cal.Rewrite(raw);
 		for (double h : horizons)
 		{
 			WorldPose seen = PredictWorld(rewritten, h);
@@ -150,10 +155,7 @@ void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *)
 		Calibration cal{ RandomRotation(rng), RandomVector(rng, 3.0), scaleDist(rng) };
 		const double delta = shiftDist(rng);
 		vr::DriverPose_t raw = RandomPose(rng, Eigen::Vector3d::Zero());
-		vr::DriverPose_t rewritten = raw;
-		double t[3] = { cal.translation.x(), cal.translation.y(), cal.translation.z() };
-		vr::HmdQuaternion_t r{ cal.rotation.w(), cal.rotation.x(), cal.rotation.y(), cal.rotation.z() };
-		questcal::driverpose::Apply(rewritten, r, t, cal.scale, delta);
+		vr::DriverPose_t rewritten = cal.Rewrite(raw, delta);
 		for (double h : horizons)
 		{
 			WorldPose seen = PredictWorld(rewritten, h);
@@ -181,10 +183,7 @@ void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *)
 		Calibration cal{ RandomRotation(rng), RandomVector(rng, 3.0), scaleDist(rng) };
 		Eigen::Vector3d driverFromHead = RandomVector(rng, 0.4);
 		vr::DriverPose_t raw = RandomPose(rng, driverFromHead);
-		vr::DriverPose_t rewritten = raw;
-		double t[3] = { cal.translation.x(), cal.translation.y(), cal.translation.z() };
-		vr::HmdQuaternion_t r{ cal.rotation.w(), cal.rotation.x(), cal.rotation.y(), cal.rotation.z() };
-		questcal::driverpose::Apply(rewritten, r, t, cal.scale, 0.0);
+		vr::DriverPose_t rewritten = cal.Rewrite(raw);
 		for (double h : horizons)
 		{
 			double away = (PredictWorld(rewritten, h).head - cal.Apply(PredictWorld(raw, h).head)).norm();
@@ -195,8 +194,7 @@ void RunPredictionModelScenarios(void (*check)(const char *, bool, const char *)
 		Calibration realistic{ cal.rotation, cal.translation, 1.02 };
 		Eigen::Vector3d smallOffset = driverFromHead.normalized() * 0.05;
 		vr::DriverPose_t rawSmall = RandomPose(rng, smallOffset);
-		vr::DriverPose_t rewrittenSmall = rawSmall;
-		questcal::driverpose::Apply(rewrittenSmall, r, t, realistic.scale, 0.0);
+		vr::DriverPose_t rewrittenSmall = realistic.Rewrite(rawSmall);
 		worstRealistic = std::max(worstRealistic,
 			(PredictWorld(rewrittenSmall, 0.011).head - realistic.Apply(PredictWorld(rawSmall, 0.011).head)).norm());
 	}

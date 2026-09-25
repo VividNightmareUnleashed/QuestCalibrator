@@ -504,11 +504,9 @@ void FrozenRecoveryBoundaryScenario(Check check)
 	MountExtrinsic mount;
 	mount.valid = true;
 	engine.SetExtrinsic(mount);
-	// 3 cm is inside the 5 cm freeze band but outside the 2.5 cm fast resume
-	// band: it must not resume on the 5 s confirm, and must on the long in-band
-	// one. Frozen corrects nothing, so without the second path a disagreement
-	// between the two bands held the freeze for good (42 minutes live on
-	// 2026-09-25) although Tracking would have corrected it without freezing.
+	// 3 cm lies between the 2.5 cm fast-resume band and the 5 cm freeze band:
+	// no resume on the 5 s confirm, only on the long in-band one. Without that
+	// path the freeze held for good (42 minutes live on 2026-09-25).
 	bool frozen = false, stayedFrozen = true, resumed = false;
 	double resumedAt = -1.0;
 	for (int i = 1; i <= 5000; ++i)
@@ -543,9 +541,8 @@ void FrozenRecoveryBoundaryScenario(Check check)
 void UpdaterRestartScenario(Check check)
 {
 	using namespace questcal::update;
-	// The harness is built with the same Version.h as the overlay, so on an
-	// alpha it is itself a prerelease and its updater would never check. The
-	// restart machinery belongs to the stable lane; drive it as a stable build.
+	// On an alpha the harness is itself a prerelease, whose updater never
+	// checks; drive the restart machinery as a stable build.
 	Version stable = CurrentVersion();
 	stable.prereleaseLabel.clear();
 	stable.prereleaseOrdinal = 0;
@@ -606,8 +603,6 @@ void UpdaterRestartScenario(Check check)
 				: !completed && calls == 1 && state == State::Disabled), "");
 	}
 
-	// A prerelease build never opens a session at all: enabling it reports the
-	// prerelease and the feed is not fetched.
 	Version alpha = stable;
 	alpha.prereleaseLabel = "alpha";
 	alpha.prereleaseOrdinal = 4;

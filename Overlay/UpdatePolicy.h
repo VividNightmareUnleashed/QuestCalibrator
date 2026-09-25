@@ -34,10 +34,8 @@ inline bool IsPrerelease(const Version &version)
 	return !version.prereleaseLabel.empty();
 }
 
-// The build's own identity, assembled in exactly one place. Filling a Version
-// field by field at the call site is what let 1.2.0-alpha.3 report itself as
-// 1.2.0: a field nobody remembered to set defaults to "final", and the tester
-// then compares equal to the release they are waiting for.
+// The build's own identity, assembled in one place so no field is left at its
+// "final release" default.
 inline Version CurrentVersion()
 {
 	Version version;
@@ -53,12 +51,6 @@ inline Version CurrentVersion()
 // outranks every prerelease of it, and two prereleases of it are ordered by
 // label then ordinal. Labels compare as text, which puts alpha below beta
 // below rc.
-//
-// The update path never reaches these last four lines, because it decides the
-// lane before it compares anything and a feed candidate is always final. They
-// are here because a comparison that quietly ignored half the fields of the
-// thing it compares is what made 1.2.0-alpha.3 equal to 1.2.0 in the first
-// place, and whoever builds the prerelease lane will need the order to hold.
 inline int CompareVersions(const Version &a, const Version &b)
 {
 	if (a.major != b.major) return a.major < b.major ? -1 : 1;
@@ -118,11 +110,8 @@ inline bool ParseVersionComponent(const std::string &text, size_t &cursor,
 	return true;
 }
 
-// Only the fork's stable release namespace is eligible. This deliberately
-// rejects inherited v* tags and prerelease suffixes; alpha/beta delivery can be
-// added later as a separate, explicit channel without changing stable users.
-// Every version it yields is therefore a final release, which is what lets a
-// prerelease running locally compare below the stable release it matches.
+// Only the fork's stable release namespace: inherited v* tags and prerelease
+// suffixes are rejected, so every version this yields is a final release.
 inline bool ParseReleaseTag(const std::string &tag, Version &version)
 {
 	static const std::string prefix = "questcalibrator-v";
@@ -180,6 +169,7 @@ struct ReleaseCandidate
 	std::string packageName;
 	std::string downloadUrl;
 	std::string digest;
+	std::array<unsigned char, 32> digestBytes{};
 	uint64_t size = 0;
 };
 
@@ -193,25 +183,17 @@ inline bool JsonField(const picojson::object &object, const char *key, T &out)
 	return true;
 }
 
-// The stable lane, and the only lane there is: the overlay reads published
-// stable releases and nothing else.
-//
-// The feed is untrusted input. Select the newest published stable release first,
-// then require its one canonical package to be complete and internally
-// consistent. Never fall back to an older package when the newest release is
-// malformed: that would hide a broken or partially published release.
+// The feed is untrusted input. Select the newest published stable release,
+// then require its one canonical package to be complete and consistent. Never
+// fall back to an older package when the newest release is malformed: that
+// would hide a broken or partially published release. `current` is always a
+// final release: Updater::CheckNow stops a prerelease build before this.
 inline bool SelectReleaseCandidate(const std::string &json,
 	const Version &current, ReleaseCandidate &candidate, bool &updateAvailable,
 	std::string &error)
 {
 	updateAvailable = false;
 	error.clear();
-	// A prerelease is on its own lane. It is installed by hand and leaves by
-	// hand, so the stable feed never has anything to say to it, whatever the
-	// feed holds. The updater stops before it gets here; this is the second
-	// lock, so no future caller can hand a tester a stable package by accident.
-	if (IsPrerelease(current))
-		return true;
 	picojson::value root;
 	std::string parseError;
 	try
@@ -306,15 +288,14 @@ inline bool SelectReleaseCandidate(const std::string &json,
 	double size = 0.0;
 	if (!JsonField(*package, "browser_download_url", parsed.downloadUrl) ||
 		!JsonField(*package, "digest", parsed.digest) ||
-		!JsonField(*package, "size", size) || !std::isfinite(size) ||
+		!JsonField(*package, "size", size) ||
 		std::floor(size) != size || size < 128.0 * 1024.0 ||
 		size > 64.0 * 1024.0 * 1024.0)
 	{
 		error = "The newest release package has invalid metadata.";
 		return false;
 	}
-	std::array<unsigned char, 32> digestBytes;
-	if (!ParseSha256Digest(parsed.digest, digestBytes))
+	if (!ParseSha256Digest(parsed.digest, parsed.digestBytes))
 	{
 		error = "The newest release package has no valid SHA-256 digest.";
 		return false;

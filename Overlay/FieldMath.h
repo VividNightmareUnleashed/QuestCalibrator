@@ -2,28 +2,17 @@
 
 // Overlay-side mirror of the driver's spatial-correction-field blend
 // (Driver/AlignmentField.cpp BlendAt), over the overlay's absolute anchors.
+// Pure Eigen, so the harness checks it against alignfield::BlendAt.
 //
-// The continuous-calibration loop needs the transform the field actually
-// produces at the mounted tracker's spot: with anchors present the true local
-// alignment legitimately differs from the base calibration, so measuring the
-// windowed estimate against raw base would read every anchor's own delta as a
-// "deviation" — freezing on it near large anchors and, below the freeze
-// threshold, emitting corrections that drag the base (and with it every
-// anchor) toward one spot's local deformation. Blending here and comparing
-// against delta_blend o base keeps continuous corrections orthogonal to the
-// field: only genuinely global movement of the universe produces a deviation.
+// The continuous-calibration loop compares its estimate against the transform
+// the field actually produces at the mounted tracker's spot: against the raw
+// base it would read every anchor's own delta as a deviation and drag the base
+// toward one spot's local deformation. Comparing against delta_blend o base
+// keeps continuous corrections orthogonal to the field.
 //
-// Applying a yaw/translation correction D through ApplyAlignmentDelta stays exact:
-// it shifts the base AND the absolute anchors by D, so the blended expectation
-// itself moves by exactly D (delta' = D delta D^-1, expected' = D o expected).
-//
-// Pure Eigen so the synthetic test harness compiles exactly this code and
-// checks it against alignfield::BlendAt. That purity is why this stays a
-// mirror rather than a thin adapter over the driver's blend: an adapter would
-// have to build a protocol::SetAlignmentField, pulling protocol and OpenVR
-// types into a layer that is deliberately dependency-free. The cost of the
-// mirror is that the blend width must be passed in rather than assumed - see
-// BlendedFieldCalibration.
+// A yaw/translation correction D (ApplyCalibrationDelta) shifts the base AND
+// the absolute anchors by D, so the blended expectation moves by exactly D
+// (delta' = D delta D^-1, expected' = D o expected).
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -38,10 +27,8 @@ constexpr double FieldBlendIdentityFloor = 0.05;
 
 // The per-anchor delta the driver blends: delta_i = anchor_i o base^-1, the
 // correction that, applied after the base calibration, reproduces the absolute
-// solve at that anchor's spot. SINGLE SOURCE for the derivation:
-// SendAlignmentField ships exactly this, BlendedFieldCalibration mirrors it,
-// and the test harness builds reference fields from it — the continuous loop's
-// "corrections orthogonal to the field" invariant needs all three bit-equal.
+// solve at that anchor's spot. The single source for SendAlignmentField,
+// BlendedFieldCalibration and the harness, which must agree bit for bit.
 inline void AnchorDelta(const Eigen::Quaterniond &anchorRot,
                         const Eigen::Vector3d &anchorTrans,
                         const Eigen::Quaterniond &baseRotInv,
@@ -54,17 +41,9 @@ inline void AnchorDelta(const Eigen::Quaterniond &anchorRot,
 
 // Expected local calibration delta_blend(queryBasePos) o base. Anchors carry
 // absolute per-spot solves (.position in reference space, .rotation /
-// .translationMeters the absolute transform); deltas against base are derived
-// here exactly as SendAlignmentField ships them. With zero anchors the result
-// is the base calibration itself.
-// sigmaMeters must be the value the driver is blending with, i.e. the one
-// SendAlignmentField put on the wire - not merely the default that happens to
-// match it. The wire field is real, per-message and range-validated, so the
-// moment sigma becomes configurable a hard-coded constant here would give the
-// driver one field shape and the continuous loop's expectation another, with
-// nothing failing: healthy anchor gradients would then read as universe
-// deviation, which is the exact failure the field-blended comparison exists to
-// prevent. Passing it in keeps the two blends coupled by construction.
+// .translationMeters the absolute transform). With zero anchors the result is
+// the base calibration itself. sigmaMeters must be the width
+// SendAlignmentField put on the wire, which the driver blends with.
 template <class AnchorVec>
 inline void BlendedFieldCalibration(const AnchorVec &anchors,
                                     const Eigen::Quaterniond &baseRot,
@@ -78,10 +57,7 @@ inline void BlendedFieldCalibration(const AnchorVec &anchors,
 	Eigen::Vector4d q(0.0, 0.0, 0.0, FieldBlendIdentityFloor);   // (x, y, z, w)
 	Eigen::Vector3d p = FieldBlendIdentityFloor * queryBasePos;
 
-	// Mirrors the driver's clamp (AlignmentField.cpp): a non-positive or
-	// absurd sigma must not divide by ~zero here either.
-	double sigma = sigmaMeters > 0.01 ? sigmaMeters : 1.5;
-	const double invTwoSigmaSq = 1.0 / (2.0 * sigma * sigma);
+	const double invTwoSigmaSq = 1.0 / (2.0 * sigmaMeters * sigmaMeters);
 
 	Eigen::Quaterniond baseInv = baseRot.conjugate();
 	for (const auto &a : anchors)

@@ -2,10 +2,6 @@
 #include "stdafx.h"
 #include "UiInternal.h"
 
-// ---------------------------------------------------------------------------
-// Plain-language calibration rating (simple mode)
-// ---------------------------------------------------------------------------
-
 bool s_showSettings = false;
 
 // The driver's pose channel feeds every runtime monitor. Preview mode has no
@@ -161,10 +157,8 @@ CalRating ComputeCalibrationRating(ContinuousStatus continuous)
 
 	// Staleness/drift only degrade the rating when nothing is maintaining the
 	// alignment; a healthy continuous loop re-measures it constantly. A frozen
-	// loop is reported on its own line with its own action, not folded into
-	// this verdict: a calibration that solved well ten minutes ago is still
-	// good when the headset tracker gets nudged, and calling it Poor sent
-	// people to redo a good calibration or to switch the feature off.
+	// loop gets its own line and action instead: a calibration that solved
+	// well is still good when the headset tracker gets nudged.
 	bool continuouslyMaintained = continuous == ContinuousStatus::Tracking;
 	if (!continuouslyMaintained)
 	{
@@ -176,14 +170,10 @@ CalRating ComputeCalibrationRating(ContinuousStatus continuous)
 			r = Rating_VeryPoor;
 	}
 
-	// Solve residuals live only in lastResult, which FinishCalibration sets and
-	// nothing persists, so a profile restored from the registry has no evidence
-	// behind the quality half of this verdict. If none of the monitors above
-	// found a reason to demote it, what we have is an absence of evidence, not
-	// a good measurement -- say so instead of asserting the best label.
-	// A running continuous loop is a live measurement of the same thing, so
-	// after a restart it is evidence enough: "Not measured" beside "maintained
-	// continuously" would deny a measurement the app has.
+	// Solve residuals are not persisted, so a restored profile has no evidence
+	// behind the quality half of this verdict. With nothing demoting it, say
+	// "Not measured" rather than Good, unless the continuous loop is measuring
+	// live.
 	const bool measured = CalCtx.lastResult.valid ||
 		((continuous == ContinuousStatus::Tracking || continuous == ContinuousStatus::Frozen) &&
 			CalCtx.continuousDeviation.valid);
@@ -202,26 +192,11 @@ const char *RatingLabel(CalRating r)
 	return r == Rating_Unknown ? "Not measured" : RatingLabels[r];
 }
 
-// The band a fresh solve's residuals land in; shared with the last-calibration
-// row so its colour follows the numbers instead of a hardcoded green.
-CalRating SolveQualityRating(const questcal::EngineResult &result)
-{
-	if (!result.valid)
-		return Rating_Unknown;
-	double rot = result.rotationRmsDeg;
-	double pos = result.translationRmsMeters * 100.0;
-	return (rot <= 3.0 && pos <= 1.5) ? Rating_Good :
-		(rot <= 6.0 && pos <= 3.0) ? Rating_Decent :
-		(rot <= 12.0 && pos <= 6.0) ? Rating_Poor : Rating_VeryPoor;
-}
-
 ImVec4 RatingColor(CalRating r)
 {
 	switch (r)
 	{
-	// Unknown claims nothing in either direction, so it gets the neutral ink
-	// rather than the green of a verdict we cannot support or the red of one
-	// we have no reason to give.
+	// Unknown claims nothing in either direction, so it gets the neutral ink.
 	case Rating_Unknown: return Pal::Dim;
 	case Rating_Good:    return Pal::Good;
 	case Rating_Decent:  return Pal::Warn;
@@ -230,11 +205,8 @@ ImVec4 RatingColor(CalRating r)
 	}
 }
 
-// The one recalibration nudge both screens render. The rating already folds
-// solve quality, staleness, drift and a bumped mount into a single verdict;
-// re-deriving "should I nag" from alignment on one screen and from the rating
-// on the other let identical state produce contradictory advice. Returns null
-// when there is nothing to advise.
+// The recalibration nudge, derived from the rating alone so every screen gives
+// the same advice. Null when there is nothing to advise.
 const char *RecalibrationNudge(CalRating rating)
 {
 	if (rating < Rating_Poor)
@@ -244,14 +216,12 @@ const char *RecalibrationNudge(CalRating rating)
 		: "Recalibrate to tighten the alignment.";
 }
 
-// Empty when the timestamp is unusable. "Unknown" is a property of the data,
-// not a rendered phrase: returning it as an empty optional lets every caller
-// word its own fallback, instead of the wording being baked into a buffer and
-// recovered downstream by comparing against the literal.
+// Empty when the timestamp (0 = unknown) or the clock is unusable; each caller
+// words its own fallback.
 std::optional<std::string> FormatUnixAge(double unixTime)
 {
 	double now = static_cast<double>(std::time(nullptr));
-	if (!std::isfinite(unixTime) || unixTime <= 0.0 || now <= 0.0)
+	if (unixTime <= 0.0 || now <= 0.0)
 		return std::nullopt;
 
 	double seconds = now - unixTime;
@@ -270,11 +240,8 @@ std::optional<std::string> FormatUnixAge(double unixTime)
 }
 
 // The age of the alignment, from the same base UpdateDriftScore ages from:
-// the later of the manual solve and the last auto-correction, because a
-// continuously maintained calibration is not aging. Anything rendered next to
-// a score-derived verdict must use that base and say which one it is --
-// showing the solve time alone put "calibrated 3.5 days ago" beside
-// "Alignment fresh" whenever the loop had just corrected it.
+// the later of the manual solve and the last auto-correction. Anything shown
+// beside a score-derived verdict must use that base and say which one it is.
 std::optional<std::string> FormatAlignmentAge()
 {
 	if (CalCtx.lastAutoCorrectionUnixTime > CalCtx.calibrationUnixTime)
@@ -299,6 +266,8 @@ bool ProtectChaperone()
 // When the one-time drift warning modal was opened; gates its accept button.
 double g_chapWarnOpenedAt = 0.0;
 
+// Pinned below the scrolling content by BuildMainWindow. Its height goes
+// through s_bottomReserve so the next frame's content child leaves room for it.
 float s_bottomReserve = 48.0f;
 void BuildStatusBand(const VRState &state)
 {
@@ -348,18 +317,13 @@ void BuildStatusBand(const VRState &state)
 		std::string text;
 		ImVec4 color;
 	};
+	// Detail lines share one quiet ink and a role word each; the verdict owns
+	// the colour, so a detail line never reads as a second opinion.
 	std::vector<DetailLine> details;
 	if (CalCtx.uiAdvanced && CalCtx.validProfile)
 	{
 		if (CalCtx.lastResult.valid)
 		{
-			// Colour follows the solve's own quality band; a hardcoded
-			// green tick called an 11-degree solve a success.
-			CalRating solve = SolveQualityRating(CalCtx.lastResult);
-			// Detail lines share one quiet ink and a role word each; the
-			// verdict above owns the colour. A green solve row under a red
-			// verdict read as a second opinion.
-			(void)solve;
 			details.push_back({ FormatString("Solve: %.2f deg / %.1f cm, %+.1f ms%s",
 					CalCtx.lastResult.rotationRmsDeg,
 					CalCtx.lastResult.translationRmsMeters * 100.0,
@@ -386,8 +350,7 @@ void BuildStatusBand(const VRState &state)
 				CalCtx.alignment == CalibrationContext::AlignmentHealth::Aging ? "aging" : "fresh";
 			// The age is on the verdict line already.
 			std::string line = FormatString("Drift: %s", healthLabel);
-			// Evidence only when there is some: "0 tracking glitch(es)" was
-			// a developer's plural on a zero.
+			// Evidence only when there is some.
 			if (CalCtx.driftSlideEvents > 0)
 				line += FormatString("; %u slip%s up to %.1f cm while standing still",
 					CalCtx.driftSlideEvents, CalCtx.driftSlideEvents == 1 ? "" : "s",
@@ -419,8 +382,7 @@ void BuildStatusBand(const VRState &state)
 	}
 
 	// Bottom band: the verdict, the advanced detail lines, the
-	// continuous-calibration line with its own action when it has paused, and the
-	// nudge.
+	// continuous-calibration line and the nudge.
 	{
 		const bool showContinuous = CalCtx.validProfile && continuous != ContinuousStatus::Off;
 		const float lineH = g_fontBody->LegacySize + 6.0f;
@@ -429,11 +391,8 @@ void BuildStatusBand(const VRState &state)
 		float stripH = lineH * (float)lines + (lines > 1 ? 4.0f : 0.0f)
 			+ detailH * (float)details.size() + (details.empty() ? 0.0f : 4.0f);
 
-		// Full-bleed inset surface with a hairline top edge, so the status
-		// text sits on something instead of floating.
-		// Anchored to the bottom when there is room, pushed down by the
-		// content when there isn't; the surface is painted either way so
-		// the band never loses its inset when the screen is busy.
+		// Full-bleed inset surface with a hairline top edge, anchored to the
+		// bottom of the window.
 		const float bandH = stripH + 14.0f + 44.0f;
 		const float bandTop = ImGui::GetWindowHeight() - bandH;
 		s_bottomReserve = bandH;
@@ -483,8 +442,7 @@ void BuildStatusBand(const VRState &state)
 				Pal::U32(Pal::Dim), Tr(ageLine.c_str()));
 			y += lineH;
 
-			// Advanced mode: the numbers, small and in the colour of the
-			// verdict they support.
+			// Advanced mode: the numbers, small and quiet under the verdict.
 			for (const auto &detail : details)
 			{
 				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
@@ -537,9 +495,8 @@ void BuildMainScreen(const VRState &state)
 			std::vector<StatusRowData> warn;
 			if (CalCtx.validProfile && !CalCtx.enabled)
 			{
-				// Six conditions disable a calibration and each wants a
-				// different action; naming the headset for all of them sent
-				// people to check hardware that was working.
+				// Each disable reason wants a different action, so each gets
+				// its own sentence.
 				using Reason = CalibrationContext::DisableReason;
 				std::string why;
 				switch (CalCtx.disableReason)
@@ -608,7 +565,7 @@ void BuildMainScreen(const VRState &state)
 			OpenGuide(false, false);
 
 		{
-			// Labelled by length: "Slow" read as an instruction to move slowly.
+			// Labelled by length: "Slow" reads as an instruction to move slowly.
 			std::string speedLabels[3];
 			const char *speeds[3];
 			for (int i = 0; i < 3; ++i)

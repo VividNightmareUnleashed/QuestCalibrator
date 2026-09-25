@@ -5,6 +5,7 @@
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/LighthouseLog.h"
 #include "../Overlay/LighthouseVisibility.h"
+#include "../Overlay/RingPoseMath.h"
 
 #include <chrono>
 #include <cmath>
@@ -47,11 +48,7 @@ void ParserScenarios(Check check)
 		"LHR-A3C36EA5 C: SOB: add S-5 also seeing S-8 S-9 S-16", e);
 	std::time_t whole = static_cast<std::time_t>(std::floor(e.unixTime));
 	std::tm local{};
-#ifdef _WIN32
 	localtime_s(&local, &whole);
-#else
-	localtime_r(&whole, &local);
-#endif
 	double frac = e.unixTime - static_cast<double>(whole);
 	snprintf(detail, sizeof detail, "serial %s channel %d visible %s stamp %02d:%02d:%02d.%03d",
 		e.serial.c_str(), e.channel, Channels(e.visibleChannels).c_str(),
@@ -351,7 +348,9 @@ Verdict Judge(const vlighthouse::Output &run, const vlighthouse::Config &cfg,
 			}
 			++next;
 		}
-		monitor.Push(f.sample);
+		// The overlay feeds the monitor trusted samples only.
+		if (IsTrustedRingSample(f.sample, cfg.qpcToSeconds))
+			monitor.Push(f.sample);
 		DriftMonitor::Event ev;
 		while (monitor.PollEvent(ev))
 		{

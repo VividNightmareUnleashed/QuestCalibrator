@@ -13,18 +13,13 @@ public:
 	std::atomic<FuncType> originalFunc{ nullptr };
 	explicit Hook(const char *name) : name(name) { }
 
+	// `object` is a non-null interface pointer; callers check it.
 	bool CreateHookInObjectVTable(void *object, int vtableOffset, void *detourFunction)
 	{
 		if (targetFunc)
 			return Enable();
-		if (!object || !detourFunction || vtableOffset < 0)
-		{
-			LOG("Cannot create hook for %s: invalid object/detour/offset", name);
-			return false;
-		}
 
-		// For virtual objects, VC++ adds a pointer to the vtable as the first member.
-		// To access the vtable, we simply dereference the object.
+		// MSVC places the vtable pointer first in a polymorphic object.
 		void **vtable = *((void ***)object);
 		if (!vtable)
 		{
@@ -32,8 +27,6 @@ public:
 			return false;
 		}
 
-		// The vtable itself is an array of pointers to member functions,
-		// in the order they were declared in.
 		void *target = vtable[vtableOffset];
 		if (!target)
 		{

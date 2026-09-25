@@ -63,12 +63,8 @@ void RequestApplicationExit()
 		glfwSetWindowShouldClose(glfwWindow, GLFW_TRUE);
 }
 
-// The shell's half of the calibration layer's toast policy. The handle is read
-// at call time, not captured: TryCreateVROverlay runs before InitCalibrator on
-// the normal path but the overlay can also fail to create, and either way a
-// zero handle has always meant "log only". Installed by InitCalibrator's caller
-// below, which is why the calibration layer no longer declares an accessor for
-// a resource this file owns.
+// The calibration layer's toast sink. The handle is read at call time; a zero
+// handle (no overlay) means log only.
 static void ShowVRToast(const char *message)
 {
 	if (overlayMainHandle && vr::VRNotifications())
@@ -83,22 +79,15 @@ static void ShowVRToast(const char *message)
 static GLuint fboHandle = 0, fboTextureHandle = 0;
 static int fboTextureWidth = 0, fboTextureHeight = 0;
 
-// Directory containing QuestCalibrator.exe. Everything we load or register by
-// path (manifest.vrmanifest, icon.png) sits next to the executable, so this must
-// NOT come from the process working directory - installers, Start Menu shortcuts
-// and SteamVR auto-launch all start us from somewhere else, and registering a
-// manifest path relative to the wrong directory fails silently.
-static std::string appDir;   // UTF-8
+// Directory containing QuestCalibrator.exe, in UTF-8 as the OpenVR APIs expect.
+// Everything loaded or registered by path sits next to the executable, never
+// the working directory: installers, shortcuts and SteamVR auto-launch start
+// us elsewhere, and a wrong manifest path fails silently.
+static std::string appDir;
 
-// False means the module path could not be resolved at all. There is no usable
-// fallback: substituting the working directory would register a manifest path
-// SteamVR cannot launch and load the overlay icon from the wrong place, both
-// silently, so callers must treat this as fatal.
+// False is fatal: there is no usable fallback directory.
 static bool ResolveAppDir()
 {
-	// The OpenVR APIs this feeds (manifest registration, SetOverlayFromFile)
-	// take UTF-8; the ANSI variants would hand SteamVR mojibake for any
-	// non-ASCII install path, silently breaking auto-launch and the icon.
 	std::vector<wchar_t> wide(MAX_PATH);
 	for (;;)
 	{
@@ -107,9 +96,7 @@ static bool ResolveAppDir()
 			return false;
 		if (len < wide.size())
 			break;
-		// Returning exactly the buffer size means truncation, not success: an
-		// install path longer than MAX_PATH must not silently become a
-		// different directory. Retry on the heap.
+		// A result the size of the buffer means truncation; retry larger.
 		if (wide.size() >= 32768)
 			return false;   // longer than any addressable NT path
 		wide.resize(wide.size() * 2);
@@ -120,41 +107,27 @@ static bool ResolveAppDir()
 		return false;
 	*lastSlash = L'\0';
 
-	int bytes = WideCharToMultiByte(CP_UTF8, 0, wide.data(), -1, nullptr, 0, nullptr, nullptr);
-	if (bytes <= 1)
-		return false;
-	std::string utf8(static_cast<size_t>(bytes), '\0');
-	if (WideCharToMultiByte(CP_UTF8, 0, wide.data(), -1, &utf8[0], bytes, nullptr, nullptr) == 0)
-		return false;
-	utf8.resize(static_cast<size_t>(bytes) - 1);   // drop the terminating NUL
-	appDir = std::move(utf8);
-	return true;
+	appDir = Narrow(wide.data());
+	return !appDir.empty();
 }
 
-// Everything we load or register by path sits next to the executable; composing
-// those joins in one place keeps a new one from picking a different directory.
 static std::string AppFile(const char *name)
 {
 	return appDir + "\\" + name;
 }
 
-// Release builds are a GUI binary with no console, so printf/cerr from the
-// -installmanifest style commands go nowhere. Report through a message box
-// instead, unless the caller passed -noui (the installer does, so a scripted
-// install never blocks on a modal window and reads the exit code instead).
+// Release builds are a GUI binary with no console, so the CLI commands report
+// through a message box, unless -noui is passed: the installer does, so a
+// scripted install never blocks on a modal window and reads the exit code.
 static bool g_cliNoUi = false;
 
-// -frames N: render exactly N frames and return. Paired with -uipreview (which
-// builds a complete fake VR state and needs no SteamVR) this makes the UI layer
-// runnable as a smoke test: a crash on any of those frames leaves wWinMain with
-// a non-empty fatal message and a non-zero exit code.
+// -frames N: render exactly N frames and return. With -uipreview (no SteamVR
+// needed) this is a UI smoke test: a crash leaves a non-zero exit code.
 static int g_frameLimit = 0;
 
-// -shot PATH: write the overlay texture of the last frame to PATH as a PNG,
-// then return as -frames does. Without -frames it settles on thirty frames,
-// enough for the tab thumb and the hover fades to finish. The point is a
-// look at a screen without SteamVR, a headset or a window to click through:
-// the picture is the same 1200x800 texture the dashboard would receive.
+// -shot PATH: write the last frame's 1200x800 overlay texture to PATH as a PNG,
+// then return as -frames does (thirty frames by default, enough for the tab
+// thumb and hover fades to settle).
 static std::wstring g_shotPath;
 
 // -lang CODE: show the overlay in this language for the session, whatever the
@@ -189,12 +162,9 @@ struct ManifestInstallResult
 // self-repair. OpenVR rejects duplicate application keys, so replacement must
 // temporarily remove the old manifest; every failure after that restores it.
 //
-// Auto-launch is the user's setting once the app is registered: only the
-// installer (`forceAutoLaunch`) and a first-ever registration turn it on. A
-// moved install carries the previous choice across its re-registration, and a
-// registration that already points here is left exactly as SteamVR has it, so
-// a user who switched auto-launch off does not get it switched back on by
-// every launch.
+// Auto-launch is the user's setting once registered: only the installer
+// (`forceAutoLaunch`) and a first-ever registration turn it on, and a moved
+// install carries the previous choice across.
 static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 {
 	ManifestInstallResult result;
@@ -370,9 +340,8 @@ void CreateGLFWWindow()
 	else
 		glfwShowWindow(glfwWindow);
 
-	imguiContextInitialized = ImGui::CreateContext() != nullptr;
-	if (!imguiContextInitialized)
-		throw std::runtime_error("Couldn't start the user interface (ImGui).");
+	ImGui::CreateContext();
+	imguiContextInitialized = true;
 	ImGuiIO &io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
@@ -382,9 +351,8 @@ void CreateGLFWWindow()
 	g_fontTitle = AddUiFont(io, 27.0f);
 	io.FontDefault = g_fontBody;
 
-	imguiGlfwInitialized = ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
-	if (!imguiGlfwInitialized)
-		throw std::runtime_error("Couldn't start the user interface (ImGui GLFW backend).");
+	ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
+	imguiGlfwInitialized = true;
 	glfwSetWindowFocusCallback(glfwWindow, [](GLFWwindow *, int focused) {
 		imgui_vr::DesktopFocusEvent(focused != 0, dashboardOwnsInput);
 	});
@@ -503,11 +471,9 @@ void InitVR(bool &initialized)
 	ActivateMultipleDrivers();
 }
 
-// The overlay texture, as the dashboard would show it, written to -shot's
-// path. Read back from the FBO rather than the window so the picture is the
-// full 1200x800 whatever size the desktop window has. WIC does the PNG: it
-// is part of Windows, and the encoder is a dozen calls with no library to
-// carry. Alpha is dropped on purpose; the compositor ignores it too.
+// Writes the overlay texture to -shot's path as a PNG (via WIC). Read from the
+// FBO so it is the full 1200x800 whatever the window size. Alpha is dropped;
+// the compositor ignores it too.
 static bool SavePreviewShot(const std::wstring &path, std::string &error)
 {
 	const UINT w = static_cast<UINT>(fboTextureWidth), h = static_cast<UINT>(fboTextureHeight);
@@ -597,12 +563,9 @@ void RunLoop()
 					glfwGetWindowAttrib(glfwWindow, GLFW_FOCUSED) != 0);
 			dashboardOwnsInput = dashboardVisible;
 
-			// Closing the VR keyboard takes two frames to settle, so the phase is
-			// named rather than encoded in flags whose combinations only a
-			// comment explained. Both waits are deliberate, and io.WantTextInput
-			// is read here BEFORE ImGui::NewFrame, so it always lags one frame
-			// behind the widget state - which is why clearing the active widget
-			// is not enough to stop an immediate reopen.
+			// Closing the VR keyboard takes two frames to settle: io.WantTextInput
+			// is read here before ImGui::NewFrame, so it lags the widget state by
+			// a frame, and clearing the active widget alone would reopen it.
 			enum class KeyboardPhase
 			{
 				Closed,
@@ -770,14 +733,11 @@ void RunLoop()
 	}
 }
 
-// Two instances would each open a pose-ring reader and split the driver's pose
-// stream disjointly between them - each seeing roughly half the samples, with
-// no loss marker to say so, and both feeding the runtime monitors. The OpenVR
-// dashboard key catches a duplicate too, but only once SteamVR is up and the
-// overlay interface exists; this answers "am I already running" on its own and
-// before anything is opened or rotated. Local\ is the session scope, which is
-// the scope that shares the ring. The handle is deliberately held for the
-// process lifetime and released by exit.
+// Two instances would each open a pose-ring reader and silently split the
+// driver's pose stream between them. The dashboard overlay key catches a
+// duplicate only once SteamVR is up; this answers before anything is opened or
+// rotated. Local\ is the session scope that shares the ring; the handle is
+// held until exit.
 static HANDLE g_singleInstanceMutex = nullptr;
 
 static bool ClaimSingleInstance()
@@ -892,12 +852,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 				AppendSessionLog("SteamVR manifest self-repair failed: " + registration.message);
 			else if (registration.changed)
 				AppendSessionLog("SteamVR application manifest/auto-launch registration repaired");
-			// Take the single-instance guard (the dashboard overlay key) BEFORE
-			// anything opens the driver's pose ring. Two overlay readers on one
-			// ring split the sample stream between them with no loss marker, so
-			// a second instance that reached InitCalibrator first would silently
-			// decimate the running instance's stream - possibly mid-calibration
-			// - for as long as it took to reach its own first RunLoop iteration.
+			// Claim the dashboard overlay key before InitCalibrator opens the pose
+			// ring (see g_singleInstanceMutex).
 			TryCreateVROverlay();
 		}
 		CreateGLFWWindow();
@@ -932,11 +888,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	if (!g_missingPath.empty())
 		questcal::i18n::WriteMissing(g_missingPath);
 
-	// One shutdown pair for every path, and before the modal dialog below can
-	// block this process indefinitely: ShutdownCalibrator flushes debounced
-	// profile/settings updates before stopping the pose hub. The ownership
-	// flags inside the lambdas are what make a throw out of one of them
-	// recoverable - the completed half is already a no-op on the retry.
+	// One shutdown pair for every path, before the modal dialog below can block:
+	// ShutdownCalibrator flushes debounced profile/settings writes. The
+	// ownership flags make the retry after a throw finish only what is left.
 	try
 	{
 		shutdownRuntime(fatal.empty());
@@ -944,8 +898,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	}
 	catch (...)
 	{
-		// Not dead code: the ownership flags cleared whatever already completed,
-		// so this retry finishes the rest rather than repeating it.
 		shutdownRuntime(false);
 		shutdownGraphics();
 		if (fatal.empty())
@@ -986,10 +938,8 @@ static std::string InitErrorMessage(vr::EVRInitError vrErr)
 		" start SteamVR once and try again.";
 }
 
-// Every command below reaches straight for the applications or settings
-// interface, which is only valid inside an initialised session. Sharing the
-// prologue means a new command cannot forget it. The preview flags must NOT
-// call this: their whole point is running without SteamVR.
+// The CLI commands need an initialised OpenVR session. The preview flags must
+// not call this: they run without SteamVR.
 static void InitVRUtilityOrExit()
 {
 	auto vrErr = vr::VRInitError_None;
@@ -1014,10 +964,6 @@ static std::string Narrow(const std::wstring &wide)
 
 static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 {
-	// Tokenise instead of substring-matching: -noui must not be stripped out of
-	// the middle of a longer token, and an argument we do not recognise has to
-	// be reported rather than falling through to a full GUI launch with exit
-	// code 0 - which a scripted install cannot tell from success.
 	// CommandLineToArgvW applies program-name rules to the first token, so
 	// prepend a placeholder for it.
 	std::wstring full = L"QuestCalibrator.exe ";
@@ -1031,9 +977,6 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		LocalFree(argv);
 	}
 
-	// -noui may accompany any command below. The installer passes it so a
-	// scripted install never blocks on a modal dialog and reads the exit code
-	// instead; without it (manual install) results are shown in a message box.
 	std::wstring cmd, unrecognised;
 	for (size_t i = 0; i < args.size(); ++i)
 	{
@@ -1055,14 +998,9 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 			unrecognised = arg;
 	}
 
-	// Everything registered or loaded by path hangs off the install directory,
-	// so failing to resolve it must fail loudly here rather than register a
-	// manifest SteamVR will later auto-launch from the wrong place.
 	if (!appDirResolved)
 		CliExit("QuestCalibrator couldn't find its own install folder.", true);
 
-	// An extra argument alongside a valid command is as much a mistake as a
-	// mistyped command, and used to be ignored entirely.
 	if (!unrecognised.empty())
 		CliExit("Unrecognized command-line argument: " + Narrow(unrecognised), true);
 
@@ -1184,9 +1122,8 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 	}
 	else if (!cmd.empty())
 	{
-		// A mistyped command used to launch the full GUI and exit 0, which a
-		// scripted install (Start-Process -Wait) cannot tell from success: it
-		// blocks until a human closes a window that is iconified at creation.
+		// Never fall through to a GUI launch: a scripted install
+		// (Start-Process -Wait) could not tell its exit code 0 from success.
 		CliExit("Unrecognized command-line argument: " + Narrow(cmd), true);
 	}
 }

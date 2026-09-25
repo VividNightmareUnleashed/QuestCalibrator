@@ -62,17 +62,15 @@ struct VRState
 // battery bar fill goes red.
 static const float kLowBattery = 0.15f;
 
+// Rolls a setting back when it cannot be saved. Profile-backed toggles use
+// SaveProfileFieldEdit instead, which persists a candidate record before
+// touching live state, so they need no rollback.
 template<typename T>
 static void SaveSettingOrRestore(T &value, const T &previous)
 {
 	if (!SaveSettingsWithResult(CalCtx).settingsSaved)
 		value = previous;
 }
-
-// The profile-backed toggles do not have a counterpart here: they all go
-// through Configuration.cpp's SaveProfileFieldEdit, which persists a candidate
-// record before touching live state, so the UI expresses the edit and never a
-// rollback. Every such call site sits inside an `if (validProfile)` block.
 
 struct IdentifyPulseState
 {
@@ -122,8 +120,6 @@ namespace Pal
 	}
 }
 
-// Inline text that opens a URL in the default browser; underlined on hover.
-
 typedef void (*IconFn)(ImDrawList *, ImVec2, float, ImU32);
 
 struct DeviceIconTex
@@ -141,11 +137,11 @@ static const float kRowHeight = 52.0f;
 static const float kRowInsetX = 16.0f;
 static const float kRowControlY = 14.0f;
 
-// Remembers the height it opened with, so the end call cannot disagree with
-// the begin call and silently overlap the next row.
 ImVec2 BeginRowCard(float height);
 void EndRowCard(ImVec2 p, float height);
 
+// Remembers the height it opened with, so the end call cannot disagree with
+// the begin call and silently overlap the next row.
 struct RowCard
 {
 	explicit RowCard(float rowHeight) : pos(BeginRowCard(rowHeight)), height(rowHeight) {}
@@ -157,9 +153,8 @@ struct RowCard
 	float height;
 };
 
-// One-sentence explanation under a row's label. Permanent rather than a
-// tooltip: the only hover target a tooltip had was the 24 px checkbox, and
-// the explanation then covered the very controls it described.
+// The one-sentence explanation under a row's label: a permanent line rather
+// than a tooltip, which would cover the controls it describes.
 static const float kRowSubLineH = 22.0f;
 
 struct StatusRowData
@@ -174,12 +169,9 @@ struct StatusRowData
 // something" test (>= Rating_Poor) reading false for it with no special case.
 enum CalRating { Rating_Unknown = -1, Rating_Good = 0, Rating_Decent, Rating_Poor, Rating_VeryPoor };
 
-// One derived answer to "what is the continuous loop actually doing", built
-// from the same terms ContinuousTick gates its own shouldRun on. The status
-// text, the rating, the advanced row's colour, the mount advisory and both
-// recalibration nudges all read this instead of each re-deriving a slice of
-// it -- which is how the state meaning "not running at all" came to render as
-// "gathering" forever, and how the two screens came to nudge from two rules.
+// What the continuous loop is doing, derived from the same terms ContinuousTick
+// gates its own shouldRun on. Every status text, colour, rating and nudge reads
+// this rather than re-deriving a slice of it.
 enum class ContinuousStatus
 {
 	Off,         // the feature is switched off
@@ -192,9 +184,6 @@ enum class ContinuousStatus
 	Frozen,
 	Holding,
 };
-
-// Pure over context fields, so asking again is free and no cached mirror of it
-// can go stale.
 
 enum class GuideStage { Idle, GetSet, Countdown, Running, Done };
 
@@ -219,9 +208,8 @@ static const float kCountdownSeconds = 3.0f;
 // Exceed the four-row scroll threshold and exercise several battery states.
 static const int kPreviewManyTrackerCount = 6;
 
-// The top-level tabs. Calibration is the screen the app always had;
-// Lighthouse and Smoothing are optional modules (CalCtx.modules); a tab
-// whose module is not installed stays greyed out.
+// The top-level tabs. Lighthouse and Smoothing are optional modules
+// (CalCtx.modules); a tab whose module is not installed stays greyed out.
 enum class MainTab { Calibration = 0, Lighthouse, Smoothing };
 
 // Shared state, each owned by one file.
@@ -268,8 +256,6 @@ bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, Btn
 // less than the English layout's width.
 float ButtonWidthFor(const char *english, bool withIcon, float minWidth);
 bool QCCheckbox(const char *id, bool *v);
-ImVec2 BeginRowCard(float height);
-void EndRowCard(ImVec2 p, float height);
 void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label);
 void RowSubLine(ImVec2 rowPos, const char *text);
 bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, const char *subline = nullptr);
@@ -293,7 +279,6 @@ const char *ContinuousStatusLine(ContinuousStatus status);
 ImVec4 ContinuousStatusColor(ContinuousStatus status);
 CalRating ComputeCalibrationRating(ContinuousStatus continuous);
 const char *RatingLabel(CalRating r);
-CalRating SolveQualityRating(const questcal::EngineResult &result);
 ImVec4 RatingColor(CalRating r);
 const char *RecalibrationNudge(CalRating rating);
 std::optional<std::string> FormatUnixAge(double unixTime);
@@ -302,6 +287,7 @@ bool ProtectChaperone();
 void BuildStatusBand(const VRState &state);
 void BuildMainScreen(const VRState &state);
 void DeviceIcon(ImDrawList *dl, const VRDevice &dev, ImVec2 c, float s, ImU32 col);
+void RowDeviceIcon(ImDrawList *dl, const VRDevice &dev, ImVec2 c, ImU32 fallback);
 const std::string *FindDeviceName(const std::string &serial);
 std::string DeviceDisplayName(const VRDevice &dev);
 void CommitDeviceName(const VRDevice &dev, const char *text);
@@ -321,7 +307,7 @@ void BuildMenu(const VRState &state, bool runningInOverlay);
 void BuildSettingsScreen(const VRState &state);
 void SeedTransformEditorDraft();
 bool BuildProfileEditor();
-bool SaveProfileEditorDraft();
+void SaveProfileEditorDraft();
 std::string PreviewIconPath(const char *driverRelative);
 void UpdateIdentifyPulse(double now);
 void BuildHeader();
