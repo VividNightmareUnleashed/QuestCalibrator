@@ -138,6 +138,9 @@
     <ClInclude Include="PoseStreamHub.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ProfileScalarValidation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ProfileValidation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -145,6 +148,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RingPoseMath.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RingSampleGate.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
