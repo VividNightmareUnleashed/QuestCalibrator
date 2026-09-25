@@ -167,35 +167,33 @@ void DevicePoseAt(double t, const SceneConfig &scene,
 	pos = centre + scene.translationScale * (PositionAt(t) - centre);
 }
 
+// Central-difference linear and angular velocity of the pose function `poseOf` at t.
+template <typename PoseFn>
+void DifferentiatePose(const PoseFn &poseOf, double t, Eigen::Vector3d &vel, Eigen::Vector3d &angVel)
+{
+	const double h = 1e-4;
+	Eigen::Quaterniond r0, r1;
+	Eigen::Vector3d p0, p1;
+	poseOf(t - h, r0, p0);
+	poseOf(t + h, r1, p1);
+	vel = (p1 - p0) / (2.0 * h);
+	Eigen::Quaterniond dq = r1 * r0.conjugate();
+	dq.normalize();
+	if (dq.w() < 0.0) dq.coeffs() = -dq.coeffs();
+	double angle = 2.0 * std::atan2(dq.vec().norm(), dq.w());
+	angVel = (dq.vec().norm() > 1e-12)
+		? Eigen::Vector3d(dq.vec().normalized() * (angle / (2.0 * h)))
+		: Eigen::Vector3d::Zero();
+}
+
 PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
                       const GroundTruth &truth, bool isTarget,
                       const Eigen::Quaterniond &mountRot, const Eigen::Vector3d &mountPos,
                       std::mt19937 &rng)
 {
-	Eigen::Quaterniond rotA;
-	Eigen::Vector3d posA;
-	DevicePoseAt(poseTime, scene, rotA, posA);
-
-	Eigen::Quaterniond rot;
-	Eigen::Vector3d pos;
-	if (!isTarget)
-	{
-		rot = rotA;
-		pos = posA;
-	}
-	else
-	{
-		// Device B is rigidly mounted on A, then mapped into the target universe
-		// by the inverse of the ground-truth calibration:
-		//   worldRef = R * (s * pTarget) + t   =>   pTarget = R^-1 (worldRef - t) / s
-		Eigen::Quaterniond rotB = rotA * mountRot;
-		Eigen::Vector3d posB = posA + rotA * mountPos;
-		rot = truth.rotation.conjugate() * rotB;
-		pos = truth.rotation.conjugate() * (posB - truth.translation) / truth.scale;
-	}
-
-	// Velocities via central finite differences of the same construction.
-	const double h = 1e-4;
+	// Device B is rigidly mounted on A, then mapped into the target universe
+	// by the inverse of the ground-truth calibration:
+	//   worldRef = R * (s * pTarget) + t   =>   pTarget = R^-1 (worldRef - t) / s
 	auto poseAt = [&](double tt, Eigen::Quaterniond &r, Eigen::Vector3d &p)
 	{
 		Eigen::Quaterniond ra;
@@ -207,30 +205,14 @@ PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
 		r = truth.rotation.conjugate() * rb;
 		p = truth.rotation.conjugate() * (pb - truth.translation) / truth.scale;
 	};
-	Eigen::Quaterniond r0, r1;
-	Eigen::Vector3d p0, p1;
-	poseAt(poseTime - h, r0, p0);
-	poseAt(poseTime + h, r1, p1);
 
 	PoseSample s;
 	s.time = stamp;
-	s.rot = rot;
-	s.pos = pos;
-	s.vel = (p1 - p0) / (2.0 * h);
-	Eigen::Quaterniond dq = r1 * r0.conjugate();
-	dq.normalize();
-	if (dq.w() < 0.0) dq.coeffs() = -dq.coeffs();
-	double angle = 2.0 * std::atan2(dq.vec().norm(), dq.w());
-	s.angVel = (dq.vec().norm() > 1e-12)
-		? Eigen::Vector3d(dq.vec().normalized() * (angle / (2.0 * h)))
-		: Eigen::Vector3d::Zero();
+	poseAt(poseTime, s.rot, s.pos);
+	DifferentiatePose(poseAt, poseTime, s.vel, s.angVel);
 
-	// Noise and outliers. Same constraint as the timestamp jitter in
-	// GenerateStreamsWithMount: normal_distribution requires sigma > 0 at
-	// CONSTRUCTION, and a clean scene sets both of these to zero. The draws
-	// below are already gated on the same values, so the substitute sigma is
-	// never sampled - but constructing with zero aborts the Debug STL, which
-	// is why no Debug build of this harness has ever run to completion.
+	// normal_distribution needs sigma > 0 at construction (the Debug STL
+	// asserts); the stand-in is never sampled, since every draw is gated.
 	std::normal_distribution<double> pn(0.0, scene.posNoise > 0.0 ? scene.posNoise : 1.0);
 	std::normal_distribution<double> rn(0.0,
 		scene.rotNoiseDeg > 0.0 ? scene.rotNoiseDeg * EIGEN_PI / 180.0 : 1.0);
@@ -258,32 +240,25 @@ void GenerateStreamsWithMount(const SceneConfig &scene, const GroundTruth &truth
                               std::vector<PoseSample> &targetStream)
 {
 	std::mt19937 rng(seed);
-	// normal_distribution requires sigma > 0 at construction (MSVC's debug STL
-	// asserts it); substitute a dummy sigma when jitter is off — the
-	// distribution is only ever sampled when timestampJitter > 0.
+	// Sigma > 0 at construction, as in MakeSample; only sampled when jitter is on.
 	std::normal_distribution<double> timestampNoise(
 		0.0, scene.timestampJitter > 0.0 ? scene.timestampJitter : 1.0);
 
-	refStream.clear();
-	targetStream.clear();
-
-	for (double t = 0.0; t < scene.duration; t += 1.0 / scene.refRate)
-	{
-		double stamp = scene.timestampJitter > 0.0 ? t + timestampNoise(rng) : t;
-		if (!refStream.empty())
-			stamp = std::max(stamp, refStream.back().time + 1e-6);
-		refStream.push_back(MakeSample(stamp, stamp, scene, truth, false, mountRot, mountPos, rng));
-	}
-
 	// The target stream lags: the pose stamped t is the physical state at t - latency.
-	for (double t = 0.0; t < scene.duration; t += 1.0 / scene.targetRate)
+	auto generate = [&](std::vector<PoseSample> &stream, double rate, bool isTarget, double latency)
 	{
-		double stamp = scene.timestampJitter > 0.0 ? t + timestampNoise(rng) : t;
-		if (!targetStream.empty())
-			stamp = std::max(stamp, targetStream.back().time + 1e-6);
-		targetStream.push_back(
-			MakeSample(stamp, stamp - truth.latency, scene, truth, true, mountRot, mountPos, rng));
-	}
+		stream.clear();
+		for (double t = 0.0; t < scene.duration; t += 1.0 / rate)
+		{
+			double stamp = scene.timestampJitter > 0.0 ? t + timestampNoise(rng) : t;
+			if (!stream.empty())
+				stamp = std::max(stamp, stream.back().time + 1e-6);
+			stream.push_back(
+				MakeSample(stamp, stamp - latency, scene, truth, isTarget, mountRot, mountPos, rng));
+		}
+	};
+	generate(refStream, scene.refRate, false, 0.0);
+	generate(targetStream, scene.targetRate, true, truth.latency);
 }
 
 void GenerateStreams(const SceneConfig &scene, const GroundTruth &truth, uint32_t seed,
@@ -332,13 +307,9 @@ std::vector<PoseSample> StretchTime(const std::vector<PoseSample> &stream, doubl
 	return out;
 }
 
-// Zero-phase low-pass (forward+backward one-pole) over a pose stream: models
-// what streamed Quest poses look like after smoothing plus the runtime's
-// prediction — the prediction restores the phase (latency) but cannot restore
-// the high-frequency amplitude the smoothing removed. Position and rotation
-// take separate time constants (real runtimes smooth position aggressively
-// while keeping orientation crisp for reprojection); velocities are filtered
-// with their pose's tau so they stay consistent.
+// Zero-phase low-pass (forward+backward one-pole): streamed Quest poses after
+// smoothing plus runtime prediction, which restores the phase but not the lost
+// high-frequency amplitude. Position and rotation take separate time constants.
 std::vector<PoseSample> SmoothStreamZeroPhase(const std::vector<PoseSample> &stream,
                                               double posTau, double rotTau)
 {
@@ -377,10 +348,8 @@ struct Expectation
 int failures = 0;
 int checksRun = 0;
 
-// Every reported result funnels through here. The exit code alone cannot
-// distinguish "everything passed" from "nothing ran", so a deleted
-// Run*Scenarios() call or an early return that skips the rest of a group
-// shows up as a drop in the reported count instead of a green build.
+// Every result funnels through here; the reported count exposes a skipped
+// group, which the exit code (failures only) cannot.
 void RecordResult(bool pass)
 {
 	checksRun++;
@@ -419,13 +388,8 @@ void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &
 			pass = false; why += " offsetErr";
 		}
 		if (expect.maxScaleErr > 0.0 && scaleErr > expect.maxScaleErr) { pass = false; why += " scaleErr"; }
-		// solveScale is experimental and opt-in, so this is the configuration
-		// essentially every user runs -- and with it off the engine must leave
-		// scale at EXACTLY 1.0 (nothing on that path ever writes it). Without
-		// this, a leak from the guard path, an unconditional 1-D search, or a
-		// refinement writing out its nuisance scale would go unnoticed as long
-		// as the composed transform stayed self-consistent, while the driver
-		// multiplied every position, velocity and acceleration by it.
+		// With solveScale off (what essentially every user runs) scale must be
+		// exactly 1.0: the driver multiplies every position and velocity by it.
 		if (!config.solveScale && r.scale != 1.0) { pass = false; why += " scaleLeak"; }
 	}
 	if (expect.messageContains && r.message.find(expect.messageContains) == std::string::npos)
@@ -499,6 +463,65 @@ struct PoseRingFixture
 	protocol::PoseRingReader reader;
 };
 
+// A minimal ring payload with an identity rotation, identified by its timestamp.
+protocol::DevicePoseSample TokenSample(int64_t qpc, uint32_t deviceId = 0, double x = 0.0)
+{
+	protocol::DevicePoseSample sample{};
+	sample.sampleTimeQpc = qpc;
+	sample.deviceId = deviceId;
+	sample.rotation.w = 1.0;
+	sample.position[0] = x;
+	return sample;
+}
+
+// Polls `done` for up to five seconds, sleeping `sleepMs` between polls, and
+// returns its final value.
+template <typename Done>
+bool WaitFor(Done done, DWORD sleepMs)
+{
+	const ULONGLONG deadline = GetTickCount64() + 5000;
+	while (!done() && GetTickCount64() < deadline)
+		Sleep(sleepMs);
+	return done();
+}
+
+// Publishes `head` on its own thread and parks that producer just after its
+// claim, so the head slot stays owned until Release().
+class HeldClaim
+{
+public:
+	HeldClaim(protocol::PoseRingWriter &writer, const protocol::DevicePoseSample &head)
+		: thread([this, &writer, head]()
+		{
+			writer.PublishAfterClaimForTest(head, [this]()
+			{
+				claimed.store(true, std::memory_order_release);
+				while (!released.load(std::memory_order_acquire))
+					Sleep(0);
+			});
+		})
+	{
+	}
+	~HeldClaim() { Release(); }
+
+	// Whether the producer reached its claim within five seconds.
+	bool Wait()
+	{
+		return WaitFor([this] { return claimed.load(std::memory_order_acquire); }, 0);
+	}
+	void Release()
+	{
+		released.store(true, std::memory_order_release);
+		if (thread.joinable())
+			thread.join();
+	}
+
+private:
+	std::atomic<bool> claimed{ false };
+	std::atomic<bool> released{ false };
+	std::thread thread;   // last: its lambda uses the flags above
+};
+
 // World trajectory of a reference device (HMD or its controller), with
 // consistent finite-difference velocities.
 void RefTrajectory(double t, uint32_t id, Eigen::Quaterniond &rot, Eigen::Vector3d &pos,
@@ -511,28 +534,27 @@ void RefTrajectory(double t, uint32_t id, Eigen::Quaterniond &rot, Eigen::Vector
 		if (id != 0)
 			p += r * Eigen::Vector3d(0.1, -0.3, -0.25);   // hand-ish offset from the head
 	};
-
 	poseOf(t, rot, pos);
-
-	const double h = 1e-4;
-	Eigen::Quaterniond r0, r1;
-	Eigen::Vector3d p0, p1;
-	poseOf(t - h, r0, p0);
-	poseOf(t + h, r1, p1);
-	vel = (p1 - p0) / (2.0 * h);
-	Eigen::Quaterniond dq = r1 * r0.conjugate();
-	dq.normalize();
-	if (dq.w() < 0.0) dq.coeffs() = -dq.coeffs();
-	double angle = 2.0 * std::atan2(dq.vec().norm(), dq.w());
-	angVel = (dq.vec().norm() > 1e-12)
-		? Eigen::Vector3d(dq.vec().normalized() * (angle / (2.0 * h)))
-		: Eigen::Vector3d::Zero();
+	DifferentiatePose(poseOf, t, vel, angVel);
 }
 
 void Check(const char *name, bool pass, const char *detail)
 {
 	printf("%-28s %s%s%s\n", name, pass ? "PASS" : "FAIL", detail[0] ? "  " : "", detail);
 	RecordResult(pass);
+}
+
+// Passes when every named flag holds; the detail lists each as name=0/1.
+void CheckFlags(const char *name, std::initializer_list<std::pair<const char *, bool>> flags,
+	std::string detail = std::string())
+{
+	bool pass = true;
+	for (const auto &flag : flags)
+	{
+		pass = pass && flag.second;
+		detail += (detail.empty() ? "" : " ") + std::string(flag.first) + (flag.second ? "=1" : "=0");
+	}
+	Check(name, pass, detail.c_str());
 }
 
 Eigen::Quaterniond RandomQuaternion(std::mt19937 &rng, double maxAngle = EIGEN_PI)
@@ -581,9 +603,7 @@ void RunDriverPoseTransformScenarios()
 		double timeShift = timeDist(rng);
 		double initialTime = timeDist(rng);
 
-		// A real device's tracked-origin-to-head offset. It must be non-zero
-		// here: leaving it at zero makes the deliberate decision below
-		// unfalsifiable in either direction.
+		// Non-zero, or the "not scaled" assertion below could not fail.
 		Eigen::Vector3d driverFromHead = RandomVector(rng, 0.4);
 
 		vr::DriverPose_t pose{};
@@ -638,11 +658,8 @@ void RunDriverPoseTransformScenarios()
 			actualWorldRotation.angularDistance(expectedWorldRotation));
 		worstTime = std::max(worstTime,
 			std::abs(pose.poseTimeOffset - (initialTime + timeShift)));
-		// Deliberately NOT scaled: `scale` reconciles two tracking systems'
-		// universe scales, while this offset is the device's real physical
-		// geometry and stays real-size. Asserted exactly, because the decision
-		// is only safe while the solver's model makes the same assumption -
-		// scaling it here without changing the model is a silent bias.
+		// Deliberately NOT scaled: this is the device's physical geometry, and
+		// the solver's model assumes it stays real-size.
 		Eigen::Vector3d actualDriverFromHead(
 			pose.vecDriverFromHeadTranslation[0],
 			pose.vecDriverFromHeadTranslation[1],
@@ -682,36 +699,27 @@ void RunDriverProtocolValidationScenarios()
 	bool pass = ValidateAndSanitize(good, sanitized) && sanitized.openVRID == 3 &&
 		std::abs(sanitized.rotation.w - 1.0) < 1e-12 && sanitized.scale == good.scale;
 
-	auto rejectsTransform = [&](protocol::SetDeviceTransform candidate)
+	// True when `mutate` turns the valid `candidate` into a refused message.
+	auto rejects = [](auto candidate, auto mutate)
 	{
-		protocol::SetDeviceTransform ignored;
+		mutate(candidate);
+		decltype(candidate) ignored;
 		return !ValidateAndSanitize(candidate, ignored);
 	};
-	protocol::SetDeviceTransform badTransform = good;
-	badTransform.openVRID = vr::k_unMaxTrackedDeviceCount;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.translation.v[0] = nan;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.translation.v[1] = 10001.0;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.rotation.w = inf;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.rotation = { 0.0, 0.0, 0.0, 0.0 };
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.scale = 0.24;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.scale = 4.01;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.scale = nan;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.timeOffset = 1.01;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.timeOffset = inf;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.enabled = 2;
-	pass = pass && rejectsTransform(badTransform);
-	badTransform = good; badTransform.hidden = 2;
-	pass = pass && rejectsTransform(badTransform);
+	using Transform = protocol::SetDeviceTransform;
+	pass = pass &&
+		rejects(good, [&](Transform &m) { m.openVRID = vr::k_unMaxTrackedDeviceCount; }) &&
+		rejects(good, [&](Transform &m) { m.translation.v[0] = nan; }) &&
+		rejects(good, [&](Transform &m) { m.translation.v[1] = 10001.0; }) &&
+		rejects(good, [&](Transform &m) { m.rotation.w = inf; }) &&
+		rejects(good, [&](Transform &m) { m.rotation = { 0.0, 0.0, 0.0, 0.0 }; }) &&
+		rejects(good, [&](Transform &m) { m.scale = 0.24; }) &&
+		rejects(good, [&](Transform &m) { m.scale = 4.01; }) &&
+		rejects(good, [&](Transform &m) { m.scale = nan; }) &&
+		rejects(good, [&](Transform &m) { m.timeOffset = 1.01; }) &&
+		rejects(good, [&](Transform &m) { m.timeOffset = inf; }) &&
+		rejects(good, [&](Transform &m) { m.enabled = 2; }) &&
+		rejects(good, [&](Transform &m) { m.hidden = 2; });
 
 	protocol::SetAlignmentField goodField;
 	goodField.enabled = true;
@@ -724,61 +732,38 @@ void RunDriverProtocolValidationScenarios()
 	pass = pass && ValidateAndSanitize(goodField, sanitizedField) &&
 		std::abs(sanitizedField.anchors[0].rotationDelta.x - 1.0) < 1e-12;
 
-	auto rejectsField = [&](protocol::SetAlignmentField candidate)
-	{
-		protocol::SetAlignmentField ignored;
-		return !ValidateAndSanitize(candidate, ignored);
-	};
-	protocol::SetAlignmentField badField = goodField;
-	badField.anchorCount = protocol::SetAlignmentField::MaxAnchors + 1;
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.sigmaMeters = 0.01;
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.sigmaMeters = 101.0;
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.sigmaMeters = nan;
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.anchors[0].position[1] = inf;
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.anchors[0].position[2] = 10001.0;
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.anchors[0].translationDelta[0] = 100.01;
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.anchors[0].rotationDelta = { 0.0, 0.0, 0.0, 0.0 };
-	pass = pass && rejectsField(badField);
-	badField = goodField; badField.enabled = 2;
-	pass = pass && rejectsField(badField);
+	using Field = protocol::SetAlignmentField;
+	pass = pass &&
+		rejects(goodField, [&](Field &m) { m.anchorCount = Field::MaxAnchors + 1; }) &&
+		rejects(goodField, [&](Field &m) { m.sigmaMeters = 0.01; }) &&
+		rejects(goodField, [&](Field &m) { m.sigmaMeters = 101.0; }) &&
+		rejects(goodField, [&](Field &m) { m.sigmaMeters = nan; }) &&
+		rejects(goodField, [&](Field &m) { m.enabled = 2; });
 
-	// Every rejection above poisons anchor 0, and the accepted field carries one
-	// anchor - so a loop bound of `i < 1`, or hoisting the per-anchor checks out
-	// of the loop, passes all of them. Build a full field and poison its LAST
-	// anchor. The output is value-initialised first, so an unvalidated tail does
-	// not fault: the user's per-spot corrections are silently dropped to identity
-	// behind a success response from the driver.
+	// Per-anchor bounds, on the only anchor of goodField and on the LAST anchor
+	// of a full field: a validation loop that stops early passes the first set
+	// and silently drops the tail's corrections to identity.
 	protocol::SetAlignmentField tailField = goodField;
-	tailField.anchorCount = protocol::SetAlignmentField::MaxAnchors;
+	tailField.anchorCount = Field::MaxAnchors;
 	for (uint32_t i = 0; i < tailField.anchorCount; ++i)
 	{
 		tailField.anchors[i].position[0] = 1.0 + static_cast<double>(i);
 		tailField.anchors[i].rotationDelta = { 1.0, 0.0, 0.0, 0.0 };
 		tailField.anchors[i].translationDelta[2] = -0.05;
 	}
-	const uint32_t lastAnchor = protocol::SetAlignmentField::MaxAnchors - 1;
+	const uint32_t lastAnchor = Field::MaxAnchors - 1;
 	protocol::SetAlignmentField sanitizedTail;
-	// Non-vacuity: the tail must survive a clean field, or the rejections below
-	// would prove nothing about where the loop stops.
 	pass = pass && ValidateAndSanitize(tailField, sanitizedTail) &&
 		sanitizedTail.anchors[lastAnchor].position[0] ==
 			1.0 + static_cast<double>(lastAnchor);
-
-	badField = tailField; badField.anchors[lastAnchor].position[1] = inf;
-	pass = pass && rejectsField(badField);
-	badField = tailField; badField.anchors[lastAnchor].position[2] = 10001.0;
-	pass = pass && rejectsField(badField);
-	badField = tailField; badField.anchors[lastAnchor].translationDelta[0] = 100.01;
-	pass = pass && rejectsField(badField);
-	badField = tailField; badField.anchors[lastAnchor].rotationDelta = { 0.0, 0.0, 0.0, 0.0 };
-	pass = pass && rejectsField(badField);
+	auto rejectsAnchor = [&](const Field &base, uint32_t a)
+	{
+		return rejects(base, [&](Field &m) { m.anchors[a].position[1] = inf; }) &&
+			rejects(base, [&](Field &m) { m.anchors[a].position[2] = 10001.0; }) &&
+			rejects(base, [&](Field &m) { m.anchors[a].translationDelta[0] = 100.01; }) &&
+			rejects(base, [&](Field &m) { m.anchors[a].rotationDelta = { 0.0, 0.0, 0.0, 0.0 }; });
+	};
+	pass = pass && rejectsAnchor(goodField, 0) && rejectsAnchor(tailField, lastAnchor);
 
 	// Unused wire anchors are deliberately scrubbed instead of trusted.
 	protocol::SetAlignmentField unusedGarbage;
@@ -800,22 +785,13 @@ void RunDriverProtocolValidationScenarios()
 	pass = pass && ValidateAndSanitize(runtime, cleanRuntime) &&
 		cleanRuntime.enabledMask == runtime.enabledMask &&
 		cleanRuntime.hiddenMask == runtime.hiddenMask;
-	auto rejectsRuntime = [&](protocol::SetRuntimeState candidate)
-	{
-		protocol::SetRuntimeState ignored;
-		return !ValidateAndSanitize(candidate, ignored);
-	};
-	auto badRuntime = runtime;
-	badRuntime.hiddenMask |= uint64_t{ 1 } << 9;
-	pass = pass && rejectsRuntime(badRuntime);
-	badRuntime = runtime; badRuntime.transform.openVRID = 3;
-	pass = pass && rejectsRuntime(badRuntime);
-	badRuntime = runtime; badRuntime.transform.enabled = 0;
-	pass = pass && rejectsRuntime(badRuntime);
-	badRuntime = runtime; badRuntime.transform.hidden = 1;
-	pass = pass && rejectsRuntime(badRuntime);
-	badRuntime = runtime; badRuntime.enabledMask = 0; badRuntime.hiddenMask = 0;
-	pass = pass && rejectsRuntime(badRuntime);
+	using Runtime = protocol::SetRuntimeState;
+	pass = pass &&
+		rejects(runtime, [&](Runtime &m) { m.hiddenMask |= uint64_t{ 1 } << 9; }) &&
+		rejects(runtime, [&](Runtime &m) { m.transform.openVRID = 3; }) &&
+		rejects(runtime, [&](Runtime &m) { m.transform.enabled = 0; }) &&
+		rejects(runtime, [&](Runtime &m) { m.transform.hidden = 1; }) &&
+		rejects(runtime, [&](Runtime &m) { m.enabledMask = 0; m.hiddenMask = 0; });
 
 	Check("driver: protocol validation", pass,
 		"finite/range/quaternion/unused-anchor/atomic-state matrix");
@@ -846,12 +822,8 @@ void RunDriverProtocolValidationScenarios()
 		wrongRejected && handshakeAccepted && mutationAccepted && !staleMutation,
 		"pre-handshake/wrong-handshake/current/stale mutation matrix");
 
-	// A late wrong-version handshake REVOKES the connection: handshakeComplete is
-	// assigned from the version comparison, never or-ed into. Without this, a
-	// "once handshaken, always handshaken" relaxation would let a peer that
-	// downgrades mid-connection (or a second local process reusing the pipe after
-	// a good handshake) keep mutating at a version this driver no longer speaks,
-	// and no existing assertion would notice.
+	// A late wrong-version handshake revokes the connection instead of leaving
+	// it authorized by the earlier good one.
 	bool revokeDispatched = questcal::ipc::PrepareRequest(wrongHandshake, connection, response);
 	protocol::Request currentMutation(protocol::RequestSetDeviceTransform);
 	bool afterRevoke = questcal::ipc::PrepareRequest(currentMutation, connection, response);
@@ -860,28 +832,8 @@ void RunDriverProtocolValidationScenarios()
 			response.type == protocol::ResponseInvalid,
 		"a wrong-version handshake after a good one un-authorizes the connection");
 
-	// The gate's `mutation` clause names BOTH mutating request types, and only
-	// SetDeviceTransform was ever driven through it. Dropping the
-	// RequestSetRuntimeState term would make every complete-state send fall
-	// through to ResponseInvalid -- indistinguishable, on the wire, from a broken
-	// handshake -- while the driver's own field validation kept passing.
-	questcal::ipc::ConnectionState fieldConnection;
-	protocol::Request fieldMutation(protocol::RequestSetRuntimeState);
-	bool fieldPreHandshake =
-		questcal::ipc::PrepareRequest(fieldMutation, fieldConnection, response);
-	protocol::Request fieldHandshake(protocol::RequestHandshake);
-	questcal::ipc::PrepareRequest(fieldHandshake, fieldConnection, response);
-	bool fieldAccepted =
-		questcal::ipc::PrepareRequest(fieldMutation, fieldConnection, response);
-	Check("driver: alignment-field dispatch gate",
-		!fieldPreHandshake && fieldConnection.handshakeComplete && fieldAccepted,
-		"SetRuntimeState refused before the handshake, dispatched after it");
-
-	// Everything above exercises the gate in isolation. This is the first
-	// coverage of anything in IPCServer.cpp itself: which sink a request
-	// reaches, and what a setter's refusal becomes on the wire. The transport
-	// half - overlapped pipe, per-connection state, listener backoff, teardown
-	// drain - still needs a real named pipe and stays uncovered.
+	// IPCServer's dispatch: which sink each request reaches, and what a setter's
+	// refusal becomes on the wire.
 	if (!LogFile)
 		LogFile = stderr;   // the LOG macro writes unconditionally
 
@@ -907,11 +859,12 @@ void RunDriverProtocolValidationScenarios()
 	protocol::Request transformReq(protocol::RequestSetDeviceTransform);
 	protocol::Request fieldReq(protocol::RequestSetRuntimeState);
 
-	// A gate refusal must not reach a setter at all: the driver never sees
-	// values from a connection that has not proven its version.
+	// Neither mutation reaches a setter before the connection proves its version.
 	server.DispatchForTest(transformReq, dispatched, dispatchConn);
-	bool noSetterBeforeHandshake =
-		transformCalls == 0 && dispatched.type == protocol::ResponseInvalid;
+	bool noSetterBeforeHandshake = dispatched.type == protocol::ResponseInvalid;
+	server.DispatchForTest(fieldReq, dispatched, dispatchConn);
+	noSetterBeforeHandshake = noSetterBeforeHandshake && transformCalls == 0 &&
+		fieldCalls == 0 && dispatched.type == protocol::ResponseInvalid;
 
 	protocol::Request dispatchHandshake(protocol::RequestHandshake);
 	server.DispatchForTest(dispatchHandshake, dispatched, dispatchConn);
@@ -946,13 +899,9 @@ void RunDriverProtocolValidationScenarios()
 
 // ---------------------------------------------------------------------------
 // Overlay -> driver slot reconciliation (Overlay/DriverSyncPolicy.h)
-//
-// Pure policy for which slots receive the calibration and how their complete
-// masks are derived.
 
 // A device table indexed by OpenVR id. A slot nobody filled in enumerates as
-// TrackedDeviceClass_Invalid, which is exactly what OpenVR reports for an id it
-// no longer exposes -- and the driver slot outlives that disappearance.
+// Invalid, which is what OpenVR reports for an id it no longer exposes.
 struct SyncDeviceTable
 {
 	questcal::SyncDevice devices[vr::k_unMaxTrackedDeviceCount];
@@ -975,12 +924,6 @@ struct SyncDeviceTable
 		device.trackingSystem = trackingSystem ? trackingSystem : "";
 		device.serialKnown = serial != nullptr;
 		device.serial = serial ? serial : "";
-	}
-
-	void Remove(uint32_t id)
-	{
-		devices[id] = questcal::SyncDevice();
-		devices[id].id = id;
 	}
 };
 
@@ -1061,51 +1004,36 @@ void RunDriverSyncScenarios()
 }
 
 // ---------------------------------------------------------------------------
-// Overlay -> driver session sequencing (Overlay/DriverSession.h)
-//
-// Session sequencing determines request order and what the overlay may believe
-// afterward. Fault injection drives refusals, disconnects, and reconnects
-// through the production transport seams.
+// Overlay -> driver session sequencing (Overlay/DriverSession.h), with faults
+// injected through the transport seam.
 
 enum class LinkFault
 {
 	None,
-	// The driver answered, and said no.
-	Refuse,
-	// The send failed and IPCClient's one reconnect-and-replay failed too.
-	Throw,
-	// SendBlocking's replay-after-reconnect: the request WAS accepted, but by a
-	// new pipe. Nothing in the response says so -- the connection generation is
-	// the only evidence, which is the whole reason a batch stamps one.
-	Reconnect,
+	Refuse,      // the driver answered, and said no
+	Throw,       // the send and IPCClient's reconnect-and-replay both failed
+	Reconnect,   // accepted, but by a new pipe: only the generation shows it
 };
 
-// A scripted driver connection. Records every request in order and answers each
-// from a small script keyed on the request itself, so a scenario names the
-// failure the way the invariant does ("the enable for slot 3 is refused")
-// rather than by counting round-trips.
+// A scripted driver connection: records every request and answers each from a
+// script keyed on the request.
 struct FakeDriverLink
 {
 	std::vector<protocol::Request> sent;
-	// Real connections start at 1: zero is the session's "this batch has not
-	// been stamped yet" sentinel, so a scripted zero would drive a state
-	// production cannot reach.
-	uint64_t generation = 1;
-	std::function<LinkFault(size_t index, const protocol::Request &)> script;
+	uint64_t generation = 1;   // real connections start at 1; 0 means "unstamped"
+	std::function<LinkFault(const protocol::Request &)> script;
 
 	questcal::DriverTransport Transport()
 	{
 		return [this](const protocol::Request &request)
 		{
-			size_t index = sent.size();
 			sent.push_back(request);
-			LinkFault fault = script ? script(index, request) : LinkFault::None;
+			LinkFault fault = script ? script(request) : LinkFault::None;
 
 			questcal::DriverTransportResult result;
 			if (fault == LinkFault::Reconnect)
 				++generation;
-			// Reported after the attempt whether or not it succeeded, exactly as
-			// IPCClient::ConnectionGeneration() is read in production.
+			// Reported whether or not the attempt succeeded, as in production.
 			result.connectionGeneration = generation;
 			if (fault == LinkFault::Throw)
 			{
@@ -1122,18 +1050,24 @@ struct FakeDriverLink
 	}
 };
 
-// One span of recorded traffic, summarized at the level the sequencing rules
-// are written in. Deliberately not an exact wire transcript: the neutralization
-// pass retries up to three times, and a transcript assertion would make every
-// scenario brittle against a retry that is allowed to happen.
+// A script that answers every SetRuntimeState with `fault`.
+std::function<LinkFault(const protocol::Request &)> FaultState(LinkFault fault)
+{
+	return [fault](const protocol::Request &request)
+	{
+		return request.type == protocol::RequestSetRuntimeState ? fault : LinkFault::None;
+	};
+}
+
+// A span of recorded traffic, summarized at the level the sequencing rules are
+// written in.
 struct LinkSpan
 {
 	size_t requests = 0;
 	int handshakes = 0;
 	int fieldEnables = 0;
 	int fieldDisables = 0;
-	std::vector<uint32_t> enables;
-	std::vector<uint32_t> disables;
+	std::vector<uint32_t> enables;   // the slots in each SetRuntimeState's enabledMask
 };
 
 LinkSpan SpanOf(const FakeDriverLink &link, size_t from)
@@ -1144,29 +1078,17 @@ LinkSpan SpanOf(const FakeDriverLink &link, size_t from)
 		const protocol::Request &request = link.sent[i];
 		++span.requests;
 		if (request.type == protocol::RequestHandshake)
-		{
 			++span.handshakes;
-		}
-		else if (request.type == protocol::RequestSetRuntimeState)
+		if (request.type != protocol::RequestSetRuntimeState)
+			continue;
+		if (request.setRuntimeState.field.enabled)
+			++span.fieldEnables;
+		else
+			++span.fieldDisables;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 		{
-			if (request.setRuntimeState.field.enabled)
-				++span.fieldEnables;
-			else
-				++span.fieldDisables;
-			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
-			{
-				if ((request.setRuntimeState.enabledMask >> id) & 1)
-					span.enables.push_back(id);
-				else
-					span.disables.push_back(id);
-			}
-		}
-		else if (request.type == protocol::RequestSetDeviceTransform)
-		{
-			if (request.setDeviceTransform.enabled)
-				span.enables.push_back(request.setDeviceTransform.openVRID);
-			else
-				span.disables.push_back(request.setDeviceTransform.openVRID);
+			if ((request.setRuntimeState.enabledMask >> id) & 1)
+				span.enables.push_back(id);
 		}
 	}
 	return span;
@@ -1199,14 +1121,6 @@ struct SessionFixture
 	SessionFixture &operator=(const SessionFixture &) = delete;
 };
 
-// One reconciliation scan in production's order: Begin -- the handshake that
-// stamps the batch -- and then Apply.
-questcal::DriverApplyResult RunSessionScan(questcal::DriverSession &session,
-	const questcal::DriverApplyRequest &request, double now)
-{
-	return session.Apply(request, now);
-}
-
 questcal::DriverApplyRequest MakeSessionRequest(bool enabled, bool fieldWanted)
 {
 	questcal::DriverApplyRequest request;
@@ -1214,9 +1128,8 @@ questcal::DriverApplyRequest MakeSessionRequest(bool enabled, bool fieldWanted)
 	request.desired = MakeDriverSyncDesired();
 
 	protocol::SetAlignmentField &field = request.field;
-	// The caller's half of the field predicate only: the profile is live and
-	// there is something to blend. Non-default generation and anchor values so a
-	// message that lost the caller's payload is visible on the wire.
+	// Non-default generation and anchor values, so a message that lost the
+	// caller's payload is visible on the wire.
 	field.enabled = fieldWanted ? 1 : 0;
 	field.generation = 7;
 	field.sigmaMeters = questcal::FieldBlendSigmaMeters;
@@ -1231,12 +1144,9 @@ questcal::DriverApplyRequest MakeSessionRequest(bool enabled, bool fieldWanted)
 
 void RunDriverSessionScenarios()
 {
-	// 1. A batch that fails partway is never left half-applied. The whole
-	// connection is neutralized before the scan returns, so the next one starts
-	// from a driver that is known neutral instead of an unknown mixture.
-	// Deleting that recovery -- or narrowing it to the one slot that failed --
-	// leaves every transform that DID land live on a driver the overlay is
-	// simultaneously reporting as off.
+	// 1. A refused state leaves the caller believing nothing is applied, and a
+	// scan with the profile off sends one disabled state (field included) after
+	// its handshake.
 	{
 		SessionFixture fx;
 		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
@@ -1244,92 +1154,53 @@ void RunDriverSessionScenarios()
 			fx.table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
 
 		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
-		RunSessionScan(fx.session, request, 0.0);
+		fx.session.Apply(request, 0.0);
 
 		size_t from = fx.link.sent.size();
-		fx.link.script = [](size_t, const protocol::Request &request)
-		{
-			return request.type == protocol::RequestSetRuntimeState
-				? LinkFault::Refuse : LinkFault::None;
-		};
-		questcal::DriverApplyResult failed = RunSessionScan(fx.session, request, 1.0);
+		fx.link.script = FaultState(LinkFault::Refuse);
+		questcal::DriverApplyResult failed = fx.session.Apply(request, 1.0);
 		LinkSpan span = SpanOf(fx.link, from);
-
 		bool stopped = span.requests == 2 && span.handshakes == 1 &&
 			span.enables == std::vector<uint32_t>({ 1, 2, 3, 4 }) &&
 			!failed.synchronized && !failed.enabled;
 
-		// The next scan sends one canonical disabled state after its handshake.
 		fx.link.script = nullptr;
 		size_t settledFrom = fx.link.sent.size();
-		RunSessionScan(fx.session, MakeSessionRequest(false, true), 2.0);
+		fx.session.Apply(MakeSessionRequest(false, true), 2.0);
 		LinkSpan settled = SpanOf(fx.link, settledFrom);
 		bool quiet = settled.requests == 2 && settled.handshakes == 1 &&
 			settled.fieldDisables == 1;
 
 		char detail[96];
-		snprintf(detail, sizeof detail, "%d slots reset, next scan %d requests",
-			static_cast<int>(span.disables.size()),
-			static_cast<int>(settled.requests));
-		Check("driver session: complete-state failure", stopped && quiet,
-			detail);
+		snprintf(detail, sizeof detail, "%d slots sent, next scan %d requests",
+			static_cast<int>(span.enables.size()), static_cast<int>(settled.requests));
+		Check("driver session: complete-state failure", stopped && quiet, detail);
 	}
 
-	// 2. The spatial field is enabled only on top of a COMPLETE base-transform
-	// batch on this same connection, and only while the profile is still live.
-	// Hoisting the send out of that guard is the obvious "always re-assert the
-	// field" simplification, and it leaves a driver holding a stale or partial
-	// base set blending anchor deltas on top of it.
+	// 2. A first scan sends one handshake and one state that carries the base
+	// transform's slots and the caller's field payload intact.
 	{
 		SessionFixture fx;
 		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
 		for (uint32_t id = 1; id <= 3; ++id)
 			fx.table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
-		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
-
-		size_t from = fx.link.sent.size();
-		RunSessionScan(fx.session, request, 0.0);
-		LinkSpan clean = SpanOf(fx.link, from);
-		protocol::Request last = fx.link.sent.back();
-		// Shipped last, after every base transform, with the caller's payload
-		// intact -- a session that rebuilt the message would lose these.
-		bool shipped = clean.fieldEnables == 1 &&
+		fx.session.Apply(MakeSessionRequest(true, true), 0.0);
+		LinkSpan clean = SpanOf(fx.link, 0);
+		const protocol::Request &last = fx.link.sent.back();
+		bool shipped = clean.requests == 2 && clean.handshakes == 1 &&
+			clean.fieldEnables == 1 && clean.enables == std::vector<uint32_t>({ 1, 2, 3 }) &&
 			last.type == protocol::RequestSetRuntimeState &&
 			last.setRuntimeState.field.enabled == 1 &&
 			last.setRuntimeState.field.anchorCount == 2 &&
 			last.setRuntimeState.field.generation == 7 &&
 			std::abs(last.setRuntimeState.field.anchors[0].position[0] - 1.25) < 1e-12;
-
-		// The transform mask and field are one request. A refusal applies neither.
-		from = fx.link.sent.size();
-		fx.link.script = [](size_t, const protocol::Request &request)
-		{
-			return request.type == protocol::RequestSetRuntimeState
-				? LinkFault::Refuse : LinkFault::None;
-		};
-		questcal::DriverApplyResult refused = RunSessionScan(fx.session, request, 1.0);
-		LinkSpan broken = SpanOf(fx.link, from);
-		bool withheld = broken.requests == 2 && !refused.synchronized;
-
-		// A perfectly healthy connection with the profile off never enables it
-		// either, however much the caller has to blend.
-		fx.link.script = nullptr;
-		from = fx.link.sent.size();
-		RunSessionScan(fx.session, MakeSessionRequest(false, true), 2.0);
-		LinkSpan off = SpanOf(fx.link, from);
-		bool clearedWithProfile = off.fieldEnables == 0 && off.fieldDisables == 1;
-
-		Check("driver session: field after base batch",
-			shipped && withheld && clearedWithProfile,
-			"enabled only after a complete base batch on a live profile");
+		Check("driver session: field ships with the base state", shipped,
+			"one handshake, then one state with the slots and the caller's field");
 	}
 
-	// 3. What the caller may believe afterwards. A partial batch clears BOTH
-	// device masks, the resolved tracker id and `enabled` -- including for the
-	// slots that did land -- because the jump, drift and continuous monitors all
-	// steer against those identities and the driver may no longer be applying
-	// them. The two causes stay distinct as well: the UI sends the user to check
-	// SteamVR for one and their headset for the other.
+	// 3. Short of a complete state the caller may believe nothing: both device
+	// masks, the tracker id and `enabled` clear, including for slots that were
+	// live, because the monitors steer against those identities.
 	{
 		SessionFixture fx;
 		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
@@ -1340,153 +1211,83 @@ void RunDriverSessionScenarios()
 		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
 		request.desired.continuousTrackerSerial = "T-MOUNT";
 
-		questcal::DriverApplyResult live = RunSessionScan(fx.session, request, 0.0);
+		questcal::DriverApplyResult live = fx.session.Apply(request, 0.0);
 		bool derived = live.synchronized && live.enabled &&
 			live.cause == questcal::DriverDisableCause::None &&
 			live.referenceDeviceMask[0] && live.referenceDeviceMask[1] &&
 			live.targetDeviceMask[2] && live.targetDeviceMask[3] &&
 			live.continuousTrackerId == 2;
 
-		// Slot 3's enable is refused, after slot 2's landed and resolved the
-		// tracker -- so there is real derived state to throw away.
-		fx.link.script = [](size_t, const protocol::Request &request)
-		{
-			return request.type == protocol::RequestSetRuntimeState
-				? LinkFault::Refuse : LinkFault::None;
-		};
-		questcal::DriverApplyResult partial = RunSessionScan(fx.session, request, 1.0);
+		fx.link.script = FaultState(LinkFault::Refuse);
+		questcal::DriverApplyResult partial = fx.session.Apply(request, 1.0);
 		bool closed = !partial.synchronized && !partial.enabled &&
 			partial.cause == questcal::DriverDisableCause::DriverUnreachable &&
 			partial.continuousTrackerId == vr::k_unTrackedDeviceIndexInvalid;
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount && closed; ++id)
 			closed = !partial.referenceDeviceMask[id] && !partial.targetDeviceMask[id];
 
-		// A foreign headset on a healthy pipe is a different verdict entirely:
-		// the batch completes, and the cause names the headset.
-		fx.link.script = nullptr;
-		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "oculus");
-		questcal::DriverApplyResult foreign = RunSessionScan(fx.session, request, 2.0);
-		bool distinct = foreign.synchronized && !foreign.enabled &&
-			foreign.cause == questcal::DriverDisableCause::HmdMismatch;
-
-		Check("driver session: fail-closed result", derived && closed && distinct,
-			"a partial batch clears masks/tracker; a foreign HMD reports its own cause");
+		Check("driver session: fail-closed result", derived && closed,
+			"a refused state clears the masks, the tracker and enabled");
 	}
 
-	// 4. A connection the overlay has not converged yet is neutralized in full
-	// before any desired state goes near it: a restarted vrserver may have fresh
-	// slots, a new pipe to the same provider may have retained them, and nothing
-	// on the wire tells the two apart. Equally, it happens ONCE -- the pass is 66
-	// blocking round-trips on the UI thread, and paying it on every 1 Hz scan is
-	// a visibly stuttering overlay.
-	{
-		SessionFixture fx;
-		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
-		fx.table.Place(1, questcal::SyncDeviceClass::Other, "oculus");
-		questcal::DriverApplyRequest request = MakeSessionRequest(true, false);
-
-		size_t from = fx.link.sent.size();
-		RunSessionScan(fx.session, request, 0.0);
-		LinkSpan first = SpanOf(fx.link, from);
-		bool neutralizedFirst = first.handshakes == 1 && first.requests == 2 &&
-			first.enables.size() == 1 && first.enables[0] == 1;
-
-		from = fx.link.sent.size();
-		RunSessionScan(fx.session, request, 1.0);
-		LinkSpan second = SpanOf(fx.link, from);
-		bool steadyState = second.requests == 2 && second.handshakes == 1 &&
-			second.enables.size() == 1;
-
-		// A vrserver restart while idle is a new generation, and that pays for
-		// the reset pass again.
-		++fx.link.generation;
-		from = fx.link.sent.size();
-		RunSessionScan(fx.session, request, 2.0);
-		LinkSpan restarted = SpanOf(fx.link, from);
-		bool reNeutralized = restarted.handshakes == 1 &&
-			restarted.requests == 2 && restarted.enables.size() == 1;
-
-		char detail[96];
-		snprintf(detail, sizeof detail, "first %d, steady %d, after restart %d requests",
-			static_cast<int>(first.requests), static_cast<int>(second.requests),
-			static_cast<int>(restarted.requests));
-		Check("driver session: connection neutralize",
-			neutralizedFirst && steadyState && reNeutralized, detail);
-	}
-
-	// 5. A reconnect mid-batch. IPCClient replays the request on the fresh pipe
-	// and reports success, so the only evidence is the connection generation --
-	// and the enable it just replayed is now live on a connection this batch
-	// never neutralized. That one slot is retired immediately, on the new pipe,
-	// before the generation-wide pass reaches the rest. Drop the recovery and
-	// the slot stays enabled while the overlay reports the profile off.
+	// 4. A reconnect mid-batch: IPCClient replays the state on a fresh pipe and
+	// reports success, and only the connection generation shows it. The overlay
+	// withdraws its confidence until the next scan confirms the state on the
+	// new connection.
 	{
 		SessionFixture fx;
 		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
 		for (uint32_t id = 1; id <= 3; ++id)
 			fx.table.Place(id, questcal::SyncDeviceClass::Other, "oculus");
 		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
-		RunSessionScan(fx.session, request, 0.0);
+		fx.session.Apply(request, 0.0);
 
 		size_t from = fx.link.sent.size();
-		fx.link.script = [](size_t, const protocol::Request &request)
-		{
-			return request.type == protocol::RequestSetRuntimeState
-				? LinkFault::Reconnect : LinkFault::None;
-		};
-		questcal::DriverApplyResult result = RunSessionScan(fx.session, request, 1.0);
-
+		fx.link.script = FaultState(LinkFault::Reconnect);
+		questcal::DriverApplyResult result = fx.session.Apply(request, 1.0);
 		LinkSpan span = SpanOf(fx.link, from);
-		// The replay may have applied state, but it applied the complete state;
-		// only the overlay's confidence is withdrawn until the next scan.
 		bool stopped = span.requests == 2 && span.enables.size() == 3 &&
 			!result.synchronized && !result.enabled;
 
-		// The new generation was neutralized and recorded, so the next scan is a
-		// steady-state one rather than another 66-round-trip reset.
 		fx.link.script = nullptr;
 		size_t settledFrom = fx.link.sent.size();
-		RunSessionScan(fx.session, request, 2.0);
+		questcal::DriverApplyResult settledResult = fx.session.Apply(request, 2.0);
 		LinkSpan settled = SpanOf(fx.link, settledFrom);
 		bool recorded = settled.handshakes == 1 && settled.requests == 2 &&
-			settled.enables.size() == 3;
+			settled.enables.size() == 3 && settledResult.synchronized;
 
 		Check("driver session: mid-batch reconnect",
 			stopped && recorded,
 			"a reconnect can only replay one complete state and the next scan reconfirms it");
 	}
 
-	// 6. One driver failure is one banner. A dead pipe fails every request in a
-	// scan and every scan after it, so without the 30 s debounce the user's error
-	// line is rewritten dozens of times a second; without the re-arm on a
-	// recovered batch, the next genuine failure is swallowed for up to 30 s.
+	// 5. One driver failure is one banner: a dead pipe is reported once per 30 s,
+	// and a recovered batch withdraws the banner and re-arms the clock.
 	{
 		SessionFixture fx;
 		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
 		fx.table.Place(1, questcal::SyncDeviceClass::Other, "oculus");
 		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
 
-		fx.link.script = [](size_t, const protocol::Request &) { return LinkFault::Throw; };
-		questcal::DriverApplyResult dead = RunSessionScan(fx.session, request, 100.0);
+		fx.link.script = [](const protocol::Request &) { return LinkFault::Throw; };
+		questcal::DriverApplyResult dead = fx.session.Apply(request, 100.0);
 		bool reportedOnce = fx.errors == 1 && !dead.synchronized && !dead.enabled &&
 			dead.cause == questcal::DriverDisableCause::DriverUnreachable;
-		// A handshake that never answered leaves nothing to roll back, so the scan
-		// does not spend a neutralization pass on a pipe that is not there.
+		// Nothing follows a handshake that never answered.
 		bool cheapWhenDead = fx.link.sent.size() == 1;
 
-		RunSessionScan(fx.session, request, 110.0);
+		fx.session.Apply(request, 110.0);
 		bool debounced = fx.errors == 1;
-		RunSessionScan(fx.session, request, 131.0);
+		fx.session.Apply(request, 131.0);
 		bool reportedAgain = fx.errors == 2;
 
-		// A recovered batch withdraws the banner and re-arms the clock...
 		fx.link.script = nullptr;
-		RunSessionScan(fx.session, request, 132.0);
+		fx.session.Apply(request, 132.0);
 		bool withdrawn = fx.errors == 2 && fx.clears == 1;
 
-		// ...so the next failure is reported immediately, not 30 s later.
-		fx.link.script = [](size_t, const protocol::Request &) { return LinkFault::Throw; };
-		RunSessionScan(fx.session, request, 133.0);
+		// The next failure is reported immediately, not 30 s later.
+		fx.link.script = [](const protocol::Request &) { return LinkFault::Throw; };
+		fx.session.Apply(request, 133.0);
 		bool reArmed = fx.errors == 3;
 
 		char detail[80];
@@ -1496,6 +1297,19 @@ void RunDriverSessionScenarios()
 			reportedOnce && cheapWhenDead && debounced && reportedAgain &&
 				withdrawn && reArmed, detail);
 	}
+}
+
+// Polls `worker` until the completion for `sequence` arrives.
+bool AwaitCompletion(questcal::DriverWorker &worker, uint64_t sequence,
+	questcal::DriverCompletion &out, int attempts, int sleepMs)
+{
+	for (int attempt = 0; attempt < attempts; ++attempt)
+	{
+		if (worker.Poll(out) && out.sequence == sequence)
+			return true;
+		std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+	}
+	return false;
 }
 
 void RunDriverWorkerScenario()
@@ -1533,75 +1347,44 @@ void RunDriverWorkerScenario()
 	auto deviceChanged = worker.Submit(job);
 
 	questcal::DriverCompletion completion;
-	bool gotLatest = false;
-	for (int attempt = 0; attempt < 1000 && !gotLatest; ++attempt)
-	{
-		if (worker.Poll(completion) && completion.sequence == deviceChanged.sequence)
-			gotLatest = true;
-		else
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-	}
+	const bool gotLatest = AwaitCompletion(worker, deviceChanged.sequence, completion, 1000, 1) &&
+		completion.result.synchronized &&
+		completion.result.poseHookMask == protocol::PoseHook006;
 
 	const uint64_t neutralization = worker.Neutralize({ 7, 9 }, 1.0);
 	job.request.desired.scale = 1.02;
 	auto heldState = worker.Submit(job);
-	bool gotNeutralization = false;
-	for (int attempt = 0; attempt < 1000 && !gotNeutralization; ++attempt)
-	{
-		if (worker.Poll(completion) &&
-			completion.kind == questcal::DriverWorkKind::Neutralize &&
-			completion.sequence == neutralization)
-		{
-			gotNeutralization = completion.succeeded;
-		}
-		else
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		}
-	}
+	const bool gotNeutralization = AwaitCompletion(worker, neutralization, completion, 1000, 1) &&
+		completion.kind == questcal::DriverWorkKind::Neutralize && completion.succeeded;
 	const int stateCountWhileHeld = stateRequests.load();
 	std::this_thread::sleep_for(std::chrono::milliseconds(20));
 	const bool stateStayedHeld = stateRequests.load() == stateCountWhileHeld;
 
 	worker.ReleaseNeutralization();
-	bool gotReleasedState = false;
-	for (int attempt = 0; attempt < 1000 && !gotReleasedState; ++attempt)
-	{
-		if (worker.Poll(completion) &&
-			completion.kind == questcal::DriverWorkKind::Synchronize &&
-			completion.sequence == heldState.sequence)
-		{
-			gotReleasedState = completion.result.synchronized;
-		}
-		else
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		}
-	}
+	const bool gotReleasedState = AwaitCompletion(worker, heldState.sequence, completion, 1000, 1) &&
+		completion.kind == questcal::DriverWorkKind::Synchronize &&
+		completion.result.synchronized &&
+		completion.result.poseHookMask == protocol::PoseHook006;
 	worker.Stop();
 
 	Check("driver worker: coalesced and serialized background work",
 		first.stateChanged && !duplicate.stateChanged && changed.stateChanged &&
 		fieldChanged.stateChanged && deviceChanged.stateChanged &&
-		gotLatest && completion.result.synchronized &&
-		completion.result.poseHookMask == protocol::PoseHook006 && requests >= 2 &&
+		gotLatest && requests >= 2 &&
 		gotNeutralization && disableRequests == 2 && stateStayedHeld &&
 		heldState.stateChanged && gotReleasedState,
 		"same states coalesce; pair neutralization holds ordinary state until release");
 }
 
 // ---------------------------------------------------------------------------
-// The synchronous half of the asynchronous driver sync: the slot identities the
-// submitting thread derives (Overlay/DriverSession.h DeriveDriverSlotState) and
-// the refusal bookkeeping it keeps across round trips
-// (Overlay/DriverSyncTracker.h).
+// The submitting thread's half of the asynchronous driver sync: slot identities
+// (DeriveDriverSlotState) and refusal bookkeeping (Overlay/DriverSyncTracker.h).
 
 void RunDriverSyncStateScenarios()
 {
-	// The identities derived at submission are the ones the session ships on
-	// the wire and reports back, so nothing about a sync in flight is unknown
-	// to the monitors: a live profile with an armed, hidden mounted tracker,
-	// then a foreign headset that withdraws the profile.
+	// The identities derived at submission are the ones the session ships and
+	// reports back: a live profile with an armed, hidden mounted tracker, then a
+	// foreign headset that withdraws the profile.
 	{
 		SessionFixture fx;
 		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
@@ -1637,7 +1420,7 @@ void RunDriverSyncStateScenarios()
 
 		questcal::DriverSlotState derived =
 			questcal::DeriveDriverSlotState(request.desired, enumerate);
-		questcal::DriverApplyResult applied = RunSessionScan(fx.session, request, 0.0);
+		questcal::DriverApplyResult applied = fx.session.Apply(request, 0.0);
 		const bool liveShipped = fx.link.sent.back().type == protocol::RequestSetRuntimeState &&
 			applied.enabled && applied.synchronized && !derived.hmdMismatch;
 		const bool liveParity = sameIdentities(derived, applied) &&
@@ -1651,21 +1434,18 @@ void RunDriverSyncStateScenarios()
 
 		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "oculus");
 		derived = questcal::DeriveDriverSlotState(request.desired, enumerate);
-		applied = RunSessionScan(fx.session, request, 1.0);
+		applied = fx.session.Apply(request, 1.0);
 		const bool foreign = derived.hmdMismatch && !applied.enabled &&
 			applied.cause == questcal::DriverDisableCause::HmdMismatch &&
 			applied.synchronized &&
 			fx.link.sent.back().type == protocol::RequestSetRuntimeState &&
 			lastWire().enabledMask == 0 && lastWire().hiddenMask == 0;
 
-		const std::string detail = "liveShipped=" + std::to_string(liveShipped) +
-			" liveParity=" + std::to_string(liveParity) +
-			" liveSlots=" + std::to_string(liveSlots) +
-			" foreign=" + std::to_string(foreign) +
-			" enabledMask=" + std::to_string(derived.enabledMask) +
-			" trackerId=" + std::to_string(derived.continuousTrackerId);
-		Check("driver sync state: submit-time identities match the session",
-			liveShipped && liveParity && liveSlots && foreign, detail.c_str());
+		CheckFlags("driver sync state: submit-time identities match the session",
+			{ { "liveShipped", liveShipped }, { "liveParity", liveParity },
+				{ "liveSlots", liveSlots }, { "foreign", foreign } },
+			"enabledMask=" + std::to_string(derived.enabledMask) +
+				" trackerId=" + std::to_string(derived.continuousTrackerId));
 	}
 
 	// A first submission is applied optimistically. The refusal that answers it
@@ -1684,22 +1464,15 @@ void RunDriverSyncStateScenarios()
 			!tracker.NoteSubmission(5, false);
 		const bool refusedAgain = tracker.NoteVerdict(5, false) &&
 			tracker.NoteSubmission(6, false);
-		const std::string detail = "fresh=" + std::to_string(fresh) +
-			" refused=" + std::to_string(refused) +
-			" heldSame=" + std::to_string(heldSame) +
-			" liftedByChange=" + std::to_string(liftedByChange) +
-			" pendingSame=" + std::to_string(pendingSame) +
-			" confirmed=" + std::to_string(confirmed) +
-			" refusedAgain=" + std::to_string(refusedAgain);
-		Check("driver sync state: a refusal holds across identical resubmissions",
-			fresh && refused && heldSame && liftedByChange &&
-				pendingSame && confirmed && refusedAgain, detail.c_str());
+		CheckFlags("driver sync state: a refusal holds across identical resubmissions",
+			{ { "fresh", fresh }, { "refused", refused }, { "heldSame", heldSame },
+				{ "liftedByChange", liftedByChange }, { "pendingSame", pendingSame },
+				{ "confirmed", confirmed }, { "refusedAgain", refusedAgain } });
 	}
 
-	// The periodic one-second scan may submit an identical retry while a pipe
-	// request is still inside its two-second timeout. The older completion still
-	// answers the current desired state and must be accepted; otherwise every
-	// slow completion can be starved forever by the next retry.
+	// The 1 s scan may submit an identical retry while a request is still inside
+	// its 2 s timeout. The older completion still answers the current state and
+	// must be accepted, or each slow completion is starved by the next retry.
 	{
 		questcal::DriverSyncTracker tracker;
 		const bool firstOpen = !tracker.NoteSubmission(1, true);
@@ -1709,19 +1482,15 @@ void RunDriverSyncStateScenarios()
 		const bool heldRetry = tracker.NoteSubmission(3, false);
 		const bool recoveryAccepted = tracker.NoteVerdict(2, true) &&
 			!tracker.HoldsRefusal();
-		const std::string detail = "firstOpen=" + std::to_string(firstOpen) +
-			" retryOpen=" + std::to_string(retryOpen) +
-			" slowRefusalAccepted=" + std::to_string(slowRefusalAccepted) +
-			" heldRetry=" + std::to_string(heldRetry) +
-			" recoveryAccepted=" + std::to_string(recoveryAccepted);
-		Check("driver sync state: equivalent slow completions remain applicable",
-			firstOpen && retryOpen && slowRefusalAccepted && heldRetry &&
-				recoveryAccepted, detail.c_str());
+		CheckFlags("driver sync state: equivalent slow completions remain applicable",
+			{ { "firstOpen", firstOpen }, { "retryOpen", retryOpen },
+				{ "slowRefusalAccepted", slowRefusalAccepted }, { "heldRetry", heldRetry },
+				{ "recoveryAccepted", recoveryAccepted } });
 	}
 
-	// Liveness of that hold: an unchanged resubmission is still dispatched to
-	// the driver and completes under its own sequence, so a refused profile is
-	// re-asked every scan and comes back the moment the driver accepts it.
+	// Liveness of that hold: an unchanged resubmission is still dispatched and
+	// completes under its own sequence, so a refused profile comes back the
+	// moment the driver accepts it.
 	{
 		std::atomic<bool> refuse{ true };
 		questcal::DriverWorker worker;
@@ -1735,16 +1504,6 @@ void RunDriverSyncStateScenarios()
 				refuse ? protocol::ResponseInvalid : protocol::ResponseSuccess);
 			return result;
 		});
-		auto await = [&worker](uint64_t sequence, questcal::DriverCompletion &out)
-		{
-			for (int i = 0; i < 400; ++i)
-			{
-				if (worker.Poll(out) && out.sequence == sequence)
-					return true;
-				std::this_thread::sleep_for(std::chrono::milliseconds(5));
-			}
-			return false;
-		};
 
 		questcal::DriverSyncTracker tracker;
 		questcal::DriverStateJob job;
@@ -1754,7 +1513,7 @@ void RunDriverSyncStateScenarios()
 
 		const auto first = worker.Submit(job);
 		const bool firstOpen = !tracker.NoteSubmission(first.sequence, first.stateChanged);
-		const bool firstRefused = await(first.sequence, completion) &&
+		const bool firstRefused = AwaitCompletion(worker, first.sequence, completion, 400, 5) &&
 			!completion.result.synchronized &&
 			tracker.NoteVerdict(completion.sequence, completion.result.synchronized) &&
 			tracker.HoldsRefusal();
@@ -1763,18 +1522,16 @@ void RunDriverSyncStateScenarios()
 		const auto again = worker.Submit(job);
 		const bool held = !again.stateChanged &&
 			tracker.NoteSubmission(again.sequence, again.stateChanged);
-		const bool lifted = await(again.sequence, completion) &&
+		const bool lifted = AwaitCompletion(worker, again.sequence, completion, 400, 5) &&
 			completion.kind == questcal::DriverWorkKind::Synchronize &&
 			completion.result.synchronized &&
 			tracker.NoteVerdict(completion.sequence, completion.result.synchronized) &&
 			!tracker.HoldsRefusal();
 		worker.Stop();
 
-		const std::string detail = "firstOpen=" + std::to_string(firstOpen) +
-			" firstRefused=" + std::to_string(firstRefused) +
-			" held=" + std::to_string(held) + " lifted=" + std::to_string(lifted);
-		Check("driver sync state: an unchanged resubmission lifts the hold when accepted",
-			firstOpen && firstRefused && held && lifted, detail.c_str());
+		CheckFlags("driver sync state: an unchanged resubmission lifts the hold when accepted",
+			{ { "firstOpen", firstOpen }, { "firstRefused", firstRefused },
+				{ "held", held }, { "lifted", lifted } });
 	}
 }
 
@@ -1827,9 +1584,7 @@ void RunPoseSampleScenarios()
 		!ProfileHmdIdentityMatches("", "quest-pro-A"),
 		"only the persisted non-empty physical serial matches");
 
-	// Ring consumers reject finite-but-implausible values before Eigen
-	// composition. These are numerically finite yet large enough to overflow
-	// downstream squared norms/products.
+	// Finite values large enough to overflow downstream squared norms.
 	protocol::DevicePoseSample bounded = RingSample(2, 1.0,
 		Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
 		Eigen::Quaterniond::Identity(), Eigen::Vector3d(0.1, 1.0, -0.2),
@@ -1848,9 +1603,8 @@ void RunPoseSampleScenarios()
 		!IsUsableRingSample(bounded, 1e300),
 		"bounded accepted; extreme pos/vel/ang/time rejected");
 
-	// Backlog drained after a UI stall is fresh only if its producer capture
-	// QPC is fresh; the UI observation time and pose prediction offset are not
-	// the capture time. A positive prediction offset must not reject fresh data.
+	// Freshness is judged on the producer's capture QPC, not the observation
+	// time or the prediction offset, which must not reject fresh data.
 	protocol::DevicePoseSample predictedSample{};
 	predictedSample.sampleTimeQpc = 1000000000;
 	predictedSample.poseTimeOffset = 0.05;
@@ -1871,11 +1625,8 @@ void RunPoseSampleScenarios()
 	char detail[256];
 
 	// The composition every solver input goes through: worldFromDriver o driver
-	// pose, velocities rotated into the world frame, and the driver's own
-	// prediction offset folded into the timestamp. Expectations are literals
-	// rather than the same expression re-evaluated, so a rewritten composition
-	// (dropped rotation on the velocities, inverted worldFromDriver, reversed
-	// rotation product, dropped poseTimeOffset) shows up here.
+	// pose, velocities rotated into the world frame, poseTimeOffset folded into
+	// the timestamp. Expectations are literals, not the expression re-evaluated.
 	{
 		const Eigen::Quaterniond wfdRot(
 			Eigen::AngleAxisd(EIGEN_PI / 2.0, Eigen::Vector3d::UnitY()));
@@ -1907,12 +1658,9 @@ void RunPoseSampleScenarios()
 		Check("pose ring: composed world sample", ok, detail);
 	}
 
-	// The trust boundary: a driver may mark a pose Running_OK while supplying
-	// malformed numerics, and it may supply clean numerics while reporting the
-	// device as not tracking. Both are tracking ABSENCE, so the composed output
-	// must be left exactly as the caller had it -- softening a rejection into a
-	// defaulted (identity, origin) pose would feed the solver a fabricated
-	// sample that passes every downstream check.
+	// The trust boundary: malformed numerics on a Running_OK pose, or clean
+	// numerics on a device that is not tracking, are tracking absence, and the
+	// caller's output must be left untouched rather than defaulted.
 	{
 		const Eigen::Quaterniond wfdRot(
 			Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
@@ -1941,11 +1689,8 @@ void RunPoseSampleScenarios()
 		malformedNumeric.position[1] = 1e300;
 		protocol::DevicePoseSample degenerateRotation = good;
 		degenerateRotation.rotation = { 0.0, 0.0, 0.0, 0.0 };
-		// Every field is individually inside the ring bounds, yet the sum is not:
-		// the driver offset and the device position are each 9 km, so the
-		// composed world position lands at 18 km. This is the case only the
-		// second (composed) gate can catch, so it fails if that gate is dropped
-		// as redundant with the per-field one.
+		// Each field is inside the ring bounds but the composed position (18 km)
+		// is not: only the second, composed gate catches it.
 		protocol::DevicePoseSample overflowingComposition = good;
 		overflowingComposition.worldFromDriverRotation = { 1.0, 0.0, 0.0, 0.0 };
 		overflowingComposition.worldFromDriverTranslation[0] = 9000.0;
@@ -1965,15 +1710,13 @@ void RunPoseSampleScenarios()
 			"healthy accepted; invalid/not-tracking/unbounded/degenerate/overflowing rejected without writing out");
 	}
 
-	// Drift-feed eligibility. The reference side contributes the HMD only (its
-	// SLAM map IS the universe); the target side contributes everything rigid to
-	// it EXCEPT the HMD-mounted tracker, which rides a human head. Losing that
-	// one clause is what puts a resting head into the drift feed and toasts the
-	// user about a calibration that is being actively maintained.
+	// Drift-feed eligibility: the HMD alone on the reference side (its SLAM map
+	// is the universe); on the target side everything except the HMD-mounted
+	// tracker, which rides a human head.
 	{
 		ringpose::DriftFeedCandidate c;
-		// Stale HMD observation so the proximity heuristic cannot mask the
-		// identity rules being checked here.
+		// A stale HMD observation, so the proximity heuristic cannot mask the
+		// identity rules.
 		c.composedTime = 100.0;
 		c.hmdRawTime = 90.0;
 		c.mountedTrackerId = 9;
@@ -2012,12 +1755,9 @@ void RunPoseSampleScenarios()
 			"HMD-only on the reference side; target side minus the mounted tracker, base stations and unread classes");
 	}
 
-	// The worn-device proximity heuristic, and the placement of the calibrated
-	// scale inside it: a target-raw position has to be scaled BEFORE the base
-	// rotation and translation, exactly as the driver applies it. At scale 1.5 a
-	// tracker 3 m out sits at 4.5 m in reference space -- dropping the factor
-	// puts it 1.5 m away from the headset it is actually strapped to, back over
-	// the arm's-reach threshold and into the drift feed.
+	// The worn-device proximity heuristic, with the calibrated scale applied
+	// before the base transform as the driver does: at scale 1.5 a tracker 3 m
+	// out sits at 4.5 m in reference space, on the headset it is strapped to.
 	{
 		ringpose::DriftFeedCandidate c;
 		c.deviceId = 5;
@@ -2041,10 +1781,8 @@ void RunPoseSampleScenarios()
 		ringpose::DriftFeedCandidate staleHmd = wornOnUser;
 		staleHmd.hmdRawTime = 96.0;
 
-		// The lower body is outside the sphere: a foot tracker 1.6 m below the
-		// head and 0.3 m across is worn; the same depth 1.5 m across is a
-		// device on the floor elsewhere, and the same radius above the head
-		// is not a body at all.
+		// A foot tracker 1.6 m below the head and 0.3 m across is worn; 1.5 m
+		// across is on the floor elsewhere, and 1.6 m above is no body at all.
 		ringpose::DriftFeedCandidate atTheFeet = c;
 		atTheFeet.hmdRawPosition = Eigen::Vector3d(4.8, 1.6, 0.0);
 		ringpose::DriftFeedCandidate acrossTheFloor = c;
@@ -2138,17 +1876,13 @@ void RunPoseRingConcurrentScenario()
 			for (int i = 0; i < samplesPerProducer; ++i)
 			{
 				int token = producer * samplesPerProducer + i;
-				protocol::DevicePoseSample sample{};
-				sample.sampleTimeQpc = static_cast<int64_t>(token + 1);
-				sample.deviceId = static_cast<uint32_t>(producer);
+				protocol::DevicePoseSample sample = TokenSample(token + 1,
+					static_cast<uint32_t>(producer), static_cast<double>(token));
 				sample.poseIsValid = true;
 				sample.deviceIsConnected = true;
-				sample.rotation.w = 1.0;
-				sample.position[0] = static_cast<double>(token);
 				sample.position[1] = static_cast<double>(-token);
-				// This scenario checks payload ownership/integrity, not the
-				// separately-tested fail-fast policy. Retry an intentional claim-lock
-				// contention drop so a preempted producer cannot make it flaky.
+				// Integrity, not the fail-fast policy tested elsewhere: retry a
+				// contention drop so a preempted producer cannot make this flaky.
 				while (!writer.Publish(sample))
 				{
 					publishRetries.fetch_add(1, std::memory_order_relaxed);
@@ -2213,10 +1947,7 @@ void RunPoseRingTerminalGapInPlaceScenario()
 	// alone reports them ahead of it instead.
 	PoseRingFixture ring("TerminalGapInPlace");
 	bool opened = ring.Open();
-	protocol::DevicePoseSample pose{};
-	pose.sampleTimeQpc = 15000000;
-	pose.deviceId = 3;
-	pose.rotation.w = 1.0;
+	const protocol::DevicePoseSample pose = TokenSample(15000000, 3);
 	std::string events;
 	auto onSample = [&](const protocol::DevicePoseSample &sample)
 	{
@@ -2261,14 +1992,7 @@ void RunPoseRingOverflowScenario()
 
 	const uint64_t overflowExtra = 257;
 	for (uint64_t i = 0; i < protocol::PoseRing::Capacity + overflowExtra; ++i)
-	{
-		protocol::DevicePoseSample sample{};
-		sample.sampleTimeQpc = static_cast<int64_t>(1000000 + i);
-		sample.deviceId = 7;
-		sample.rotation.w = 1.0;
-		sample.position[0] = static_cast<double>(i);
-		writer.Publish(sample);
-	}
+		writer.Publish(TokenSample(static_cast<int64_t>(1000000 + i), 7, static_cast<double>(i)));
 	int overflowCount = 0;
 	int overflowCorrupt = 0;
 	uint64_t overflowGapDrops = 0;
@@ -2316,64 +2040,32 @@ void RunPoseRingStalledProducerScenario()
 	PoseRingFixture ring("Stalled");
 	auto &stalledWriter = ring.writer;
 	auto &stalledReader = ring.reader;
-	bool stalledOpened = ring.Open();
-	if (!stalledOpened)
+	if (!ring.Open())
 	{
 		Check("pose ring: stalled producer ownership", false, "could not create/open mapping");
 		return;
 	}
 	char detail[192];
 
-	std::atomic<bool> claimHeld{ false };
-	std::atomic<bool> releaseClaim{ false };
-	protocol::DevicePoseSample headSample{};
-	headSample.sampleTimeQpc = 2000000;
-	headSample.deviceId = 9;
-	headSample.rotation.w = 1.0;
-	headSample.position[0] = 0.0;
-	std::thread stalled([&]()
-	{
-		stalledWriter.PublishAfterClaimForTest(headSample, [&]()
-		{
-			claimHeld.store(true, std::memory_order_release);
-			while (!releaseClaim.load(std::memory_order_acquire))
-				Sleep(0);
-		});
-	});
-
-	ULONGLONG waitStart = GetTickCount64();
-	while (!claimHeld.load(std::memory_order_acquire) && GetTickCount64() - waitStart < 5000)
-		Sleep(0);
-	bool held = claimHeld.load(std::memory_order_acquire);
+	HeldClaim claim(stalledWriter, TokenSample(2000000, 9));
+	const bool held = claim.Wait();
 	int fillSucceeded = 0;
-	if (held)
+	for (uint64_t i = 1; held && i < protocol::PoseRing::Capacity; ++i)
 	{
-		for (uint64_t i = 1; i < protocol::PoseRing::Capacity; ++i)
-		{
-			protocol::DevicePoseSample sample{};
-			sample.sampleTimeQpc = static_cast<int64_t>(2000000 + i);
-			sample.deviceId = 9;
-			sample.rotation.w = 1.0;
-			sample.position[0] = static_cast<double>(i);
-			if (stalledWriter.Publish(sample))
-				++fillSucceeded;
-		}
+		if (stalledWriter.Publish(TokenSample(static_cast<int64_t>(2000000 + i), 9, static_cast<double>(i))))
+			++fillSucceeded;
 	}
 
 	const int rejectedAttempts = 128;
 	int rejected = 0;
 	for (int i = 0; held && i < rejectedAttempts; ++i)
 	{
-		protocol::DevicePoseSample sample{};
-		sample.sampleTimeQpc = 3000000 + i;
-		sample.rotation.w = 1.0;
-		if (!stalledWriter.Publish(sample))
+		if (!stalledWriter.Publish(TokenSample(3000000 + i)))
 			++rejected;
 	}
 	int consumedWhileHeld = 0;
 	stalledReader.Drain([&](const protocol::DevicePoseSample &) { ++consumedWhileHeld; });
-	releaseClaim.store(true, std::memory_order_release);
-	stalled.join();
+	claim.Release();
 
 	int stalledConsumed = 0;
 	int stalledCorrupt = 0;
@@ -2394,11 +2086,7 @@ void RunPoseRingStalledProducerScenario()
 			gapAfterPrefix += count;
 		});
 
-	protocol::DevicePoseSample afterGap{};
-	afterGap.sampleTimeQpc = 5000000;
-	afterGap.deviceId = 9;
-	afterGap.rotation.w = 1.0;
-	afterGap.position[0] = 500.0;
+	const protocol::DevicePoseSample afterGap = TokenSample(5000000, 9, 500.0);
 	bool afterGapPublished = stalledWriter.Publish(afterGap);
 	uint64_t positionalTailDrops = 0;
 	bool gapBeforeTailSample = false;
@@ -2441,64 +2129,34 @@ void RunPoseRingOverwrittenMarkerScenario()
 	PoseRingFixture ring("MarkerOverwrite");
 	auto &markerWriter = ring.writer;
 	auto &markerReader = ring.reader;
-	bool markerOpened = ring.Open();
+	if (!ring.Open())
+	{
+		Check("pose ring: overwritten marker accounting", false, "could not create/open mapping");
+		return;
+	}
 	char detail[192];
-	std::atomic<bool> markerClaimHeld{ false };
-	std::atomic<bool> releaseMarkerClaim{ false };
-	std::thread markerStalled;
-	bool markerHeld = false;
+	HeldClaim claim(markerWriter, TokenSample(10000000));
+	const bool markerHeld = claim.Wait();
 	int markerFill = 0;
+	for (uint64_t i = 1; markerHeld && i < protocol::PoseRing::Capacity; ++i)
+	{
+		if (markerWriter.Publish(TokenSample(10000000 + static_cast<int64_t>(i))))
+			++markerFill;
+	}
 	const int markerFailures = 11;
 	int markerRejected = 0;
-	if (markerOpened)
+	for (int i = 0; markerHeld && i < markerFailures; ++i)
 	{
-		protocol::DevicePoseSample markerHead{};
-		markerHead.sampleTimeQpc = 10000000;
-		markerHead.rotation.w = 1.0;
-		markerStalled = std::thread([&]()
-		{
-			markerWriter.PublishAfterClaimForTest(markerHead, [&]()
-			{
-				markerClaimHeld.store(true, std::memory_order_release);
-				while (!releaseMarkerClaim.load(std::memory_order_acquire))
-					Sleep(0);
-			});
-		});
-		ULONGLONG markerWaitStart = GetTickCount64();
-		while (!markerClaimHeld.load(std::memory_order_acquire) &&
-			GetTickCount64() - markerWaitStart < 5000)
-			Sleep(0);
-		markerHeld = markerClaimHeld.load(std::memory_order_acquire);
-		for (uint64_t i = 1; markerHeld && i < protocol::PoseRing::Capacity; ++i)
-		{
-			protocol::DevicePoseSample sample{};
-			sample.sampleTimeQpc = 10000000 + static_cast<int64_t>(i);
-			sample.rotation.w = 1.0;
-			if (markerWriter.Publish(sample))
-				++markerFill;
-		}
-		for (int i = 0; markerHeld && i < markerFailures; ++i)
-		{
-			protocol::DevicePoseSample sample{};
-			sample.sampleTimeQpc = 10100000 + i;
-			sample.rotation.w = 1.0;
-			if (!markerWriter.Publish(sample))
-				++markerRejected;
-		}
+		if (!markerWriter.Publish(TokenSample(10100000 + i)))
+			++markerRejected;
 	}
-	releaseMarkerClaim.store(true, std::memory_order_release);
-	if (markerStalled.joinable())
-		markerStalled.join();
+	claim.Release();
 
 	const int64_t markerTailBase = 11000000;
 	int markerTailPublished = 0;
 	for (uint64_t i = 0; markerHeld && i <= protocol::PoseRing::Capacity; ++i)
 	{
-		protocol::DevicePoseSample sample{};
-		sample.sampleTimeQpc = markerTailBase + static_cast<int64_t>(i);
-		sample.deviceId = 14;
-		sample.rotation.w = 1.0;
-		if (markerWriter.Publish(sample))
+		if (markerWriter.Publish(TokenSample(markerTailBase + static_cast<int64_t>(i), 14)))
 			++markerTailPublished;
 	}
 	int markerRetained = 0;
@@ -2521,12 +2179,12 @@ void RunPoseRingOverwrittenMarkerScenario()
 		});
 	uint64_t markerExpectedLoss = protocol::PoseRing::Capacity + 1 + markerFailures;
 	snprintf(detail, sizeof detail,
-		"opened %d held %d fill %d rejected %d tail %d retained %d ordered %d gap %llu/%llu positional %d",
-		markerOpened, markerHeld, markerFill, markerRejected, markerTailPublished,
+		"held %d fill %d rejected %d tail %d retained %d ordered %d gap %llu/%llu positional %d",
+		markerHeld, markerFill, markerRejected, markerTailPublished,
 		markerRetained, markerOrdered, static_cast<unsigned long long>(markerGapTotal),
 		static_cast<unsigned long long>(markerExpectedLoss), markerGapBeforeFirst);
 	Check("pose ring: overwritten marker accounting",
-		markerOpened && markerHeld &&
+		markerHeld &&
 		markerFill == static_cast<int>(protocol::PoseRing::Capacity - 1) &&
 		markerRejected == markerFailures &&
 		markerTailPublished == static_cast<int>(protocol::PoseRing::Capacity + 1) &&
@@ -2568,11 +2226,7 @@ void RunPoseRingAbandonedWriterScenario()
 	protocol::PoseRingWriter replacementWriter;
 	bool replacementOpened = reopenOpened && replacementWriter.Create(reopenMappingName.c_str());
 	uint64_t replacementEpoch = survivingReader.SessionEpoch();
-	protocol::DevicePoseSample replacementSample{};
-	replacementSample.sampleTimeQpc = 4000000;
-	replacementSample.deviceId = 11;
-	replacementSample.rotation.w = 1.0;
-	replacementSample.position[0] = 42.0;
+	const protocol::DevicePoseSample replacementSample = TokenSample(4000000, 11, 42.0);
 	bool replacementPublished = replacementOpened && replacementWriter.Publish(replacementSample);
 	int replacementReceived = 0;
 	bool replacementValid = false;
@@ -2633,11 +2287,8 @@ void RunPoseRingAbandonedResetOwnerScenario()
 				CloseHandle(mutex);
 			}
 		});
+		WaitFor([&] { return resetOwnerReady.load(std::memory_order_acquire); }, 0);
 	}
-	ULONGLONG resetOwnerDeadline = GetTickCount64() + 5000;
-	while (resetCrashCreated && !resetOwnerReady.load(std::memory_order_acquire) &&
-		GetTickCount64() < resetOwnerDeadline)
-		Sleep(0);
 	HANDLE liveResetMutex = abandonedResetMutex.load(std::memory_order_acquire);
 	bool liveResetOwnerObserved = liveResetMutex != nullptr &&
 		WaitForSingleObject(liveResetMutex, 0) == WAIT_TIMEOUT;
@@ -2656,12 +2307,8 @@ void RunPoseRingAbandonedResetOwnerScenario()
 				resetCrashMappingName.c_str());
 			resetContenderDone.store(true, std::memory_order_release);
 		});
+		WaitFor([&] { return resetContenderStarted.load(std::memory_order_acquire); }, 0);
 	}
-	resetOwnerDeadline = GetTickCount64() + 5000;
-	while (liveResetOwnerObserved &&
-		!resetContenderStarted.load(std::memory_order_acquire) &&
-		GetTickCount64() < resetOwnerDeadline)
-		Sleep(0);
 	Sleep(20);
 	bool resetContenderSerialized = liveResetOwnerObserved &&
 		resetContenderStarted.load(std::memory_order_acquire) &&
@@ -2676,11 +2323,7 @@ void RunPoseRingAbandonedResetOwnerScenario()
 	protocol::PoseRingWriter resetCrashLiveContender;
 	bool resetCrashLiveContenderRejected = resetCrashReplacementOpened &&
 		!resetCrashLiveContender.Create(resetCrashMappingName.c_str());
-	protocol::DevicePoseSample resetCrashSample{};
-	resetCrashSample.sampleTimeQpc = 4100000;
-	resetCrashSample.deviceId = 12;
-	resetCrashSample.rotation.w = 1.0;
-	resetCrashSample.position[0] = 43.0;
+	const protocol::DevicePoseSample resetCrashSample = TokenSample(4100000, 12, 43.0);
 	bool resetCrashPublished = resetCrashReplacementOpened &&
 		resetCrashReplacement.Publish(resetCrashSample);
 	int resetCrashReceived = 0;
@@ -2721,10 +2364,7 @@ void RunPoseRingOpenResetRaceScenario()
 	for (uint64_t i = 0; openRaceCreated &&
 		i < protocol::PoseRing::Capacity + 5; ++i)
 	{
-		protocol::DevicePoseSample sample{};
-		sample.sampleTimeQpc = 14000000 + static_cast<int64_t>(i);
-		sample.rotation.w = 1.0;
-		if (openRaceOldWriter.Publish(sample))
+		if (openRaceOldWriter.Publish(TokenSample(14000000 + static_cast<int64_t>(i))))
 			++oldRacePublished;
 	}
 
@@ -2753,20 +2393,11 @@ void RunPoseRingOpenResetRaceScenario()
 					while (!releaseOpenGate.load(std::memory_order_acquire))
 						Sleep(0);
 				},
-				[&]()
-				{
-					ULONGLONG deadline = GetTickCount64() + 5000;
-					while (!replacementDone.load(std::memory_order_acquire) &&
-						GetTickCount64() < deadline)
-						Sleep(0);
-				});
+				[&]() { WaitFor([&] { return replacementDone.load(std::memory_order_acquire); }, 0); });
 		});
 	}
-	ULONGLONG openRaceDeadline = GetTickCount64() + 5000;
-	while (openRaceCreated && !openInsideGate.load(std::memory_order_acquire) &&
-		GetTickCount64() < openRaceDeadline)
-		Sleep(0);
-	bool openGateReached = openInsideGate.load(std::memory_order_acquire);
+	const bool openGateReached = openRaceCreated &&
+		WaitFor([&] { return openInsideGate.load(std::memory_order_acquire); }, 0);
 	if (openGateReached)
 	{
 		openRaceOldWriter.Close();
@@ -2775,10 +2406,7 @@ void RunPoseRingOpenResetRaceScenario()
 			openRaceReplacementOpened = openRaceReplacement.Create(openRaceMappingName.c_str());
 			replacementDone.store(true, std::memory_order_release);
 		});
-		openRaceDeadline = GetTickCount64() + 5000;
-		while (!openRaceReader.ResetInProgressForTest() &&
-			GetTickCount64() < openRaceDeadline)
-			Sleep(0);
+		WaitFor([&] { return openRaceReader.ResetInProgressForTest(); }, 0);
 	}
 	bool resetWaitObserved = openGateReached && openRaceReader.ResetInProgressForTest();
 	if (resetWaitObserved)
@@ -2790,12 +2418,9 @@ void RunPoseRingOpenResetRaceScenario()
 			competingAttemptStarted.store(true, std::memory_order_release);
 			competingReplacementOpened = competingReplacement.Create(openRaceMappingName.c_str());
 		});
-		openRaceDeadline = GetTickCount64() + 5000;
-		while (!competingAttemptStarted.load(std::memory_order_acquire) &&
-			GetTickCount64() < openRaceDeadline)
-			Sleep(0);
-		// Let the contender reach the already-held reset gate before releasing
-		// the reader. The failed claim is immediate in the corrected protocol.
+		WaitFor([&] { return competingAttemptStarted.load(std::memory_order_acquire); }, 0);
+		// Let the contender reach the already-held reset gate (its failed claim
+		// is immediate) before releasing the reader.
 		Sleep(20);
 	}
 	releaseOpenGate.store(true, std::memory_order_release);
@@ -2806,10 +2431,7 @@ void RunPoseRingOpenResetRaceScenario()
 	if (competingWriter.joinable())
 		competingWriter.join();
 
-	protocol::DevicePoseSample openRaceSeed{};
-	openRaceSeed.sampleTimeQpc = 15000000;
-	openRaceSeed.deviceId = 17;
-	openRaceSeed.rotation.w = 1.0;
+	const protocol::DevicePoseSample openRaceSeed = TokenSample(15000000, 17);
 	bool openRaceSeedPublished = openRaceReplacementOpened &&
 		openRaceReplacement.Publish(openRaceSeed);
 	int openRaceSeedReceived = 0;
@@ -2825,11 +2447,7 @@ void RunPoseRingOpenResetRaceScenario()
 	for (uint64_t i = 0; openRaceSeedReceived == 1 &&
 		i < protocol::PoseRing::Capacity + 1; ++i)
 	{
-		protocol::DevicePoseSample sample{};
-		sample.sampleTimeQpc = 15100000 + static_cast<int64_t>(i);
-		sample.deviceId = 17;
-		sample.rotation.w = 1.0;
-		if (openRaceReplacement.Publish(sample))
+		if (openRaceReplacement.Publish(TokenSample(15100000 + static_cast<int64_t>(i), 17)))
 			++openRaceTailPublished;
 	}
 	int openRaceTailReceived = 0;
@@ -2865,67 +2483,35 @@ void RunPoseHubTerminalGapScenario()
 	std::string hubMappingName = PoseRingMappingName("Hub");
 	protocol::PoseRingWriter hubWriter;
 	char detail[192];
-	bool hubOpened = hubWriter.Create(hubMappingName.c_str());
-	std::atomic<bool> hubClaimHeld{ false };
-	std::atomic<bool> releaseHubClaim{ false };
-	std::thread hubStalled;
+	if (!hubWriter.Create(hubMappingName.c_str()))
+	{
+		Check("pose hub: positional terminal gap", false, "could not create mapping");
+		return;
+	}
 	const int64_t hubPrefixBase = 6000000;
 	int hubFillSucceeded = 0;
 	int hubRejected = 0;
 	const int hubRejectedAttempts = 7;
-	bool hubHeld = false;
-	if (hubOpened)
+	HeldClaim claim(hubWriter, TokenSample(hubPrefixBase, 12));
+	const bool hubHeld = claim.Wait();
+	for (uint64_t i = 1; hubHeld && i < protocol::PoseRing::Capacity; ++i)
 	{
-		protocol::DevicePoseSample hubHead{};
-		hubHead.sampleTimeQpc = hubPrefixBase;
-		hubHead.deviceId = 12;
-		hubHead.rotation.w = 1.0;
-		hubStalled = std::thread([&]()
-		{
-			hubWriter.PublishAfterClaimForTest(hubHead, [&]()
-			{
-				hubClaimHeld.store(true, std::memory_order_release);
-				while (!releaseHubClaim.load(std::memory_order_acquire))
-					Sleep(0);
-			});
-		});
-
-		ULONGLONG hubWaitStart = GetTickCount64();
-		while (!hubClaimHeld.load(std::memory_order_acquire) &&
-			GetTickCount64() - hubWaitStart < 5000)
-			Sleep(0);
-		hubHeld = hubClaimHeld.load(std::memory_order_acquire);
-		if (hubHeld)
-		{
-			for (uint64_t i = 1; i < protocol::PoseRing::Capacity; ++i)
-			{
-				protocol::DevicePoseSample sample{};
-				sample.sampleTimeQpc = hubPrefixBase + static_cast<int64_t>(i);
-				sample.deviceId = 12;
-				sample.rotation.w = 1.0;
-				if (hubWriter.Publish(sample))
-					++hubFillSucceeded;
-			}
-			for (int i = 0; i < hubRejectedAttempts; ++i)
-			{
-				protocol::DevicePoseSample sample{};
-				sample.sampleTimeQpc = 7000000 + i;
-				sample.deviceId = 12;
-				sample.rotation.w = 1.0;
-				if (!hubWriter.Publish(sample))
-					++hubRejected;
-			}
-		}
-		releaseHubClaim.store(true, std::memory_order_release);
-		hubStalled.join();
+		if (hubWriter.Publish(TokenSample(hubPrefixBase + static_cast<int64_t>(i), 12)))
+			++hubFillSucceeded;
 	}
+	for (int i = 0; hubHeld && i < hubRejectedAttempts; ++i)
+	{
+		if (!hubWriter.Publish(TokenSample(7000000 + i, 12)))
+			++hubRejected;
+	}
+	claim.Release();
 
 	PoseStreamHub hub;
 	int hubConsumer = hub.CreateConsumer();
-	if (hubOpened && hubHeld)
+	if (hubHeld)
 		hub.Start(hubMappingName.c_str());
 	ULONGLONG hubDeadline = GetTickCount64() + 5000;
-	while (hubOpened && hubHeld && !hub.RingOpen() && GetTickCount64() < hubDeadline)
+	while (hubHeld && !hub.RingOpen() && GetTickCount64() < hubDeadline)
 		Sleep(1);
 
 	std::vector<protocol::DevicePoseSample> hubOut;
@@ -2933,7 +2519,7 @@ void RunPoseHubTerminalGapScenario()
 	bool hubPrefixValid = true;
 	bool hubTerminal = false;
 	uint64_t hubTerminalDrops = 0;
-	while (hubOpened && hubHeld && GetTickCount64() < hubDeadline && !hubTerminal)
+	while (hubHeld && GetTickCount64() < hubDeadline && !hubTerminal)
 	{
 		uint64_t dropped = hub.Drain(hubConsumer, hubOut);
 		for (const auto &sample : hubOut)
@@ -2953,10 +2539,7 @@ void RunPoseHubTerminalGapScenario()
 			Sleep(1);
 	}
 
-	protocol::DevicePoseSample hubAfterGap{};
-	hubAfterGap.sampleTimeQpc = 8000000;
-	hubAfterGap.deviceId = 12;
-	hubAfterGap.rotation.w = 1.0;
+	const protocol::DevicePoseSample hubAfterGap = TokenSample(8000000, 12);
 	bool hubAfterPublished = hubTerminal && hubWriter.Publish(hubAfterGap);
 	bool hubResumed = false;
 	uint64_t hubAfterDrops = 0;
@@ -2973,14 +2556,14 @@ void RunPoseHubTerminalGapScenario()
 	hub.Stop();
 
 	snprintf(detail, sizeof detail,
-		"opened %d held %d fill %d/%llu rejected %d/%d prefix %d valid %d terminal %llu/%d resumed %d postDrops %llu",
-		hubOpened, hubHeld, hubFillSucceeded,
+		"held %d fill %d/%llu rejected %d/%d prefix %d valid %d terminal %llu/%d resumed %d postDrops %llu",
+		hubHeld, hubFillSucceeded,
 		static_cast<unsigned long long>(protocol::PoseRing::Capacity - 1),
 		hubRejected, hubRejectedAttempts, hubPrefixCount, hubPrefixValid,
 		static_cast<unsigned long long>(hubTerminalDrops), hubTerminal,
 		hubResumed, static_cast<unsigned long long>(hubAfterDrops));
 	Check("pose hub: positional terminal gap",
-		hubOpened && hubHeld && hubWasOpen &&
+		hubHeld && hubWasOpen &&
 		hubFillSucceeded == static_cast<int>(protocol::PoseRing::Capacity - 1) &&
 		hubRejected == hubRejectedAttempts && hubPrefixValid &&
 		hubPrefixCount == static_cast<int>(protocol::PoseRing::Capacity) &&
@@ -2998,10 +2581,7 @@ void RunPoseHubMarkerOverflowScenario()
 	char detail[192];
 	std::vector<protocol::DevicePoseSample> hubOut;
 	int overflowConsumer = overflowHub.CreateConsumer();
-	protocol::DevicePoseSample overflowSample{};
-	overflowSample.deviceId = 13;
-	overflowSample.rotation.w = 1.0;
-	overflowSample.sampleTimeQpc = 9000000;
+	protocol::DevicePoseSample overflowSample = TokenSample(9000000, 13);
 	overflowHub.AppendSampleForTest(overflowSample);
 	overflowSample.sampleTimeQpc++;
 	overflowHub.AppendSampleForTest(overflowSample);
@@ -3029,14 +2609,7 @@ void RunPoseHubConsumerIndependenceScenario()
 	PoseStreamHub hub;
 	int firstConsumer = hub.CreateConsumer();
 	int secondConsumer = hub.CreateConsumer();
-	protocol::DevicePoseSample sample{};
-	sample.deviceId = 18;
-	sample.rotation.w = 1.0;
-	auto append = [&](int64_t token)
-	{
-		sample.sampleTimeQpc = token;
-		hub.AppendSampleForTest(sample);
-	};
+	auto append = [&](int64_t token) { hub.AppendSampleForTest(TokenSample(token, 18)); };
 
 	append(1);
 	append(2);
@@ -3093,14 +2666,7 @@ void RunPoseHubDrainThroughGapsScenario()
 	// must reach the newest sample and report every hole it crossed.
 	PoseStreamHub hub;
 	const int consumer = hub.CreateConsumer();
-	protocol::DevicePoseSample sample{};
-	sample.deviceId = 4;
-	sample.rotation.w = 1.0;
-	auto append = [&](int64_t token)
-	{
-		sample.sampleTimeQpc = token;
-		hub.AppendSampleForTest(sample);
-	};
+	auto append = [&](int64_t token) { hub.AppendSampleForTest(TokenSample(token, 4)); };
 	append(1);
 	append(2);
 	hub.AppendGapForTest(1);
@@ -3153,30 +2719,15 @@ void RunPoseHubMidDrainOverflowScenario()
 	char detail[256];
 	std::vector<protocol::DevicePoseSample> hubOut;
 	int midDrainConsumer = midDrainHub.CreateConsumer();
-	protocol::DevicePoseSample midDrainSample{};
-	midDrainSample.deviceId = 15;
-	midDrainSample.rotation.w = 1.0;
 	const int64_t midDrainBase = 12000000;
 	for (uint64_t i = 0; i < PoseStreamHub::HistoryCapacity; ++i)
-	{
-		midDrainSample.sampleTimeQpc = midDrainBase + static_cast<int64_t>(i);
-		midDrainHub.AppendSampleForTest(midDrainSample);
-	}
-	// Nothing below names the hub's chunk size. The overwrite is sized from what
-	// the first chunk actually copied (twice it, so the consumer's cursor is
-	// certain to fall behind the retained window), and every position is asserted
-	// relative to that observed prefix -- so this scenario tracks any chunk size
-	// instead of failing when a private tuning constant moves. `overflowInjected`
-	// stays asserted: if the chunk size ever exceeded the whole backlog the hook
-	// would never fire, and that must fail loudly rather than pass vacuously.
-	//
-	// The overwrite also runs on a SEPARATE thread, parked before the drain and
-	// released from inside the chunk hook. Driving it from the draining thread
-	// demonstrated nothing about concurrency and could not observe the property
-	// the chunking exists for: that Drain RELEASES the producer mutex between
-	// chunks so a producer can publish. Held across the chunk boundary, the
-	// injector blocks, the bounded wait expires, and the second Check fails --
-	// rather than hanging the suite.
+		midDrainHub.AppendSampleForTest(TokenSample(midDrainBase + static_cast<int64_t>(i), 15));
+	// The overwrite is sized from what the first chunk copied (twice it, so the
+	// cursor falls behind the retained window) and every position is relative to
+	// that prefix, so no chunk size is named here. It runs on a separate thread
+	// released from inside the chunk hook: if Drain held the producer mutex across
+	// chunks, the injector would block, the bounded wait expire, and the second
+	// Check fail rather than hang the suite.
 	std::mutex injectMutex;
 	std::condition_variable injectSignal;
 	uint64_t injectedSamples = 0;
@@ -3189,12 +2740,10 @@ void RunPoseHubMidDrainOverflowScenario()
 		uint64_t count = injectedSamples;
 		lock.unlock();
 
-		protocol::DevicePoseSample overwrite = midDrainSample;
 		for (uint64_t i = 0; i < count; ++i)
 		{
-			overwrite.sampleTimeQpc = midDrainBase +
-				static_cast<int64_t>(PoseStreamHub::HistoryCapacity + i);
-			midDrainHub.AppendSampleForTest(overwrite);
+			midDrainHub.AppendSampleForTest(TokenSample(midDrainBase +
+				static_cast<int64_t>(PoseStreamHub::HistoryCapacity + i), 15));
 		}
 
 		lock.lock();
@@ -3219,9 +2768,7 @@ void RunPoseHubMidDrainOverflowScenario()
 	});
 	uint64_t prefixDrops = midDrainHub.Drain(midDrainConsumer, hubOut);
 	{
-		// If the hook never fired the injector is still parked. Release it with
-		// nothing to inject, so this fails on `overflowInjected` below instead of
-		// hanging the suite on the join. Redundant when the hook did fire.
+		// Unpark an injector whose hook never fired, so the join cannot hang.
 		std::lock_guard<std::mutex> lock(injectMutex);
 		injectRequested = true;
 	}
@@ -3256,66 +2803,67 @@ void RunPoseHubMidDrainOverflowScenario()
 			: "the producer mutex was not released between copy chunks");
 }
 
+// Drains until `sample` (by time and device) arrives or five seconds pass,
+// adding every reported loss to `drops`.
+bool DrainUntilReceived(PoseStreamHub &hub, int consumer,
+	const protocol::DevicePoseSample &sample, uint64_t &drops)
+{
+	std::vector<protocol::DevicePoseSample> out;
+	const ULONGLONG deadline = GetTickCount64() + 5000;
+	while (GetTickCount64() < deadline)
+	{
+		drops += hub.Drain(consumer, out);
+		for (const auto &candidate : out)
+		{
+			if (candidate.sampleTimeQpc == sample.sampleTimeQpc &&
+				candidate.deviceId == sample.deviceId)
+				return true;
+		}
+		Sleep(1);
+	}
+	return false;
+}
+
 void RunPoseHubWriterLivenessScenario()
 {
-	// A quiet writer is alive even during SteamVR standby, but a terminated
-	// writer must make RingOpen fall promptly. Simulate the hardest stale-owner
-	// case: the PID was reused by a live process but its creation time differs.
-	// The hub must disconnect, reopen a replacement writer, and resume after one
-	// session boundary.
+	// A quiet writer is alive even during SteamVR standby, but a terminated one
+	// must make RingOpen fall promptly. The hardest stale-owner case: the PID was
+	// reused by a live process with a different creation time. The hub must
+	// disconnect, reopen a replacement writer, and resume after one boundary.
 	std::string livenessMappingName = PoseRingMappingName("Liveness");
 	DWORD staleProcessId = GetCurrentProcessId();
 	uint64_t staleCreationTime = std::numeric_limits<uint64_t>::max();
 	protocol::PoseRingWriter livenessWriter;
 	char detail[192];
-	std::vector<protocol::DevicePoseSample> hubOut;
 	bool livenessCreated = livenessWriter.Create(livenessMappingName.c_str());
 	PoseStreamHub livenessHub;
 	int livenessConsumer = livenessHub.CreateConsumer();
+	auto ringOpen = [&] { return livenessHub.RingOpen(); };
 	if (livenessCreated)
+	{
 		livenessHub.Start(livenessMappingName.c_str());
-	ULONGLONG livenessDeadline = GetTickCount64() + 5000;
-	while (livenessCreated && !livenessHub.RingOpen() &&
-		GetTickCount64() < livenessDeadline)
-		Sleep(1);
+		WaitFor(ringOpen, 1);
+	}
 	bool initiallyAlive = livenessHub.RingOpen();
 	if (initiallyAlive)
+	{
 		livenessWriter.AbandonForTest(staleProcessId, staleCreationTime);
-	livenessDeadline = GetTickCount64() + 5000;
-	while (initiallyAlive && livenessHub.RingOpen() &&
-		GetTickCount64() < livenessDeadline)
-		Sleep(1);
+		WaitFor([&] { return !livenessHub.RingOpen(); }, 1);
+	}
 	bool disappearanceDetected = initiallyAlive && !livenessHub.RingOpen();
 
 	protocol::PoseRingWriter replacementLivenessWriter;
 	bool livenessRecreated = disappearanceDetected &&
 		replacementLivenessWriter.Create(livenessMappingName.c_str());
-	livenessDeadline = GetTickCount64() + 5000;
-	while (livenessRecreated && !livenessHub.RingOpen() &&
-		GetTickCount64() < livenessDeadline)
-		Sleep(1);
+	if (livenessRecreated)
+		WaitFor(ringOpen, 1);
 	bool reopenedAlive = livenessHub.RingOpen();
-	protocol::DevicePoseSample livenessSample{};
-	livenessSample.sampleTimeQpc = 13000000;
-	livenessSample.deviceId = 16;
-	livenessSample.rotation.w = 1.0;
+	const protocol::DevicePoseSample livenessSample = TokenSample(13000000, 16);
 	bool livenessPublished = reopenedAlive &&
 		replacementLivenessWriter.Publish(livenessSample);
 	uint64_t livenessDrops = 0;
-	bool livenessReceived = false;
-	livenessDeadline = GetTickCount64() + 5000;
-	while (livenessPublished && !livenessReceived && GetTickCount64() < livenessDeadline)
-	{
-		livenessDrops += livenessHub.Drain(livenessConsumer, hubOut);
-		for (const auto &sample : hubOut)
-		{
-			if (sample.sampleTimeQpc == livenessSample.sampleTimeQpc &&
-				sample.deviceId == livenessSample.deviceId)
-				livenessReceived = true;
-		}
-		if (!livenessReceived)
-			Sleep(1);
-	}
+	bool livenessReceived = livenessPublished &&
+		DrainUntilReceived(livenessHub, livenessConsumer, livenessSample, livenessDrops);
 	livenessHub.Stop();
 	snprintf(detail, sizeof detail,
 		"reusedPid %lu created %d initial %d disappeared %d recreated %d reopened %d published %d received %d gaps %llu",
@@ -3339,43 +2887,25 @@ void RunPoseHubLiveResetGateScenario()
 	PoseStreamHub hub;
 	int consumer = hub.CreateConsumer();
 	if (controllerOpened)
+	{
 		hub.Start(mappingName.c_str());
-	ULONGLONG deadline = GetTickCount64() + 5000;
-	while (controllerOpened && !hub.RingOpen() && GetTickCount64() < deadline)
-		Sleep(1);
+		WaitFor([&] { return hub.RingOpen(); }, 1);
+	}
 	bool initiallyOpen = hub.RingOpen();
 	if (initiallyOpen)
+	{
 		resetController.SetResetInProgressForTest(true);
-	deadline = GetTickCount64() + 5000;
-	while (initiallyOpen && hub.ResetDeferralsForTest() == 0 &&
-		GetTickCount64() < deadline)
-		Sleep(1);
+		WaitFor([&] { return hub.ResetDeferralsForTest() != 0; }, 1);
+	}
 	bool resetObserved = hub.ResetDeferralsForTest() != 0;
 	bool mappingRetained = resetObserved && hub.RingOpen();
 	if (initiallyOpen)
 		resetController.SetResetInProgressForTest(false);
 
-	protocol::DevicePoseSample sample{};
-	sample.sampleTimeQpc = 16000000;
-	sample.deviceId = 19;
-	sample.rotation.w = 1.0;
+	const protocol::DevicePoseSample sample = TokenSample(16000000, 19);
 	bool published = mappingRetained && writer.Publish(sample);
-	std::vector<protocol::DevicePoseSample> out;
 	uint64_t drops = 0;
-	bool received = false;
-	deadline = GetTickCount64() + 5000;
-	while (published && !received && GetTickCount64() < deadline)
-	{
-		drops += hub.Drain(consumer, out);
-		for (const auto &candidate : out)
-		{
-			if (candidate.sampleTimeQpc == sample.sampleTimeQpc &&
-				candidate.deviceId == sample.deviceId)
-				received = true;
-		}
-		if (!received)
-			Sleep(1);
-	}
+	bool received = published && DrainUntilReceived(hub, consumer, sample, drops);
 	hub.Stop();
 
 	char detail[192];
@@ -3479,14 +3009,9 @@ void RunSolverPrimitiveScenarios()
 		Check("solver: offset signs + bounds", pass, detail);
 	}
 
-	// The same recovery, pinned to a TENTH of the correlation step. On the
-	// reported-velocity path the profile is instantaneous and the
-	// correlation is an autocorrelation peaking on the true latency, which is
-	// what makes a sub-step band meaningful: the correlator resamples the
-	// reference profile once and slices that shared grid per lag, so a
-	// whole-slot indexing error, a grid spacing that is not an integer divisor
-	// of the step, or a tail artifact that moves with the lag all shift the peak
-	// by far more than 0.2 ms.
+	// The same recovery on the reported-velocity path, pinned to a tenth of the
+	// correlation step: a slot-indexing error, a resample grid that does not
+	// divide the step, or a lag-dependent tail artifact all move the peak further.
 	{
 		GroundTruth subStep;
 		subStep.rotation = Eigen::Quaterniond(
@@ -3496,9 +3021,7 @@ void RunSolverPrimitiveScenarios()
 		scene.duration = 20.0;
 
 		EngineConfig cfg;
-		// Two of these are not multiples of the search step, so the parabolic
-		// refinement has to supply the sub-step part rather than landing on a
-		// grid lag by construction.
+		// +-0.7 ms is off the search grid: the parabolic refinement must supply it.
 		const double latencies[] = { -0.037, -0.0007, 0.0, 0.0007, 0.037 };
 		double worstSubStep = 0.0;
 		bool subStepPass = true;
@@ -3518,12 +3041,9 @@ void RunSolverPrimitiveScenarios()
 		Check("solver: sub-step offset recovery", subStepPass, detail);
 	}
 
-	// Virtual Desktop re-sends the headset's previous angular velocity in 25
-	// to 40 % of frames, and once held a single value for a whole run. A held
-	// value is the profile one frame late, so correlating it moved the
-	// measured offset by about the held share of a frame, differently each
-	// run: -5.1 ms and +1.6 ms two hours apart on one pair of devices. A
-	// stream that repeats itself is measured from its rotations instead.
+	// Virtual Desktop re-sends the headset's previous angular velocity in 25 to
+	// 40 % of frames (once for a whole run), which moved the measured offset by
+	// -5.1 and +1.6 ms on one pair of devices. A repeating stream uses rotations.
 	{
 		GroundTruth truth;
 		truth.rotation = Eigen::Quaterniond(
@@ -3560,12 +3080,9 @@ void RunSolverPrimitiveScenarios()
 		Check("solver: offset ignores a held angular velocity", pass, detail);
 	}
 
-	// The scale's one-sigma has to describe how far the scale really scatters,
-	// because it decides whether the scale is applied. The textbook figure
-	// treats every row as independent; rows are overlapping sample pairs and a
-	// headset's position error wanders over a second or more, so it understated
-	// the scatter 2.2x on white noise and 18x with 2 mm of slow wander, in-place
-	// motion or not. The block jackknife is checked against the scatter itself.
+	// The scale's one-sigma decides whether the scale is applied, so it must match
+	// the real scatter. Rows overlap and headset error wanders, so the textbook
+	// figure understated it 2.2x on white noise and 18x with 2 mm of wander.
 	{
 		GroundTruth truth;
 		truth.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(0.8, Eigen::Vector3d::UnitY()));
@@ -3621,10 +3138,8 @@ void RunSolverPrimitiveScenarios()
 		Check("solver: scale sigma matches the scale's real scatter", pass, summary.c_str());
 	}
 
-	// Dropouts are holes, not long interpolation ramps. Correlating across them
-	// used to turn a true +18 ms lag into a high-scoring negative lag. The
-	// estimator may recover the truth from the surviving support or abstain, but
-	// it must never bless a distant answer.
+	// Dropouts are holes, not interpolation ramps: correlating across them once
+	// turned a true +18 ms lag into a negative one. Recover or abstain.
 	{
 		GroundTruth truth;
 		truth.latency = 0.018;
@@ -3812,9 +3327,8 @@ void RunSolverRobustnessScenarios()
 			r.valid && rotErr < 0.8 && transErr < 0.02, detail);
 	}
 
-	// Every golden-section scale candidate must start a fresh IRLS solve. A
-	// deterministic heavy outlier set used to make the result depend on which
-	// neighboring candidate had last mutated the shared row weights.
+	// Every golden-section scale candidate must start a fresh IRLS solve; heavy
+	// outliers once made the result depend on the last candidate's row weights.
 	{
 		SceneConfig scene;
 		GroundTruth scaledTruth{
@@ -3840,23 +3354,15 @@ void RunSolverRobustnessScenarios()
 			"valid %d scale %.5f err %.5f rot %.3f deg trans %.1f mm rms %.1f mm",
 			r.valid, r.scale, scaleErr, rotErr, transErr * 1000.0,
 			r.translationRmsMeters * 1000.0);
-		// The one band widened rather than tightened by the measurement pass.
-		// Measured scaleErr is 0.01315 against a 0.015 bound - a 12% margin on
-		// a quantity that depends on the outlier draws. The property scenario,
-		// the only place draws actually vary here, moves its worst case ~1.3x
-		// above the mean across 12 seeds; 12% would not survive that, so a
-		// different STL's normal_distribution could fail this on correct code.
-		// 0.025 is ~1.9x the measured error, in line with the other bands.
-		// rotErr and transErr sit at 0.000 deg / 20.6 mm, so those stay.
+		// scaleErr measures 0.013; 0.025 leaves room for another STL's outlier draws.
 		Check("solver: robust scale outliers",
 			r.valid && scaleErr < 0.025 && rotErr < 0.5 && transErr < 0.03,
 			detail);
 	}
 
-	// Force JointRefine's meter/radian conversion outside finite range while
-	// leaving the sequential objective well-conditioned and finite. Refinement
-	// must fail closed and preserve that usable seed byte-for-byte, never accept
-	// a NaN candidate because its cost comparisons happened to be false.
+	// Force JointRefine's meter/radian conversion out of finite range while the
+	// sequential solve stays finite: refinement must keep that seed exactly,
+	// never accept a NaN candidate whose cost comparisons came out false.
 	{
 		SceneConfig scene;
 		auto aligned = GenerateAlignedSamples(scene, truth, 4330);
@@ -3875,16 +3381,16 @@ void RunSolverRobustnessScenarios()
 			fallback.translation.allFinite() && std::isfinite(fallback.scale) &&
 			std::isfinite(fallback.rotationRmsDeg) &&
 			std::isfinite(fallback.translationRmsMeters);
+		double rotDiff = fallback.rotation.angularDistance(sequential.rotation);
+		double transDiff = (fallback.translation - sequential.translation).norm();
 		bool retained = sequential.valid && fallback.valid &&
 			!fallback.refinementApplied && finiteFallback &&
-			fallback.rotation.angularDistance(sequential.rotation) < 1e-12 &&
-			(fallback.translation - sequential.translation).norm() < 1e-12 &&
+			rotDiff < 1e-12 && transDiff < 1e-12 &&
 			std::abs(fallback.scale - sequential.scale) < 1e-12;
 		snprintf(detail, sizeof detail,
 			"sequential %d fallback %d refined %d finite %d rotDiff %.2e transDiff %.2e",
 			sequential.valid, fallback.valid, fallback.refinementApplied, finiteFallback,
-			fallback.rotation.angularDistance(sequential.rotation),
-			(fallback.translation - sequential.translation).norm());
+			rotDiff, transDiff);
 		Check("solver: non-finite refinement fallback", retained, detail);
 	}
 
@@ -3919,98 +3425,59 @@ void RunSolverRobustnessScenarios()
 		posCfg.maxTranslationRms = 0.01;
 		EngineResult badPosition = CalibrationEngine::Solve(ref, target, posCfg);
 
-		bool pass = !badRotation.valid && !badPosition.valid &&
-			badRotation.message.find("Rotation residual") != std::string::npos &&
-			badPosition.message.find("Position residual") != std::string::npos;
+		bool rotationNamed = badRotation.message.find("Rotation residual") != std::string::npos;
+		bool positionNamed = badPosition.message.find("Position residual") != std::string::npos;
 		snprintf(detail, sizeof detail, "rotation %.2f deg (%d) position %.1f mm (%d)",
-			badRotation.rotationRmsDeg,
-			badRotation.message.find("Rotation residual") != std::string::npos,
-			badPosition.translationRmsMeters * 1000.0,
-			badPosition.message.find("Position residual") != std::string::npos);
-		Check("solver: residual rejection gates", pass, detail);
+			badRotation.rotationRmsDeg, rotationNamed,
+			badPosition.translationRmsMeters * 1000.0, positionNamed);
+		Check("solver: residual rejection gates", !badRotation.valid && !badPosition.valid &&
+			rotationNamed && positionNamed, detail);
 	}
 
 	// Validation and input-integrity matrix. These inputs must fail closed with
 	// useful reasons rather than producing a plausible-looking transform.
 	{
-		SceneConfig scene;
+		SceneConfig scene, stillScene;
+		stillScene.motionScale = 0.02;
 		std::vector<PoseSample> ref, target;
 		GenerateStreams(scene, truth, 4400, ref, target);
 
-		std::vector<PoseSample> shortRef(ref.begin(), ref.begin() + 7);
-		std::vector<PoseSample> shortTarget(target.begin(), target.begin() + 7);
-		EngineResult tooShort = CalibrationEngine::Solve(
-			shortRef, shortTarget, EngineConfig());
-
-		SceneConfig stillScene;
-		stillScene.motionScale = 0.02;
-		std::vector<PoseSample> stillRef, stillTarget;
-		GenerateStreams(stillScene, truth, 4401, stillRef, stillTarget);
-		EngineResult tooStill = CalibrationEngine::Solve(
-			stillRef, stillTarget, EngineConfig());
-
-		auto nanRef = ref;
-		nanRef[20].pos.x() = std::numeric_limits<double>::quiet_NaN();
-		EngineResult nanResult = CalibrationEngine::Solve(
-			nanRef, target, EngineConfig());
-
-		auto zeroQuat = target;
-		zeroQuat[30].rot = Eigen::Quaterniond(0.0, 0.0, 0.0, 0.0);
-		EngineResult zeroResult = CalibrationEngine::Solve(
-			ref, zeroQuat, EngineConfig());
-
-		auto enormousQuat = target;
-		double maxDouble = std::numeric_limits<double>::max();
-		enormousQuat[30].rot = Eigen::Quaterniond(
-			maxDouble, maxDouble, maxDouble, maxDouble);
-		EngineResult enormousResult = CalibrationEngine::Solve(
-			ref, enormousQuat, EngineConfig());
-
-		auto hugeFiniteQuat = target;
-		hugeFiniteQuat[30].rot = Eigen::Quaterniond(1e100, 1e100, 1e100, 1e100);
-		EngineResult hugeFiniteResult = CalibrationEngine::Solve(
-			ref, hugeFiniteQuat, EngineConfig());
-
-		auto duplicateTime = ref;
-		duplicateTime[40].time = duplicateTime[39].time;
-		EngineResult duplicateResult = CalibrationEngine::Solve(
-			duplicateTime, target, EngineConfig());
-
-		auto extremePosition = ref;
-		extremePosition[20].pos.x() = 1e300;
-		EngineResult extremePositionResult = CalibrationEngine::Solve(
-			extremePosition, target, EngineConfig());
-		auto extremeVelocity = target;
-		extremeVelocity[20].vel.y() = 1e300;
-		EngineResult extremeVelocityResult = CalibrationEngine::Solve(
-			ref, extremeVelocity, EngineConfig());
-		auto extremeTime = ref;
-		extremeTime[20].time = 1e300;
-		EngineResult extremeTimeResult = CalibrationEngine::Solve(
-			extremeTime, target, EngineConfig());
-
-		bool pass = !tooShort.valid && !tooStill.valid &&
-			!nanResult.valid && !zeroResult.valid && !enormousResult.valid &&
-			!hugeFiniteResult.valid &&
-			!duplicateResult.valid && !extremePositionResult.valid &&
-			!extremeVelocityResult.valid && !extremeTimeResult.valid &&
-			tooShort.message.find("Not enough samples") != std::string::npos &&
-			tooStill.message.find("Not enough rotation") != std::string::npos &&
-			nanResult.message.find("invalid or out-of-range") != std::string::npos &&
-			zeroResult.message.find("invalid or out-of-range") != std::string::npos &&
-			enormousResult.message.find("invalid or out-of-range") != std::string::npos &&
-			hugeFiniteResult.message.find("invalid or out-of-range") != std::string::npos &&
-			duplicateResult.message.find("non-increasing") != std::string::npos &&
-			extremePositionResult.message.find("out-of-range") != std::string::npos &&
-			extremeVelocityResult.message.find("out-of-range") != std::string::npos &&
-			extremeTimeResult.message.find("out-of-range") != std::string::npos;
-		snprintf(detail, sizeof detail,
-			"short %d still %d nan %d zero/max/huge-q %d%d%d duplicate %d extreme p/v/t %d%d%d",
-			!tooShort.valid, !tooStill.valid, !nanResult.valid,
-			!zeroResult.valid, !enormousResult.valid, !hugeFiniteResult.valid,
-			!duplicateResult.valid, !extremePositionResult.valid,
-			!extremeVelocityResult.valid, !extremeTimeResult.valid);
-		Check("solver: fail-closed inputs", pass, detail);
+		using Streams = std::vector<PoseSample>;
+		const double maxDouble = std::numeric_limits<double>::max();
+		const struct
+		{
+			const char *name;
+			std::function<void(Streams &, Streams &)> corrupt;
+			const char *reason;
+		} cases[] = {
+			{ "short", [](Streams &r, Streams &t) { r.resize(7); t.resize(7); }, "Not enough samples" },
+			{ "still", [&](Streams &r, Streams &t) { GenerateStreams(stillScene, truth, 4401, r, t); },
+				"Not enough rotation" },
+			{ "nan", [](Streams &r, Streams &) { r[20].pos.x() = std::numeric_limits<double>::quiet_NaN(); },
+				"invalid or out-of-range" },
+			{ "zero-q", [](Streams &, Streams &t) { t[30].rot = Eigen::Quaterniond(0.0, 0.0, 0.0, 0.0); },
+				"invalid or out-of-range" },
+			{ "max-q", [&](Streams &, Streams &t)
+				{ t[30].rot = Eigen::Quaterniond(maxDouble, maxDouble, maxDouble, maxDouble); },
+				"invalid or out-of-range" },
+			{ "huge-q", [](Streams &, Streams &t) { t[30].rot = Eigen::Quaterniond(1e100, 1e100, 1e100, 1e100); },
+				"invalid or out-of-range" },
+			{ "duplicate", [](Streams &r, Streams &) { r[40].time = r[39].time; }, "non-increasing" },
+			{ "extreme p", [](Streams &r, Streams &) { r[20].pos.x() = 1e300; }, "out-of-range" },
+			{ "extreme v", [](Streams &, Streams &t) { t[20].vel.y() = 1e300; }, "out-of-range" },
+			{ "extreme t", [](Streams &r, Streams &) { r[20].time = 1e300; }, "out-of-range" },
+		};
+		std::string wrong;
+		for (const auto &c : cases)
+		{
+			Streams r = ref, t = target;
+			c.corrupt(r, t);
+			EngineResult result = CalibrationEngine::Solve(r, t, EngineConfig());
+			if (result.valid || result.message.find(c.reason) == std::string::npos)
+				wrong += std::string(wrong.empty() ? "" : "; ") + c.name + " -> " +
+					(result.valid ? "valid" : result.message);
+		}
+		Check("solver: fail-closed inputs", wrong.empty(), wrong.c_str());
 	}
 
 	// An otherwise-valid but enormous timestamp span must trip the explicit
@@ -4092,8 +3559,7 @@ void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
 		worstOffset = std::max(worstOffset, offsetErr);
 		worstScale = std::max(worstScale, scaleErr);
 
-		// With solveScale off the field must be untouched, not merely close:
-		// roughly two thirds of these trials run that way and never looked.
+		// With solveScale off the scale must stay exactly 1.0, not merely close.
 		bool pass = r.valid && rotErr < 0.8 && transErr < 0.025 &&
 			offsetErr < 0.005 && (cfg.solveScale ? scaleErr < 0.012 : r.scale == 1.0);
 		if (!pass && firstFailure < 0)
@@ -4104,22 +3570,14 @@ void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
 	}
 
 	char detail[384];
+	snprintf(detail, sizeof detail,
+		"%d trials seed %u worst %.3f deg / %.1f mm / %.2f ms / scale %.4f",
+		trials, propertySeed,
+		worstRot, worstTrans * 1000.0, worstOffset * 1000.0, worstScale);
+	std::string summary = detail;
 	if (firstFailure >= 0)
-	{
-		snprintf(detail, sizeof detail,
-			"%d trials seed %u worst %.3f deg / %.1f mm / %.2f ms / scale %.4f  first failure %d: %s",
-			trials, propertySeed,
-			worstRot, worstTrans * 1000.0, worstOffset * 1000.0, worstScale,
-			firstFailure, firstMessage.c_str());
-	}
-	else
-	{
-		snprintf(detail, sizeof detail,
-			"%d trials seed %u worst %.3f deg / %.1f mm / %.2f ms / scale %.4f",
-			trials, propertySeed,
-			worstRot, worstTrans * 1000.0, worstOffset * 1000.0, worstScale);
-	}
-	Check("solver: randomized properties", firstFailure < 0, detail);
+		summary += "  first failure " + std::to_string(firstFailure) + ": " + firstMessage;
+	Check("solver: randomized properties", firstFailure < 0, summary.c_str());
 
 	// The production gravity prior must remain a prior: rich motion should
 	// recover a realistic range of tilted universes rather than flatten them.
@@ -4152,15 +3610,15 @@ void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
 	}
 }
 
-// Re-express a world state after the universe re-bases by (R, T).
-void ApplyUniverse(const Eigen::Quaterniond &R, const Eigen::Vector3d &T,
-                   Eigen::Quaterniond &rot, Eigen::Vector3d &pos,
-                   Eigen::Vector3d &vel, Eigen::Vector3d &angVel)
+// RefTrajectory's pose for device `id` at t, reported under the given worldFromDriver.
+protocol::DevicePoseSample RefSample(uint32_t id, double t,
+                                     const Eigen::Quaterniond &wfdRot = Eigen::Quaterniond::Identity(),
+                                     const Eigen::Vector3d &wfdTrans = Eigen::Vector3d::Zero())
 {
-	rot = R * rot;
-	pos = R * pos + T;
-	vel = R * vel;
-	angVel = R * angVel;
+	Eigen::Quaterniond rot;
+	Eigen::Vector3d pos, vel, angVel;
+	RefTrajectory(t, id, rot, pos, vel, angVel);
+	return RingSample(id, t, wfdRot, wfdTrans, rot, pos, vel, angVel);
 }
 
 struct JumpRun
@@ -4201,30 +3659,36 @@ void RunJumpScenarios()
 	const Eigen::Vector3d D_T(0.4, 0.0, -0.3);
 	const double tJump = 1.5;
 	const double rate = 90.0;
+	const uint32_t hmd = vr::k_unTrackedDeviceIndex_Hmd;
 	char detail[256];
 
-	// A. worldFromDriver rebase: driver-local pose continuous, wfd carries the
-	// jump. Exactly one delta, exact, recovered near-exactly, no double-apply
-	// from the second device.
+	// Raw-pose jump: worldFromDriver stays identity and, once `rebased`, the
+	// driver pose itself is re-expressed in the universe moved by (D_R, D_T).
+	auto rawSample = [&](uint32_t id, double t, bool rebased)
 	{
-		JumpDetector jd(TestQpcToSeconds);
-		JumpRun r = DriveJump(jd, rate, [&](double t, uint32_t id)
+		Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
+		RefTrajectory(t, id, rot, pos, vel, angVel);
+		if (rebased)
 		{
-			Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-			RefTrajectory(t, id, rot, pos, vel, angVel);
-			bool after = t >= tJump;
-			// wfd rebase: driver pose IS the trajectory; wfd jumps.
-			return RingSample(id, t,
-				after ? D_R : Eigen::Quaterniond::Identity(),
-				after ? D_T : Eigen::Vector3d::Zero(),
-				rot, pos, vel, angVel);
-		});
+			rot = D_R * rot;
+			pos = D_R * pos + D_T;
+			vel = D_R * vel;
+			angVel = D_R * angVel;
+		}
+		return RingSample(id, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
+			rot, pos, vel, angVel);
+	};
 
-		bool pass = r.deltas == 1 && r.last.exact && r.YawErrDeg(jumpYaw) < 0.1 && r.TransErr(D_T) < 0.01;
-		snprintf(detail, sizeof detail, "deltas %d  exact %d  yawErr %.3f deg  transErr %.4f m",
-			r.deltas, r.last.exact ? 1 : 0, r.YawErrDeg(jumpYaw), r.TransErr(D_T));
-		Check("jump: wfd rebase", pass, detail);
-	}
+	// worldFromDriver rebase by (jumpRot, D_T) at tJump; the driver pose stays continuous.
+	auto runWfdRebase = [&](JumpDetector &jd, const Eigen::Quaterniond &jumpRot)
+	{
+		return DriveJump(jd, rate, [&](double t, uint32_t id)
+		{
+			bool after = t >= tJump;
+			return RefSample(id, t, after ? jumpRot : Eigen::Quaterniond::Identity(),
+				after ? D_T : Eigen::Vector3d::Zero());
+		});
+	};
 
 	// Some runtimes change WFD and inversely re-express the driver-local pose,
 	// leaving the composed world pose and velocity continuous. That is a basis
@@ -4251,34 +3715,20 @@ void RunJumpScenarios()
 	}
 
 	// A rejected HMD observation breaks adjacency even when the surrounding
-	// valid frames are close enough that their local trajectory would otherwise
-	// pass the exact WFD test. Cover the three rejection classes independently:
+	// valid frames would pass the exact WFD test. One case per rejection class:
 	// explicit invalidity, malformed numerics, and composed-time inversion.
 	{
 		auto transitionAcceptedAcross = [&](int rejectionKind)
 		{
 			JumpDetector jd(TestQpcToSeconds);
-			auto sampleAt = [&](double t, const Eigen::Quaterniond &wfdRotation,
-				const Eigen::Vector3d &wfdTranslation)
-			{
-				Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-				RefTrajectory(t, vr::k_unTrackedDeviceIndex_Hmd,
-					rot, pos, vel, angVel);
-				return RingSample(vr::k_unTrackedDeviceIndex_Hmd, t,
-					wfdRotation, wfdTranslation, rot, pos, vel, angVel);
-			};
-
-			jd.Push(sampleAt(1.0, Eigen::Quaterniond::Identity(),
-				Eigen::Vector3d::Zero()));
-			protocol::DevicePoseSample rejected = sampleAt(
-				rejectionKind == 2 ? 0.99 : 1.01,
-				Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+			jd.Push(RefSample(hmd, 1.0));
+			protocol::DevicePoseSample rejected = RefSample(hmd, rejectionKind == 2 ? 0.99 : 1.01);
 			if (rejectionKind == 0)
 				rejected.poseIsValid = false;
 			else if (rejectionKind == 1)
 				rejected.position[0] = std::numeric_limits<double>::quiet_NaN();
 			jd.Push(rejected);
-			jd.Push(sampleAt(1.02, D_R, D_T));
+			jd.Push(RefSample(hmd, 1.02, D_R, D_T));
 
 			JumpDetector::UniverseDelta delta;
 			return jd.PollDelta(delta);
@@ -4305,22 +3755,12 @@ void RunJumpScenarios()
 		const Eigen::Vector3d trans2(-0.15, 0.02, 0.25);
 		for (double t = 0.0; t < 3.0; t += 1.0 / rate)
 		{
-			Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-			RefTrajectory(t, vr::k_unTrackedDeviceIndex_Hmd, rot, pos, vel, angVel);
-			Eigen::Quaterniond wfdRotation = Eigen::Quaterniond::Identity();
-			Eigen::Vector3d wfdTranslation = Eigen::Vector3d::Zero();
 			if (t >= 2.0)
-			{
-				wfdRotation = wfd2;
-				wfdTranslation = trans2;
-			}
+				jd.Push(RefSample(hmd, t, wfd2, trans2));
 			else if (t >= 0.75)
-			{
-				wfdRotation = wfd1;
-				wfdTranslation = trans1;
-			}
-			jd.Push(RingSample(vr::k_unTrackedDeviceIndex_Hmd, t,
-				wfdRotation, wfdTranslation, rot, pos, vel, angVel));
+				jd.Push(RefSample(hmd, t, wfd1, trans1));
+			else
+				jd.Push(RefSample(hmd, t));
 		}
 		std::vector<JumpDetector::UniverseDelta> deltas;
 		JumpDetector::UniverseDelta delta;
@@ -4335,21 +3775,19 @@ void RunJumpScenarios()
 		Check("jump: queued exact WFD endpoints", endpoints, detail);
 	}
 
-	// B. Raw-pose jump under noise: wfd static, the driver pose stream itself
-	// re-bases. Heuristic path, windowed estimation, two-device agreement.
+	// Raw-pose jump under noise: heuristic path, windowed estimation,
+	// two-device agreement.
 	{
 		JumpDetector jd(TestQpcToSeconds);
 		std::mt19937 rng(99);
 		std::normal_distribution<double> noise(0.0, 0.002);
 		JumpRun r = DriveJump(jd, rate, [&](double t, uint32_t id)
 		{
-			Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-			RefTrajectory(t, id, rot, pos, vel, angVel);
-			if (t >= tJump)
-				ApplyUniverse(D_R, D_T, rot, pos, vel, angVel);
-			pos += Eigen::Vector3d(noise(rng), noise(rng), noise(rng));
-			return RingSample(id, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
-				rot, pos, vel, angVel);
+			protocol::DevicePoseSample s = rawSample(id, t, t >= tJump);
+			const Eigen::Vector3d n(noise(rng), noise(rng), noise(rng));
+			for (int k = 0; k < 3; ++k)
+				s.position[k] += n(k);
+			return s;
 		});
 
 		bool pass = r.deltas == 1 && !r.last.exact && r.last.devicesAgreeing >= 2 &&
@@ -4371,12 +3809,7 @@ void RunJumpScenarios()
 			for (int step = firstStep; step <= steps; ++step)
 			{
 				double t = step / 100.0;
-				Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-				RefTrajectory(t, id, rot, pos, vel, angVel);
-				if (t >= jumpAt)
-					ApplyUniverse(D_R, D_T, rot, pos, vel, angVel);
-				jd.Push(RingSample(id, t, Eigen::Quaterniond::Identity(),
-					Eigen::Vector3d::Zero(), rot, pos, vel, angVel));
+				jd.Push(rawSample(id, t, t >= jumpAt));
 			}
 		};
 		feedDevice(0, 0.0, 10.0, 1.49);
@@ -4443,7 +3876,7 @@ void RunJumpScenarios()
 			result.TransErr(Eigen::Vector3d(0.02, 0.0, 0.0)) < 1e-9, detail);
 	}
 
-	// C. Fast continuous motion, no jump: no false positives.
+	// Fast continuous motion, no jump: no false positives.
 	{
 		JumpDetector jd(TestQpcToSeconds);
 		JumpRun r = DriveJump(jd, rate, [&](double t, uint32_t id)
@@ -4458,7 +3891,7 @@ void RunJumpScenarios()
 		Check("jump: no false positive", r.deltas == 0, detail);
 	}
 
-	// D. Hard gap in the reference stream: gap event, never a compensation.
+	// Hard gap in the reference stream: gap event, never a compensation.
 	{
 		JumpDetector jd(TestQpcToSeconds);
 		int deltas = 0, gapEvents = 0;
@@ -4469,12 +3902,7 @@ void RunJumpScenarios()
 		{
 			for (double t = t0; t < t1; t += 1.0 / rate)
 			{
-				Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-				RefTrajectory(t, 0, rot, pos, vel, angVel);
-				if (after)
-					ApplyUniverse(D_R, D_T, rot, pos, vel, angVel);
-				jd.Push(RingSample(0, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
-					rot, pos, vel, angVel));
+				jd.Push(rawSample(0, t, after));
 				while (jd.PollDelta(d)) deltas++;
 				while (jd.PollGap(g)) gapEvents++;
 			}
@@ -4486,13 +3914,9 @@ void RunJumpScenarios()
 		Check("jump: gap => event only", deltas == 0 && gapEvents == 1, detail);
 	}
 
-	// E. Resume age. A Quest Pro through Virtual Desktop resumes poses on wake
-	// while its tracking engine is still in 3DoF; the snap to the relocalized
-	// 6DoF pose seconds later is indistinguishable from a moved universe on
-	// the stream alone. The accepted delta must therefore report how long the
-	// stream had been back, measured from the first sample after the gap (or
-	// the first sample ever when there was no gap), so a log reader can tell
-	// the two apart.
+	// A Quest Pro through Virtual Desktop resumes in 3DoF and snaps to its 6DoF
+	// pose seconds later, which looks like a moved universe. So the delta reports
+	// how long the stream had been back: since the gap, or since the first sample.
 	{
 		auto run = [&](bool withGap)
 		{
@@ -4504,12 +3928,7 @@ void RunJumpScenarios()
 			{
 				for (double t = t0; t < t1; t += 1.0 / rate)
 				{
-					Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-					RefTrajectory(t, 0, rot, pos, vel, angVel);
-					if (t >= tSnap)
-						ApplyUniverse(D_R, D_T, rot, pos, vel, angVel);   // solo, above the big-solo floor
-					jd.Push(RingSample(0, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
-						rot, pos, vel, angVel));
+					jd.Push(rawSample(0, t, t >= tSnap));   // solo, above the big-solo floor
 					while (jd.PollDelta(d)) { r.deltas++; r.last = d; }
 				}
 			};
@@ -4541,46 +3960,30 @@ void RunJumpScenarios()
 	// after the bad burst still has to be recovered.
 	{
 		JumpDetector jd(TestQpcToSeconds);
-		auto sampleAt = [&](double t)
-		{
-			Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-			RefTrajectory(t, 0, rot, pos, vel, angVel);
-			return RingSample(0, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
-				rot, pos, vel, angVel);
-		};
-		protocol::DevicePoseSample bad = sampleAt(0.1);
+		protocol::DevicePoseSample bad = RefSample(0, 0.1);
 		bad.position[0] = std::numeric_limits<double>::quiet_NaN();
 		jd.Push(bad);
-		bad = sampleAt(0.2);
+		bad = RefSample(0, 0.2);
 		bad.rotation = { 0.0, 0.0, 0.0, 0.0 };
 		jd.Push(bad);
-		bad = sampleAt(0.3);
+		bad = RefSample(0, 0.3);
 		bad.poseTimeOffset = std::numeric_limits<double>::infinity();
 		jd.Push(bad);
-		bad = sampleAt(0.31);
+		bad = RefSample(0, 0.31);
 		bad.poseTimeOffset = 1e300;
 		jd.Push(bad);
-		bad = sampleAt(0.32);
+		bad = RefSample(0, 0.32);
 		bad.position[0] = 1e300;
 		jd.Push(bad);
-		bad = sampleAt(0.33);
+		bad = RefSample(0, 0.33);
 		bad.angularVelocity[1] = 1e300;
 		jd.Push(bad);
-		jd.Push(sampleAt(0.25));
-		bad = sampleAt(0.20);
+		jd.Push(RefSample(0, 0.25));
+		bad = RefSample(0, 0.20);
 		bad.position[0] += 10.0;   // valid numerics, but timestamp inversion
 		jd.Push(bad);
 
-		JumpRun r = DriveJump(jd, rate, [&](double t, uint32_t id)
-		{
-			Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-			RefTrajectory(t, id, rot, pos, vel, angVel);
-			bool after = t >= tJump;
-			return RingSample(id, t,
-				after ? D_R : Eigen::Quaterniond::Identity(),
-				after ? D_T : Eigen::Vector3d::Zero(),
-				rot, pos, vel, angVel);
-		});
+		JumpRun r = runWfdRebase(jd, D_R);
 		bool pass = r.deltas == 1 && r.last.exact && r.YawErrDeg(jumpYaw) < 0.1 &&
 			r.TransErr(D_T) < 0.01;
 		snprintf(detail, sizeof detail, "deltas %d exact %d yawErr %.3f transErr %.4f",
@@ -4588,38 +3991,26 @@ void RunJumpScenarios()
 		Check("jump: malformed inputs recover", pass, detail);
 	}
 
-	// E. Gravity constraint (invariant 15) under a re-localization that is NOT
-	// gravity-preserving: the worldFromDriver delta carries genuine tilt. Every
-	// other jump scenario builds a pure-UnitY jump, so a detector that folded
-	// the raw delta straight into the calibration would pass all of them. Here
-	// the accepted delta must be the yaw part alone -- applying the tilt would
-	// slope the floor and roll the horizon in one step -- and the discarded
-	// tilt must be reported as the non-rigid residual rather than dropped.
+	// worldFromDriver rebase, upright and with 6 deg of genuine tilt (gravity
+	// invariant 15). Upright: exactly one exact delta, no double-apply from the
+	// second device. Tilted: the accepted delta is the yaw part alone (the tilt
+	// would slope the floor in one step), and the tilt is reported as residual.
 	{
-		const double tiltRad = 6.0 * EIGEN_PI / 180.0;
 		auto runWithTilt = [&](double tilt)
 		{
 			JumpDetector jd(TestQpcToSeconds);
-			Eigen::Quaterniond jumpRot =
-				(Eigen::Quaterniond(Eigen::AngleAxisd(jumpYaw, Eigen::Vector3d::UnitY())) *
-				 Eigen::Quaterniond(Eigen::AngleAxisd(tilt, Eigen::Vector3d::UnitX()))).normalized();
-			return DriveJump(jd, rate, [&](double t, uint32_t id)
-			{
-				Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-				RefTrajectory(t, id, rot, pos, vel, angVel);
-				bool after = t >= tJump;
-				return RingSample(id, t,
-					after ? jumpRot : Eigen::Quaterniond::Identity(),
-					after ? D_T : Eigen::Vector3d::Zero(),
-					rot, pos, vel, angVel);
-			});
+			return runWfdRebase(jd,
+				(D_R * Eigen::Quaterniond(Eigen::AngleAxisd(tilt, Eigen::Vector3d::UnitX()))).normalized());
 		};
-
-		JumpRun tilted = runWithTilt(tiltRad);
+		JumpRun tilted = runWithTilt(6.0 * EIGEN_PI / 180.0);
 		JumpRun upright = runWithTilt(0.0);
 
-		// The accepted rotation is built from an AngleAxis about UnitY, so its
-		// x/z components are exactly zero -- assert the AXIS, not the magnitude.
+		snprintf(detail, sizeof detail, "deltas %d  exact %d  yawErr %.3f deg  transErr %.4f m",
+			upright.deltas, upright.last.exact ? 1 : 0, upright.YawErrDeg(jumpYaw), upright.TransErr(D_T));
+		Check("jump: wfd rebase", upright.deltas == 1 && upright.last.exact &&
+			upright.YawErrDeg(jumpYaw) < 0.1 && upright.TransErr(D_T) < 0.01, detail);
+
+		// The accepted rotation is built about UnitY: assert the axis exactly.
 		double offAxis = std::max(std::abs(tilted.last.rotation.x()),
 			std::abs(tilted.last.rotation.z()));
 		double reportedTiltDeg = tilted.last.residualTiltRad * 180.0 / EIGEN_PI;
@@ -4636,34 +4027,24 @@ void RunJumpScenarios()
 		Check("jump: yaw-only under tilt", pass, detail);
 	}
 
-	// F. The bookkeeping an accepted exact delta carries for the drift/staleness
-	// scoring, plus the two drain APIs. Push the non-HMD device FIRST at the
-	// rebase frame: TryAccept clears the candidate list the instant the HMD's
-	// own candidate lands, so per-device disagreement is only observable when
-	// another device's candidate is already pending.
+	// The bookkeeping an accepted exact delta carries, plus the two drain APIs.
+	// The non-HMD device is pushed FIRST: TryAccept clears the candidates when
+	// the HMD's lands, so disagreement shows only against a pending candidate.
 	{
 		auto runWithSecondDevice = [&](const Eigen::Vector3d &shift)
 		{
 			JumpDetector jd(TestQpcToSeconds);
 			JumpRun r;
 			JumpDetector::UniverseDelta d;
-			Eigen::Vector3d shifted = D_T + shift;
+			const Eigen::Vector3d shifted = D_T + shift;
 			for (double t = 0.0; t < 3.0; t += 1.0 / rate)
 			{
-				bool after = t >= tJump;
-				for (int order = 1; order >= 0; --order)
+				for (uint32_t id : { 1u, 0u })
 				{
-					uint32_t id = static_cast<uint32_t>(order);
-					Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-					RefTrajectory(t, id, rot, pos, vel, angVel);
-					Eigen::Quaterniond wfdRot = Eigen::Quaterniond::Identity();
-					Eigen::Vector3d wfdTrans = Eigen::Vector3d::Zero();
-					if (after)
-					{
-						wfdRot = D_R;
-						wfdTrans = id == 0 ? D_T : shifted;
-					}
-					jd.Push(RingSample(id, t, wfdRot, wfdTrans, rot, pos, vel, angVel));
+					if (t >= tJump)
+						jd.Push(RefSample(id, t, D_R, id == 0 ? D_T : shifted));
+					else
+						jd.Push(RefSample(id, t));
 				}
 				while (jd.PollDelta(d)) { r.deltas++; r.last = d; }
 			}
@@ -4684,50 +4065,28 @@ void RunJumpScenarios()
 		// Notes are the calibration log's only record of what the detector saw;
 		// Reset is what calibration start and monitor-disable call.
 		JumpDetector jd(TestQpcToSeconds);
-		auto pushHmd = [&](double t, const Eigen::Quaterniond &wfdRot, const Eigen::Vector3d &wfdTrans)
-		{
-			Eigen::Quaterniond rot; Eigen::Vector3d pos, vel, angVel;
-			RefTrajectory(t, vr::k_unTrackedDeviceIndex_Hmd, rot, pos, vel, angVel);
-			jd.Push(RingSample(vr::k_unTrackedDeviceIndex_Hmd, t, wfdRot, wfdTrans,
-				rot, pos, vel, angVel));
-		};
 		const Eigen::Quaterniond D_R2(
 			Eigen::AngleAxisd(-10.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
 		const Eigen::Vector3d D_T2(-0.2, 0.0, 0.15);
 
-		// Every timestamp comes from the same step index. Accumulating `t +=
-		// 1.0 / rate` up to a hand-written boundary constant does NOT reach it
-		// cleanly: 135 additions of 1/90 land on 1.4999999999999967, which is
-		// still < 1.5, so the loop emits one extra sample -- and RingSample's
-		// `t / TestQpcToSeconds + 0.5` rounds a 3e-15 s difference into the SAME
-		// 10 MHz tick as 1.5. Push then reads the following rebase sample as a
-		// composed-time inversion, drops it, and clears wfdValid, so the rebase
-		// is never looked for at all (no note, no candidate, no delta -- which
-		// also made the Reset check below vacuous). Integer steps keep adjacent
-		// samples a full frame apart, which is the property Push depends on.
+		// Integer steps: 135 additions of 1/90 fall 3e-15 s short of 1.5, and
+		// RingSample rounds that extra sample into the rebase frame's QPC tick,
+		// so Push would drop the rebase as a time inversion and never see it.
 		const int jumpStep = static_cast<int>(tJump * rate);   // 135 at 90 Hz
 		std::string firstNote;
 		bool noteDescribesRebase = false;
 		for (int step = 0; step <= jumpStep + 1; ++step)
 		{
-			Eigen::Quaterniond wfdRot = Eigen::Quaterniond::Identity();
-			Eigen::Vector3d wfdTrans = Eigen::Vector3d::Zero();
+			const double t = static_cast<double>(step) / rate;
 			if (step == jumpStep)
-			{
-				wfdRot = D_R;
-				wfdTrans = D_T;
-			}
+				jd.Push(RefSample(hmd, t, D_R, D_T));
 			else if (step > jumpStep)
-			{
-				wfdRot = D_R2;
-				wfdTrans = D_T2;
-			}
-			pushHmd(static_cast<double>(step) / rate, wfdRot, wfdTrans);
+				jd.Push(RefSample(hmd, t, D_R2, D_T2));
+			else
+				jd.Push(RefSample(hmd, t));
 
-			// Poll where the rebase actually happens, and only the first note:
-			// the second rebase then leaves its own note AND its delta pending,
-			// so Reset below has something real to drop rather than passing on
-			// an empty queue.
+			// Poll only the first note: the second rebase leaves its note and
+			// delta pending, so Reset below has something real to drop.
 			if (step == jumpStep)
 				noteDescribesRebase = jd.PollNote(firstNote) &&
 					firstNote.find("rebase") != std::string::npos;
@@ -4744,7 +4103,7 @@ void RunJumpScenarios()
 		for (double t = 2.0; t < 2.6; t += 1.0 / rate)
 		{
 			bool second = t >= 2.3;
-			pushHmd(t, second ? D_R2 : D_R, second ? D_T2 : D_T);
+			jd.Push(RefSample(hmd, t, second ? D_R2 : D_R, second ? D_T2 : D_T));
 			while (jd.PollDelta(stale))
 			{
 				if (second)
@@ -5068,24 +4427,17 @@ protocol::SetAlignmentField BuildField(const FieldTransform &base,
 	return f;
 }
 
-// Independent oracle for the driver's blend, derived from the field's
-// DEFINITION (see AlignmentField.h) rather than transcribed from BlendAt: a
-// Gaussian radial basis over horizontal separation plus one constant identity
-// contributor, combined as a weighted mean.
+// Independent oracle for the driver's blend, written from the field's
+// definition (AlignmentField.h) rather than from BlendAt:
 //
 //   w_i   = exp(-(r_i / sigma)^2 / 2),  r_i = horizontal |query - anchor_i|
 //   w_0   = the identity floor; its delta is the identity transform
 //   rot   = normalize(sum_j w_j q_j)    (each q_j in identity's hemisphere)
 //   trans = sum_j w_j (R_j pos + t_j) / sum_j w_j - rot * pos
 //
-// Every constant is spelled out as its own literal on purpose. Reading
-// alignfield::IdentityFloorWeight would move oracle and implementation
-// together, which is precisely the failure this oracle exists to catch: the
-// floor decides how much of a measured anchor delta the runtime actually
-// applies -- 1/(1+w0), ~95% at 0.05 -- so a silent change to it MUST break the
-// comparison scenario below.
-void ReferenceBlend(const protocol::SetAlignmentField &f, uint32_t anchorCount,
-                    const Eigen::Vector3d &pos,
+// The floor is a literal, not alignfield::IdentityFloorWeight: it sets how much
+// of an anchor delta is applied (1/(1+w0)), so a silent change must break this.
+void ReferenceBlend(const protocol::SetAlignmentField &f, const Eigen::Vector3d &pos,
                     Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut)
 {
 	const double identityFloorWeight = 0.05;   // must equal alignfield::IdentityFloorWeight
@@ -5101,7 +4453,7 @@ void ReferenceBlend(const protocol::SetAlignmentField &f, uint32_t anchorCount,
 	mix.push_back({ identityFloorWeight,
 		Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero() });
 
-	for (uint32_t i = 0; i < anchorCount; ++i)
+	for (uint32_t i = 0; i < f.anchorCount; ++i)
 	{
 		const auto &a = f.anchors[i];
 		Eigen::Vector2d horizontal(pos.x() - a.position[0], pos.z() - a.position[2]);
@@ -5202,34 +4554,15 @@ void RunFieldScenarios()
 		Check("field: identity fade", posErr < 0.001 && rotErr < 0.01, detail);
 	}
 
-	// C. q and -q are the same rotation: negating a stored anchor quaternion
-	// must not change the blend.
-	{
-		protocol::SetAlignmentField negated = field;
-		auto &q = negated.anchors[0].rotationDelta;
-		q = { -q.w, -q.x, -q.y, -q.z };
-
-		double p[3] = { -2.0, 1.0, -2.5 };
-		vr::HmdQuaternion_t r1, r2;
-		double t1[3], t2[3];
-		alignfield::BlendAt(field, p, r1, t1);
-		alignfield::BlendAt(negated, p, r2, t2);
-
-		double dq = std::abs(r1.w * r2.w + r1.x * r2.x + r1.y * r2.y + r1.z * r2.z);
-		double dt = Dist3(t1, t2);
-		snprintf(detail, sizeof detail, "|dot| %.12f  dTrans %.2e", dq, dt);
-		Check("field: hemisphere invariance", dq > 1.0 - 1e-12 && dt < 1e-12, detail);
-	}
-
-	// D. The driver's hand-rolled blend agrees with the Eigen reference over
-	// random fields and query points.
+	// C. The driver's hand-rolled blend agrees with the Eigen reference over
+	// random fields and query points. About half the anchor quaternions are
+	// negated, so this also pins q / -q invariance: the reference is sign-blind.
 	{
 		std::mt19937 rng(2024);
 		std::uniform_real_distribution<double> u(-1.0, 1.0);
 		double worstQ = 0.0, worstT = 0.0;
 
-		// Include a full field: the previous 1/4/7 progression never reached
-		// MaxAnchors, so the last slot was blended by neither side.
+		// Up to a full field, so the last slot is blended too.
 		const uint32_t counts[] = { 1, 4, 7, protocol::SetAlignmentField::MaxAnchors };
 		for (int trial = 0; trial < static_cast<int>(sizeof counts / sizeof counts[0]); ++trial)
 		{
@@ -5262,7 +4595,7 @@ void RunFieldScenarios()
 
 				Eigen::Quaterniond refR;
 				Eigen::Vector3d refT;
-				ReferenceBlend(rf, rf.anchorCount, pos, refR, refT);
+				ReferenceBlend(rf, pos, refR, refT);
 
 				worstQ = std::max(worstQ, 1.0 - std::abs(r.w * refR.w() + r.x * refR.x() + r.y * refR.y() + r.z * refR.z()));
 				worstT = std::max(worstT, (Eigen::Vector3d(t[0], t[1], t[2]) - refT).norm());
@@ -5272,7 +4605,7 @@ void RunFieldScenarios()
 		Check("field: matches reference", worstQ < 1e-12 && worstT < 1e-12, detail);
 	}
 
-	// E. Same generation slews (rate-limited steps toward the target, then
+	// D. Same generation slews (rate-limited steps toward the target, then
 	// convergence); a generation bump snaps immediately.
 	{
 		protocol::SetAlignmentField f1 = BuildField(base, anchors, positions, 7);
@@ -5315,7 +4648,7 @@ void RunFieldScenarios()
 		Check("field: slew + generation snap", limited && convErr < 1e-9 && snapErr < 1e-12, detail);
 	}
 
-	// F. Universe-jump invariance: shifting base and anchors by D (what
+	// E. Universe-jump invariance: shifting base and anchors by D (what
 	// ApplyUniverseDelta does) and re-deriving the deltas must move every
 	// corrected world pose by exactly D, for both rotation and translation.
 	{
@@ -5392,16 +4725,12 @@ void RunChaperoneScenarios()
 		Eigen::Vector3d recoveredTranslation;
 		bool recovered = WorldFromDriverDelta(oldRotation, oldTranslation,
 			newRotation, newTranslation, recoveredRotation, recoveredTranslation);
-		snprintf(detail, sizeof detail, "rot %.3e trans %.3e changed %d",
-			recoveredRotation.angularDistance(expectedRotation),
-			(recoveredTranslation - expectedTranslation).norm(),
-			WorldFromDriverChanged(oldRotation, oldTranslation,
-				newRotation, newTranslation));
+		double rotErr = recoveredRotation.angularDistance(expectedRotation);
+		double transErr = (recoveredTranslation - expectedTranslation).norm();
+		bool changed = WorldFromDriverChanged(oldRotation, oldTranslation, newRotation, newTranslation);
+		snprintf(detail, sizeof detail, "rot %.3e trans %.3e changed %d", rotErr, transErr, changed);
 		Check("chaperone: recover world delta",
-			recovered && recoveredRotation.angularDistance(expectedRotation) < 1e-12 &&
-			(recoveredTranslation - expectedTranslation).norm() < 1e-12 &&
-			WorldFromDriverChanged(oldRotation, oldTranslation,
-				newRotation, newTranslation), detail);
+			recovered && rotErr < 1e-12 && transErr < 1e-12 && changed, detail);
 	}
 
 	{
@@ -5415,9 +4744,7 @@ void RunChaperoneScenarios()
 	}
 
 	// Chaperone re-anchoring trusts a WFD delta only when adjacent HMD-local
-	// poses prove that it was a real universe rebase. The same helper is shared
-	// with JumpDetector so the two state machines cannot classify one transition
-	// differently.
+	// poses prove a real rebase; JumpDetector shares this helper.
 	{
 		ringpose::DriverLocalPoseSample previous;
 		previous.time = 1.0;
@@ -5433,12 +4760,8 @@ void RunChaperoneScenarios()
 			previous.angularVelocity.norm() * 0.05,
 			previous.angularVelocity.normalized())) * previous.rotation;
 
-		Eigen::Quaterniond acceptedRotation;
-		Eigen::Vector3d acceptedTranslation;
-		bool wfdDeltaValid = WorldFromDriverDelta(identity, Eigen::Vector3d::Zero(),
-			D_R, D_T, acceptedRotation, acceptedTranslation);
 		Check("chaperone: continuous WFD rebase",
-			wfdDeltaValid && ringpose::IsDriverLocalPoseContinuous(previous, continuous), "");
+			ringpose::IsDriverLocalPoseContinuous(previous, continuous), "");
 
 		ringpose::DriverLocalPoseSample inverseLocal = continuous;
 		inverseLocal.rotation = D_R.conjugate() * continuous.rotation;
@@ -5754,11 +5077,9 @@ void CalError(const ContinuousSim &sim, const GroundTruth &truth, double t,
 	posMOut = (dR * hp + tD - hp).norm();
 }
 
-// Tilt (non-yaw) part of the sim's calibration error. A yaw-only correction
-// policy leaves it EXACTLY invariant: both left- and right-multiplying by a
-// rotation about UnitY preserve |(w, y)| of the delta quaternion, and the tilt
-// is 2*acos of that. So this doubles as a detector for a correction that
-// carried any tilt at all.
+// Tilt (non-yaw) part of the sim's calibration error. Yaw corrections leave it
+// exactly invariant (either-side UnitY rotations preserve |(w, y)|), so any
+// change means some correction carried tilt.
 double CalTiltDeg(const ContinuousSim &sim, const GroundTruth &truth)
 {
 	Eigen::Quaterniond dR = (truth.rotation * sim.calRot.conjugate()).normalized();
@@ -5894,16 +5215,23 @@ void RunContinuousScenarios()
 		return e;
 	}();
 
-	// Sim whose calibration starts a known 0.3 deg / few-mm delta away from
-	// truth, for the scenarios that must walk it back.
-	auto makeOffsetSim = [&](ContinuousSim &sim)
+	// Sim on the true mount and latency whose calibration starts exactly at truth.
+	auto makeSim = [&](ContinuousSim &sim, const GroundTruth &truth)
 	{
 		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
+		sim.solvedOffset = truth.latency;
+		sim.calRot = truth.rotation;
+		sim.calTrans = truth.translation;
+	};
+	// ... or a known 0.3 deg / few-mm delta away from it, for the scenarios that
+	// must walk it back.
+	auto makeOffsetSim = [&](ContinuousSim &sim, const GroundTruth &truth)
+	{
+		makeSim(sim, truth);
 		Eigen::Quaterniond dR(Eigen::AngleAxisd(0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
 		Eigen::Vector3d dT(0.004, 0.002, -0.003);
-		sim.calRot = (dR.conjugate() * baseTruth.rotation).normalized();
-		sim.calTrans = dR.conjugate() * (baseTruth.translation - dT);
+		sim.calRot = (dR.conjugate() * truth.rotation).normalized();
+		sim.calTrans = dR.conjugate() * (truth.translation - dT);
 	};
 
 	// 1. Extrinsic derivation recovers the mount from a manual calibration's
@@ -5944,29 +5272,13 @@ void RunContinuousScenarios()
 	}
 
 	// 2. Frame-convention keystone: start the calibration a known small delta
-	// away from truth; the closed loop must walk it back to truth (any sign or
-	// composition-order bug diverges or leaves a large stable residual).
-	{
-		std::mt19937 rng(101);
-		ContinuousSim sim;
-		makeOffsetSim(sim);
-
-		RunContinuousSegment(sim, scene, 0.0, 15.0, rng, constTruth, constMount, alwaysVisible);
-
-		double yawErr, posErr;
-		CalError(sim, baseTruth, 15.0, yawErr, posErr);
-		snprintf(detail, sizeof detail, "residual yaw %.3f deg  pos %.1f mm  corrections %d",
-			yawErr, posErr * 1000.0, sim.corrections);
-		Check("continuous: converges to truth",
-			sim.corrections >= 1 && sim.freezes == 0 && yawErr < 0.12 && posErr < 0.005, detail);
-	}
-
-	// Streaming offset signs: RunContinuousSegment feeds each reference,
-	// target, and Update event in timestamp order, just like the overlay. For a
-	// negative solved offset, a target needs a reference pose that arrives in a
-	// later tick; it must remain pending rather than being consumed on the first
-	// failed interpolation. Exercise the search bounds and representative inner
-	// values in both directions, plus exact zero.
+	// away from truth; the closed loop must walk it back (any sign or
+	// composition-order bug diverges or leaves a large stable residual). Run
+	// at every offset sign: RunContinuousSegment feeds events in timestamp
+	// order like the overlay, so for a negative solved offset a target needs a
+	// reference pose from a later tick and must stay pending rather than be
+	// consumed by the first failed interpolation. The offsets are the search
+	// bounds, representative inner values and exact zero.
 	{
 		const double offsets[] = { -0.055, -0.018, 0.0, 0.018, 0.055 };
 		bool pass = true;
@@ -5981,13 +5293,7 @@ void RunContinuousScenarios()
 			auto truthAt = [&](double) { return truth; };
 
 			ContinuousSim sim;
-			sim.ca.SetExtrinsic(trueExtrinsic);
-			sim.solvedOffset = offsets[i];
-			Eigen::Quaterniond dR(Eigen::AngleAxisd(
-				0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
-			Eigen::Vector3d dT(0.004, 0.002, -0.003);
-			sim.calRot = (dR.conjugate() * truth.rotation).normalized();
-			sim.calTrans = dR.conjugate() * (truth.translation - dT);
+			makeOffsetSim(sim, truth);
 
 			std::mt19937 rng(1200 + static_cast<uint32_t>(i));
 			RunContinuousSegment(sim, scene, 0.0, 15.0, rng,
@@ -6020,7 +5326,7 @@ void RunContinuousScenarios()
 		dirty.outlierRate = 0.05;
 
 		ContinuousSim sim;
-		makeOffsetSim(sim);
+		makeOffsetSim(sim, baseTruth);
 
 		RunContinuousSegment(sim, dirty, 0.0, 15.0, rng, constTruth, constMount, alwaysVisible,
 			nullptr, /*negateTargetQuat=*/true);
@@ -6049,10 +5355,7 @@ void RunContinuousScenarios()
 		};
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 
 		double maxYaw = 0.0, maxPos = 0.0;
 		RunContinuousSegment(sim, scene, 0.0, 70.0, rng, driftTruth, constMount, alwaysVisible,
@@ -6094,10 +5397,7 @@ void RunContinuousScenarios()
 		};
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 
 		RunContinuousSegment(sim, scene, 0.0, 31.0, rng, constTruth, constMount, alwaysVisible, refPost);
 
@@ -6138,10 +5438,7 @@ void RunContinuousScenarios()
 		};
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 		sim.afterMark = 55.0;
 
 		RunContinuousSegment(sim, scene, 0.0, 75.0, rng, constTruth, slipMount, alwaysVisible);
@@ -6174,10 +5471,7 @@ void RunContinuousScenarios()
 		auto stepTruth = [&](double t) { return t < 73.0 ? baseTruth : stepped; };
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 		sim.afterMark = 73.0;
 
 		RunContinuousSegment(sim, scene, 0.0, 82.0, rng, stepTruth, constMount, visible);
@@ -6205,22 +5499,12 @@ void RunContinuousScenarios()
 	// settles. With the option off the offset never moves, and a motionless
 	// window yields no estimate at all.
 	//
-	// UNVERIFIED, deliberately: the EWMA itself and its limits are NOT pinned
-	// here. The shipped filter lives in ContinuousTick (Overlay/Calibration.cpp
-	// :1741-1758) -- the 0.75/0.25 blend, the +/-0.002 s per-update step clamp,
-	// the +/-0.060 s absolute clamp on the accumulated offset, and the 0.5 ms
-	// threshold that decides whether the driver is re-synchronized -- and
-	// Calibration.cpp is not in SolverTests. `applyEwma` below is a DRIVER for
-	// the scenario, not an oracle: it exists so the offset moves at all, and it
-	// carries neither the absolute clamp nor the resync threshold. Asserting its
-	// own step bound (as this scenario used to) was a tautology over the two
-	// lines above the assertion and could not fail for any behaviour of the
-	// shipped code. What IS pinned below reaches ContinuousAlignment:
-	// PollTimeOffset's cadence, its measurements tracking a moving true latency,
-	// its silence when the opt-in is off, and the correlator's refusal on
-	// motionless streams. Pinning the filter needs it lifted out of
-	// ContinuousTick into a compiled unit (a pure `double NextTimeOffset(double
-	// current, double measured)` would do it).
+	// The shipped EWMA (blend, step and absolute clamps, resync threshold) lives
+	// in ContinuousTick in Calibration.cpp, which SolverTests does not compile,
+	// so it is NOT pinned here: `applyEwma` only drives the offset so it moves.
+	// What is pinned is ContinuousAlignment's side: PollTimeOffset's cadence,
+	// its tracking of a moving latency, its silence when the opt-in is off, and
+	// the correlator's refusal on motionless streams.
 	{
 		std::mt19937 rng(707);
 		auto rampTruth = [&](double t)
@@ -6235,23 +5519,18 @@ void RunContinuousScenarios()
 
 		ContinuousSim sim;
 		sim.ca.SetConfig(cfg);
-		sim.ca.SetExtrinsic(trueExtrinsic);
+		makeSim(sim, baseTruth);
 		sim.solvedOffset = 0.008;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
 
-		double maxStep = 0.0;   // reported only; see the note above
 		int offsetUpdates = 0;
 		auto applyEwma = [&](double)
 		{
 			double measured;
 			while (sim.ca.PollTimeOffset(measured))
 			{
-				double target = 0.75 * sim.solvedOffset + 0.25 * measured;
-				double step = target - sim.solvedOffset;
+				double step = (0.75 * sim.solvedOffset + 0.25 * measured) - sim.solvedOffset;
 				if (step > 0.002) step = 0.002;
 				if (step < -0.002) step = -0.002;
-				maxStep = std::max(maxStep, std::abs(step));
 				sim.solvedOffset += step;
 				offsetUpdates++;
 			}
@@ -6262,10 +5541,8 @@ void RunContinuousScenarios()
 
 		// Opt-out: identical run, offset must never move.
 		ContinuousSim simOff;
-		simOff.ca.SetExtrinsic(trueExtrinsic);
+		makeSim(simOff, baseTruth);
 		simOff.solvedOffset = 0.008;
-		simOff.calRot = baseTruth.rotation;
-		simOff.calTrans = baseTruth.translation;
 		int offUpdates = 0;
 		std::mt19937 rngOff(707);
 		RunContinuousSegment(simOff, scene, 0.0, 120.0, rngOff, rampTruth, constMount, alwaysVisible,
@@ -6278,24 +5555,21 @@ void RunContinuousScenarios()
 			});
 
 		// Motionless streams: the correlator must refuse.
-		std::vector<PoseSample> stillRef, stillTgt;
+		std::vector<PoseSample> still;
 		for (double t = 0.0; t < 30.0; t += 1.0 / 90.0)
 		{
 			PoseSample s;
 			s.time = t;
 			s.rot = Eigen::Quaterniond::Identity();
 			s.pos = Eigen::Vector3d(0.0, 1.2, 0.0);
-			stillRef.push_back(s);
-			stillTgt.push_back(s);
+			still.push_back(s);
 		}
-		EngineConfig ecfg;
 		double stillOut = 0.0;
-		bool stillEstimated = CalibrationEngine::EstimateTimeOffset(stillRef, stillTgt, ecfg, stillOut);
+		bool stillEstimated = CalibrationEngine::EstimateTimeOffset(still, still, EngineConfig(), stillOut);
 
 		snprintf(detail, sizeof detail,
-			"tracked to %.1f ms (err %.2f ms)  %d updates  harness maxStep %.2f ms (unasserted)  off %d  still %d",
-			sim.solvedOffset * 1000.0, trackErr * 1000.0, offsetUpdates, maxStep * 1000.0,
-			offUpdates, stillEstimated);
+			"tracked to %.1f ms (err %.2f ms)  %d updates  off %d  still %d",
+			sim.solvedOffset * 1000.0, trackErr * 1000.0, offsetUpdates, offUpdates, stillEstimated);
 		Check("continuous: latency re-estimation",
 			offsetUpdates >= 5 && trackErr < 0.003 &&
 			offUpdates == 0 && simOff.solvedOffset == 0.008 && !stillEstimated, detail);
@@ -6356,15 +5630,13 @@ void RunContinuousScenarios()
 			}
 		}
 
-		// The identity floor is still a shared constant on both sides. The blend
-		// width no longer is - it travels on the wire and is exercised above at
-		// several non-default values.
-		bool constantsMatch =
-			FieldBlendIdentityFloor == alignfield::IdentityFloorWeight;
-		snprintf(detail, sizeof detail, "worst rot %.2e rad  pos %.2e m  constants %d",
-			worstRot, worstPos, constantsMatch);
+		// The identity floor is a shared constant on both sides; the blend width
+		// travels on the wire and is exercised above.
+		static_assert(FieldBlendIdentityFloor == alignfield::IdentityFloorWeight,
+			"the overlay's field mirror and the driver disagree on the identity floor");
+		snprintf(detail, sizeof detail, "worst rot %.2e rad  pos %.2e m", worstRot, worstPos);
 		Check("continuous: field expectation matches driver blend",
-			worstRot < 1e-9 && worstPos < 1e-9 && constantsMatch, detail);
+			worstRot < 1e-9 && worstPos < 1e-9, detail);
 	}
 
 	// 10. Anchor coexistence: an anchor capturing a genuine 6 cm local
@@ -6392,10 +5664,7 @@ void RunContinuousScenarios()
 			{ anchorPos, localTruth.rotation, localTruth.translation } };
 
 		ContinuousSim simBase;
-		simBase.ca.SetExtrinsic(trueExtrinsic);
-		simBase.solvedOffset = baseTruth.latency;
-		simBase.calRot = baseTruth.rotation;
-		simBase.calTrans = baseTruth.translation;
+		makeSim(simBase, baseTruth);
 		RunContinuousSegment(simBase, scene, 0.0, 20.0, rng, localTruthAt, constMount, alwaysVisible);
 
 		Eigen::Quaterniond expRot;
@@ -6405,8 +5674,7 @@ void RunContinuousScenarios()
 
 		std::mt19937 rng2(910);
 		ContinuousSim simField;
-		simField.ca.SetExtrinsic(trueExtrinsic);
-		simField.solvedOffset = baseTruth.latency;
+		makeSim(simField, baseTruth);
 		simField.calRot = expRot;
 		simField.calTrans = expTrans;
 		RunContinuousSegment(simField, scene, 0.0, 20.0, rng2, localTruthAt, constMount, alwaysVisible);
@@ -6423,93 +5691,113 @@ void RunContinuousScenarios()
 		Check("continuous: anchors do not read as faults", baseFroze && fieldQuiet, detail);
 	}
 
-	// 11. A moving field history must be compared position by position. The
-	// mounted tracker crosses from outside a 6 cm anchor into its center while
-	// the universes remain perfectly stable. Comparing the whole 10 s window to
-	// only the latest local transform produces a centimeter-scale false
-	// correction; rebasing every observation through its own field value stays
-	// at the unchanged base calibration.
+	// Scenarios 11 and 17 share one sweep: the mounted tracker crosses from 5 m
+	// outside a 6 cm anchor into its centre while both universes stay perfectly
+	// still. Two engines see the same streams. The faithful one looks the field
+	// up as ContinuousTick's closure does, at the tracker's BASE-CALIBRATED world
+	// position (calibrated scale times the raw position, then the base
+	// transform), and must stay silent; `updateOther` drives the variant under
+	// test, which must invent corrections.
+	struct AnchorSweep
 	{
-		const FieldTransform base{ Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero() };
-		std::vector<OverlayAnchor> anchors{
-			{ Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(),
-				Eigen::Vector3d(0.06, 0.0, 0.0) } };
-
-		// Same shape as the closure ContinuousTick builds (Overlay/Calibration.cpp
-		// :1663-1670): the field is looked up at the tracker's BASE-CALIBRATED
-		// world position, so the calibrated scale multiplies the raw target
-		// position before the base transform. Unity here; scenario 17 drives it
-		// with a non-unity scale, which is the only way that factor is visible.
-		const double calScale = 1.0;
-		auto expectedAt = [&](const Eigen::Vector3d &targetRawPos,
+		int faithfulCorrections = 0;
+		ContinuousAlignment::State faithfulState{};
+		int otherCorrections = 0;
+		double otherMaxCorrection = 0.0;
+	};
+	const FieldTransform sweepBase{ Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero() };
+	const std::vector<OverlayAnchor> sweepAnchors{
+		{ Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(), Eigen::Vector3d(0.06, 0.0, 0.0) } };
+	auto sweepLookup = [&](const Eigen::Vector3d &basePos,
+		Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
+	{
+		BlendedFieldCalibration(sweepAnchors, sweepBase.R, sweepBase.T, basePos,
+			rotationOut, translationOut);
+	};
+	using SweepUpdate = std::function<void(ContinuousAlignment &, double,
+		const Eigen::Quaterniond &, const Eigen::Vector3d &)>;
+	auto runAnchorSweep = [&](double calScale, uint32_t seed, const SweepUpdate &updateOther)
+	{
+		auto faithful = [&](const Eigen::Vector3d &targetRawPos,
 			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
 		{
-			Eigen::Vector3d basePos = base.R * (calScale * targetRawPos) + base.T;
-			BlendedFieldCalibration(anchors, base.R, base.T, basePos,
+			sweepLookup(sweepBase.R * (calScale * targetRawPos) + sweepBase.T,
 				rotationOut, translationOut);
 		};
 
 		MountExtrinsic identityMount;
 		identityMount.valid = true;
-		ContinuousAlignment perObservation;
-		ContinuousAlignment latestOnly;
-		perObservation.SetExtrinsic(identityMount);
-		latestOnly.SetExtrinsic(identityMount);
+		ContinuousAlignment good, other;
+		good.SetExtrinsic(identityMount);
+		other.SetExtrinsic(identityMount);
 
-		std::mt19937 rng(911);
+		std::mt19937 rng(seed);
 		std::normal_distribution<double> refNoise(0.0, 0.0001);
-		int correctCorrections = 0;
-		int latestCorrections = 0;
-		double latestMaxCorrection = 0.0;
+		AnchorSweep out;
 		for (double t = 0.0; t < 16.0; t += 1.0 / 90.0)
 		{
-			double x = t < 10.0 ? -5.0 + 0.5 * t : 0.0;
-			double vx = t < 10.0 ? 0.5 : 0.0;
+			// The world track; the tracker reports it divided by calScale.
+			double worldX = t < 10.0 ? -5.0 + 0.5 * t : 0.0;
+			double worldVx = t < 10.0 ? 0.5 : 0.0;
 
 			PoseSample target;
 			target.time = t;
 			target.rot = Eigen::Quaterniond::Identity();
-			target.pos = Eigen::Vector3d(x, 0.0, 0.0);
-			target.vel = Eigen::Vector3d(vx, 0.0, 0.0);
+			target.pos = Eigen::Vector3d(worldX / calScale, 0.0, 0.0);
+			target.vel = Eigen::Vector3d(worldVx / calScale, 0.0, 0.0);
 
 			Eigen::Quaterniond localRot;
 			Eigen::Vector3d localTrans;
-			expectedAt(target.pos, localRot, localTrans);
+			faithful(target.pos, localRot, localTrans);
 
 			PoseSample reference;
 			reference.time = t;
 			reference.rot = localRot;
-			reference.pos = localRot * target.pos + localTrans +
+			reference.pos = localRot * (calScale * target.pos) + localTrans +
 				Eigen::Vector3d(refNoise(rng), refNoise(rng), refNoise(rng));
-			reference.vel = Eigen::Vector3d(vx, 0.0, 0.0);
+			reference.vel = Eigen::Vector3d(worldVx, 0.0, 0.0);
 
-			perObservation.PushReference(reference);
-			perObservation.PushTarget(target);
-			latestOnly.PushReference(reference);
-			latestOnly.PushTarget(target);
+			good.PushReference(reference);
+			good.PushTarget(target);
+			other.PushReference(reference);
+			other.PushTarget(target);
 
-			perObservation.Update(t, base.R, base.T, calScale, 0.0, expectedAt);
-			latestOnly.Update(t, localRot, localTrans, calScale, 0.0);
+			good.Update(t, sweepBase.R, sweepBase.T, calScale, 0.0, faithful);
+			updateOther(other, t, localRot, localTrans);
 
 			ContinuousAlignment::Correction correction;
-			while (perObservation.PollCorrection(correction))
-				correctCorrections++;
-			while (latestOnly.PollCorrection(correction))
+			while (good.PollCorrection(correction))
+				out.faithfulCorrections++;
+			while (other.PollCorrection(correction))
 			{
-				latestCorrections++;
-				latestMaxCorrection = std::max(latestMaxCorrection,
+				out.otherCorrections++;
+				out.otherMaxCorrection = std::max(out.otherMaxCorrection,
 					correction.translation.norm());
 			}
 		}
+		out.faithfulState = good.GetState();
+		return out;
+	};
 
+	// 11. A moving field history must be compared position by position:
+	// comparing the whole 10 s window to only the latest local transform
+	// produces a centimeter-scale false correction, while rebasing every
+	// observation through its own field value stays at the base calibration.
+	{
+		const AnchorSweep s = runAnchorSweep(1.0, 911,
+			[](ContinuousAlignment &latestOnly, double t,
+				const Eigen::Quaterniond &localRot, const Eigen::Vector3d &localTrans)
+			{
+				latestOnly.Update(t, localRot, localTrans, 1.0, 0.0);
+			});
 		snprintf(detail, sizeof detail,
 			"per-observation %d corrections / state %d; latest-only %d, max %.1f mm",
-			correctCorrections, static_cast<int>(perObservation.GetState()),
-			latestCorrections, latestMaxCorrection * 1000.0);
+			s.faithfulCorrections, static_cast<int>(s.faithfulState),
+			s.otherCorrections, s.otherMaxCorrection * 1000.0);
 		Check("continuous: moving field baseline",
-			correctCorrections == 0 &&
-			perObservation.GetState() == ContinuousAlignment::State::Tracking &&
-			latestCorrections > 0 && latestMaxCorrection > 0.005,
+			s.faithfulCorrections == 0 &&
+			s.faithfulState == ContinuousAlignment::State::Tracking &&
+			s.otherCorrections > 0 && s.otherMaxCorrection > 0.005,
 			detail);
 	}
 
@@ -6525,10 +5813,7 @@ void RunContinuousScenarios()
 		};
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 
 		bool holdingSeen = false;
 		RunContinuousSegment(sim, scene, 0.0, 50.0, rng, constTruth, constMount, alwaysVisible,
@@ -6612,26 +5897,22 @@ void RunContinuousScenarios()
 			detail);
 	}
 
-	// 15. Corrections are yaw-only (invariant 15). Every other scenario starts
-	// from a pure-yaw offset and only measures correction MAGNITUDE, so a Decide
-	// that reconstructed the correction from the full delta rD -- which is
-	// sitting right there, already computed -- would converge just as well and
-	// pass all of them, while quietly folding tracker orientation bias and lighthouse noise
-	// into the playspace as pitch and roll. Start 0.3 deg of yaw AND 0.6 deg of
+	// 15. Corrections are yaw-only (invariant 15). The other scenarios start
+	// from pure yaw and measure only correction magnitude, so a Decide built
+	// from the full delta would pass them all while folding tracker bias into
+	// the playspace as pitch and roll. Start 0.3 deg of yaw AND 0.6 deg of
 	// pitch from truth, both inside the freeze band: the yaw must be walked out,
-	// the tilt must survive bit-for-bit, and no correction may carry an off-axis
-	// component.
+	// the tilt must survive bit-for-bit, and no correction may carry an
+	// off-axis component.
 	{
 		std::mt19937 rng(1212);
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
+		makeSim(sim, baseTruth);
 		Eigen::Quaterniond dR =
 			Eigen::Quaterniond(Eigen::AngleAxisd(0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())) *
 			Eigen::Quaterniond(Eigen::AngleAxisd(0.6 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX()));
 		dR.normalize();
 		sim.calRot = (dR.conjugate() * baseTruth.rotation).normalized();
-		sim.calTrans = baseTruth.translation;
 
 		double startTilt = CalTiltDeg(sim, baseTruth);
 		RunContinuousSegment(sim, scene, 0.0, 25.0, rng, constTruth, constMount, alwaysVisible);
@@ -6639,11 +5920,9 @@ void RunContinuousScenarios()
 		double yawErr, posErr;
 		CalError(sim, baseTruth, 25.0, yawErr, posErr);
 
-		// The tilt survives in the rotation, but the position at the head is
-		// corrected in full: the yaw pivots there. What is left is the tilt
-		// times how far the head moved since the last correction (the path
-		// sweeps +-0.35 m), about 4 mm at 0.6 deg. Pivoting the dropped tilt
-		// about the target origin instead used to leave ~17 mm here for good.
+		// The yaw pivots at the head, so what is left there is the tilt times
+		// how far the head moved since the last correction: about 4 mm at
+		// 0.6 deg (pivoting at the target origin left ~17 mm).
 		snprintf(detail, sizeof detail,
 			"corr %d  offAxis %.2e  tilt %.4f -> %.4f deg (built 0.6)  yaw %.3f deg  pos %.1f mm",
 			sim.corrections, sim.maxCorrOffAxis, startTilt, endTilt, yawErr, posErr * 1000.0);
@@ -6656,37 +5935,23 @@ void RunContinuousScenarios()
 
 	// 16. Frozen -> Tracking. The resume hysteresis (deviation below the freeze
 	// band by resumeFactor, latched, then confirmed for resumeConfirmSeconds) is
-	// the only exit from Frozen short of Reset, and no scenario ever took it --
-	// every mention of Resumed in this harness asserted it stayed at ZERO. So an
-	// inverted comparison or a latch that never sets would leave continuous
-	// calibration dead for the rest of the session after any transient fault
-	// cleared, with the UI still blaming a mount that is fine.
-	//
-	// Perturbing the CALIBRATION rather than the truth is what a folded jump
-	// delta or a recalibration does, and it leaves the observation stream
-	// continuous, so the jump guard never sees it. Warble injected while frozen
-	// also pins the `state == Frozen` early return on the scatter path: it must
-	// raise neither an ObservationsUnstable event nor a second freeze.
+	// the only exit from Frozen short of Reset; an inverted comparison or a
+	// latch that never sets would leave continuous calibration dead for the
+	// session after any transient fault. Perturbing the CALIBRATION, as a
+	// folded jump delta or a recalibration does, keeps the observation stream
+	// continuous, so the jump guard never sees it. Warble while frozen pins the
+	// `state == Frozen` early return on the scatter path: no
+	// ObservationsUnstable event and no second freeze.
 	{
 		std::mt19937 rng(1313);
 		auto frozenWarble = [](double t, PoseSample &s)
 		{
-			if (t < 26.0 || t >= 31.0)
-				return;
-			double angle = (1.6 * EIGEN_PI / 180.0) * std::sin(2.0 * EIGEN_PI * t / 0.8);
-			s.rot = (Eigen::Quaterniond(Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitX()))
-				* s.rot).normalized();
-			s.pos += Eigen::Vector3d(
-				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.7),
-				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.5 + 0.8),
-				0.008 * std::sin(2.0 * EIGEN_PI * t / 0.9 + 2.0));
+			if (t >= 26.0)
+				ApplyTrackingWarble(t, 31.0, s);
 		};
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 
 		RunContinuousSegment(sim, scene, 0.0, 15.0, rng, constTruth, constMount, alwaysVisible);
 		bool trackingFirst = sim.ca.GetState() == ContinuousAlignment::State::Tracking;
@@ -6722,101 +5987,32 @@ void RunContinuousScenarios()
 		Check("continuous: freeze then resume", trackingFirst && froze && resumed, detail);
 	}
 
-	// 17. The field lookup is a function of the tracker's BASE-CALIBRATED world
-	// position, so the closure must scale the raw target position before the
-	// base transform -- exactly what ContinuousTick's expectedAt does
-	// (Overlay/Calibration.cpp:1663-1670). At scale 1.0 that factor is
-	// invisible, which is why scenarios 9-11 never exercised it. Run the same
-	// anchor crossing at scale 1.25, once through a scale-carrying closure and
-	// once through one that drops the factor (the shape of the bug): the first
-	// must stay silent, the second must invent corrections because it reads the
-	// field 20% of the way back toward the origin.
+	// 17. The calibrated scale in the field lookup is invisible at 1.0, so run
+	// the anchor sweep at 1.25: a closure that drops the factor (the shape of
+	// the bug) reads the field 20% of the way back toward the origin and must
+	// invent corrections.
 	{
 		const double calScale = 1.25;
-		const FieldTransform base{ Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero() };
-		std::vector<OverlayAnchor> anchors{
-			{ Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity(),
-				Eigen::Vector3d(0.06, 0.0, 0.0) } };
-
-		auto lookupAt = [&](const Eigen::Vector3d &basePos,
-			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
-		{
-			BlendedFieldCalibration(anchors, base.R, base.T, basePos,
-				rotationOut, translationOut);
-		};
-		auto withScale = [&](const Eigen::Vector3d &targetRawPos,
-			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
-		{
-			lookupAt(base.R * (calScale * targetRawPos) + base.T, rotationOut, translationOut);
-		};
-		auto withoutScale = [&](const Eigen::Vector3d &targetRawPos,
-			Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
-		{
-			lookupAt(base.R * targetRawPos + base.T, rotationOut, translationOut);
-		};
-
-		MountExtrinsic identityMount;
-		identityMount.valid = true;
-		ContinuousAlignment scaled, unscaled;
-		scaled.SetExtrinsic(identityMount);
-		unscaled.SetExtrinsic(identityMount);
-
-		std::mt19937 rng(912);
-		std::normal_distribution<double> refNoise(0.0, 0.0001);
-		int scaledCorrections = 0, unscaledCorrections = 0;
-		double unscaledMaxCorrection = 0.0;
-		for (double t = 0.0; t < 16.0; t += 1.0 / 90.0)
-		{
-			// World sweep from 5 m out into the anchor's centre. The tracker
-			// reports RAW positions; the driver scales them by calScale, so the
-			// raw track is the world track divided by it.
-			double worldX = t < 10.0 ? -5.0 + 0.5 * t : 0.0;
-			double worldVx = t < 10.0 ? 0.5 : 0.0;
-
-			PoseSample target;
-			target.time = t;
-			target.rot = Eigen::Quaterniond::Identity();
-			target.pos = Eigen::Vector3d(worldX / calScale, 0.0, 0.0);
-			target.vel = Eigen::Vector3d(worldVx / calScale, 0.0, 0.0);
-
-			Eigen::Quaterniond localRot;
-			Eigen::Vector3d localTrans;
-			withScale(target.pos, localRot, localTrans);
-
-			PoseSample reference;
-			reference.time = t;
-			reference.rot = localRot;
-			reference.pos = localRot * (calScale * target.pos) + localTrans +
-				Eigen::Vector3d(refNoise(rng), refNoise(rng), refNoise(rng));
-			reference.vel = Eigen::Vector3d(worldVx, 0.0, 0.0);
-
-			scaled.PushReference(reference);
-			scaled.PushTarget(target);
-			unscaled.PushReference(reference);
-			unscaled.PushTarget(target);
-
-			scaled.Update(t, base.R, base.T, calScale, 0.0, withScale);
-			unscaled.Update(t, base.R, base.T, calScale, 0.0, withoutScale);
-
-			ContinuousAlignment::Correction correction;
-			while (scaled.PollCorrection(correction))
-				scaledCorrections++;
-			while (unscaled.PollCorrection(correction))
+		const AnchorSweep s = runAnchorSweep(calScale, 912,
+			[&](ContinuousAlignment &unscaled, double t,
+				const Eigen::Quaterniond &, const Eigen::Vector3d &)
 			{
-				unscaledCorrections++;
-				unscaledMaxCorrection = std::max(unscaledMaxCorrection,
-					correction.translation.norm());
-			}
-		}
-
+				unscaled.Update(t, sweepBase.R, sweepBase.T, calScale, 0.0,
+					[&](const Eigen::Vector3d &targetRawPos,
+						Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
+					{
+						sweepLookup(sweepBase.R * targetRawPos + sweepBase.T,
+							rotationOut, translationOut);
+					});
+			});
 		snprintf(detail, sizeof detail,
 			"scale %.2f: with-scale %d corrections / state %d; scale-dropped %d, max %.1f mm",
-			calScale, scaledCorrections, static_cast<int>(scaled.GetState()),
-			unscaledCorrections, unscaledMaxCorrection * 1000.0);
+			calScale, s.faithfulCorrections, static_cast<int>(s.faithfulState),
+			s.otherCorrections, s.otherMaxCorrection * 1000.0);
 		Check("continuous: field lookup scale",
-			scaledCorrections == 0 &&
-			scaled.GetState() == ContinuousAlignment::State::Tracking &&
-			unscaledCorrections > 0 && unscaledMaxCorrection > 0.005,
+			s.faithfulCorrections == 0 &&
+			s.faithfulState == ContinuousAlignment::State::Tracking &&
+			s.otherCorrections > 0 && s.otherMaxCorrection > 0.005,
 			detail);
 	}
 
@@ -6856,13 +6052,10 @@ void RunContinuousScenarios()
 	// 21. The dropped tilt pivots at the head (live 2026-09-25). The target's
 	// raw origin sits ~2.3 m from the head and the calibration carries 1 deg of
 	// tilt the observations do not, while matching them exactly at the head.
-	// A yaw-only correction that kept the estimate's own translation pivoted
-	// the tilt about the raw origin: it walked the head ~4 cm off, left it
-	// there as a floor, and the next few centimeters of drift froze the loop.
-	// Now what is left at the head is the tilt times how far the head moved
-	// since the last evaluation (the path sweeps +-0.35 m at up to 0.3 m/s,
-	// decisions come every 2 s): about a centimeter at worst, a few
-	// millimeters on average, and no offset that stays.
+	// Pivoting the tilt about the raw origin walked the head ~4 cm off for
+	// good, and a few more centimeters of drift froze the loop. What may be
+	// left is the tilt times the head's motion since the last evaluation:
+	// about a centimeter at worst, a few millimeters on average.
 	{
 		std::mt19937 rng(2101);
 		GroundTruth farTruth = baseTruth;
@@ -6870,8 +6063,7 @@ void RunContinuousScenarios()
 		auto farConst = [&](double) { return farTruth; };
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = farTruth.latency;
+		makeSim(sim, farTruth);
 		const Eigen::Quaterniond tilt(Eigen::AngleAxisd(
 			1.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.0, 0.4).normalized()));
 		sim.calRot = (tilt.conjugate() * farTruth.rotation).normalized();
@@ -6907,16 +6099,12 @@ void RunContinuousScenarios()
 
 	// 22. A freeze whose deviation settles inside the freeze band but not
 	// inside the fast resume band resumes after resumeInBandSeconds, and the
-	// loop then corrects what is left. Before, nothing could: Frozen applies
-	// no correction, so a deviation of 2.5 to 5 cm held the freeze for the
-	// rest of the session (42 minutes live on 2026-09-25).
+	// loop then corrects what is left: Frozen applies no correction, so such a
+	// deviation held the freeze for the session (42 minutes live on 2026-09-25).
 	{
 		std::mt19937 rng(2202);
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 
 		RunContinuousSegment(sim, scene, 0.0, 15.0, rng, constTruth, constMount, alwaysVisible);
 		const Eigen::Quaterniond kick(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
@@ -6956,10 +6144,7 @@ void RunContinuousScenarios()
 		auto restartTruth = [&](double t) { return (t >= 20.0 && t < 50.0) ? offTruth : baseTruth; };
 
 		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
+		makeSim(sim, baseTruth);
 
 		bool firstNoted = false, secondNoted = false;
 		int settleCorrections = 0, settleFreezes = 0, lastCorrections = 0;
@@ -7010,19 +6195,14 @@ void RunContinuousScenarios()
 // ---------------------------------------------------------------------------
 // Persistence: the Config record codec, the write gates, and the load-plan
 // state machine (Overlay/ProfileRecordJson.h + Overlay/ProfileValidation.h).
-//
-// Configuration.cpp is compiled by no test. These two headers carry every
-// persistence decision that used to live inside it, so this is the only place a
-// writer/parser divergence -- the mount extrinsic or the field anchors silently
-// reverting on every launch -- can be caught before a user finds it.
+// Configuration.cpp is compiled by no test, so this is where a writer/parser
+// divergence (a mount extrinsic or field anchors reverting every launch) shows.
 
 const size_t PersistMaxAnchors = protocol::SetAlignmentField::MaxAnchors;
 
-// Re-normalizing an already-normalized quaternion is not required to be
-// bit-exact, so quaternion components get a few ulps of slack. Everything the
-// codec stores verbatim is compared exactly: picojson emits %.17g, which
-// round-trips an IEEE double. Components are compared one at a time -- an
-// angular distance would not see a w/x transposition between writer and reader.
+// Quaternions get a few ulps for re-normalization; everything stored verbatim
+// is compared exactly (picojson emits %.17g). Component-wise, because an
+// angular distance would not see a w/x transposition.
 bool PersistQuatEq(const Eigen::Quaterniond &a, const Eigen::Quaterniond &b)
 {
 	const double tol = 1e-15;
@@ -7235,6 +6415,12 @@ void RunPersistenceRoundTripScenario()
 	{
 		why += std::string(" ") + cell + "(" + what + ")";
 	};
+	auto roundTrip = [](const ProfileRecord &record, uint32_t revision,
+		ProfileRecord &back, ProfileParseResult &result)
+	{
+		LegacyProfileSettings legacy;
+		return PersistReadBack(PersistWrite(record, revision), back, legacy, result);
+	};
 
 	// A1: fully populated, both optional blocks present, two anchors in range.
 	const ProfileRecord good = PersistGoodRecord();
@@ -7267,9 +6453,8 @@ void RunPersistenceRoundTripScenario()
 		ProfileRecord record = good;
 		record.continuousTrackerSerial.clear();
 		ProfileRecord r2;
-		LegacyProfileSettings l2;
 		ProfileParseResult p2;
-		std::string e2 = PersistReadBack(PersistWrite(record, 7), r2, l2, p2);
+		std::string e2 = roundTrip(record, 7, r2, p2);
 		if (!e2.empty()) fail("A2", e2);
 		else if (!r2.continuousTrackerSerial.empty()) fail("A2", "serial survived");
 	}
@@ -7280,9 +6465,8 @@ void RunPersistenceRoundTripScenario()
 		ProfileRecord record = good;
 		record.universeValid = false;
 		ProfileRecord r3;
-		LegacyProfileSettings l3;
 		ProfileParseResult p3;
-		std::string e3 = PersistReadBack(PersistWrite(record, 7), r3, l3, p3);
+		std::string e3 = roundTrip(record, 7, r3, p3);
 		if (!e3.empty()) fail("A3", e3);
 		else if (r3.universeValid ||
 			r3.universeHmdSerial != record.universeHmdSerial)
@@ -7295,9 +6479,8 @@ void RunPersistenceRoundTripScenario()
 		ProfileRecord record = good;
 		record.mountExtrinsic.valid = false;
 		ProfileRecord r4;
-		LegacyProfileSettings l4;
 		ProfileParseResult p4;
-		std::string e4 = PersistReadBack(PersistWrite(record, 7), r4, l4, p4);
+		std::string e4 = roundTrip(record, 7, r4, p4);
 		MountExtrinsicRecord defaults;
 		if (!e4.empty()) fail("A4", e4);
 		else if (r4.mountExtrinsic.valid ||
@@ -7313,9 +6496,8 @@ void RunPersistenceRoundTripScenario()
 		ProfileRecord record = good;
 		record.fieldAnchors.clear();
 		ProfileRecord r5;
-		LegacyProfileSettings l5;
 		ProfileParseResult p5;
-		std::string e5 = PersistReadBack(PersistWrite(record, 7), r5, l5, p5);
+		std::string e5 = roundTrip(record, 7, r5, p5);
 		if (!e5.empty()) fail("A5", e5);
 		else if (!r5.fieldAnchors.empty()) fail("A5", "anchors appeared");
 	}
@@ -7330,10 +6512,8 @@ void RunPersistenceRoundTripScenario()
 	uint32_t a7Revision = 0;
 	{
 		ProfileRecord r7;
-		LegacyProfileSettings l7;
 		ProfileParseResult p7;
-		std::string e7 = PersistReadBack(
-			PersistWrite(good, maxRevision), r7, l7, p7);
+		std::string e7 = roundTrip(good, maxRevision, r7, p7);
 		if (!e7.empty()) fail("A7", e7);
 		else
 		{
@@ -7528,10 +6708,7 @@ void RunPersistenceRejectionScenario()
 	auto mountObject = [](std::initializer_list<double> quat, double rotRms)
 	{
 		picojson::object extrinsic;
-		picojson::array q;
-		for (double v : quat)
-			q.push_back(picojson::value(v));
-		extrinsic["rotation_quat"] = picojson::value(q);
+		extrinsic["rotation_quat"] = PersistNumbers(quat);
 		extrinsic["translation_meters"] = PersistNumbers({ 0.01, 0.0, -0.02 });
 		extrinsic["rot_rms_deg"] = picojson::value(rotRms);
 		extrinsic["pos_rms_m"] = picojson::value(0.001);
@@ -7588,20 +6765,26 @@ void RunPersistenceRejectionScenario()
 void RunPersistenceLegacyScenario()
 {
 	std::string why;
-	auto parse = [&](const char *cell, const picojson::object &obj,
-		ProfileRecord &record, LegacyProfileSettings &legacy,
-		ProfileParseResult &result) -> bool
+	struct Parsed
 	{
+		bool ok = false;
+		ProfileRecord record;
+		LegacyProfileSettings legacy;
+		ProfileParseResult result;
+	};
+	auto parse = [&](const char *cell, const picojson::object &obj)
+	{
+		Parsed p;
 		try
 		{
-			result = ParseProfileObject(record, legacy, obj, PersistMaxAnchors);
-			return true;
+			p.result = ParseProfileObject(p.record, p.legacy, obj, PersistMaxAnchors);
+			p.ok = true;
 		}
 		catch (const std::exception &e)
 		{
 			why += std::string(" ") + cell + "(threw \"" + e.what() + "\")";
-			return false;
 		}
+		return p;
 	};
 
 	// E1: a v1 record's solve_scale is never honoured -- doing so would
@@ -7612,14 +6795,12 @@ void RunPersistenceLegacyScenario()
 		obj["settings_version"] = picojson::value(1.0);
 		obj["solve_scale"] = picojson::value(true);
 		obj["scale"] = picojson::value(1.01);
-		ProfileRecord record;
-		LegacyProfileSettings legacy;
-		ProfileParseResult result;
-		if (parse("E1", obj, record, legacy, result))
+		const Parsed p = parse("E1", obj);
+		if (p.ok)
 		{
-			if (!result.migratedScaleSetting) why += " E1(not migrated)";
-			if (!legacy.hasSolveScale || legacy.solveScale) why += " E1(solveScale honoured)";
-			if (record.scale != 1.01) why += " E1(scale clobbered)";
+			if (!p.result.migratedScaleSetting) why += " E1(not migrated)";
+			if (!p.legacy.hasSolveScale || p.legacy.solveScale) why += " E1(solveScale honoured)";
+			if (p.record.scale != 1.01) why += " E1(scale clobbered)";
 		}
 	}
 
@@ -7632,16 +6813,12 @@ void RunPersistenceLegacyScenario()
 			picojson::object obj = PersistMinimalProfileObject();
 			obj["settings_version"] = picojson::value(1.0);
 			obj["scale"] = picojson::value(scales[i]);
-			ProfileRecord record;
-			LegacyProfileSettings legacy;
-			ProfileParseResult result;
-			if (!parse("E2", obj, record, legacy, result))
-				continue;
-			if (result.suspiciousLegacyScale != expected[i])
+			const Parsed p = parse("E2", obj);
+			if (p.ok && p.result.suspiciousLegacyScale != expected[i])
 			{
 				char cell[64];
 				snprintf(cell, sizeof cell, " E2(scale %.3f -> %d)", scales[i],
-					result.suspiciousLegacyScale ? 1 : 0);
+					p.result.suspiciousLegacyScale ? 1 : 0);
 				why += cell;
 			}
 		}
@@ -7651,30 +6828,22 @@ void RunPersistenceLegacyScenario()
 	{
 		picojson::object obj = PersistMinimalProfileObject();
 		obj["solve_scale"] = picojson::value(true);
-		ProfileRecord record;
-		LegacyProfileSettings legacy;
-		ProfileParseResult result;
-		if (parse("E3", obj, record, legacy, result))
+		const Parsed p = parse("E3", obj);
+		if (p.ok)
 		{
-			if (!legacy.hasSolveScale || !legacy.solveScale) why += " E3(solveScale dropped)";
-			if (result.migratedScaleSetting) why += " E3(migration re-ran)";
+			if (!p.legacy.hasSolveScale || !p.legacy.solveScale) why += " E3(solveScale dropped)";
+			if (p.result.migratedScaleSetting) why += " E3(migration re-ran)";
 		}
 	}
 
 	// E4: absent is not a default. Configuration.cpp copies only when hasX, so
 	// this is what stops a profile resetting preferences it never carried.
 	{
-		picojson::object obj = PersistMinimalProfileObject();
-		ProfileRecord record;
-		LegacyProfileSettings legacy;
-		ProfileParseResult result;
-		if (parse("E4", obj, record, legacy, result))
-		{
-			if (legacy.hasApplyTimeOffset || legacy.hasSolveScale ||
-				legacy.hasUiAdvanced || legacy.hasChaperoneWarningAck ||
-				legacy.hasCalibrationSpeed)
-				why += " E4(absent became present)";
-		}
+		const Parsed p = parse("E4", PersistMinimalProfileObject());
+		if (p.ok && (p.legacy.hasApplyTimeOffset || p.legacy.hasSolveScale ||
+			p.legacy.hasUiAdvanced || p.legacy.hasChaperoneWarningAck ||
+			p.legacy.hasCalibrationSpeed))
+			why += " E4(absent became present)";
 	}
 
 	// E5: every key the walk still has to visit.
@@ -7684,11 +6853,10 @@ void RunPersistenceLegacyScenario()
 		obj["ui_advanced"] = picojson::value(true);
 		obj["chaperone_warning_ack"] = picojson::value(true);
 		obj["calibration_speed"] = picojson::value(2.0);
-		ProfileRecord record;
-		LegacyProfileSettings legacy;
-		ProfileParseResult result;
-		if (parse("E5", obj, record, legacy, result))
+		const Parsed p = parse("E5", obj);
+		if (p.ok)
 		{
+			const LegacyProfileSettings &legacy = p.legacy;
 			if (!legacy.hasApplyTimeOffset || legacy.applyTimeOffset)
 				why += " E5(apply_time_offset)";
 			if (!legacy.hasUiAdvanced || !legacy.uiAdvanced) why += " E5(ui_advanced)";
@@ -8011,12 +7179,9 @@ void RunPersistenceLoadPlanScenario()
 	Check("persistence H: load plan", why.empty(), detail);
 }
 
-// The save-scheduling machine that used to be eight loose fields on
-// CalibrationContext, in a header the harness could not compile. Each check is
-// one line from the finding's "Preserve" list: two independent dirty bits over
-// one shared clock, a partial write that retries only the record that failed,
-// a correction stream that cannot defer the flush forever, and Clear()'s
-// survivor rule.
+// The save schedule: two independent dirty bits over one shared clock, a
+// partial write that retries only the record that failed, a correction stream
+// that cannot defer the flush forever, and Clear()'s survivor rule.
 void RunPersistenceScheduleScenario()
 {
 	using questcal::PersistenceState;
@@ -8065,7 +7230,7 @@ void RunPersistenceScheduleScenario()
 		PersistenceState p;
 		p.MarkProfileAndSettings(0.0);
 		p.profileDirty = false;          // the half that succeeded
-		want("C1-settings-alone", !p.profileDirty && p.settingsDirty && p.HasDirty());
+		want("C1-settings-alone", p.settingsDirty && p.HasDirty());
 		want("C2-due-at-failure", p.Due(61.0));
 		p.Retry(61.0);
 		want("C3-both-clocks-reset", p.dirtyTime == 61.0 && p.firstDirtyTime == 61.0);
@@ -8416,6 +7581,13 @@ questcal::update::Version UpdateVersion(uint32_t major, uint32_t minor,
 	return version;
 }
 
+static std::string UpdateFeed(std::initializer_list<picojson::value> releases)
+{
+	picojson::value feed;
+	feed.set<picojson::array>(picojson::array(releases));
+	return feed.serialize();
+}
+
 void RunUpdatePolicyScenarios()
 {
 	using namespace questcal::update;
@@ -8430,9 +7602,7 @@ void RunUpdatePolicyScenarios()
 		!ParseReleaseTag("questcalibrator-v12.034.56", parsed) &&
 		!ParseReleaseTag("questcalibrator-v42949672960.0.0", parsed), "");
 
-	// Ordering the three numbers alone made 1.2.0-alpha.3 equal to 1.2.0. The
-	// update path now decides the lane before it compares, so this order is what
-	// the prerelease lane will be built on rather than what gates a download.
+	// Ordering the three numbers alone made 1.2.0-alpha.3 equal to 1.2.0.
 	const Version alpha3 = UpdateVersion(1, 2, 0, "alpha", 3);
 	const Version stable120 = UpdateVersion(1, 2, 0);
 	Check("updates: a prerelease sorts below its final release",
@@ -8454,8 +7624,7 @@ void RunUpdatePolicyScenarios()
 		CanonicalPackageName(stable120) == "QuestCalibrator-1.2.0.zip", "");
 
 	// The resource compiler cannot build the string from the numbers, so the two
-	// halves of Version.h are written out separately and can drift apart. A build
-	// that reports a version it is not is exactly what this whole check is about.
+	// halves of Version.h are written out separately and can drift apart.
 	const std::string headerVersion = VersionString(CurrentVersion());
 	Check("updates: the version header agrees with itself",
 		headerVersion == QUESTCAL_VERSION_STRING, headerVersion.c_str());
@@ -8469,21 +7638,17 @@ void RunUpdatePolicyScenarios()
 			"sha256:z768f19e0724ef00432d694bf6e5ad23c9010de5a32b087d56e0c6bd094d8072",
 			digestBytes), "");
 
-	picojson::array releases;
-	releases.push_back(UpdateReleaseValue("questcalibrator-v9.0.0", true, false,
-		"QuestCalibrator-9.0.0.zip", digest));
-	releases.push_back(UpdateReleaseValue("questcalibrator-v8.0.0", false, true,
-		"QuestCalibrator-8.0.0.zip", digest));
-	releases.push_back(UpdateReleaseValue("v99.0.0", false, false,
-		"QuestCalibrator-99.0.0.zip", digest));
-	releases.push_back(UpdateReleaseValue("questcalibrator-v1.2.0", false, false,
-		"QuestCalibrator-1.2.0.zip", digest));
-	picojson::value feed;
-	feed.set<picojson::array>(std::move(releases));
+	// A draft, a prerelease and a non-canonical tag, all newer than the one
+	// eligible release.
+	const std::string feed = UpdateFeed({
+		UpdateReleaseValue("questcalibrator-v9.0.0", true, false, "QuestCalibrator-9.0.0.zip", digest),
+		UpdateReleaseValue("questcalibrator-v8.0.0", false, true, "QuestCalibrator-8.0.0.zip", digest),
+		UpdateReleaseValue("v99.0.0", false, false, "QuestCalibrator-99.0.0.zip", digest),
+		UpdateReleaseValue("questcalibrator-v1.2.0", false, false, "QuestCalibrator-1.2.0.zip", digest) });
 	ReleaseCandidate candidate;
 	bool available = false;
 	std::string error;
-	const bool selected = SelectReleaseCandidate(feed.serialize(),
+	const bool selected = SelectReleaseCandidate(feed,
 		UpdateVersion(1, 1, 0), candidate, available, error);
 	Check("updates: newest eligible stable release wins",
 		selected && available && error.empty() &&
@@ -8494,49 +7659,35 @@ void RunUpdatePolicyScenarios()
 	ReleaseCandidate none;
 	bool newerAvailable = true;
 	error.clear();
-	const bool current = SelectReleaseCandidate(feed.serialize(),
+	const bool current = SelectReleaseCandidate(feed,
 		UpdateVersion(1, 2, 0), none, newerAvailable, error);
 	Check("updates: current version does not redownload",
 		current && !newerAvailable && error.empty(), error.c_str());
 
-	picojson::array newerStable;
-	newerStable.push_back(UpdateReleaseValue("questcalibrator-v9.9.9", false,
-		false, "QuestCalibrator-9.9.9.zip", digest));
-	newerStable.push_back(UpdateReleaseValue("questcalibrator-v1.1.0", false,
-		false, "QuestCalibrator-1.1.0.zip", digest));
-	picojson::value stableLaneFeed;
-	stableLaneFeed.set<picojson::array>(std::move(newerStable));
 	ReleaseCandidate stableSide;
 	bool stableAvailable = false;
 	error.clear();
-	const bool stableSelected = SelectReleaseCandidate(stableLaneFeed.serialize(),
+	const bool stableSelected = SelectReleaseCandidate(UpdateFeed({
+			UpdateReleaseValue("questcalibrator-v9.9.9", false, false, "QuestCalibrator-9.9.9.zip", digest),
+			UpdateReleaseValue("questcalibrator-v1.1.0", false, false, "QuestCalibrator-1.1.0.zip", digest) }),
 		UpdateVersion(1, 2, 0), stableSide, stableAvailable, error);
 	Check("updates: the newest stable release is offered past an older one",
 		stableSelected && stableAvailable && error.empty() &&
 		VersionString(stableSide.version) == "9.9.9" &&
 		stableSide.packageName == "QuestCalibrator-9.9.9.zip", error.c_str());
 
-	picojson::array missingDigest;
-	missingDigest.push_back(UpdateReleaseValue("questcalibrator-v2.0.0", false,
-		false, "QuestCalibrator-2.0.0.zip", ""));
-	picojson::value missingDigestFeed;
-	missingDigestFeed.set<picojson::array>(std::move(missingDigest));
 	available = false;
 	error.clear();
-	const bool acceptedMissingDigest = SelectReleaseCandidate(
-		missingDigestFeed.serialize(), UpdateVersion(1, 1, 0), candidate, available,
-		error);
+	const bool acceptedMissingDigest = SelectReleaseCandidate(UpdateFeed({
+			UpdateReleaseValue("questcalibrator-v2.0.0", false, false, "QuestCalibrator-2.0.0.zip", "") }),
+		UpdateVersion(1, 1, 0), candidate, available, error);
 	Check("updates: package without digest fails closed",
 		!acceptedMissingDigest && available && !error.empty(), error.c_str());
 
-	picojson::array duplicate;
-	duplicate.push_back(UpdateReleaseValue("questcalibrator-v2.0.0", false,
-		false, "QuestCalibrator-2.0.0.zip", digest, true));
-	picojson::value duplicateFeed;
-	duplicateFeed.set<picojson::array>(std::move(duplicate));
 	available = false;
 	error.clear();
-	const bool acceptedDuplicate = SelectReleaseCandidate(duplicateFeed.serialize(),
+	const bool acceptedDuplicate = SelectReleaseCandidate(UpdateFeed({
+			UpdateReleaseValue("questcalibrator-v2.0.0", false, false, "QuestCalibrator-2.0.0.zip", digest, true) }),
 		UpdateVersion(1, 1, 0), candidate, available, error);
 	Check("updates: duplicate canonical packages fail closed",
 		!acceptedDuplicate && available && !error.empty(), error.c_str());
@@ -8545,9 +7696,7 @@ void RunUpdatePolicyScenarios()
 int main(int argc, char **argv)
 {
 	// Unbuffered: an abort discards a buffered stdout, so a harness that dies
-	// mid-run reports nothing at all about where. That is precisely how a
-	// zero-sigma normal_distribution kept every Debug build of this harness
-	// from ever completing without leaving a single line of evidence.
+	// mid-run would report nothing about where.
 	setvbuf(stdout, nullptr, _IONBF, 0);
 	int propertyTrials = 64;
 	uint32_t propertySeed = 0x5EED1234u;
@@ -8599,8 +7748,7 @@ int main(int argc, char **argv)
 
 	EngineConfig config;
 
-	// Production-path helpers used by profile loading and the driver. These
-	// checks pin the non-solver correctness fixes alongside the math suite.
+	// Production-path helpers used by profile loading and the driver.
 	{
 		Eigen::Quaterniond identity(1.0, 0.0, 0.0, 0.0);
 		Eigen::Quaterniond zero(0.0, 0.0, 0.0, 0.0);
@@ -8632,25 +7780,8 @@ int main(int argc, char **argv)
 			!IsValidScale(0.0) && !IsValidScale(-1.0) &&
 			!IsValidScale(std::numeric_limits<double>::infinity()) &&
 			!IsValidScale(10.0);
-		printf("%-28s %s\n", "profile semantics", pass ? "PASS" : "FAIL");
-		RecordResult(pass);
+		Check("profile semantics", pass, "");
 	}
-	bool corruptMissingUse = CanUseRecoveredSettings(
-		RecordLoadState::Missing, RecordLoadState::Unreadable);
-	bool corruptValidUse = CanUseRecoveredSettings(
-		RecordLoadState::Loaded, RecordLoadState::Unreadable);
-	bool corruptMayWrite = CanMaterializeSettings(RecordLoadState::Unreadable);
-	bool missingMayWrite = CanMaterializeSettings(RecordLoadState::Missing);
-	bool parsedMayWrite = CanMaterializeSettings(RecordLoadState::Loaded);
-	bool corruptMissingSettingsWrite = CanPersistSettings(
-		RecordLoadState::Unreadable, RecordLoadState::Missing);
-	bool corruptValidSettingsWrite = CanPersistSettings(
-		RecordLoadState::Unreadable, RecordLoadState::Loaded);
-	Check("persistence: Config recovery gate",
-		!corruptMissingUse && corruptValidUse && !corruptMayWrite &&
-		missingMayWrite && parsedMayWrite &&
-		!corruptMissingSettingsWrite && corruptValidSettingsWrite,
-		"corrupt Config never writable; valid separate Settings remains usable/writable");
 
 	{
 		double position[3] = { 2.0, -4.0, 6.0 };
@@ -8661,8 +7792,7 @@ int main(int argc, char **argv)
 			position[0] == 1.0 && position[1] == -2.0 && position[2] == 3.0 &&
 			velocity[0] == -4.0 && velocity[1] == 5.0 && velocity[2] == 6.0 &&
 			acceleration[0] == 7.0 && acceleration[1] == -8.0 && acceleration[2] == 9.0;
-		printf("%-28s %s\n", "driver linear scale", pass ? "PASS" : "FAIL");
-		RecordResult(pass);
+		Check("driver linear scale", pass, "");
 	}
 
 	// Before any group that starts threads: DisableHooks proves quiescence only
@@ -8686,77 +7816,51 @@ int main(int argc, char **argv)
 	// Every untrusted input's properties over mutated seeds, and the float slew.
 	RunPropertyScenarios(Check, propertyTrials, propertySeed);
 
-	// Accuracy bands below are derived, not guessed. Measurement: 12 seeds x
-	// {Debug, Release} on MSVC 14.44. Two results shaped every number here.
-	// First, the deterministic scenarios are bit-identical across seeds AND
-	// across optimization level - only the property scenario varies with
-	// --property-seed - so these bands were never absorbing observed noise;
-	// the 12x-43x headroom was pure slack. Second, where draws DO change (the
-	// property scenario, 12 seeds) the worst-case error moves about 1.3x above
-	// its mean.
-	//
-	// So each band is ~4x its measured error: comfortably past the 1.3x that
-	// changing draws costs, while turning an assertion that could not fail
-	// into one that can. 4x rather than 2x because std::normal_distribution is
-	// implementation-defined - a different STL generates different scenes
-	// entirely, which is the one axis this machine cannot measure. Bands
-	// already inside 4x were left alone; none were loosened.
-	// Floors of 0.02 deg / 0.001 m keep the exact-recovery cases off
-	// bit-for-bit equality.
-
-	// 1. Clean data: near-exact recovery (measured 0.0000 deg / 0.0000 m).
-	{
-		SceneConfig scene;
-		Expectation e;
-		e.maxRotErrDeg = 0.02;
-		e.maxTransErrM = 0.001;
-		RunScenario("clean", scene, truth, config, e);
-	}
-
-	// 2. Realistic noise (measured 0.0117 deg / 0.0006 m; was 43x / 25x).
+	// Accuracy bands are ~4x each scenario's measured error (12 seeds x
+	// {Debug, Release}, MSVC 14.44). The deterministic scenarios are
+	// bit-identical across seeds and optimization levels; 4x rather than 2x
+	// because std::normal_distribution is implementation-defined, so another
+	// STL generates different scenes. Floors of 0.02 deg / 0.001 m keep the
+	// exact-recovery cases off bit-for-bit equality.
+	auto noisyScene = []
 	{
 		SceneConfig scene;
 		scene.posNoise = 0.002;
 		scene.rotNoiseDeg = 0.2;
+		return scene;
+	};
+	auto bands = [](double maxRotErrDeg, double maxTransErrM)
+	{
 		Expectation e;
-		e.maxRotErrDeg = 0.05;
-		e.maxTransErrM = 0.0025;
-		RunScenario("noise", scene, truth, config, e);
-	}
+		e.maxRotErrDeg = maxRotErrDeg;
+		e.maxTransErrM = maxTransErrM;
+		return e;
+	};
+
+	// 1. Clean data: near-exact recovery (measured 0.0000 deg / 0.0000 m).
+	RunScenario("clean", SceneConfig(), truth, config, bands(0.02, 0.001));
+
+	// 2. Realistic noise (measured 0.0117 deg / 0.0006 m).
+	RunScenario("noise", noisyScene(), truth, config, bands(0.05, 0.0025));
 
 	// 3. 18 ms latency on the target stream, plus noise.
 	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
-		scene.rotNoiseDeg = 0.2;
+		const SceneConfig scene = noisyScene();
 		GroundTruth t2 = truth;
 		t2.latency = 0.018;
-		Expectation e;
-		// Deliberately below the uncompensated damage the counterfactual below
-		// measures (~0.185 deg / 5.4 mm on this exact data). At the old
-		// 0.5 deg / 15 mm the two scenarios overlapped: an inert or inverted
-		// application at CalibrationEngine.cpp:1020 landed inside the pass band
-		// while r.timeOffset -- the ESTIMATE, produced before and independently
-		// of the application -- still read +18.0 ms.
-		e.maxRotErrDeg = 0.12;
-		e.maxTransErrM = 0.004;
-		RunScenario("latency 18ms", scene, t2, config, e);
+		// Below the uncompensated damage the counterfactual measures (~0.185 deg
+		// / 5.4 mm on this data), so an inert or inverted application of the
+		// estimated offset cannot land inside the band.
+		RunScenario("latency 18ms", scene, t2, config, bands(0.12, 0.004));
 
-		// Same data without compensation: document the damage (not asserted).
+		// Same data without compensation: document the damage (report-only).
 		EngineConfig noComp = config;
 		noComp.estimateTimeOffset = false;
-		Expectation e2;
-		e2.expectValid = true;
-		e2.maxRotErrDeg = 90.0;    // report-only run
-		e2.maxTransErrM = 10.0;
-		RunScenario("latency uncompensated", scene, t2, noComp, e2);
+		RunScenario("latency uncompensated", scene, t2, noComp, bands(90.0, 10.0));
 
-		// The absolute tolerances above still only bound the compensated
-		// residual. What pins the APPLICATION is the ratio: compensating must
-		// remove most of the damage its own counterfactual measures. A sign flip
-		// at the application site roughly doubles the residual instead of
-		// shrinking it, so this fails hard where an absolute band can be tuned
-		// around. Same streams for both, so the comparison is exact.
+		// What pins the APPLICATION is the ratio: compensating must remove most
+		// of the damage its own counterfactual measures on the same streams. A
+		// sign flip at the application site roughly doubles the residual.
 		std::vector<PoseSample> refStream, targetStream;
 		GenerateStreams(scene, t2, 1234, refStream, targetStream);
 		EngineResult on = CalibrationEngine::Solve(refStream, targetStream, config);
@@ -8775,43 +7879,46 @@ int main(int argc, char **argv)
 		Check("latency compensation separates",
 			on.valid && off.valid &&
 			onRot < 0.5 * offRot && onTrans < 0.5 * offTrans, detail);
+
+		// Publish-before-rewrite (regression): the driver publishes ring samples
+		// BEFORE shifting poseTimeOffset. Publishing after would put the applied
+		// shift into the recorded target times, so the next solve would find ~0
+		// and recalibration would silently erase the latency correction. Model
+		// that bugged pipeline on the same streams. Symmetric clamp bounds: the
+		// harness's laggy side is the target, so the shift is negative and would
+		// hit the asymmetric advance clamp.
+		double shift = ComputeAppliedTimeOffset(on.timeOffset, 0.05, 0.05);
+		std::vector<PoseSample> bugged = targetStream;
+		for (auto &s : bugged)
+			s.time += shift;
+		EngineResult erased = CalibrationEngine::Solve(refStream, bugged, config);
+		snprintf(detail, sizeof detail, "first %+.1f ms  bugged-pipeline %+.1f ms",
+			on.timeOffset * 1000.0, erased.timeOffset * 1000.0);
+		Check("publish-before-rewrite",
+			on.valid && erased.valid && std::abs(erased.timeOffset) < 0.004, detail);
 	}
 
-	// 4. Outliers on top of noise: IRLS must hold the line.
+	// 4. Outliers on top of noise: IRLS must hold the line (measured
+	// 0.0297 deg / 0.0008 m).
 	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
-		scene.rotNoiseDeg = 0.2;
+		SceneConfig scene = noisyScene();
 		scene.outlierRate = 0.02;
-		// Measured 0.0297 deg / 0.0008 m; was 24x / 25x.
-		Expectation e;
-		e.maxRotErrDeg = 0.12;
-		e.maxTransErrM = 0.0035;
-		RunScenario("outliers 2%", scene, truth, config, e);
+		RunScenario("outliers 2%", scene, truth, config, bands(0.12, 0.0035));
 	}
 
 	// 5. Genuinely tilted target universe: rich motion must outvote the
-	// gravity prior and recover the tilt.
+	// gravity prior and recover the tilt (measured 0.0592 deg / 0.0016 m).
 	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
-		scene.rotNoiseDeg = 0.2;
 		GroundTruth tilted = truth;
 		tilted.rotation = truth.rotation * Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX()));
-		// Measured 0.0592 deg / 0.0016 m; was 17x / 12x.
-		Expectation e;
-		e.maxRotErrDeg = 0.24;
-		e.maxTransErrM = 0.007;
-		RunScenario("tilted universe 3deg", scene, tilted, config, e);
+		RunScenario("tilted universe 3deg", noisyScene(), tilted, config, bands(0.24, 0.007));
 	}
 
 	// 6. Yaw-only motion: tilt/roll unconstrained; the engine must refuse
 	// rather than hallucinate.
 	{
-		SceneConfig scene;
+		SceneConfig scene = noisyScene();
 		scene.yawOnlyMotion = true;
-		scene.posNoise = 0.002;
-		scene.rotNoiseDeg = 0.2;
 		Expectation e;
 		e.expectValid = false;
 		e.messageContains = "one axis";
@@ -8825,9 +7932,7 @@ int main(int argc, char **argv)
 	// near-singular along the vertical — the conditioning gate must refuse
 	// rather than ship a noise-driven floor height.
 	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
-		scene.rotNoiseDeg = 0.2;
+		SceneConfig scene = noisyScene();
 		scene.offAxisScale = 0.6;
 		scene.offAxisRate = 2.0;
 		scene.offAxisBurstT0 = 5.0;
@@ -8840,52 +7945,37 @@ int main(int argc, char **argv)
 
 	// 6b'. The accept side of the same boundary: SUSTAINED slight nodding at
 	// the same axis-spread scale keeps large deltas tilted too, so the
-	// translation system is conditioned and the solve must go through.
+	// translation system is conditioned and the solve must go through
+	// (measured 0.0135 deg / 0.0007 m).
 	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
-		scene.rotNoiseDeg = 0.2;
+		SceneConfig scene = noisyScene();
 		scene.offAxisScale = 0.16;
 		scene.offAxisRate = 2.0;
-		// Measured 0.0135 deg / 0.0007 m; was 44x / 29x - the loosest band here.
-		Expectation e;
-		e.maxRotErrDeg = 0.06;
-		e.maxTransErrM = 0.003;
-		RunScenario("sustained slight nods", scene, truth, config, e);
+		RunScenario("sustained slight nods", scene, truth, config, bands(0.06, 0.003));
 	}
 
 	// 6b''. Slow, cautious motion: everything scaled down so most admitted
 	// pairs sit just above the minimum pair angle, where axis-direction noise
 	// is amplified by 1/theta — the inverse-variance angle weighting keeps
-	// those pairs from dominating the rotation solve.
+	// those pairs from dominating the rotation solve (measured 0.0256 deg /
+	// 0.0011 m).
 	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
+		SceneConfig scene = noisyScene();
 		scene.rotNoiseDeg = 0.4;
 		scene.motionScale = 0.35;
-		// Measured 0.0256 deg / 0.0011 m; was 14x / 18x.
-		Expectation e;
-		e.maxRotErrDeg = 0.11;
-		e.maxTransErrM = 0.005;
-		RunScenario("slow cautious motion", scene, truth, config, e);
+		RunScenario("slow cautious motion", scene, truth, config, bands(0.11, 0.005));
 	}
 
 	// 6c. Long continuous sweeps: large-lag deltas pass through 180 deg, where
 	// the two streams' independent shortest-arc hemisphere choices decorrelate
 	// under noise. The near-pi pair gate must keep that band out of the
-	// initial Kabsch; recovery stays at normal-noise accuracy.
+	// initial Kabsch; recovery stays at normal-noise accuracy (measured
+	// 0.0487 deg / 0.0012 m; removing the gate has to move it past the band).
 	{
-		SceneConfig scene;
+		SceneConfig scene = noisyScene();
 		scene.duration = 40.0;
-		scene.posNoise = 0.002;
 		scene.rotNoiseDeg = 0.4;
-		// Measured 0.0487 deg / 0.0012 m; was 12x / 17x. This is the scenario
-		// built to pin the near-pi pair gate, so slack here is the least
-		// affordable: removing the gate has to move the number past this band.
-		Expectation e;
-		e.maxRotErrDeg = 0.20;
-		e.maxTransErrM = 0.005;
-		RunScenario("near-180 sweeps", scene, truth, config, e, 4321);
+		RunScenario("near-180 sweeps", scene, truth, config, bands(0.20, 0.005), 4321);
 	}
 
 	// 7. Playspace scale.
@@ -8896,9 +7986,7 @@ int main(int argc, char **argv)
 		scaled.scale = 1.03;
 		EngineConfig sc = config;
 		sc.solveScale = true;
-		Expectation e;
-		e.maxRotErrDeg = 0.5;
-		e.maxTransErrM = 0.03;
+		Expectation e = bands(0.5, 0.03);
 		e.maxScaleErr = 0.005;
 		RunScenario("scale 1.03", scene, scaled, sc, e);
 	}
@@ -8908,8 +7996,7 @@ int main(int argc, char **argv)
 	// exists to stop residual Kabsch rotation error from leaking into the
 	// translation with a play-space lever arm.
 	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
+		SceneConfig scene = noisyScene();
 		scene.rotNoiseDeg = 0.3;
 
 		std::vector<PoseSample> refStream, targetStream;
@@ -9011,6 +8098,33 @@ int main(int argc, char **argv)
 						"", r->rotationRmsDeg, r->translationRmsMeters,
 						r->axisSpread, r->transEigRatio, r->message.c_str());
 		}
+
+		// Scale guard, fail-closed branch. When smoothing is detected and the
+		// guarded fixed-scale re-solve fails its OWN gates, the result must be
+		// invalid rather than fall back to the contaminated free-scale fit
+		// (aRaw: ~0.88 for a true 1.0, which the driver would multiply every
+		// position, velocity and acceleration by). The residual gate sits
+		// BETWEEN the free fit's and the scale-pinned fit's own residuals on
+		// hypothesis A's data, so it admits the first and rejects the second
+		// with no constant to go stale.
+		EngineConfig pinnedCfg = config;   // the fit the guard's re-solve performs
+		pinnedCfg.solveScale = false;
+		EngineResult pinnedFit = CalibrationEngine::Solve(refSm, tgt, pinnedCfg);
+
+		double gate = 0.5 * (aRaw.translationRmsMeters + pinnedFit.translationRmsMeters);
+		EngineConfig guardCfg = sc;
+		guardCfg.maxTranslationRms = gate;
+		EngineResult guarded = CalibrationEngine::Solve(refSm, tgt, guardCfg);
+
+		// A collapsed separation (~1.0; measured ~1.9x) would pass vacuously.
+		bool separated = pinnedFit.translationRmsMeters > 1.5 * aRaw.translationRmsMeters;
+		bool guardPass = aRaw.valid && separated && !guarded.valid &&
+			guarded.message.find("guarded fixed-scale re-solve failed") != std::string::npos;
+		printf("%-28s %s  rms free %.4f m (scale %.3f) vs pinned %.4f m  gate %.4f  guarded valid %d: %s\n",
+			"scale guard fail-closed", guardPass ? "PASS" : "FAIL",
+			aRaw.translationRmsMeters, aRaw.scale, pinnedFit.translationRmsMeters, gate,
+			guarded.valid, guarded.message.c_str());
+		RecordResult(guardPass);
 	}
 
 	// 7d. Scale diagnostic branch coverage: a short otherwise-valid session
@@ -9099,60 +8213,6 @@ int main(int argc, char **argv)
 		RecordResult(pass);
 	}
 
-	// 7e. Scale guard, fail-closed branch. When streamed-pose smoothing is
-	// detected and the guarded fixed-scale re-solve fails its OWN gates, the
-	// result must be marked invalid rather than falling back to the contaminated
-	// free-scale fit: that fit collapses to ~0.88 for a true 1.0, and the driver
-	// multiplies every position, velocity and acceleration by it, shrinking the
-	// user's whole target universe ~12% behind a green verdict. 7c and 7d pin
-	// both success branches; this else has never executed.
-	//
-	// Reuse 7c's hypothesis-A data, whose fingerprint (smoothing detected, gross
-	// band dirty, guarded scale neutralised to 1.0) is already asserted there.
-	// The residual gate is then placed BETWEEN the two fits' own measured
-	// residuals rather than at a guessed constant: the free-scale fit absorbs
-	// the attenuation into scale, the scale-pinned fit cannot, so one threshold
-	// admits the first and rejects the second — exactly the case the branch
-	// exists for, with no magic numbers to go stale.
-	{
-		EngineConfig sc = config;
-		sc.solveScale = true;
-
-		SceneConfig scene;
-		scene.posNoise = 0.001;
-		scene.rotNoiseDeg = 0.1;
-		std::vector<PoseSample> ref, tgt;
-		GenerateStreams(scene, truth, 777, ref, tgt);
-		std::vector<PoseSample> refSm = SmoothStreamZeroPhase(ref, 0.3, 0.05);
-
-		EngineConfig freeCfg = sc;
-		freeCfg.pinScaleOnSmoothing = false;
-		EngineResult freeFit = CalibrationEngine::Solve(refSm, tgt, freeCfg);
-
-		// Exactly the fit the guard's re-solve performs on this data: scale
-		// pinned, targets pre-scaled by the guarded 1.0 (i.e. unchanged).
-		EngineConfig pinnedCfg = config;
-		pinnedCfg.solveScale = false;
-		EngineResult pinnedFit = CalibrationEngine::Solve(refSm, tgt, pinnedCfg);
-
-		double gate = 0.5 * (freeFit.translationRmsMeters + pinnedFit.translationRmsMeters);
-		EngineConfig guardCfg = sc;
-		guardCfg.maxTranslationRms = gate;
-		EngineResult guarded = CalibrationEngine::Solve(refSm, tgt, guardCfg);
-
-		// A collapsed separation would let this pass vacuously; fail loudly.
-		// Measured separation on this data is ~1.9x, so the bar sits below that
-		// and well above the ~1.0 a collapse would produce.
-		bool separated = pinnedFit.translationRmsMeters > 1.5 * freeFit.translationRmsMeters;
-		bool pass = freeFit.valid && separated && !guarded.valid &&
-			guarded.message.find("guarded fixed-scale re-solve failed") != std::string::npos;
-		printf("%-28s %s  rms free %.4f m (scale %.3f) vs pinned %.4f m  gate %.4f  guarded valid %d: %s\n",
-			"scale guard fail-closed", pass ? "PASS" : "FAIL",
-			freeFit.translationRmsMeters, freeFit.scale, pinnedFit.translationRmsMeters, gate,
-			guarded.valid, guarded.message.c_str());
-		RecordResult(pass);
-	}
-
 	// 8. Runtime application of the solved offset: sign and asymmetric clamp.
 	// Production shape: laggy wireless reference => solved offset is negative
 	// => positive shift (delay the fresh lighthouse targets). Delaying may use
@@ -9163,48 +8223,7 @@ int main(int argc, char **argv)
 			std::abs(ComputeAppliedTimeOffset(-0.080) - 0.050) < 1e-12 &&
 			std::abs(ComputeAppliedTimeOffset(+0.010) + 0.010) < 1e-12 &&
 			std::abs(ComputeAppliedTimeOffset(+0.040) + 0.015) < 1e-12;
-		printf("%-28s %s\n", "applied offset sign/clamp", pass ? "PASS" : "FAIL");
-		RecordResult(pass);
-	}
-
-	// 9. Publish-before-rewrite invariant (regression). The driver publishes
-	// ring samples BEFORE shifting poseTimeOffset. If it ever published after,
-	// recorded target times would absorb the applied shift, the next solve
-	// would find ~zero offset, and recalibration would silently erase the
-	// latency correction. Model both pipelines and assert the divergence.
-	{
-		SceneConfig scene;
-		scene.posNoise = 0.002;
-		scene.rotNoiseDeg = 0.2;
-		GroundTruth t2 = truth;
-		t2.latency = 0.018;
-
-		std::vector<PoseSample> refStream, targetStream;
-		GenerateStreams(scene, t2, 1234, refStream, targetStream);
-
-		EngineResult first = CalibrationEngine::Solve(refStream, targetStream, config);
-		// Symmetric clamp bounds here: the harness's laggy side is the target,
-		// so the shift is negative and would hit the asymmetric advance clamp.
-		double shift = ComputeAppliedTimeOffset(first.timeOffset, 0.05, 0.05);
-
-		// Correct pipeline: ring samples are pre-rewrite, a re-solve reproduces
-		// the same offset.
-		EngineResult second = CalibrationEngine::Solve(refStream, targetStream, config);
-
-		// Bugged pipeline: ring records post-rewrite poseTimeOffset, i.e. the
-		// target timeline already carries the applied shift.
-		std::vector<PoseSample> bugged = targetStream;
-		for (auto &s : bugged)
-			s.time += shift;
-		EngineResult erased = CalibrationEngine::Solve(refStream, bugged, config);
-
-		bool pass = first.valid && second.valid && erased.valid &&
-			std::abs(second.timeOffset - first.timeOffset) < 0.001 &&
-			std::abs(erased.timeOffset) < 0.004;
-		printf("%-28s %s  first %+.1f ms  re-solve %+.1f ms  bugged-pipeline %+.1f ms\n",
-			"publish-before-rewrite", pass ? "PASS" : "FAIL",
-			first.timeOffset * 1000.0, second.timeOffset * 1000.0, erased.timeOffset * 1000.0);
-		RecordResult(pass);
+		Check("applied offset sign/clamp", pass, "");
 	}
 
 	// ---- Universe-jump detection ----
