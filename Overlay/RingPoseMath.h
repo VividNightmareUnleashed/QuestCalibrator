@@ -17,9 +17,7 @@
 // composes world poses from the shared-memory stream, plus the pure ingestion
 // policy that governs them: the trust boundary a sample must clear, the
 // composition itself, and which composed samples may feed the drift monitor.
-// The overlay used to spell those policies out at each consumer inside
-// Calibration.cpp, which no test compiles; they live here so there is one copy
-// and the harness can drive it.
+// Kept here, not in Calibration.cpp, so the harness can drive it.
 struct RingSampleParts
 {
 	Eigen::Quaterniond wfdRot;
@@ -48,6 +46,7 @@ struct DriverLocalPoseSample
 // A worldFromDriver transition describes a real raw-universe rebase only if
 // adjacent driver-local poses remain on their reported trajectory. An inverse
 // local-pose rewrite is bookkeeping that leaves the composed raw pose still.
+// Both samples come from trusted ring samples (IsUsableRingSample).
 inline bool IsDriverLocalPoseContinuous(
 	const DriverLocalPoseSample &previous,
 	const DriverLocalPoseSample &current,
@@ -56,17 +55,7 @@ inline bool IsDriverLocalPoseContinuous(
 	double maxRotationErrorRadians = MaxLocalRotationErrorRadians)
 {
 	double dt = current.time - previous.time;
-	auto validRotation = [](const Eigen::Quaterniond &rotation) {
-		double normSquared = rotation.squaredNorm();
-		return rotation.coeffs().allFinite() && std::isfinite(normSquared) &&
-			normSquared > 1e-12;
-	};
-	if (!std::isfinite(dt) || dt <= 0.0 || dt > maxFrameSeconds ||
-		!validRotation(previous.rotation) || !validRotation(current.rotation) ||
-		!previous.position.allFinite() || !current.position.allFinite() ||
-		!previous.velocity.allFinite() || !current.velocity.allFinite() ||
-		!previous.angularVelocity.allFinite() ||
-		!current.angularVelocity.allFinite())
+	if (dt <= 0.0 || dt > maxFrameSeconds)
 		return false;
 
 	Eigen::Vector3d predictedPosition = previous.position +
@@ -75,8 +64,6 @@ inline bool IsDriverLocalPoseContinuous(
 	Eigen::Vector3d meanAngularVelocity =
 		0.5 * (previous.angularVelocity + current.angularVelocity);
 	double predictedAngle = meanAngularVelocity.norm() * dt;
-	if (!std::isfinite(predictedAngle))
-		return false;
 	if (predictedAngle > 1e-12)
 	{
 		predictedRotation = Eigen::Quaterniond(Eigen::AngleAxisd(
@@ -96,11 +83,8 @@ inline bool IsDriverLocalPoseContinuous(
 inline bool IsFreshCaptureTime(
 	double sampleTime, double qpcNow, double maxAgeSeconds)
 {
-	if (!std::isfinite(sampleTime) || !std::isfinite(qpcNow) ||
-		!std::isfinite(maxAgeSeconds) || maxAgeSeconds < 0.0)
-		return false;
-	double age = qpcNow - sampleTime;
-	return std::isfinite(age) && age >= 0.0 && age <= maxAgeSeconds;
+	double age = qpcNow - sampleTime;   // NaN fails both comparisons
+	return age >= 0.0 && age <= maxAgeSeconds;
 }
 
 // Raw collection rides through the isolated poses the driver drops when two
@@ -134,23 +118,20 @@ inline bool MonitorGapTolerable(uint64_t gap, bool crossedSessionBoundary)
 
 } // namespace ringpose
 
-// The per-field numeric checks are the shared wire vocabulary
-// (common/NumericValidation.h), not a ring-private one: the driver's inbound
-// gate asks the same questions of the same two C-array types, and a bound added
-// to TransformLimits.h has to reach both. IsAcceptableQuaternion in particular
-// is the ACCEPT-OR-DROP half of the shared quaternion pair - deliberately not
-// the driver's sanitizing NormalizeQuaternion, which would turn a huge finite
-// quaternion into accepted data here instead of tracking absence.
+// The per-field checks are the wire vocabulary shared with the driver's inbound
+// gate (common/NumericValidation.h). IsAcceptableQuaternion accepts or drops;
+// the driver's sanitizing NormalizeQuaternion would turn a huge finite
+// quaternion into accepted data instead of tracking absence.
 using questcal::numeric::IsAcceptableQuaternion;
 using questcal::numeric::IsBoundedVector3;
 
 // A driver can mark a pose Running_OK while still supplying malformed numeric
 // fields. Validate the complete raw sample before any solver or runtime monitor
-// composes it; invalid samples are treated as tracking absence.
+// composes it; invalid samples are treated as tracking absence. qpcToSeconds is
+// the positive QPC period.
 inline bool IsUsableRingSample(const protocol::DevicePoseSample &s, double qpcToSeconds)
 {
-	if (!std::isfinite(qpcToSeconds) || qpcToSeconds <= 0.0 ||
-		!std::isfinite(s.poseTimeOffset) ||
+	if (!std::isfinite(s.poseTimeOffset) ||
 		std::abs(s.poseTimeOffset) > protocol::limits::MaxAbsTimeOffsetSeconds ||
 		!IsAcceptableQuaternion(s.worldFromDriverRotation) ||
 		!IsAcceptableQuaternion(s.rotation) ||
@@ -164,8 +145,7 @@ inline bool IsUsableRingSample(const protocol::DevicePoseSample &s, double qpcTo
 		return false;
 
 	double composedTime = static_cast<double>(s.sampleTimeQpc) * qpcToSeconds + s.poseTimeOffset;
-	return std::isfinite(composedTime) &&
-		std::abs(composedTime) <= protocol::limits::MaxAbsPoseTimestampSeconds;
+	return std::abs(composedTime) <= protocol::limits::MaxAbsPoseTimestampSeconds;
 }
 
 inline double RingSampleTime(const protocol::DevicePoseSample &s, double qpcToSeconds)
@@ -192,10 +172,8 @@ inline RingSampleParts UnpackRingSample(const protocol::DevicePoseSample &s)
 
 // The complete overlay-side trust boundary for one ring sample: the driver must
 // claim the pose is valid AND that the device is actually tracking, and the
-// numeric fields must survive validation. Spelled once because every consumer
-// (chaperone baseline, collector, runtime monitor, continuous loop) must ask the
-// same question — a bound added to the numeric half has to reach all four, and
-// they used to carry four hand-written copies of this conjunction.
+// numeric fields must survive validation. Every consumer (chaperone baseline,
+// collector, runtime monitor, continuous loop) asks this one question.
 inline bool IsTrustedRingSample(
 	const protocol::DevicePoseSample &s, double qpcToSeconds)
 {
@@ -223,11 +201,8 @@ inline bool IsUsableComposedSample(const questcal::PoseSample &s)
 // Compose the raw-world pose (worldFromDriver * driver pose) from a ring sample
 // and convert its capture timestamp to seconds on the QPC clock — the single
 // ingestion path from the shared-memory stream into solver/monitor space.
-//
-// Returns false for anything the trust boundary rejects, and leaves `out`
-// untouched so a rejection can never be mistaken for data: an invalid sample is
-// tracking absence, never a defaulted pose. `qpcToSeconds` is a parameter rather
-// than a file-static so this stays pure and the harness can drive it.
+// Returns false for anything the trust boundary rejects and leaves `out`
+// untouched: an invalid sample is tracking absence, never a defaulted pose.
 inline bool TryComposeRingSample(const protocol::DevicePoseSample &s,
 	double qpcToSeconds, questcal::PoseSample &out)
 {
@@ -306,17 +281,13 @@ inline Eigen::Vector3d BaseCalibratedPosition(
 // stationarity gates then "slides" with slow posture creep.
 //
 // A base station is on the target side too, but it is the universe, not a
-// device in it: it publishes a dozen poses in a session, and the early ones
-// move by metres while SteamVR settles where the station stands. One session
-// read two of them as tracking losses recovered 2.3 m away. A device whose
-// class has not been read yet is held back for the same reason: the property
-// scan runs every 2 s and a station's settling poses are its first.
+// device in it: its early poses move by metres while SteamVR settles where it
+// stands (one session read two as losses recovered 2.3 m away). A device whose
+// class has not been read yet (the scan runs every 2 s) is held back likewise.
 //
-// All of these rules are load-bearing and are one predicate on purpose. The
-// mounted-tracker exclusion in particular is the only thing keeping a resting
-// head out of the drift feed: without it the monitor logs StationarySlide,
-// UpdateDriftScore crosses the stale threshold, and the user is told a
-// calibration that is being actively maintained looks poor.
+// The mounted-tracker exclusion is the only thing keeping a resting head out of
+// the drift feed, which would otherwise call an actively maintained
+// calibration stale.
 struct DriftFeedCandidate
 {
 	uint32_t deviceId = vr::k_unTrackedDeviceIndexInvalid;

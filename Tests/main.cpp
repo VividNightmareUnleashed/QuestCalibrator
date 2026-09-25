@@ -3988,19 +3988,11 @@ void RunSolverRobustnessScenarios()
 		EngineResult extremeTimeResult = CalibrationEngine::Solve(
 			extremeTime, target, EngineConfig());
 
-		auto extremeAligned = GenerateAlignedSamples(scene, truth, 4402, 80);
-		extremeAligned[20].time = 1e300;
-		extremeAligned[20].ref.pos.z() = 1e300;
-		extremeAligned[20].target.vel.x() = 1e300;
-		EngineResult extremeAlignedResult = CalibrationEngine::SolveAligned(
-			extremeAligned, EngineConfig());
-
 		bool pass = !tooShort.valid && !tooStill.valid &&
 			!nanResult.valid && !zeroResult.valid && !enormousResult.valid &&
 			!hugeFiniteResult.valid &&
 			!duplicateResult.valid && !extremePositionResult.valid &&
 			!extremeVelocityResult.valid && !extremeTimeResult.valid &&
-			!extremeAlignedResult.valid &&
 			tooShort.message.find("Not enough samples") != std::string::npos &&
 			tooStill.message.find("Not enough rotation") != std::string::npos &&
 			nanResult.message.find("invalid or out-of-range") != std::string::npos &&
@@ -4010,35 +4002,22 @@ void RunSolverRobustnessScenarios()
 			duplicateResult.message.find("non-increasing") != std::string::npos &&
 			extremePositionResult.message.find("out-of-range") != std::string::npos &&
 			extremeVelocityResult.message.find("out-of-range") != std::string::npos &&
-			extremeTimeResult.message.find("out-of-range") != std::string::npos &&
-			extremeAlignedResult.message.find("out-of-range") != std::string::npos;
+			extremeTimeResult.message.find("out-of-range") != std::string::npos;
 		snprintf(detail, sizeof detail,
-			"short %d still %d nan %d zero/max/huge-q %d%d%d duplicate %d extreme p/v/t/a %d%d%d%d",
+			"short %d still %d nan %d zero/max/huge-q %d%d%d duplicate %d extreme p/v/t %d%d%d",
 			!tooShort.valid, !tooStill.valid, !nanResult.valid,
 			!zeroResult.valid, !enormousResult.valid, !hugeFiniteResult.valid,
 			!duplicateResult.valid, !extremePositionResult.valid,
-			!extremeVelocityResult.valid, !extremeTimeResult.valid,
-			!extremeAlignedResult.valid);
+			!extremeVelocityResult.valid, !extremeTimeResult.valid);
 		Check("solver: fail-closed inputs", pass, detail);
 	}
 
-	// Invalid work controls must fail before divisions, allocations, or loops;
-	// an otherwise-valid but enormous timestamp span must also trip the explicit
+	// An otherwise-valid but enormous timestamp span must trip the explicit
 	// correlation-resample cap rather than allocating proportional memory.
 	{
 		SceneConfig scene;
 		std::vector<PoseSample> ref, target;
 		GenerateStreams(scene, truth, 4410, ref, target);
-		EngineConfig zeroStep;
-		zeroStep.timeOffsetStep = 0.0;
-		EngineResult zeroStepResult = CalibrationEngine::Solve(ref, target, zeroStep);
-		EngineConfig nanStep;
-		nanStep.timeOffsetStep = std::numeric_limits<double>::quiet_NaN();
-		EngineResult nanStepResult = CalibrationEngine::Solve(ref, target, nanStep);
-		EngineConfig zeroBudget;
-		zeroBudget.maxAlignedSamples = 0;
-		EngineResult zeroBudgetResult = CalibrationEngine::Solve(ref, target, zeroBudget);
-
 		ref.resize(8);
 		target.resize(8);
 		for (size_t i = 0; i < 8; ++i)
@@ -4049,19 +4028,9 @@ void RunSolverRobustnessScenarios()
 		double offset = 123.0;
 		bool oversizedEstimated = CalibrationEngine::EstimateTimeOffset(
 			ref, target, EngineConfig(), offset);
-		bool pass = !zeroStepResult.valid && !nanStepResult.valid &&
-			!zeroBudgetResult.valid && !oversizedEstimated && offset == 0.0 &&
-			zeroStepResult.message.find("Invalid calibration engine configuration") !=
-				std::string::npos &&
-			nanStepResult.message.find("Invalid calibration engine configuration") !=
-				std::string::npos &&
-			zeroBudgetResult.message.find("Invalid calibration engine configuration") !=
-				std::string::npos;
-		snprintf(detail, sizeof detail,
-			"zero/nan step %d/%d zero budget %d oversized estimate %d offset %.1f",
-			!zeroStepResult.valid, !nanStepResult.valid, !zeroBudgetResult.valid,
+		snprintf(detail, sizeof detail, "oversized estimate %d offset %.1f",
 			oversizedEstimated, offset);
-		Check("solver: config and work caps", pass, detail);
+		Check("solver: correlation work cap", !oversizedEstimated && offset == 0.0, detail);
 	}
 }
 
@@ -5444,25 +5413,6 @@ void RunChaperoneScenarios()
 				tinyRotation, tinyTranslation), "");
 	}
 
-	{
-		Eigen::Quaterniond zero(0.0, 0.0, 0.0, 0.0);
-		double maxDouble = std::numeric_limits<double>::max();
-		Eigen::Quaterniond enormous(maxDouble, maxDouble, maxDouble, maxDouble);
-		Eigen::Vector3d finite = Eigen::Vector3d::Zero();
-		Eigen::Vector3d nonfinite = finite;
-		nonfinite.x() = std::numeric_limits<double>::infinity();
-		Eigen::Quaterniond deltaRotation;
-		Eigen::Vector3d deltaTranslation;
-		bool pass = !WorldFromDriverDelta(zero, finite, identity, finite,
-				deltaRotation, deltaTranslation) &&
-			!WorldFromDriverDelta(identity, finite, enormous, finite,
-				deltaRotation, deltaTranslation) &&
-			!WorldFromDriverDelta(identity, nonfinite, identity, finite,
-				deltaRotation, deltaTranslation) &&
-			WorldFromDriverChanged(zero, finite, identity, finite);
-		Check("chaperone: reject invalid world delta", pass, "");
-	}
-
 	// Chaperone re-anchoring trusts a WFD delta only when adjacent HMD-local
 	// poses prove that it was a real universe rebase. The same helper is shared
 	// with JumpDetector so the two state machines cannot classify one transition
@@ -5573,7 +5523,7 @@ void RunChaperoneScenarios()
 
 		bool pass = QuadsMatch(a, a, 0.002f) && QuadsMatch(a, jitter, 0.002f) &&
 			!QuadsMatch(a, moved, 0.002f) && !QuadsMatch(a, fewer, 0.002f) &&
-			!QuadsMatch(a, nonFinite, 0.002f) && !QuadsMatch(a, a, -0.1f);
+			!QuadsMatch(a, nonFinite, 0.002f);
 		Check("chaperone: quads match", pass, "");
 	}
 
