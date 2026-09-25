@@ -52,6 +52,10 @@ struct CalibrationRun
 	uint64_t toleratedLoss = 0;
 	uint64_t toleratedGaps = 0;
 	uint64_t neutralizationSequence = 0;
+	// Each device's live lighthouse restart count when collection began
+	// (LighthouseVisibility::Device::liveRestarts; 0 for other systems).
+	uint32_t referenceRestartsAtStart = 0;
+	uint32_t targetRestartsAtStart = 0;
 	Universe referenceUniverse;
 	Universe targetUniverse;
 	std::vector<PoseSample> referenceSamples;

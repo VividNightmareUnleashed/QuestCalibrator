@@ -65,6 +65,13 @@ public:
 		double lastEvent = -1e9;    // ring seconds; live lines only
 		double lastDisturbance = -1e9;
 		std::string lastDisturbanceText;
+		// Live lines only, so a consumer can tell a new one from the last it
+		// saw by the count. Restarts are the subset that begin a new solution
+		// (a bootstrap, or tracking again after no station at all): the pose
+		// before and after them is not one continuous track.
+		uint32_t liveDisturbances = 0;
+		uint32_t liveRestarts = 0;
+		double lastRestart = -1e9;
 	};
 
 	LighthouseVisibility() = default;
@@ -80,6 +87,16 @@ public:
 	// disturbance, or up to a second before one (a log line can be stamped
 	// just after the pose it explains).
 	bool Disturbed(const std::string &serial, double ringTime) const;
+
+	// Whether the device's pose is fit to measure against right now: false
+	// while it is known to see fewer than cleanStations, and for
+	// config.disturbedSeconds after (or up to a second before) any live
+	// disturbance. Unlike Disturbed, a visible set not yet known from the log
+	// is not held against it, so a device the log never mentioned is settled.
+	bool Settling(const std::string &serial, double ringTime) const;
+
+	// A live restart (see Device::liveRestarts) within `seconds` of ringTime.
+	bool RestartedWithin(const std::string &serial, double ringTime, double seconds) const;
 
 	const Device *Find(const std::string &serial) const;
 	const std::map<std::string, Device> &Devices() const { return devices; }
