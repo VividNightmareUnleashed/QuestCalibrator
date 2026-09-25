@@ -1,11 +1,13 @@
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/TrackingStreamDigest.h"
+#include "../Overlay/LighthouseFrameWatch.h"
 
 #include <cmath>
 #include <cstdio>
 #include <functional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace
@@ -569,5 +571,150 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 			lines.size() == 2 && counts && lines[1] == "driver queue drops over the last minute: 1 (1 pose(s))",
 			line.substr(0, 200).c_str());
 		check("detailed log: the digest waits a minute between lines", digest.Flush(90.0).empty(), "next line at 121 s");
+	}
+
+	// The lighthouse frame watch. Three base stations publish every 0.5 s
+	// (identity local pose, worldFromDriver = their pose); the headset
+	// tracker (9) walks and a second tracker (10) stands still, both in
+	// station 1's frame, at 250 Hz for nine seconds. A universe move applies
+	// one world delta (62 deg of yaw over 78.6 deg of tilt, as on 2026-09-24)
+	// to every worldFromDriver and leaves the local poses on their paths.
+	{
+		using Pose = std::pair<Eigen::Quaterniond, Eigen::Vector3d>;
+		const double deg = 3.14159265358979323846 / 180.0;
+		const Pose identity(Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero());
+		auto compose = [](const Pose &a, const Pose &b)
+		{
+			return Pose((a.first * b.first).normalized(), a.first * b.second + a.second);
+		};
+		auto inverse = [](const Pose &a)
+		{
+			Eigen::Quaterniond r = a.first.conjugate();
+			return Pose(r, -(r * a.second));
+		};
+		auto rot = [&](double yawDeg, double pitchDeg)
+		{
+			return Eigen::Quaterniond(Eigen::AngleAxisd(yawDeg * deg, Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(pitchDeg * deg, Eigen::Vector3d::UnitX()));
+		};
+		auto sample = [](uint32_t id, double time, const Pose &wfd, const Pose &local, const Eigen::Vector3d &vel)
+		{
+			auto s = Sample(id, time, 0.0);
+			s.worldFromDriverRotation = { wfd.first.w(), wfd.first.x(), wfd.first.y(), wfd.first.z() };
+			s.rotation = { local.first.w(), local.first.x(), local.first.y(), local.first.z() };
+			for (int k = 0; k < 3; ++k)
+			{
+				s.worldFromDriverTranslation[k] = wfd.second[k];
+				s.position[k] = local.second[k];
+				s.velocity[k] = vel[k];
+			}
+			return s;
+		};
+		const Pose stations[3] = {
+			Pose(rot(30, -30), Eigen::Vector3d(-2.6, 2.2, -0.3)),
+			Pose(rot(150, -35), Eigen::Vector3d(1.4, 2.3, -3.9)),
+			Pose(rot(-115, -25), Eigen::Vector3d(0.2, 2.1, 2.5)),
+		};
+		const Pose delta(rot(62, 78.6), Eigen::Vector3d(0.4, -1.1, 2.0));
+
+		struct Result
+		{
+			std::vector<LighthouseFrameWatch::Report> reports;
+			std::string line;
+		};
+		// `moves`: universe moves; `reexpressAt`: tracker 10 changes to station
+		// 2's frame without moving; `jumpAt`: tracker 9's local pose jumps 30 cm.
+		auto run = [&](const std::vector<double> &moves, double reexpressAt, double jumpAt)
+		{
+			LighthouseFrameWatch watch;
+			Result out;
+			const Eigen::Vector3d walk(0.2, 0.0, 0.1);
+			double nextStation = 1.0;
+			for (int i = 0; i <= 9 * 250; ++i)
+			{
+				const double time = 1.0 + i / 250.0;
+				Pose world = identity;
+				for (double at : moves)
+					if (time >= at)
+						world = compose(delta, world);
+				Pose s[3];
+				for (int k = 0; k < 3; ++k)
+					s[k] = compose(world, stations[k]);
+
+				Pose local9(rot(20, 0), Eigen::Vector3d(0.5, -1.0, 2.5) + walk * (time - 1.0));
+				if (jumpAt >= 0.0 && time >= jumpAt)
+					local9.second.x() += 0.3;
+				watch.Note(sample(9, time, s[0], local9, walk), QpcSeconds, false);
+
+				const Pose local10(Eigen::Quaterniond::Identity(), Eigen::Vector3d(-0.4, -1.8, 2.2));
+				if (reexpressAt >= 0.0 && time >= reexpressAt)
+					watch.Note(sample(10, time, s[1], compose(inverse(s[1]), compose(s[0], local10)),
+						Eigen::Vector3d::Zero()), QpcSeconds, false);
+				else
+					watch.Note(sample(10, time, s[0], local10, Eigen::Vector3d::Zero()), QpcSeconds, false);
+
+				if (time >= nextStation)
+				{
+					for (int k = 0; k < 3; ++k)
+						watch.Note(sample(1 + k, time, s[k], identity, Eigen::Vector3d::Zero()), QpcSeconds, true);
+					nextStation += 0.5;
+				}
+				for (const auto &r : watch.Flush())
+				{
+					out.reports.push_back(r);
+					out.line = LighthouseFrameWatch::Describe(r, 9);
+				}
+			}
+			return out;
+		};
+
+		auto still = run({}, -1.0, -1.0);
+		check("lighthouse frame: nothing reported while no frame changes",
+			still.reports.empty(), still.line.c_str());
+
+		auto moved = run({ 5.0 }, -1.0, -1.0);
+		bool whole = moved.reports.size() == 1;
+		if (whole)
+		{
+			const auto &r = moved.reports[0];
+			whole = r.moved == 5 && r.movedBaseStations == 3 && r.reExpressed == 0 && r.unclear == 0 &&
+				std::abs(r.yawDeg - 62.0) < 0.01 && std::abs(r.tiltDeg - 78.6) < 0.01 &&
+				r.spreadDeg < 1e-6 && r.spreadM < 1e-6 && r.largestShiftM > 1.0 &&
+				moved.line.find("5 device(s) (3 base station(s), the headset tracker among them)") != std::string::npos;
+		}
+		check("lighthouse frame: a universe move is one report, every device, one delta",
+			whole, moved.line.c_str());
+
+		auto twice = run({ 3.0, 7.0 }, -1.0, -1.0);
+		check("lighthouse frame: moves seconds apart are reported apart",
+			twice.reports.size() == 2 && twice.reports[0].moved == 5 && twice.reports[1].moved == 5,
+			twice.line.c_str());
+
+		auto reexpressed = run({}, 5.0, -1.0);
+		check("lighthouse frame: a pose put in another station's frame is not a move",
+			reexpressed.reports.size() == 1 && reexpressed.reports[0].moved == 0 &&
+			reexpressed.reports[0].reExpressed == 1 &&
+			reexpressed.line.find("re-expressed their pose in another frame without moving") != std::string::npos,
+			reexpressed.line.c_str());
+
+		auto jumped = run({}, -1.0, 5.0);
+		check("lighthouse frame: a tracker's own jump is not a frame change",
+			jumped.reports.empty(), jumped.line.c_str());
+
+		auto both = run({ 5.0 }, -1.0, 5.0);
+		check("lighthouse frame: a tracker that jumps with the move is set apart",
+			both.reports.size() == 1 && both.reports[0].moved == 4 && both.reports[0].unclear == 1 &&
+			both.line.find("headset tracker") == std::string::npos &&
+			both.line.find("1 whose own pose jumped as well") != std::string::npos,
+			both.line.c_str());
+
+		LighthouseFrameWatch::Report refined;
+		refined.moved = refined.movedBaseStations = 1;
+		refined.largestShiftM = 0.004;
+		refined.yawDeg = 0.02;
+		refined.tiltDeg = 0.01;
+		check("lighthouse frame: a station refined by millimetres stays in the detailed log",
+			!LighthouseFrameWatch::Notable(refined) &&
+			!moved.reports.empty() && LighthouseFrameWatch::Notable(moved.reports[0]), "");
 	}
 }

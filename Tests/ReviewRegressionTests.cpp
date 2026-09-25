@@ -1,7 +1,6 @@
 #include "../Driver/ServerTrackedDeviceProvider.h"
 #include "../Overlay/ContinuousCorrectionGate.h"
 #include "../Overlay/FieldMath.h"
-#include "../Overlay/LegacyContinuous.h"
 #include "../Overlay/PersistenceState.h"
 #include "../Overlay/RingPoseMath.h"
 #include "../Overlay/Updater.h"
@@ -539,60 +538,6 @@ void FrozenRecoveryBoundaryScenario(Check check)
 		frozen && stayedFrozen && resumed && resumedAt < 70.0, detail);
 }
 
-void LegacyTranslationScenario(Check check)
-{
-	using namespace questcal::legacy;
-	double worst = 0;
-	bool valid = true;
-	for (int count : { 24, 60 })
-	for (double noise : { 0.0, 0.001 })
-	{
-		CalibrationCalc calc;
-		calc.Clear();
-		std::vector<Sample> samples;
-		Eigen::Quaterniond world(Eigen::AngleAxisd(0.3, Eigen::Vector3d::UnitY()));
-		for (int i = 0; i < count; ++i)
-		{
-			double t = i * 0.3;
-			Eigen::Quaterniond r(Eigen::AngleAxisd(0.7 * std::sin(t), Eigen::Vector3d::UnitY()) *
-				Eigen::AngleAxisd(0.6 * std::cos(1.3 * t), Eigen::Vector3d::UnitX()));
-			Eigen::Vector3d p(0.1 * std::sin(t), 1.5, 0.2 * std::cos(t));
-			Eigen::Vector3d target = world.conjugate() * (p + r * Eigen::Vector3d(0, 0.15, 0)
-				- Eigen::Vector3d(0.2, 0.05, -0.1));
-			target += noise * Eigen::Vector3d(std::sin(7 * t), std::cos(9 * t), std::sin(11 * t));
-			samples.emplace_back(Pose(r, p), Pose(world.conjugate() * r, target), t);
-			calc.PushSample(samples.back());
-		}
-		valid &= calc.ComputeOneshot(false);
-		const Eigen::Matrix3d rotation = calc.Transformation().rotation();
-		// Independent all-pairs oracle, retaining the original objective.
-		Eigen::MatrixXd coefficients(3 * count * (count - 1), 3);
-		Eigen::VectorXd constants(coefficients.rows());
-		int row = 0;
-		for (int i = 0; i < count; ++i)
-		for (int j = 0; j < i; ++j)
-		for (int family = 0; family < 2; ++family)
-		{
-			Eigen::Matrix3d qi = samples[i].ref.rot.transpose();
-			Eigen::Matrix3d qj = samples[j].ref.rot.transpose();
-			if (family == 1)
-			{
-				qi = (rotation * samples[i].target.rot).transpose();
-				qj = (rotation * samples[j].target.rot).transpose();
-			}
-			coefficients.block<3, 3>(row, 0) = qj - qi;
-			constants.segment<3>(row) = qj * (samples[j].ref.trans - rotation * samples[j].target.trans)
-				- qi * (samples[i].ref.trans - rotation * samples[i].target.trans);
-			row += 3;
-		}
-		Eigen::Vector3d expected = coefficients.jacobiSvd<Eigen::ComputeThinU | Eigen::ComputeThinV>().solve(constants);
-		worst = std::max(worst, (expected - calc.Transformation().translation()).norm());
-	}
-	char detail[128];
-	snprintf(detail, sizeof detail, "worst difference from all-pairs solve %.3e m", worst);
-	check("legacy: centered solve preserves all-pairs objective", valid && worst < 1e-10, detail);
-}
-
 void UpdaterRestartScenario(Check check)
 {
 	using namespace questcal::update;
@@ -696,6 +641,5 @@ void RunReviewRegressionScenarios(Check check)
 	SettingsPartialCommitScenario(check);
 	ConnectedPoseTrustScenario(check);
 	FrozenRecoveryBoundaryScenario(check);
-	LegacyTranslationScenario(check);
 	UpdaterRestartScenario(check);
 }

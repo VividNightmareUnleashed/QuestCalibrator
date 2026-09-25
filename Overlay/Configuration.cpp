@@ -137,7 +137,7 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.continuousTrackerSerial = ctx.continuousTrackerSerial;
 	record.continuousLatencyReestimation = ctx.continuousLatencyReestimation;
 	record.continuousRequireTrigger = ctx.continuousRequireTrigger;
-	record.continuousMode = static_cast<int>(ctx.continuousMode);
+	record.continuousNoPause = ctx.continuousNoPause;
 	record.hideMountedTracker = ctx.hideMountedTracker;
 	record.mountExtrinsic.valid = ctx.mountExtrinsic.valid;
 	record.mountExtrinsic.rotation = ctx.mountExtrinsic.rot;
@@ -200,7 +200,7 @@ static void ApplyProfilePreferences(
 	ctx.continuousTrackerSerial = record.continuousTrackerSerial;
 	ctx.continuousLatencyReestimation = record.continuousLatencyReestimation;
 	ctx.continuousRequireTrigger = record.continuousRequireTrigger;
-	ctx.continuousMode = record.continuousMode == 1 ? ContinuousMode::Legacy : ContinuousMode::Quest;
+	ctx.continuousNoPause = record.continuousNoPause;
 	ctx.hideMountedTracker = record.hideMountedTracker;
 	// Only the persisted members: MountExtrinsic::pairs is a runtime statistic
 	// that the load path resets and a preference edit must keep.

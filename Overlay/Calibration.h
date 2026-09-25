@@ -72,6 +72,8 @@ struct CalibrationProfileState
 	uint32_t continuousTrackerId = 0xFFFFFFFF;
 	double lastAutoCorrectionUnixTime = 0.0;
 	uint32_t autoCorrectionsApplied = 0;
+	uint32_t continuousReanchors = 0;
+	uint32_t continuousReanchorsUndone = 0;
 	questcal::ContinuousAlignment::State continuousState =
 		questcal::ContinuousAlignment::State::Inactive;
 	questcal::ContinuousAlignment::Deviation continuousDeviation;
@@ -121,12 +123,6 @@ struct CalibrationProfileState
 void InitSessionLog();
 void AppendSessionLog(const std::string &msg);
 
-// Which loop keeps the calibration true during play. Quest is
-// QuestCalibrator's own model (a measured mount offset, corrections from
-// every pose); Legacy is the verbatim port of OpenVR-SpaceCalibrator's, which
-// re-solves from motion. Persisted with the profile.
-enum class ContinuousMode { Quest = 0, Legacy = 1 };
-
 struct CalibrationContext : CalibrationProfileState
 {
 	// Session evidence survives profile resets and recalibrations. Only the
@@ -137,13 +133,6 @@ struct CalibrationContext : CalibrationProfileState
 		uint64_t batches = 0, samples = 0, gapEvents = 0, reportedLoss = 0;
 		double lastUpdateTime = 0.0;
 		questcal::ContinuousAlignment::Diagnostics engine;
-		struct Legacy
-		{
-			uint64_t resets = 0, gapResets = 0, bindingResets = 0, staleResets = 0;
-			uint64_t solveAttempts = 0, solvesAccepted = 0, pairSkewRejected = 0;
-			size_t samples = 0;
-			bool valid = false;
-		} legacy;
 	} continuousDiagnostics;
 
 	CalibrationState state = CalibrationState::None;
@@ -224,20 +213,20 @@ struct CalibrationContext : CalibrationProfileState
 	bool continuousLatencyReestimation = false;  // persisted; opt-in, default off
 	bool continuousRequireTrigger = false;       // persisted; confirm corrections manually
 	bool hideMountedTracker = true;              // persisted; displace from games
-	ContinuousMode continuousMode = ContinuousMode::Quest;  // persisted; which loop runs
+	// "Don't pause": follow every change the headset tracker reports, as
+	// OpenVR-SpaceCalibrator does, instead of pausing when the readings and the
+	// calibration disagree (ContinuousAlignment::SetFollowMode). Persisted; it
+	// took over the slot of the removed legacy method, which players chose to
+	// stop the pausing.
+	bool continuousNoPause = false;
 
 	// The feature is armed only when the tracker pick and the mount offset
 	// learned for that tracker are both present (picking a tracker clears the
 	// extrinsic), and every consumer, the driver-side hide included, must ask
-	// this. The legacy loop measures its own tracker offset, so for it the
-	// pick alone arms the feature.
+	// this.
 	bool ContinuousArmed() const
 	{
-		if (!continuousEnabled)
-			return false;
-		if (continuousMode == ContinuousMode::Legacy)
-			return !continuousTrackerSerial.empty();
-		return mountExtrinsic.valid;
+		return continuousEnabled && mountExtrinsic.valid;
 	}
 
 	// Driver pose-channel health, refreshed every tick. Losing the ring parks
@@ -260,6 +249,10 @@ struct CalibrationContext : CalibrationProfileState
 	bool lighthouseLogAvailable = false;
 	std::string lighthouseLogPath;
 	uint32_t lighthouseAttributedEvents = 0;
+	// Lighthouse frame moves seen on the pose stream (LighthouseFrameWatch.h)
+	// and the last one's log line, for the diagnostics export.
+	uint32_t lighthouseFrameMoves = 0;
+	std::string lastLighthouseFrameMove;
 	// The optional modules the installer put in (Modules.h), read at startup.
 	questcal::Modules modules;
 	// Debounced persistence for runtime compensation updates: dirty records save

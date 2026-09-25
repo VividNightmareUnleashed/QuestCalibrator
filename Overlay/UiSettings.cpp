@@ -272,7 +272,8 @@ void BuildSettingsScreen(const VRState &state)
 					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(ContinuousStatusColor(continuous)), status);
 
-				// Nested inset: tracker pick, game visibility, opt-in latency.
+				// Nested inset: tracker pick, don't pause, game visibility,
+				// opt-in latency, trigger confirmation.
 				ImVec2 np = ImVec2(p.x + 12.0f, p.y + kRowHeight + kRowSubLineH);
 				ImVec2 nb = ImVec2(p.x + cw - 12.0f, np.y + nestedH - 8.0f);
 				dl->AddRectFilled(np, nb, Pal::U32(Pal::Inset), 9.0f);
@@ -331,39 +332,26 @@ void BuildSettingsScreen(const VRState &state)
 								candidate.mountExtrinsic =
 									questcal::MountExtrinsicRecord();
 							});
-						// The count described the previous tracker's loop.
+						// The counts described the previous tracker's loop.
 						CalCtx.autoCorrectionsApplied = 0;
+						CalCtx.continuousReanchors = 0;
+						CalCtx.continuousReanchorsUndone = 0;
 					}
 				}
 				ImGui::PopStyleVar();
 				ImGui::PopItemWidth();
 
-				// Which loop runs: a two-way switch, since both are a method and
-				// neither is "on". Legacy is the original SpaceCalibrator's,
-				// for players whose setup worked with it.
-				{
-					const float segItemW = 150.0f, segH = 32.0f;
-					const float rowY = np.y + 40.0f;
-					dl->AddText(g_fontBody, g_fontBody->LegacySize,
-						ImVec2(np.x + 12.0f, rowY + segH * 0.5f - g_fontBody->LegacySize * 0.5f),
-						Pal::U32(Pal::Text), Tr("Method"));
-					const ImVec2 segPos(nb.x - 14.0f - (segItemW * 2.0f + 8.0f), rowY);
-					ImGui::SetCursorScreenPos(segPos);
-					const char *methods[] = { "Standard", "Legacy" };
-					const int mode = CalCtx.continuousMode == ContinuousMode::Legacy ? 1 : 0;
-					const int picked = Segmented("contMethod", mode, methods, 2, segItemW, segH);
-					if (ImGui::IsMouseHoveringRect(segPos,
-						ImVec2(segPos.x + segItemW * 2.0f + 8.0f, rowY + segH)))
-						// Beside the cursor, not below it: below is the rest of the inset.
-						ShowTip("Standard measures where the tracker sits on the headset once,\n"
-							"then corrects from every pose. Legacy is OpenVR-SpaceCalibrator's\n"
-							"method: it re-solves from head movement. Try it if Standard keeps pausing.", true);
-					if (picked != mode)
-						SaveProfileFieldEdit(CalCtx,
-							[&](questcal::ProfileRecord &candidate) {
-								candidate.continuousMode = picked;
-							});
-				}
+				bool noPause = CalCtx.continuousNoPause;
+				if (NestedToggle("##contNoPause", ImVec2(np.x + 12.0f, np.y + 46.0f), nestedW,
+					"Don't pause", noPause,
+					"Follows every change the headset tracker reports, as\n"
+					"OpenVR-SpaceCalibrator does, instead of pausing when the readings\n"
+					"and the calibration disagree. A bad base station fix of the\n"
+					"headset tracker then moves your body trackers until it clears."))
+					SaveProfileFieldEdit(CalCtx,
+						[&](questcal::ProfileRecord &candidate) {
+							candidate.continuousNoPause = noPause;
+						});
 
 				bool hideMountedTracker = CalCtx.hideMountedTracker;
 				if (NestedToggle("##hideTracker", ImVec2(np.x + 12.0f, np.y + 80.0f), nestedW,
@@ -588,7 +576,7 @@ void BuildSettingsScreen(const VRState &state)
 				std::string path, error;
 				if (WriteDiagnosticsFile(CalCtx, path, error, vr::VRSystem(), CaptureCalibrationDiagnostics()))
 				{
-					CalCtx.Tell("Diagnostics saved to " + path, CalibrationContext::Tone::Good);
+					CalCtx.Tell("Diagnostics saved to " + PathForLog(path), CalibrationContext::Tone::Good);
 					if (!g_uiPreviewMode)
 						RevealInExplorer(path);
 				}

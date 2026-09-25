@@ -56,6 +56,14 @@ struct EngineConfig
 {
 	// --- time alignment ---
 	bool   estimateTimeOffset = true;
+	// Used when the estimate fails, instead of failing the solve: the latency
+	// is a nuisance parameter, and the residual gates below still judge the
+	// result. The overlay passes the profile's last measured offset (or zero).
+	// A weak correlation used to refuse the whole calibration: three of five
+	// attempts in the 2026-09-25 tester session, where the one success had a
+	// correlation of 0.75 and a peak 0.0017 above the next lag.
+	bool   useFallbackTimeOffset = false;
+	double fallbackTimeOffset = 0.0;   // seconds; positive = target stream lags reference
 	double timeOffsetRange = 0.06;     // seconds searched on each side of zero
 	// Coarse lag grid, refined parabolically. The correlator resamples at a
 	// whole division of it (step/2 at or above 2 ms, else the step itself), so
@@ -164,7 +172,9 @@ struct EngineResult
 	double scale = 1.0;
 	double timeOffset = 0.0;                    // seconds; positive = target stream lags reference
 	bool timeOffsetValid = false;
-	double timeOffsetScore = 0.0;
+	bool timeOffsetFellBack = false;            // the estimate failed and the fallback was used
+	std::string timeOffsetFailure;              // why the estimate failed, when it did
+	double timeOffsetScore = 0.0;               // the best correlation, measured or not
 	double timeOffsetPeakMargin = 0.0;
 
 	// Quality metrics (populated even when invalid, when computable).
@@ -204,12 +214,16 @@ public:
 	                          const std::vector<PoseSample> &targetStream,
 	                          const EngineConfig &config);
 
+	// failureOut, when given, names the condition that refused an estimate;
+	// scoreOut and peakMarginOut then still carry the best lag's figures where
+	// one was computed.
 	static bool EstimateTimeOffset(const std::vector<PoseSample> &refStream,
 	                               const std::vector<PoseSample> &targetStream,
 	                               const EngineConfig &config,
 	                               double &offsetOut,
 	                               double *scoreOut = nullptr,
-	                               double *peakMarginOut = nullptr);
+	                               double *peakMarginOut = nullptr,
+	                               std::string *failureOut = nullptr);
 
 	static bool InterpolateAt(const std::vector<PoseSample> &stream, double t,
 	                          double maxGap, PoseSample &out);
