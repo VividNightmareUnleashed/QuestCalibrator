@@ -40,10 +40,8 @@ void IPCClient::Close()
 	}
 }
 
-// Waits out one overlapped transfer under TransactionTimeoutMs and returns the
-// bytes transferred. A timeout is thrown exactly like an I/O error so
-// SendDriverRequest's ConnectionGeneration bookkeeping and the
-// replay-after-reconnect path in SendBlocking both behave unchanged.
+// A timeout throws like an I/O error, so SendBlocking's reconnect-and-replay
+// handles both.
 DWORD IPCClient::AwaitOverlapped(OVERLAPPED &ov, const char *what)
 {
 	DWORD transferred = 0;
@@ -136,10 +134,9 @@ protocol::Response IPCClient::SendBlocking(const protocol::Request &request)
 	}
 	catch (...)
 	{
-		// A vrserver restart invalidates the old named-pipe instance. All
-		// current mutations are complete-state setters, so replaying one after
-		// a fresh same-version handshake is safe and lets the overlay recover
-		// without a restart of its own.
+		// A vrserver restart invalidates the old pipe instance. Every mutation
+		// is a complete-state setter, so replaying it after a fresh handshake
+		// is safe.
 		Close();
 	}
 
