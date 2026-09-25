@@ -105,7 +105,6 @@
     <ClInclude Include="Diagnostics.h" />
     <ClInclude Include="Localization.h" />
     <ClInclude Include="LocalizationTables.h" />
-    <ClInclude Include="LegacyContinuous.h" />
     <ClInclude Include="UpdatePolicy.h" />
     <ClInclude Include="Updater.h" />
     <ClInclude Include="CalibrationRun.h" />
@@ -122,6 +121,7 @@
     <ClInclude Include="Modules.h" />
     <ClInclude Include="LicenseAgreement.h" />
     <ClInclude Include="TrackingStreamDigest.h" />
+    <ClInclude Include="LighthouseFrameWatch.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
     <ClInclude Include="DriverSyncTracker.h" />
@@ -382,7 +382,6 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
-    <ClCompile Include="LegacyContinuous.cpp" />
     <ClCompile Include="Updater.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

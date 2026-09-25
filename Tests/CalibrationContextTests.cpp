@@ -35,6 +35,13 @@ bool DiagnosticsExportScenario()
 	capture.poseStream.devices[16].latest.position[1] = -0.25;
 	std::string path, error;
 	const bool saved = WriteDiagnosticsFile(ctx, path, error, nullptr, capture);
+	// What the log and the screen get instead of the full path.
+	const bool shortened = PathForLog(path).rfind("%LOCALAPPDATA%\\QuestCalibrator\\diagnostics\\", 0) == 0 &&
+		ShortenUserPath("C:\\Users\\Jo\\AppData\\Local\\x", "C:\\Users\\jo\\AppData\\Local", "C:\\Users\\jo") ==
+			"%LOCALAPPDATA%\\x" &&
+		ShortenUserPath("C:\\Users\\jo\\Desktop\\x", "C:\\Users\\jo\\AppData\\Local", "C:\\Users\\jo") ==
+			"%USERPROFILE%\\Desktop\\x" &&
+		ShortenUserPath("C:\\Users\\joanna\\x", "", "C:\\Users\\jo") == "C:\\Users\\joanna\\x";
 	std::string report;
 	if (saved)
 	{
@@ -49,7 +56,7 @@ bool DiagnosticsExportScenario()
 	std::filesystem::remove(root / L"QuestCalibrator" / L"diagnostics");
 	std::filesystem::remove(root / L"QuestCalibrator");
 	std::filesystem::remove(root);
-	return saved && error.empty() && report.find("SHA-256: unavailable") == std::string::npos &&
+	return saved && error.empty() && shortened && report.find("SHA-256: unavailable") == std::string::npos &&
 		report.find("[driver synchronization]") != std::string::npos &&
 		report.find("scale identifiable: off, condition 0.0001") != std::string::npos &&
 		report.find("mount rotation (w x y z)") != std::string::npos &&
@@ -88,12 +95,11 @@ bool ContinuousInputDiagnosticsScenario()
 		report.find("accepted capture age 20.0 ms") == std::string::npos)
 		return false;
 	ctx.Clear();
-	ctx.continuousMode = ContinuousMode::Legacy;
+	ctx.continuousNoPause = true;
 	const std::string afterReset = DescribeContinuousDiagnostics(ctx, 20.0);
 	return input.devices[0].received == 3 &&
-		afterReset.find("method: legacy") != std::string::npos &&
-		afterReset.find("accepted capture age 10000.0 ms") != std::string::npos &&
-		afterReset.find("valid solve off") != std::string::npos;
+		afterReset.find("don't pause: on") != std::string::npos &&
+		afterReset.find("accepted capture age 10000.0 ms") != std::string::npos;
 }
 
 bool PoseStreamDiagnosticsScenario()
@@ -295,7 +301,7 @@ bool CalibrationContextCadenceScenario()
 	ctx.continuousTrackerSerial = "tracker";
 	ctx.continuousTrackerId = 3;
 	ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd] = true;
-	ctx.continuousMode = ContinuousMode::Legacy;
+	ctx.continuousNoPause = true;
 	if (ctx.IdleUpdateInterval() != 0.05)
 		return false;
 	ctx.poseRingOpen = false;
@@ -306,7 +312,7 @@ bool CalibrationContextCadenceScenario()
 	if (ctx.IdleUpdateInterval() != 0.05)
 		return false;
 
-	ctx.continuousMode = ContinuousMode::Quest;
+	ctx.continuousNoPause = false;
 	ctx.mountExtrinsic.valid = true;
 	ctx.continuousRequireTrigger = true;
 	if (ctx.IdleUpdateInterval() != 0.05)

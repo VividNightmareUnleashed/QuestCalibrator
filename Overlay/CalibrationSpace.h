@@ -29,9 +29,12 @@ void ResetUniverseObservations(CalibrationContext &ctx);
 bool FinishUniverseObservations(CalibrationContext &ctx, double now);
 
 // Applies a reference-space delta to every profile-owned spatial value.
+// moveChaperone: the reference space itself moved (a headset re-center), so
+// the protected chaperone moves with it; a correction or a re-anchor moves
+// only the target side and leaves it.
 bool ApplyCalibrationDelta(CalibrationContext &ctx,
 	const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translation,
-	bool snap, double now);
+	bool snap, double now, bool moveChaperone);
 
 // Rebinds physical-HMD and raw-universe ownership after a successful base
 // calibration and disarms a room snapshot that no longer belongs to it.

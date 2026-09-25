@@ -448,6 +448,8 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		freezeExceededSince = -1.0;
 		resumeBelowSince = -1.0;
 		resumeInBandSince = -1.0;
+		reanchorSince = -1.0;
+		undoSince = -1.0;
 		if (rotExceed || posExceed)
 			deviation.valid = false;
 		else
@@ -466,6 +468,8 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	{
 		deviation.valid = false;
 		freezeExceededSince = -1.0;   // no deviation can confirm through noise
+		reanchorSince = -1.0;         // nor can a re-anchor, or its undoing
+		undoSince = -1.0;
 		if (state == State::Frozen)
 		{
 			resumeBelowSince = -1.0;
@@ -498,8 +502,8 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		yawAngle, headStep, headPos);
 
 	bool exceed = deviation.yawDeg >= config.freezeYawDeg
-		|| deviation.tiltDeg >= config.freezeTiltDeg
 		|| deviation.posM >= config.freezePosM;
+	bool tilted = deviation.tiltDeg >= config.holdTiltDeg;
 
 	if (state == State::Frozen)
 	{
@@ -507,10 +511,11 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		// unfreezes after a short confirm (a cleared tracking fault, or a
 		// recalibration that resets us anyway); one anywhere inside the band
 		// after a long one, since Tracking would correct it without freezing.
-		// A persisting fault stays outside the band and never does.
+		// A persisting fault stays outside the band and never does. A tilted
+		// window holds, so it confirms neither.
 		bool below = deviation.yawDeg < config.freezeYawDeg * config.resumeFactor
-			&& deviation.tiltDeg < config.freezeTiltDeg * config.resumeFactor
-			&& deviation.posM < config.freezePosM * config.resumeFactor;
+			&& deviation.posM < config.freezePosM * config.resumeFactor
+			&& !tilted;
 		if (below)
 		{
 			if (resumeBelowSince < 0.0)
@@ -520,7 +525,7 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		{
 			resumeBelowSince = -1.0;
 		}
-		if (!exceed)
+		if (!exceed && !tilted)
 		{
 			if (resumeInBandSince < 0.0)
 				resumeInBandSince = now;
@@ -533,15 +538,30 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 			(resumeInBandSince >= 0.0 && now - resumeInBandSince >= config.resumeInBandSeconds))
 		{
 			EnterState(State::Tracking);
+			episodeSince = -1.0;
+			reanchorSince = -1.0;
+			undoSince = -1.0;
 			Event e;
 			e.type = Event::Resumed;
 			events.push_back(e);
+			return;
 		}
+		// Still off by the freeze thresholds or tilted: the deviation that
+		// stays put is followed. Anything inside the band waits for the resume.
+		if (exceed || tilted)
+			TryReanchor(now, est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
+		else
+			reanchorSince = undoSince = -1.0;
 		return;
 	}
 
 	if (exceed)
 	{
+		// A tilt hold that grew into a deviation is a new episode, which the
+		// freeze starts.
+		episodeSince = -1.0;
+		reanchorSince = -1.0;
+		undoSince = -1.0;
 		if (freezeExceededSince < 0.0)
 		{
 			freezeExceededSince = now;
@@ -549,6 +569,7 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		else if (now - freezeExceededSince >= config.freezeConfirmSeconds)
 		{
 			EnterState(State::Frozen);
+			episodeSince = now;
 			Event e;
 			e.type = Event::FrozenLargeDeviation;
 			e.deviation = deviation;
@@ -559,6 +580,22 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		return;
 	}
 
+	// Tilted: hold like scatter, with the deviation still published. Only
+	// sustained yaw or position at the head freezes; a tilt that stays put
+	// re-anchors like a freeze does.
+	if (tilted)
+	{
+		freezeExceededSince = -1.0;
+		if (episodeSince < 0.0)
+			episodeSince = now;
+		EnterState(State::Holding);
+		TryReanchor(now, est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
+		return;
+	}
+
+	episodeSince = -1.0;
+	reanchorSince = -1.0;
+	undoSince = -1.0;
 	EnterState(State::Tracking);
 
 	if (deviation.yawDeg < config.deadbandYawDeg && deviation.posM < config.deadbandPosM)
@@ -580,6 +617,114 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	correction.translation = headPos + f * headStep - correction.rotation * headPos;
 	pendingCorrection = correction;
 	correctionEligible = true;
+}
+
+void ContinuousAlignment::TryReanchor(double now, const WindowEstimate &est,
+                                      const Eigen::Quaterniond &calRotation,
+                                      const Eigen::Vector3d &calTranslationMeters,
+                                      double yawAngle, const Eigen::Vector3d &headStep,
+                                      const Eigen::Vector3d &headPos)
+{
+	// The readings are back on the calibration the last re-anchor replaced:
+	// what it followed has cleared. Nothing new is followed meanwhile, and a
+	// restart does not hold this back, since a restart is what usually
+	// clears a fault of the target.
+	if (replaced)
+	{
+		double undoYaw = 0.0;
+		Eigen::Vector3d undoStep, undoHead;
+		const Deviation back = MeasureDeviation(est, replaced->rot, replaced->trans,
+			undoYaw, undoStep, undoHead);
+		if (back.yawDeg < config.freezeYawDeg * config.resumeFactor &&
+			back.posM < config.freezePosM * config.resumeFactor &&
+			back.tiltDeg < config.holdTiltDeg)
+		{
+			reanchorSince = -1.0;
+			if (undoSince < 0.0)
+				undoSince = now;
+			if (now - undoSince < config.resumeConfirmSeconds || pendingObs)
+				return;
+			Correction undo;
+			undo.rotation = (replaced->rot * calRotation.conjugate()).normalized();
+			undo.translation = replaced->trans - undo.rotation * calTranslationMeters;
+			pendingReanchor = undo;
+			Event e;
+			e.type = Event::ReanchorUndone;
+			e.deviation = deviation;
+			events.push_back(e);
+			replaced.reset();
+			episodeSince = -1.0;
+			undoSince = -1.0;
+			EnterState(State::Tracking);
+			return;
+		}
+		undoSince = -1.0;
+	}
+
+	// A restart of the target shortly before the episode, or during it, says
+	// the target moved rather than the universes: freeze on it (live
+	// 2026-09-25, every remaining freeze came within 30 s of one). Follow mode
+	// takes the target's word regardless, as OpenVR-SpaceCalibrator does.
+	const bool attributed = episodeSince >= 0.0 &&
+		lastTargetResolveTime >= episodeSince - config.resolveAttributionSeconds;
+	if (attributed && !followMode)
+	{
+		reanchorSince = -1.0;
+		return;
+	}
+
+	// The estimate has to hold still, not merely stay off: compared with the
+	// one the run began on, at the same head position, so the head moving
+	// through a large rotation does not read as the estimate moving.
+	if (reanchorSince >= 0.0)
+	{
+		double driftYaw = 0.0;
+		Eigen::Vector3d driftStep, driftHead;
+		const Deviation drift = MeasureDeviation(est, reanchorRef.rot, reanchorRef.trans,
+			driftYaw, driftStep, driftHead);
+		if (drift.yawDeg >= config.reanchorSteadyDeg || drift.tiltDeg >= config.reanchorSteadyDeg ||
+			drift.posM >= config.reanchorSteadyPosM)
+			reanchorSince = -1.0;
+	}
+	if (reanchorSince < 0.0)
+	{
+		reanchorSince = now;
+		reanchorRef = est;
+		return;
+	}
+	if (now - reanchorSince < (followMode ? config.followConfirmSeconds : config.reanchorConfirmSeconds))
+		return;
+	// A window in front of an unresolved jump-guard step authorizes nothing,
+	// this included; the confirm carries on and completes on the next one.
+	if (pendingObs)
+		return;
+
+	// The estimate becomes the calibration. A tilt this large is the lighthouse
+	// frame's own and goes in whole; below it, what tilt there is reads as the
+	// tracker's orientation bias, and the re-anchor turns about the head
+	// exactly as a correction would, without the step cap.
+	Correction reanchor;
+	if (deviation.tiltDeg >= config.holdTiltDeg)
+	{
+		Eigen::Quaterniond rD = (est.rot * calRotation.conjugate()).normalized();
+		reanchor.rotation = rD;
+		reanchor.translation = est.trans - rD * calTranslationMeters;
+	}
+	else
+	{
+		reanchor.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(yawAngle, Eigen::Vector3d::UnitY()));
+		reanchor.translation = headPos + headStep - reanchor.rotation * headPos;
+	}
+	pendingReanchor = reanchor;
+	replaced = Replaced{ calRotation, calTranslationMeters };
+	Event e;
+	e.type = Event::Reanchored;
+	e.deviation = deviation;
+	e.afterTargetResolve = attributed;
+	events.push_back(e);
+	episodeSince = -1.0;
+	reanchorSince = -1.0;
+	EnterState(State::Tracking);
 }
 
 ContinuousAlignment::Deviation ContinuousAlignment::MeasureDeviation(
@@ -634,6 +779,14 @@ void ContinuousAlignment::EnterState(State s)
 		resumeBelowSince = -1.0;
 		resumeInBandSince = -1.0;
 	}
+	// Without an estimate there is no stuck episode to follow; a freeze keeps
+	// its own through a gap by not passing through here.
+	if (s == State::Inactive || s == State::Coasting)
+	{
+		episodeSince = -1.0;
+		reanchorSince = -1.0;
+		undoSince = -1.0;
+	}
 	state = s;
 }
 
@@ -653,6 +806,8 @@ void ContinuousAlignment::ClearConfirmMarks()
 	freezeExceededSince = -1.0;
 	resumeBelowSince = -1.0;
 	resumeInBandSince = -1.0;
+	reanchorSince = -1.0;
+	undoSince = -1.0;
 }
 
 void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotation,
@@ -764,6 +919,15 @@ bool ContinuousAlignment::PollCorrection(Correction &out)
 	return true;
 }
 
+bool ContinuousAlignment::PollReanchor(Correction &out)
+{
+	if (!pendingReanchor)
+		return false;
+	out = *pendingReanchor;
+	pendingReanchor.reset();
+	return true;
+}
+
 bool ContinuousAlignment::PollEvent(Event &out)
 {
 	if (events.empty())
@@ -809,6 +973,9 @@ void ContinuousAlignment::Reset(ResetReason reason)
 	unstableNotified = false;
 	pendingObs.reset();
 	pendingCorrection.reset();
+	pendingReanchor.reset();
+	if (!gap)
+		replaced.reset();
 	pendingTimeOffset.reset();
 	events.clear();
 	EnterState(keepFrozen ? State::Frozen : keepCoasting ? State::Coasting : State::Inactive);

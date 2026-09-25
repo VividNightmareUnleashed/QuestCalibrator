@@ -43,6 +43,9 @@ const char *ConfigError(const EngineConfig &config)
 		return "timeOffsetRange";
 	if (!finitePositive(config.timeOffsetStep))
 		return "timeOffsetStep";
+	if (!std::isfinite(config.fallbackTimeOffset) ||
+		std::abs(config.fallbackTimeOffset) > protocol::limits::MaxAbsTimeOffsetSeconds)
+		return "fallbackTimeOffset";
 	if (!finiteNonnegative(config.maxLinearSpeed) ||
 		config.maxLinearSpeed > protocol::limits::MaxAbsLinearVelocityMetersPerSecond)
 		return "maxLinearSpeed";
@@ -660,22 +663,29 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
                                             double &offsetOut,
                                             double *scoreOut,
                                             double *peakMarginOut,
-                                            bool validateInputs)
+                                            bool validateInputs,
+                                            std::string *failureOut)
 {
 	offsetOut = 0.0;
 	if (scoreOut) *scoreOut = 0.0;
 	if (peakMarginOut) *peakMarginOut = 0.0;
+	auto refuse = [&](const char *why)
+	{
+		if (failureOut)
+			*failureOut = why;
+		return false;
+	};
 	if (refStream.size() < 8 || targetStream.size() < 8)
-		return false;
+		return refuse("fewer than 8 samples on a side");
 	if (ConfigError(config))
-		return false;
+		return refuse("invalid configuration");
 	if (validateInputs && (!IsValidStream(refStream) || !IsValidStream(targetStream)))
-		return false;
+		return refuse("invalid stream");
 
 	double start = std::max(refStream.front().time, targetStream.front().time) + config.timeOffsetRange;
 	double end = std::min(refStream.back().time, targetStream.back().time) - config.timeOffsetRange;
 	if (end - start < 0.5)
-		return false;   // not enough overlap to correlate
+		return refuse("the streams overlap for under 0.5 s");
 
 	// The reference profile is resampled ONCE below, onto a grid every lag's
 	// window is a whole-slot slice of. That requires the lag step to be an exact
@@ -692,10 +702,10 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	double resampledCount = (end - start) / dt;
 	if (!std::isfinite(resampledCount) || resampledCount < 64.0 ||
 		resampledCount > MaxResampledPointCount)
-		return false;
+		return refuse("the overlap is outside the resampling budget");
 	double searchSteps = config.timeOffsetRange / config.timeOffsetStep;
 	if ((2.0 * searchSteps + 1.0) * resampledCount > MaxCorrelationWork)
-		return false;
+		return refuse("the search is outside the work budget");
 	size_t count = static_cast<size_t>(resampledCount);
 
 	int steps = static_cast<int>(config.timeOffsetRange / config.timeOffsetStep);
@@ -705,7 +715,7 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	double gridPointCount = static_cast<double>(count) +
 		2.0 * static_cast<double>(steps) * static_cast<double>(subdiv);
 	if (gridPointCount > MaxResampledPointCount)
-		return false;
+		return refuse("the search is outside the resampling budget");
 	size_t gridCount = static_cast<size_t>(gridPointCount);
 
 	ResampledSpeed targetSpeed = ResampleSpeed(
@@ -776,8 +786,11 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 		}
 	}
 
+	// The best lag's figures are evidence even when they refuse the estimate.
+	if (scoreOut) *scoreOut = std::max(bestScore, -1.0);
 	if (bestScore < 0.25)
-		return false;   // no meaningful correlation peak
+		return refuse(bestScore <= -1.0 ? "no lag had enough varying motion on both sides"
+			: "the best correlation is under 0.25");
 
 	int bestGridIndex = static_cast<int>(std::distance(scores.begin(),
 		std::max_element(scores.begin(), scores.end())));
@@ -791,8 +804,9 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 		secondScore = std::max(secondScore, scores[i]);
 	}
 	double peakMargin = secondScore > -1.0 ? bestScore - secondScore : bestScore;
+	if (peakMarginOut) *peakMarginOut = peakMargin;
 	if (peakMargin <= 1e-6)
-		return false;
+		return refuse("no lag stands out from the others");
 
 	// Parabolic refinement around the discrete peak.
 	if (bestGridIndex > 0 && bestGridIndex + 1 < static_cast<int>(scores.size()))
@@ -1384,13 +1398,23 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	double offsetScore = 0.0;
 	double offsetPeakMargin = 0.0;
 	bool offsetKnown = false;
+	bool offsetFellBack = false;
+	std::string offsetFailure;
 	if (config.estimateTimeOffset)
 	{
 		offsetKnown = EstimateTimeOffset(refStream, targetStream, config, offset,
-			&offsetScore, &offsetPeakMargin, false);
-		if (!offsetKnown)
+			&offsetScore, &offsetPeakMargin, false, &offsetFailure);
+		if (!offsetKnown && config.useFallbackTimeOffset)
+		{
+			offset = config.fallbackTimeOffset;
+			offsetFellBack = true;
+		}
+		else if (!offsetKnown)
 		{
 			failure.failure = EngineFailure::TimeOffset;
+			failure.timeOffsetFailure = offsetFailure;
+			failure.timeOffsetScore = offsetScore;
+			failure.timeOffsetPeakMargin = offsetPeakMargin;
 			failure.message = "Time offset could not be measured reliably. Keep both devices visible and rotate them together with varied motion.";
 			return failure;
 		}
@@ -1522,6 +1546,8 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	result.motionSmoothingDetected = fineAttenuated;
 	result.timeOffset = offset;
 	result.timeOffsetValid = offsetKnown;
+	result.timeOffsetFellBack = offsetFellBack;
+	result.timeOffsetFailure = offsetFailure;
 	result.timeOffsetScore = offsetScore;
 	result.timeOffsetPeakMargin = offsetPeakMargin;
 	result.samplesGated = gated;
