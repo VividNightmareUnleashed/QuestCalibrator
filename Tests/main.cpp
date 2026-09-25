@@ -683,117 +683,32 @@ void RunDriverPoseTransformScenarios()
 
 void RunDriverProtocolValidationScenarios()
 {
+	// ValidateAndSanitize is proved over every message by the VirtualQuest
+	// formal checks (formal/input-validation: accepted exactly when in bounds,
+	// sound output, unit quaternions, no write on a refused state). This smoke
+	// check keeps a build without the submodule honest, and covers two things
+	// the proof leaves to the harness: value-initialisation making an unused
+	// anchor neutral (the model checker mis-models it) and the state publishing
+	// the anchors it validated.
 	using questcal::driverinput::ValidateAndSanitize;
-	const double nan = std::numeric_limits<double>::quiet_NaN();
-	const double inf = std::numeric_limits<double>::infinity();
-
-	protocol::SetDeviceTransform good;
-	good.openVRID = 3;
-	good.enabled = true;
-	good.translation = { { 1.0, -2.0, 3.0 } };
-	good.rotation = { 2.0, 0.0, 0.0, 0.0 };
-	good.scale = 1.25;
-	good.timeOffset = -0.055;
-	protocol::SetDeviceTransform sanitized;
-	bool pass = ValidateAndSanitize(good, sanitized) && sanitized.openVRID == 3 &&
-		std::abs(sanitized.rotation.w - 1.0) < 1e-12 && sanitized.scale == good.scale;
-
-	// True when `mutate` turns the valid `candidate` into a refused message.
-	auto rejects = [](auto candidate, auto mutate)
-	{
-		mutate(candidate);
-		decltype(candidate) ignored;
-		return !ValidateAndSanitize(candidate, ignored);
-	};
-	using Transform = protocol::SetDeviceTransform;
-	pass = pass &&
-		rejects(good, [&](Transform &m) { m.openVRID = vr::k_unMaxTrackedDeviceCount; }) &&
-		rejects(good, [&](Transform &m) { m.translation.v[0] = nan; }) &&
-		rejects(good, [&](Transform &m) { m.translation.v[1] = 10001.0; }) &&
-		rejects(good, [&](Transform &m) { m.rotation.w = inf; }) &&
-		rejects(good, [&](Transform &m) { m.rotation = { 0.0, 0.0, 0.0, 0.0 }; }) &&
-		rejects(good, [&](Transform &m) { m.scale = 0.24; }) &&
-		rejects(good, [&](Transform &m) { m.scale = 4.01; }) &&
-		rejects(good, [&](Transform &m) { m.scale = nan; }) &&
-		rejects(good, [&](Transform &m) { m.timeOffset = 1.01; }) &&
-		rejects(good, [&](Transform &m) { m.timeOffset = inf; }) &&
-		rejects(good, [&](Transform &m) { m.enabled = 2; }) &&
-		rejects(good, [&](Transform &m) { m.hidden = 2; });
-
-	protocol::SetAlignmentField goodField;
-	goodField.enabled = true;
-	goodField.anchorCount = 1;
-	goodField.sigmaMeters = 1.5;
-	goodField.anchors[0].position[0] = 2.0;
-	goodField.anchors[0].rotationDelta = { 0.0, 3.0, 0.0, 0.0 };
-	goodField.anchors[0].translationDelta[2] = -0.2;
-	protocol::SetAlignmentField sanitizedField;
-	pass = pass && ValidateAndSanitize(goodField, sanitizedField) &&
-		std::abs(sanitizedField.anchors[0].rotationDelta.x - 1.0) < 1e-12;
-
-	using Field = protocol::SetAlignmentField;
-	pass = pass &&
-		rejects(goodField, [&](Field &m) { m.anchorCount = Field::MaxAnchors + 1; }) &&
-		rejects(goodField, [&](Field &m) { m.sigmaMeters = 0.01; }) &&
-		rejects(goodField, [&](Field &m) { m.sigmaMeters = 101.0; }) &&
-		rejects(goodField, [&](Field &m) { m.sigmaMeters = nan; }) &&
-		rejects(goodField, [&](Field &m) { m.enabled = 2; });
-
-	// Per-anchor bounds, on the only anchor of goodField and on the LAST anchor
-	// of a full field: a validation loop that stops early passes the first set
-	// and silently drops the tail's corrections to identity.
-	protocol::SetAlignmentField tailField = goodField;
-	tailField.anchorCount = Field::MaxAnchors;
-	for (uint32_t i = 0; i < tailField.anchorCount; ++i)
-	{
-		tailField.anchors[i].position[0] = 1.0 + static_cast<double>(i);
-		tailField.anchors[i].rotationDelta = { 1.0, 0.0, 0.0, 0.0 };
-		tailField.anchors[i].translationDelta[2] = -0.05;
-	}
-	const uint32_t lastAnchor = Field::MaxAnchors - 1;
-	protocol::SetAlignmentField sanitizedTail;
-	pass = pass && ValidateAndSanitize(tailField, sanitizedTail) &&
-		sanitizedTail.anchors[lastAnchor].position[0] ==
-			1.0 + static_cast<double>(lastAnchor);
-	auto rejectsAnchor = [&](const Field &base, uint32_t a)
-	{
-		return rejects(base, [&](Field &m) { m.anchors[a].position[1] = inf; }) &&
-			rejects(base, [&](Field &m) { m.anchors[a].position[2] = 10001.0; }) &&
-			rejects(base, [&](Field &m) { m.anchors[a].translationDelta[0] = 100.01; }) &&
-			rejects(base, [&](Field &m) { m.anchors[a].rotationDelta = { 0.0, 0.0, 0.0, 0.0 }; });
-	};
-	pass = pass && rejectsAnchor(goodField, 0) && rejectsAnchor(tailField, lastAnchor);
-
-	// Unused wire anchors are deliberately scrubbed instead of trusted.
-	protocol::SetAlignmentField unusedGarbage;
-	unusedGarbage.anchorCount = 0;
-	unusedGarbage.anchors[0].position[0] = nan;
-	protocol::SetAlignmentField scrubbed;
-	pass = pass && ValidateAndSanitize(unusedGarbage, scrubbed) &&
-		scrubbed.anchors[0].position[0] == 0.0 && scrubbed.anchors[0].rotationDelta.w == 1.0;
-
-	protocol::SetRuntimeState runtime;
-	runtime.enabledMask = (uint64_t{ 1 } << 3) | (uint64_t{ 1 } << 7);
-	runtime.hiddenMask = uint64_t{ 1 } << 7;
-	runtime.transform = good;
-	runtime.transform.openVRID = 0;
-	runtime.transform.enabled = 1;
-	runtime.transform.hidden = 0;
-	runtime.field = goodField;
-	protocol::SetRuntimeState cleanRuntime;
-	pass = pass && ValidateAndSanitize(runtime, cleanRuntime) &&
-		cleanRuntime.enabledMask == runtime.enabledMask &&
-		cleanRuntime.hiddenMask == runtime.hiddenMask;
-	using Runtime = protocol::SetRuntimeState;
-	pass = pass &&
-		rejects(runtime, [&](Runtime &m) { m.hiddenMask |= uint64_t{ 1 } << 9; }) &&
-		rejects(runtime, [&](Runtime &m) { m.transform.openVRID = 3; }) &&
-		rejects(runtime, [&](Runtime &m) { m.transform.enabled = 0; }) &&
-		rejects(runtime, [&](Runtime &m) { m.transform.hidden = 1; }) &&
-		rejects(runtime, [&](Runtime &m) { m.enabledMask = 0; m.hiddenMask = 0; });
-
-	Check("driver: protocol validation", pass,
-		"finite/range/quaternion/unused-anchor/atomic-state matrix");
+	protocol::SetRuntimeState good;
+	good.enabledMask = 1;
+	good.transform.rotation = { 2.0, 0.0, 0.0, 0.0 };
+	good.field.enabled = 1;
+	good.field.anchorCount = 1;
+	good.field.anchors[0].position[0] = 2.0;
+	good.field.anchors[1].position[0] = std::numeric_limits<double>::quiet_NaN();
+	protocol::SetRuntimeState bad = good;
+	bad.transform.translation.v[0] = std::numeric_limits<double>::quiet_NaN();
+	protocol::SetRuntimeState clean, untouched;
+	untouched.enabledMask = 7;
+	Check("driver: protocol validation",
+		ValidateAndSanitize(good, clean) && clean.transform.rotation.w == 1.0 &&
+			clean.field.anchors[0].position[0] == 2.0 &&
+			clean.field.anchors[1].position[0] == 0.0 &&
+			clean.field.anchors[1].rotationDelta.w == 1.0 &&
+			!ValidateAndSanitize(bad, untouched) && untouched.enabledMask == 7,
+		"good state accepted, anchor published, unused anchor neutral; NaN refused, nothing written");
 
 	questcal::ipc::ConnectionState connection;
 	protocol::Response response;
@@ -1659,7 +1574,11 @@ void RunPoseSampleScenarios()
 
 	// The trust boundary: malformed numerics on a Running_OK pose, or clean
 	// numerics on a device that is not tracking, are tracking absence, and the
-	// caller's output must be left untouched rather than defaulted.
+	// caller's output must be left untouched rather than defaulted. Which raw
+	// samples the first gate refuses is proved over every sample by the
+	// VirtualQuest formal checks (formal/input-validation); what stays here is
+	// the Eigen side they cannot reach: a refusal through either gate leaves the
+	// output untouched, and the composed gate catches what the first cannot.
 	{
 		const Eigen::Quaterniond wfdRot(
 			Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
@@ -1679,15 +1598,9 @@ void RunPoseSampleScenarios()
 				out.time == sentinel.time && out.pos == sentinel.pos;
 		};
 
-		protocol::DevicePoseSample notValid = good;
-		notValid.poseIsValid = false;
 		protocol::DevicePoseSample notTracking = good;
 		notTracking.trackingResult =
 			static_cast<uint32_t>(vr::TrackingResult_Running_OutOfRange);
-		protocol::DevicePoseSample malformedNumeric = good;
-		malformedNumeric.position[1] = 1e300;
-		protocol::DevicePoseSample degenerateRotation = good;
-		degenerateRotation.rotation = { 0.0, 0.0, 0.0, 0.0 };
 		// Each field is inside the ring bounds but the composed position (18 km)
 		// is not: only the second, composed gate catches it.
 		protocol::DevicePoseSample overflowingComposition = good;
@@ -1697,16 +1610,11 @@ void RunPoseSampleScenarios()
 
 		PoseSample accepted;
 		bool ok = TryComposeRingSample(good, TestQpcToSeconds, accepted) &&
-			IsTrustedRingSample(good, TestQpcToSeconds) &&
-			rejectsAndPreserves(notValid) &&
 			rejectsAndPreserves(notTracking) &&
-			rejectsAndPreserves(malformedNumeric) &&
-			rejectsAndPreserves(degenerateRotation) &&
 			IsTrustedRingSample(overflowingComposition, TestQpcToSeconds) &&
-			rejectsAndPreserves(overflowingComposition) &&
-			!IsTrustedRingSample(notTracking, TestQpcToSeconds);
+			rejectsAndPreserves(overflowingComposition);
 		Check("pose ring: ingestion trust boundary", ok,
-			"healthy accepted; invalid/not-tracking/unbounded/degenerate/overflowing rejected without writing out");
+			"healthy accepted; refused at the trust gate and at the composed gate without writing out");
 	}
 
 	// Drift-feed eligibility: the HMD alone on the reference side (its SLAM map
@@ -7209,25 +7117,19 @@ void RunPersistenceContractScenario()
 	m = good; m.rotation = Eigen::Quaterniond(0.0, 0.0, 0.0, 0.0);
 	expect("zero-quat", m, false, "the calibration transform is invalid");
 
-	m = good; m.scale = 0.24; expect("scale-0.24", m, false, nullptr);
-	m = good; m.scale = 4.01; expect("scale-4.01", m, false, nullptr);
-	m = good; m.scale = 0.25; expect("scale-0.25", m, true, nullptr);
-	m = good; m.scale = 4.0;  expect("scale-4.0", m, true, nullptr);
-
-	m = good; m.timeOffset = 1.0;       expect("offset-1.0", m, true, nullptr);
-	m = good; m.timeOffset = 1.0000001; expect("offset-over", m, false, nullptr);
-
-	// 0 means "unknown", which older records legitimately carry.
-	m = good; m.calibrationUnixTime = 0.0;    expect("time-0", m, true, nullptr);
-	m = good; m.calibrationUnixTime = -0.001; expect("time-negative", m, false, nullptr);
+	// The scalar bounds (scale, time offset, record time, residual) are proved
+	// over every double by the VirtualQuest formal checks
+	// (formal/input-validation, ProfileScalarValidation.h), and persistence D
+	// drives each one through the parser. What stays here goes through Eigen or
+	// the record's structure.
 
 	m = good; m.universeHmdSerial.clear();
 	expect("universe-no-serial", m, false, nullptr);
 	m.universeValid = false;
 	expect("universe-disarmed", m, true, nullptr);
 
+	// A mount block that would be refused is ignored while it is not valid.
 	m = good; m.mountExtrinsic.rotationRmsDeg = -1.0;
-	expect("mount-bad-rms", m, false, nullptr);
 	m.mountExtrinsic.valid = false;
 	expect("mount-disarmed", m, true, nullptr);
 
@@ -7262,10 +7164,8 @@ void RunPersistenceContractScenario()
 
 	char detail[384];
 	snprintf(detail, sizeof detail,
-		"scale [%.2f,%.2f], |offset| <= %.1f, <= %zu anchors; anchor loop outside the valid gate%s%s",
-		protocol::limits::MinScale, protocol::limits::MaxScale,
-		protocol::limits::MaxAbsTimeOffsetSeconds, PersistMaxAnchors,
-		why.empty() ? "" : "  <-", why.c_str());
+		"systems, quaternion, universe, mount gate, <= %zu anchors; anchor loop outside the valid gate%s%s",
+		PersistMaxAnchors, why.empty() ? "" : "  <-", why.c_str());
 	Check("persistence F: contract", why.empty(), detail);
 }
 
