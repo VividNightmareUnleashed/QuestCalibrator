@@ -22,7 +22,9 @@
 // settles; neither freezes. A freeze or tilt hold whose estimate then stays
 // put, with no restart of the tracker's own tracking to explain it, is the
 // universes having moved apart, and the estimate is re-anchored as the
-// calibration (Config: re-anchor). Corrections never apply tilt: both
+// calibration (Config: re-anchor). Follow mode (the Legacy method) never
+// freezes: such a deviation becomes the calibration at the next evaluation,
+// as OpenVR-SpaceCalibrator's continuous mode does. Corrections never apply tilt: both
 // runtimes are gravity-aligned, so a small tilt deviation is tracker
 // orientation bias or noise, not universe drift. The yaw-only correction pivots at the
 // head, so the position there is still corrected in full: dropping the tilt
@@ -131,19 +133,17 @@ public:
 		// within resolveAttributionSeconds before the episode began (or since),
 		// is the universes having moved apart, and the estimate becomes the
 		// calibration. A glued mount does not move; a tracker whose own
-		// lighthouse solution went bad does, and that restart is in the log.
-		// Live 2026-09-24: the lighthouse side moved 62 deg / 78.6 deg of tilt
-		// with no restart of the headset tracker, rigid for an hour, and the
-		// body trackers stayed 5 m off until a recalibration nobody ran. The
-		// tilt is applied too when it is at least holdTiltDeg; below that the
-		// re-anchor turns about the head like a correction, uncapped ---
+		// lighthouse solution went bad does, and that restart is in the log, so
+		// nothing re-anchors while the caller cannot see the target's restarts
+		// (SetTargetRestartsVisible). Live 2026-09-24: the lighthouse side moved
+		// 62 deg / 78.6 deg of tilt with no restart of the headset tracker, rigid
+		// for an hour, and the body trackers stayed 5 m off until a recalibration
+		// nobody ran. The tilt is applied too when it is at least holdTiltDeg;
+		// below that the re-anchor turns about the head like a correction,
+		// uncapped ---
 		double reanchorConfirmSeconds = 30.0;
 		double reanchorSteadyDeg = 1.0;    // yaw or tilt the estimate may wander by during the confirm
 		double reanchorSteadyPosM = 0.05;  // at the head
-		// Follow mode ("don't pause", OpenVR-SpaceCalibrator's behaviour): every
-		// stuck episode re-anchors after this, restart or not. A bad lighthouse
-		// fix of the headset tracker then moves the body trackers until it clears.
-		double followConfirmSeconds = 10.0;
 		// A re-anchor is undone when a later stuck episode's readings fit the
 		// calibration it replaced inside the resume band for
 		// resumeConfirmSeconds, restart or not: a fault of the target that no
@@ -202,7 +202,7 @@ public:
 			TrackerLost,
 			TrackerRecovered,
 			ObservationsUnstable,   // sustained scatter; informational
-			Reanchored,             // the estimate became the calibration (PollReanchor)
+			Reanchored,             // the estimate became the calibration (PollReanchor); in follow mode, each follow
 			ReanchorUndone,         // the calibration before it fits again and is back (PollReanchor)
 		} type = FrozenLargeDeviation;
 		// Each event carries its own evidence, so one message never needs a
@@ -213,8 +213,8 @@ public:
 		double scatterPosM = 0.0;
 		// FrozenLargeDeviation: confirmed within resolveAttributionSeconds of a
 		// NoteTargetResolved, so the target's tracking restart is the likely
-		// cause and the next restart the likely cure. Reanchored: the episode
-		// was attributed so, and follow mode re-anchored anyway.
+		// cause and the next restart the likely cure. Reanchored: follow mode
+		// followed a deviation that came that soon after a restart.
 		bool afterTargetResolve = false;
 	};
 
@@ -305,12 +305,20 @@ public:
 	// True while the target's tracking says its pose is not settled (fewer
 	// than two base stations in view, or moments after a restart). No verdict
 	// is drawn from such a pose: no correction, no freeze, no resume; the
-	// state shows Holding unless it is already Frozen.
+	// state shows Holding unless it is already Frozen. Follow mode ignores it.
 	void SetTargetSettling(bool settling) { targetSettling = settling; }
 
-	// "Don't pause": re-anchor every stuck episode after followConfirmSeconds,
-	// whether or not the target's tracking restarted.
-	void SetFollowMode(bool follow) { followMode = follow; }
+	// The caller would see a restart of the target's tracking (SteamVR's log
+	// is being read and names the target). Without that no freeze can be told
+	// from the target's own fault, so none re-anchors. Off until set.
+	void SetTargetRestartsVisible(bool visible) { restartsVisible = visible; }
+
+	// Follow mode, the Legacy method: never freeze. A deviation past the
+	// freeze thresholds or a tilt past the hold becomes the calibration at the
+	// next evaluation (PollReanchor), restart or not, settled or not. A bad
+	// lighthouse fix of the headset tracker then moves the body trackers until
+	// it clears. Switching either way starts the episode bookkeeping over.
+	void SetFollowMode(bool follow);
 
 	// Derive the mount extrinsic from a manual calibration's sample buffers
 	// and its solved (valid) result. The per-pair spread doubles as the
@@ -364,6 +372,13 @@ private:
 	                 const Eigen::Vector3d &calTranslationMeters,
 	                 double yawAngle, const Eigen::Vector3d &headStep,
 	                 const Eigen::Vector3d &headPos);
+	// The whole delta from the calibration onto the estimate, as a re-anchor
+	// or a follow applies it.
+	Correction DeltaToEstimate(const WindowEstimate &est,
+	                           const Eigen::Quaterniond &calRotation,
+	                           const Eigen::Vector3d &calTranslationMeters,
+	                           double yawAngle, const Eigen::Vector3d &headStep,
+	                           const Eigen::Vector3d &headPos) const;
 	void EnterState(State s);
 	void ClearConfirmMarks();
 
@@ -395,6 +410,7 @@ private:
 
 	bool targetSettling = false;
 	double lastTargetResolveTime = -1e9;
+	bool restartsVisible = false;
 	bool followMode = false;
 
 	// The stuck episode: when the freeze confirmed, or when the tilt hold
@@ -407,8 +423,8 @@ private:
 
 	// The calibration the last re-anchor replaced, and the run of readings
 	// that fit it again. A re-anchor can follow a fault of the target that no
-	// restart explains (live 2026-09-25 01:25: a single-station solution of
-	// the headset tracker read 6 deg of tilt 71 s after it started, and the
+	// restart explains (live 2026-09-25 01:25: a solution of the headset
+	// tracker, all four stations in it, read 6 deg of tilt 71 s after it started, and the
 	// next restart cleared it); the calibration comes back when the readings
 	// return to it. Kept through what Frozen survives; any other reset
 	// (a recalibration suspends the loop) drops it.

@@ -5011,6 +5011,10 @@ void SetMountAfterSlip(double t, double slipTime,
 
 struct ContinuousSim
 {
+	// As an overlay that reads SteamVR's log and finds the tracker in it: the
+	// restarts a scenario notes are the only ones there were.
+	ContinuousSim() { ca.SetTargetRestartsVisible(true); }
+
 	ContinuousAlignment ca;
 	ContinuousAlignment::ExpectedCalibrationAt expectedAt;
 	Eigen::Quaterniond calRot{ 1, 0, 0, 0 };
@@ -6255,13 +6259,15 @@ void RunContinuousScenarios()
 	// for an hour; the loop froze and the body trackers stayed 5 m off). Here
 	// the target universe moves by 30 deg of yaw over 20 deg of tilt and a
 	// metre at 20 s and stays there. Unattributed, the freeze re-anchors once
-	// the estimate has held still for reanchorConfirmSeconds, tilt included.
-	// The same move right after a restart of the target is the target's own
-	// fault: it stays frozen, unless follow mode ("don't pause") is on, which
-	// follows it after followConfirmSeconds. A deviation that keeps moving
-	// never re-anchors. A re-anchor onto a fault of the target itself, one no
-	// restart explained, is undone once the readings return to the old
-	// calibration (live 2026-09-25 01:25).
+	// the estimate has held still for reanchorConfirmSeconds, tilt included,
+	// and only where the target's restarts would have shown. The same move
+	// right after a restart of the target is the target's own fault: it stays
+	// frozen, unless follow mode (the Legacy method) is on, which never
+	// freezes and follows it at the first evaluation, settling or not. A
+	// deviation that keeps moving never re-anchors, and Legacy follows it. A
+	// re-anchor onto a fault of the target itself, one no restart explained,
+	// is undone once the readings return to the old calibration (live
+	// 2026-09-25 01:25).
 	{
 		const Eigen::Quaterniond moveRot = (Eigen::AngleAxisd(30.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()) *
 			Eigen::AngleAxisd(20.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX())).normalized();
@@ -6277,12 +6283,14 @@ void RunContinuousScenarios()
 			double reanchorTime = -1.0, yawErr = 0.0, posErr = 0.0, tiltErr = 0.0;
 			ContinuousAlignment::State state = ContinuousAlignment::State::Inactive;
 		};
-		auto run = [&](unsigned seed, bool restart, bool follow, const std::function<GroundTruth(double)> &truthAt)
+		auto run = [&](unsigned seed, bool restart, bool follow, const std::function<GroundTruth(double)> &truthAt,
+			bool restartsVisible)
 		{
 			std::mt19937 rng(seed);
 			ContinuousSim sim;
 			sim.ca.SetExtrinsic(trueExtrinsic);
 			sim.ca.SetFollowMode(follow);
+			sim.ca.SetTargetRestartsVisible(restartsVisible);
 			sim.solvedOffset = baseTruth.latency;
 			sim.calRot = baseTruth.rotation;
 			sim.calTrans = baseTruth.translation;
@@ -6310,7 +6318,7 @@ void RunContinuousScenarios()
 			return o;
 		};
 
-		const Outcome followed = run(2501, false, false, moveAt20);
+		const Outcome followed = run(2501, false, false, moveAt20, true);
 		snprintf(detail, sizeof detail, "freezes %d, re-anchors %d at %.1f s; after: %.3f deg yaw, %.3f deg tilt, %.1f mm, state %d",
 			followed.freezes, followed.reanchors, followed.reanchorTime,
 			followed.yawErr, followed.tiltErr, followed.posErr * 1000.0, static_cast<int>(followed.state));
@@ -6319,17 +6327,36 @@ void RunContinuousScenarios()
 			followed.yawErr < 0.3 && followed.tiltErr < 0.3 && followed.posErr < 0.01 &&
 			followed.state == ContinuousAlignment::State::Tracking, detail);
 
-		const Outcome restarted = run(2502, true, false, moveAt20);
-		const Outcome restartFollowed = run(2503, true, true, moveAt20);
+		// The move lands at 20 s and the restart at 20.3 s, and the target
+		// settles until 30.3 s: Legacy follows as soon as the window refills.
+		const Outcome restarted = run(2502, true, false, moveAt20, true);
+		const Outcome restartFollowed = run(2503, true, true, moveAt20, true);
 		snprintf(detail, sizeof detail,
-			"after a restart: freezes %d (attributed %d), re-anchors %d, state %d; don't pause: re-anchors %d at %.1f s, %.3f deg / %.1f mm",
+			"after a restart: freezes %d (attributed %d), re-anchors %d, state %d; Legacy: freezes %d, follows %d, "
+			"last at %.1f s, %.3f deg / %.3f deg tilt / %.1f mm, state %d",
 			restarted.freezes, restarted.attributed, restarted.reanchors, static_cast<int>(restarted.state),
-			restartFollowed.reanchors, restartFollowed.reanchorTime, restartFollowed.yawErr, restartFollowed.posErr * 1000.0);
-		Check("continuous: a move after a target restart stays frozen unless told not to pause",
+			restartFollowed.freezes, restartFollowed.reanchors, restartFollowed.reanchorTime, restartFollowed.yawErr,
+			restartFollowed.tiltErr, restartFollowed.posErr * 1000.0, static_cast<int>(restartFollowed.state));
+		Check("continuous: a move after a target restart stays frozen; Legacy follows it at once",
 			restarted.freezes == 1 && restarted.attributed == 1 && restarted.reanchors == 0 &&
 			restarted.state == ContinuousAlignment::State::Frozen &&
-			restartFollowed.reanchors == 1 && restartFollowed.reanchorTime < 60.0 &&
-			restartFollowed.yawErr < 0.3 && restartFollowed.posErr < 0.01, detail);
+			restartFollowed.freezes == 0 && restartFollowed.reanchors >= 1 && restartFollowed.reanchorTime < 30.3 &&
+			restartFollowed.yawErr < 0.3 && restartFollowed.tiltErr < 0.3 && restartFollowed.posErr < 0.01 &&
+			restartFollowed.state == ContinuousAlignment::State::Tracking, detail);
+
+		// No restart could be seen (SteamVR's log unreadable, or silent about
+		// the tracker), so none could have explained the move either: Standard
+		// stays frozen as it did before re-anchoring. Legacy needs no log.
+		const Outcome blind = run(2507, false, false, moveAt20, false);
+		const Outcome blindFollowed = run(2508, false, true, moveAt20, false);
+		snprintf(detail, sizeof detail,
+			"Standard: freezes %d, re-anchors %d, state %d; Legacy: freezes %d, follows %d, %.3f deg / %.1f mm",
+			blind.freezes, blind.reanchors, static_cast<int>(blind.state),
+			blindFollowed.freezes, blindFollowed.reanchors, blindFollowed.yawErr, blindFollowed.posErr * 1000.0);
+		Check("continuous: without the tracker's restarts in view nothing re-anchors; Legacy still follows",
+			blind.freezes == 1 && blind.reanchors == 0 && blind.state == ContinuousAlignment::State::Frozen &&
+			blindFollowed.freezes == 0 && blindFollowed.reanchors >= 1 &&
+			blindFollowed.yawErr < 0.3 && blindFollowed.posErr < 0.01, detail);
 
 		// After the move the target universe keeps turning at 0.2 deg/s: the
 		// estimate never holds still for the confirm.
@@ -6343,12 +6370,19 @@ void RunContinuousScenarios()
 			g.translation = turn * moved.translation;
 			return g;
 		};
-		const Outcome wandered = run(2504, false, false, wandering);
-		snprintf(detail, sizeof detail, "freezes %d, re-anchors %d, state %d", wandered.freezes, wandered.reanchors,
-			static_cast<int>(wandered.state));
-		Check("continuous: a deviation that keeps moving never re-anchors",
+		const Outcome wandered = run(2504, false, false, wandering, true);
+		const Outcome wanderFollowed = run(2509, false, true, wandering, true);
+		snprintf(detail, sizeof detail, "freezes %d, re-anchors %d, state %d; Legacy: freezes %d, follows %d, "
+			"end %.3f deg / %.1f mm, state %d",
+			wandered.freezes, wandered.reanchors, static_cast<int>(wandered.state),
+			wanderFollowed.freezes, wanderFollowed.reanchors, wanderFollowed.yawErr, wanderFollowed.posErr * 1000.0,
+			static_cast<int>(wanderFollowed.state));
+		Check("continuous: a deviation that keeps moving never re-anchors; Legacy follows it",
 			wandered.freezes == 1 && wandered.reanchors == 0 &&
-			wandered.state == ContinuousAlignment::State::Frozen, detail);
+			wandered.state == ContinuousAlignment::State::Frozen &&
+			wanderFollowed.freezes == 0 && wanderFollowed.reanchors >= 1 &&
+			wanderFollowed.yawErr < 2.0 && wanderFollowed.posErr < 0.05 &&
+			wanderFollowed.state == ContinuousAlignment::State::Tracking, detail);
 
 		// The headset tracker's own solution goes bad at 20 s, long after its
 		// last restart (2 deg of yaw and 5 deg of tilt, as at 01:25), and its

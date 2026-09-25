@@ -125,9 +125,9 @@ static void ResetContinuousObservations(CalibrationContext &ctx,
 
 // Returns whether the drain crossed a hole the loops' windows must not span:
 // a stall-sized one or a driver session boundary. The driver's isolated
-// contended-publish drops are ridden through: both loops pair poses by sample
-// time, and clearing the window for each drop starved them (simulated, a pose
-// lost every 18 s kept the legacy loop's 25 s window from ever filling).
+// contended-publish drops are ridden through: the loop pairs poses by sample
+// time, and clearing the window for each drop starved it (simulated, a pose
+// lost every 18 s kept a 25 s window from ever filling).
 static bool DrainContinuousInput(CalibrationContext &ctx)
 {
 	// The whole hole in front of the batch (see RuntimeMonitorTick).
@@ -938,6 +938,9 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	}
 	Continuous->SetTargetSettling(trackerSeen &&
 		ctx.lighthouse.Settling(ctx.continuousTrackerSerial, ringNow));
+	// A freeze re-anchors only where a restart of the tracker would have shown.
+	const bool restartsVisible = ctx.lighthouseLogAvailable && trackerSeen;
+	Continuous->SetTargetRestartsVisible(restartsVisible);
 
 	// Re-evaluate the current field for each retained observation: comparing a
 	// multi-position history with only the latest spot turns healthy anchor
@@ -1071,27 +1074,34 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0,
 				ev.afterTargetResolve ? " -- after the headset tracker's base station tracking restarted" : "");
 			ctx.Log(buf);
-			// "Don't pause" follows it in a few seconds; saying it paused would
-			// be the opposite of what the player chose.
-			if (ctx.continuousNoPause)
-				break;
 			if (ev.afterTargetResolve)
 				NotifyResolveFreeze(ctx);
-			else
+			else if (restartsVisible)
 				NotifyOnce(ctx, Monitors.freezeNotified,
 					"Continuous calibration paused: readings moved too far from the calibration. It re-aligns on its own if they hold steady.",
 					CalibrationContext::Tone::Warn,
 					"QuestCalibrator: continuous calibration paused; readings moved too far from the calibration. It re-aligns on its own if they hold steady, or recalibrate with the headset tracker.",
 					ctx.notifyPoorCalibration);
+			else
+				// Without the tracker's restarts in view nothing re-aligns on
+				// its own; only the readings coming back resume it.
+				NotifyOnce(ctx, Monitors.freezeNotified,
+					"Continuous calibration paused: readings drifted too far from the calibration to correct safely.",
+					CalibrationContext::Tone::Warn,
+					"QuestCalibrator: continuous calibration paused; readings drifted too far to correct safely. Recalibrate with the headset tracker to resume.",
+					ctx.notifyPoorCalibration);
 			break;
 		case questcal::ContinuousAlignment::Event::Reanchored:
 			if (!reanchorApplied)
 				break;
+			// Legacy does this at every evaluation that exceeds the freeze
+			// thresholds, so its line says it followed rather than re-anchored.
 			snprintf(buf, sizeof buf,
-				"Continuous calibration re-anchored: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm%s%s\n",
+				"Continuous calibration %s: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm%s%s\n",
+				ctx.continuousNoPause ? "followed" : "re-anchored",
 				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0,
 				ev.deviation.tiltDeg >= Continuous->GetConfig().holdTiltDeg ? ", tilt included" : "",
-				ev.afterTargetResolve ? " -- followed through the headset tracker's restart" : "");
+				ev.afterTargetResolve ? " -- after the headset tracker's base station tracking restarted" : "");
 			ctx.Log(buf);
 			ctx.continuousReanchors++;
 			Monitors.freezeNotified = false;
@@ -1125,10 +1135,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				ctx.notifyPoorCalibration);
 			break;
 		case questcal::ContinuousAlignment::Event::Resumed:
-			if (ctx.continuousNoPause)
-				ctx.Log("Continuous calibration resumed.\n");
-			else
-				ctx.Tell("Continuous calibration resumed.\n", CalibrationContext::Tone::Good);
+			ctx.Tell("Continuous calibration resumed.\n", CalibrationContext::Tone::Good);
 			Monitors.freezeNotified = false;
 			break;
 		case questcal::ContinuousAlignment::Event::TrackerLost:

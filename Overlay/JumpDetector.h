@@ -169,7 +169,7 @@ public:
 	// each as a Reset would keep soloSettledSeconds from ever being reached.
 	void NoteStreamHole();
 	// Whether continuous alignment keeps the calibration on an independent
-	// reference (a mounted tracker, or the legacy loop's trackers). The
+	// reference (a mounted tracker). The
 	// calibration has then followed the drift, so a drift catch-up moves the
 	// frame away from it and is compensated like any other step. The caller
 	// refreshes this every tick; Reset leaves it alone.

@@ -101,8 +101,10 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   transform with no motion required. Small yaw+translation corrections are
   auto-applied and smoothed by the driver. A large deviation (a tracking fault,
   the lighthouse side moving) pauses auto-apply, and one that then holds still
-  becomes the new calibration; **Don't pause** in Settings follows the headset
-  tracker through its own faults too, as OpenVR-SpaceCalibrator does. The
+  becomes the new calibration when SteamVR's log shows no restart of the
+  headset tracker to explain it. The **Legacy** method in Settings never
+  pauses: it follows every such deviation at once, the headset tracker's own
+  faults included, as OpenVR-SpaceCalibrator does. The
   mounted tracker can be hidden from games so full-body setups never mistake it for
   a body tracker. Optional (off by default): online re-estimation of the
   inter-system time offset from the same rigid pair.
@@ -122,10 +124,14 @@ default configuration it resumes after five seconds of readings below 1° yaw an
 2.5 cm at the head, or thirty seconds below the 2° / 5 cm that paused it. Readings
 that stay off but hold still for thirty seconds become the calibration instead,
 unless the headset tracker restarted its lighthouse tracking in the two minutes
-before they moved, or since: that tracker's own fault waits for the resume. If the
+before they moved, or since: that tracker's own fault waits for the resume. When
+SteamVR's log cannot be read, or does not name the headset tracker, no restart
+could show, so nothing becomes the calibration this way. If the
 readings later return to the calibration it replaced, that one comes back. Tilt of
 1.5° or more waits without pausing, and becomes the calibration the same way if it
-holds still. If tracking is clean but alignment stays wrong, use **Recalibrate
+holds still. The Legacy method skips all of this: readings past those limits
+become the calibration at the next two-second evaluation, tilt of 1.5° or more
+included. If tracking is clean but alignment stays wrong, use **Recalibrate
 with the headset tracker**. Waiting in a particular posture is
 not a calibration step. Manual profile editing changes the base transform; it does
 not relearn the mounted tracker relationship.

@@ -43,10 +43,7 @@ ContinuousStatus ContinuousStatusNow()
 	{
 	case CA::State::Tracking: return ContinuousStatus::Tracking;
 	case CA::State::Coasting: return ContinuousStatus::Coasting;
-	// "Don't pause" follows a freeze within seconds, so it is a wait, not a
-	// pause that asks the player for anything.
-	case CA::State::Frozen:
-		return CalCtx.continuousNoPause ? ContinuousStatus::Holding : ContinuousStatus::Frozen;
+	case CA::State::Frozen:   return ContinuousStatus::Frozen;
 	case CA::State::Holding:  return ContinuousStatus::Holding;
 	default:                  return ContinuousStatus::Gathering;
 	}

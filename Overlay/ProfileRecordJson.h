@@ -362,8 +362,8 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 	if (HasTypedValue<bool>(obj, "hide_mounted_tracker"))
 		profile.hideMountedTracker = obj.at("hide_mounted_tracker").get<bool>();
 	// A name rather than a flag, so a hand-edited profile reads and an unknown
-	// value is the default. "legacy" is the method "don't pause" replaced:
-	// players picked it to stop the pausing.
+	// value is the default. "no_pause" is the Legacy method; "legacy" is what
+	// the old Legacy solver saved, and players picked it to stop the pausing.
 	if (HasTypedValue<std::string>(obj, "continuous_mode"))
 	{
 		const std::string mode = obj.at("continuous_mode").get<std::string>();

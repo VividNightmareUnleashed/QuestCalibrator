@@ -239,7 +239,7 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 	};
 	out << "continuous input diagnostics v1 (session totals; device counts cover the selected pair)\n";
 	out << "loop eligible: " << OnOff(ctx.ContinuousShouldRun())
-		<< ", don't pause: " << OnOff(ctx.continuousNoPause)
+		<< ", method: " << (ctx.continuousNoPause ? "legacy" : "standard")
 		<< ", calibration state: " << static_cast<int>(ctx.state)
 		<< ", HMD is reference: " << OnOff(ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd])
 		<< ", tracker slot: " << ctx.continuousTrackerId
@@ -466,7 +466,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 
 	out << "[continuous calibration]\n";
 	out << "enabled: " << OnOff(ctx.continuousEnabled)
-		<< ", don't pause: " << OnOff(ctx.continuousNoPause) << "\n";
+		<< ", method: " << (ctx.continuousNoPause ? "legacy" : "standard") << "\n";
 	out << "headset tracker: " << (ctx.continuousTrackerSerial.empty() ? "(none)" : ctx.continuousTrackerSerial) << "\n";
 	out << "mount measured: " << OnOff(ctx.mountExtrinsic.valid);
 	if (ctx.mountExtrinsic.valid)

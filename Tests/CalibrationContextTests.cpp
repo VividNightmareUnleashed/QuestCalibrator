@@ -98,7 +98,7 @@ bool ContinuousInputDiagnosticsScenario()
 	ctx.continuousNoPause = true;
 	const std::string afterReset = DescribeContinuousDiagnostics(ctx, 20.0);
 	return input.devices[0].received == 3 &&
-		afterReset.find("don't pause: on") != std::string::npos &&
+		afterReset.find("method: legacy") != std::string::npos &&
 		afterReset.find("accepted capture age 10000.0 ms") != std::string::npos;
 }
 

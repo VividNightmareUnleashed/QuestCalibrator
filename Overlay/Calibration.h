@@ -213,11 +213,11 @@ struct CalibrationContext : CalibrationProfileState
 	bool continuousLatencyReestimation = false;  // persisted; opt-in, default off
 	bool continuousRequireTrigger = false;       // persisted; confirm corrections manually
 	bool hideMountedTracker = true;              // persisted; displace from games
-	// "Don't pause": follow every change the headset tracker reports, as
-	// OpenVR-SpaceCalibrator does, instead of pausing when the readings and the
-	// calibration disagree (ContinuousAlignment::SetFollowMode). Persisted; it
-	// took over the slot of the removed legacy method, which players chose to
-	// stop the pausing.
+	// The Legacy method: never pause, and follow every change the headset
+	// tracker reports as OpenVR-SpaceCalibrator does
+	// (ContinuousAlignment::SetFollowMode). Persisted as "no_pause"; profiles
+	// saved by the old Legacy solver, which players chose to stop the pausing,
+	// load with it on.
 	bool continuousNoPause = false;
 
 	// The feature is armed only when the tracker pick and the mount offset

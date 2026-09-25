@@ -533,7 +533,7 @@ void ResetUniverseObservations(CalibrationContext &ctx)
 bool FinishUniverseObservations(CalibrationContext &ctx, double now)
 {
 	DrainJumpObservations(ctx);
-	// A tracking aligner or legacy loop has kept the calibration on the
+	// A tracking aligner has kept the calibration on the
 	// lighthouse, drift included, so a drift catch-up is a frame change to it.
 	// The state is the last continuous tick's; the next evaluations use it.
 	Space.jumps->SetDriftFollowed(

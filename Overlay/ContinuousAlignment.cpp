@@ -428,11 +428,12 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	// The target's own tracking says its pose is unsettled: a single-baseline
 	// lighthouse fit swims along the remaining line of sight, and a restarted
 	// solution can land centimeters away before it converges (live 2026-09-25:
-	// a headset tracker restarted from one base station read 4.4 deg / 33 cm
-	// off for ten minutes and returned on its next restart). Nothing measured
+	// a headset tracker's restarted solution read 4.4 deg / 33 cm off for ten
+	// minutes and returned on its next restart). Nothing measured
 	// through that is evidence about the universes, so every
 	// verdict waits: the deviation is still published for the log and pane.
-	if (targetSettling)
+	// Follow mode takes the target's word regardless.
+	if (targetSettling && !followMode)
 	{
 		freezeExceededSince = -1.0;
 		resumeBelowSince = -1.0;
@@ -493,6 +494,24 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	bool exceed = deviation.yawDeg >= config.freezeYawDeg
 		|| deviation.posM >= config.freezePosM;
 	bool tilted = deviation.tiltDeg >= config.holdTiltDeg;
+
+	// Follow mode, OpenVR-SpaceCalibrator's behaviour: what would freeze or
+	// hold becomes the calibration now, with no confirm and no wait for the
+	// estimate to hold still. Inside the band it tracks like Standard. A
+	// window in front of an unresolved jump-guard step authorizes nothing.
+	if (followMode && (exceed || tilted))
+	{
+		if (pendingObs)
+			return;
+		pendingReanchor = DeltaToEstimate(est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
+		Event e;
+		e.type = Event::Reanchored;
+		e.deviation = deviation;
+		e.afterTargetResolve = now - lastTargetResolveTime <= config.resolveAttributionSeconds;
+		events.push_back(e);
+		EnterState(State::Tracking);
+		return;
+	}
 
 	if (state == State::Frozen)
 	{
@@ -653,11 +672,11 @@ void ContinuousAlignment::TryReanchor(double now, const WindowEstimate &est,
 	// A restart of the target shortly before the episode, or during it, says
 	// the target moved rather than the universes: freeze on it (live
 	// 2026-09-25, every remaining freeze came within two minutes of one).
-	// Follow mode takes the target's word regardless, as
-	// OpenVR-SpaceCalibrator does.
+	// Where no restart could be seen, none can clear the episode either, so
+	// it stays frozen as it did before re-anchoring existed.
 	const bool attributed = episodeSince >= 0.0 &&
 		lastTargetResolveTime >= episodeSince - config.resolveAttributionSeconds;
-	if (attributed && !followMode)
+	if (attributed || !restartsVisible)
 	{
 		reanchorSince = -1.0;
 		return;
@@ -682,39 +701,64 @@ void ContinuousAlignment::TryReanchor(double now, const WindowEstimate &est,
 		reanchorRef = est;
 		return;
 	}
-	if (now - reanchorSince < (followMode ? config.followConfirmSeconds : config.reanchorConfirmSeconds))
+	if (now - reanchorSince < config.reanchorConfirmSeconds)
 		return;
 	// A window in front of an unresolved jump-guard step authorizes nothing,
 	// this included; the confirm carries on and completes on the next one.
 	if (pendingObs)
 		return;
 
-	// The estimate becomes the calibration. A tilt this large is the lighthouse
-	// frame's own and goes in whole; below it, what tilt there is reads as the
-	// tracker's orientation bias, and the re-anchor turns about the head
-	// exactly as a correction would, without the step cap.
-	Correction reanchor;
-	if (deviation.tiltDeg >= config.holdTiltDeg)
-	{
-		Eigen::Quaterniond rD = (est.rot * calRotation.conjugate()).normalized();
-		reanchor.rotation = rD;
-		reanchor.translation = est.trans - rD * calTranslationMeters;
-	}
-	else
-	{
-		reanchor.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(yawAngle, Eigen::Vector3d::UnitY()));
-		reanchor.translation = headPos + headStep - reanchor.rotation * headPos;
-	}
-	pendingReanchor = reanchor;
+	pendingReanchor = DeltaToEstimate(est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
 	replaced = Replaced{ calRotation, calTranslationMeters };
 	Event e;
 	e.type = Event::Reanchored;
 	e.deviation = deviation;
-	e.afterTargetResolve = attributed;
 	events.push_back(e);
 	episodeSince = -1.0;
 	reanchorSince = -1.0;
 	EnterState(State::Tracking);
+}
+
+// A tilt this large is the lighthouse frame's own and goes in whole; below
+// it, what tilt there is reads as the tracker's orientation bias, and the
+// delta turns about the head exactly as a correction would, without the step
+// cap.
+ContinuousAlignment::Correction ContinuousAlignment::DeltaToEstimate(const WindowEstimate &est,
+	const Eigen::Quaterniond &calRotation, const Eigen::Vector3d &calTranslationMeters,
+	double yawAngle, const Eigen::Vector3d &headStep, const Eigen::Vector3d &headPos) const
+{
+	Correction delta;
+	if (deviation.tiltDeg >= config.holdTiltDeg)
+	{
+		Eigen::Quaterniond rD = (est.rot * calRotation.conjugate()).normalized();
+		delta.rotation = rD;
+		delta.translation = est.trans - rD * calTranslationMeters;
+	}
+	else
+	{
+		delta.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(yawAngle, Eigen::Vector3d::UnitY()));
+		delta.translation = headPos + headStep - delta.rotation * headPos;
+	}
+	return delta;
+}
+
+void ContinuousAlignment::SetFollowMode(bool follow)
+{
+	if (follow == followMode)
+		return;
+	followMode = follow;
+	// Neither mode inherits the other's episode: follow mode keeps none, and
+	// Standard must not undo a calibration it did not replace. A freeze left
+	// behind is only a hold until the next evaluation decides afresh.
+	freezeExceededSince = -1.0;
+	resumeBelowSince = -1.0;
+	resumeInBandSince = -1.0;
+	episodeSince = -1.0;
+	reanchorSince = -1.0;
+	undoSince = -1.0;
+	replaced.reset();
+	if (state == State::Frozen)
+		EnterState(State::Holding);
 }
 
 ContinuousAlignment::Deviation ContinuousAlignment::MeasureDeviation(

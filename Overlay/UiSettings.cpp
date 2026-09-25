@@ -272,7 +272,7 @@ void BuildSettingsScreen(const VRState &state)
 					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(ContinuousStatusColor(continuous)), status);
 
-				// Nested inset: tracker pick, don't pause, game visibility,
+				// Nested inset: tracker pick, method, game visibility,
 				// opt-in latency, trigger confirmation.
 				ImVec2 np = ImVec2(p.x + 12.0f, p.y + kRowHeight + kRowSubLineH);
 				ImVec2 nb = ImVec2(p.x + cw - 12.0f, np.y + nestedH - 8.0f);
@@ -341,17 +341,33 @@ void BuildSettingsScreen(const VRState &state)
 				ImGui::PopStyleVar();
 				ImGui::PopItemWidth();
 
-				bool noPause = CalCtx.continuousNoPause;
-				if (NestedToggle("##contNoPause", ImVec2(np.x + 12.0f, np.y + 46.0f), nestedW,
-					"Don't pause", noPause,
-					"Follows every change the headset tracker reports, as\n"
-					"OpenVR-SpaceCalibrator does, instead of pausing when the readings\n"
-					"and the calibration disagree. A bad base station fix of the\n"
-					"headset tracker then moves your body trackers until it clears."))
-					SaveProfileFieldEdit(CalCtx,
-						[&](questcal::ProfileRecord &candidate) {
-							candidate.continuousNoPause = noPause;
-						});
+				// How the loop meets a disagreement: a two-way switch, since both
+				// are a method and neither is "on". Legacy never pauses, as the
+				// original SpaceCalibrator's continuous mode does.
+				{
+					const float segItemW = 150.0f, segH = 32.0f;
+					const float rowY = np.y + 40.0f;
+					dl->AddText(g_fontBody, g_fontBody->LegacySize,
+						ImVec2(np.x + 12.0f, rowY + segH * 0.5f - g_fontBody->LegacySize * 0.5f),
+						Pal::U32(Pal::Text), Tr("Method"));
+					const ImVec2 segPos(nb.x - 14.0f - (segItemW * 2.0f + 8.0f), rowY);
+					ImGui::SetCursorScreenPos(segPos);
+					const char *methods[] = { "Standard", "Legacy" };
+					const int mode = CalCtx.continuousNoPause ? 1 : 0;
+					const int picked = Segmented("contMethod", mode, methods, 2, segItemW, segH);
+					if (ImGui::IsMouseHoveringRect(segPos,
+						ImVec2(segPos.x + segItemW * 2.0f + 8.0f, rowY + segH)))
+						// Beside the cursor, not below it: below is the rest of the inset.
+						ShowTip("Standard pauses when the readings move away from the calibration\n"
+							"and resumes once they come back or hold steady. Legacy never pauses:\n"
+							"like OpenVR-SpaceCalibrator, it follows every change the headset tracker\n"
+							"reports, so a bad base station fix moves your body trackers until it clears.", true);
+					if (picked != mode)
+						SaveProfileFieldEdit(CalCtx,
+							[&](questcal::ProfileRecord &candidate) {
+								candidate.continuousNoPause = picked == 1;
+							});
+				}
 
 				bool hideMountedTracker = CalCtx.hideMountedTracker;
 				if (NestedToggle("##hideTracker", ImVec2(np.x + 12.0f, np.y + 80.0f), nestedW,
