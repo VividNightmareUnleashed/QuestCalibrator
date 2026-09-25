@@ -50,6 +50,16 @@ uint32_t ParseStationId(std::string text)
 	return static_cast<uint32_t>(std::strtoul(text.c_str(), nullptr, 16));
 }
 
+// The id at the start of "F210FBA6 (best) distance ...", where a leading zero
+// prints as a space (" 4D47FB4 distance ...").
+uint32_t LeadingStationId(const std::string &text)
+{
+	size_t start = text.find_first_not_of(' ');
+	if (start == std::string::npos)
+		return 0;
+	return ParseStationId(text.substr(start, text.find(' ', start) - start));
+}
+
 // Splits "S-5 (D3D4E73B) S-8 S-16 ( 4D47FB4)" into channel/id pairs. A
 // parenthesised token that is not an id is skipped.
 void ParseStationList(const std::string &text, std::vector<int> &channels,
@@ -245,9 +255,15 @@ bool ParseLine(const std::string &line, Event &out)
 	if (boot != std::string::npos)
 	{
 		out.kind = Event::Kind::Bootstrapped;
-		std::string rest = body.substr(boot + std::strlen("BOOTSTRAPPED base "));
-		out.stationId = ParseStationId(rest.substr(0, rest.find(' ')));
+		out.stationId = LeadingStationId(body.substr(boot + std::strlen("BOOTSTRAPPED base ")));
 		return true;
+	}
+	size_t secondary = body.find("SECONDARY base ");
+	if (secondary != std::string::npos)
+	{
+		out.kind = Event::Kind::SecondaryAdded;
+		out.stationId = LeadingStationId(body.substr(secondary + std::strlen("SECONDARY base ")));
+		return out.stationId != 0;
 	}
 	if (StartsWith(body, "Trying to start tracking from base "))
 	{

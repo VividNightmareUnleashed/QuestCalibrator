@@ -108,6 +108,23 @@ void ParserScenarios(Check check)
 	check("lighthouse log: failed bootstrap names the station",
 		ok && e.kind == Event::Kind::BootstrapFailed && e.stationId == 0xD3D4E73Bu, detail);
 
+	// A VIVE Tracker 3.0 printed no SOB line in six hours (live 2026-09-25):
+	// the stations joining each new solution came only as SECONDARY lines,
+	// padded to align, with a leading zero printed as a space as elsewhere.
+	ok = lighthouselog::ParseLine(std::string(Prefix) +
+		"LHR-D520226E C: ----- SECONDARY base 4921060B distance 2.01m  -----", e);
+	Event padded, attempt;
+	const bool paddedOk = lighthouselog::ParseLine(std::string(Prefix) +
+		"LHR-D520226E C: ----- SECONDARY base  4D47FB4 distance 3.03m   -----", padded);
+	const bool attemptIgnored = !lighthouselog::ParseLine(std::string(Prefix) +
+		"LHR-D520226E C: Trying to add a secondary base FD626122: Not enough contiguous samples for a bootstrap pose", attempt);
+	snprintf(detail, sizeof detail, "id %08X channel %d, padded %d id %08X, attempt ignored %d",
+		e.stationId, e.channel, paddedOk, padded.stationId, attemptIgnored);
+	check("lighthouse log: a secondary station names its id",
+		ok && e.kind == Event::Kind::SecondaryAdded && e.stationId == 0x4921060Bu && e.channel < 0 &&
+		!e.visibleKnown && paddedOk && padded.kind == Event::Kind::SecondaryAdded &&
+		padded.stationId == 0x04D47FB4u && attemptIgnored, detail);
+
 	bool noise =
 		!lighthouselog::ParseLine(std::string(Prefix) + "LHR-A3C36EA5 C: Assertion failed:  Explicit right sync does not match pending frame", e) &&
 		!lighthouselog::ParseLine(std::string(Prefix) + "LHR-A3C36EA5 C: Unexpected centroid ordering error 1.0ms S-5", e) &&
@@ -199,7 +216,8 @@ Event Made(Event::Kind kind, const char *serial, int channel, std::vector<int> v
 	e.serial = serial;
 	e.channel = channel;
 	e.stationId = channel >= 0 ? 0xA000u + channel : 0;
-	e.visibleKnown = kind != Event::Kind::Bootstrapped && kind != Event::Kind::BootstrapFailed;
+	e.visibleKnown = kind == Event::Kind::StationAdded || kind == Event::Kind::StationDropped ||
+		kind == Event::Kind::NoneSeen;
 	e.visibleChannels = std::move(visible);
 	e.visibleIds.assign(e.visibleChannels.size(), 0);
 	e.historical = historical;
@@ -283,16 +301,17 @@ void VisibilityScenarios(Check check)
 		ranked.size() == 3 && ranked[0].channel == 5 && ranked[0].drops == 2 &&
 		vis.StationName(5) == "S-5 (0000A005)", detail);
 
-	// Settling, for the continuous loop: a device the log never named and one
-	// whose set is not known yet are settled, a live restart is counted and
-	// holds for the window, and fewer than two known stations hold for as
-	// long as they last.
+	// Settling, for the continuous loop: a device the log never named is
+	// settled, a replayed bootstrap leaves its device on the one station it
+	// started from (state) without counting a restart, a live restart is
+	// counted and holds for the window, and fewer than two known stations
+	// hold for as long as they last.
 	{
 		const bool unknownSettled = !vis.Settling("LHR-3", 500.0);
 		vis.Apply(Made(K::Bootstrapped, "LHR-4", 5, {}, true), 0.0);
 		const LighthouseVisibility::Device *replayed = vis.Find("LHR-4");
-		const bool replayedSettled = !vis.Settling("LHR-4", 500.0) && vis.Disturbed("LHR-4", 500.0) &&
-			replayed->liveRestarts == 0 && replayed->liveDisturbances == 0;
+		const bool replayedSettled = vis.Settling("LHR-4", 500.0) && vis.Disturbed("LHR-4", 500.0) &&
+			replayed->InView() == 1 && replayed->liveRestarts == 0 && replayed->liveDisturbances == 0;
 
 		vis.Apply(Made(K::Bootstrapped, "LHR-3", 5, {}), 500.0);
 		const LighthouseVisibility::Device *three = vis.Find("LHR-3");
@@ -311,6 +330,56 @@ void VisibilityScenarios(Check check)
 			unknownSettled, replayedSettled, bootCounted, windowOnly, singleHolds);
 		check("lighthouse state: settling and restart counts for the continuous loop",
 			unknownSettled && replayedSettled && bootCounted && windowOnly && singleHolds, detail);
+	}
+
+	// A device that reports the stations joining a new solution only in
+	// SECONDARY lines (the headset tracker of 2026-09-25): the bootstrap
+	// leaves it on its one station, which holds past the restart's window,
+	// and each SECONDARY line adds one without a session-log line. A station
+	// no line has named yet still counts. An SOB line is the device's own
+	// account and replaces the rebuilt set.
+	{
+		LighthouseVisibility rebuild;
+		Event map = Made(K::StationAdded, "LHR-9", 13, { 2, 3, 11, 13 }, true);
+		map.visibleIds = { 0xA002u, 0xA003u, 0xA00Bu, 0xA00Du };
+		rebuild.Apply(map, 0.0);
+		auto boot = [&](double t)
+		{
+			Event b = Made(K::Bootstrapped, "LHR-T", -1, {});
+			b.stationId = 0xA00Du;   // the real line names the id, not the channel
+			return rebuild.Apply(b, t);
+		};
+		auto secondary = [&](uint32_t id, double t)
+		{
+			Event s2 = Made(K::SecondaryAdded, "LHR-T", -1, {});
+			s2.stationId = id;
+			return rebuild.Apply(s2, t);
+		};
+		const std::string started = boot(100.0);
+		const LighthouseVisibility::Device *t = rebuild.Find("LHR-T");
+		const bool oneHolds = t->visibleKnown && t->InView() == 1 && Same(t->visible, { 13 }) &&
+			t->degraded && rebuild.Settling("LHR-T", 115.0);
+		const std::string joined = secondary(0xA00Bu, 116.0);
+		const bool twoClear = joined.empty() && t->InView() == 2 && !t->degraded &&
+			!rebuild.Settling("LHR-T", 117.0);
+		secondary(0xA002u, 116.1);
+		secondary(0xB0B0B0B0u, 116.2);
+		secondary(0xA002u, 116.3);   // named twice, counted once
+		const bool full = Same(t->visible, { 2, 11, 13 }) && t->unmappedIds.size() == 1 &&
+			t->unmappedIds[0] == 0xB0B0B0B0u && t->InView() == 4;
+		boot(200.0);
+		const bool over = t->InView() == 1 && t->unmappedIds.empty() && rebuild.Settling("LHR-T", 215.0);
+		Event own = Made(K::StationAdded, "LHR-T", 13, { 13 });
+		own.visibleIds = { 0xA00Du };
+		const std::string again = rebuild.Apply(own, 200.1);
+		secondary(0xA002u, 200.2);   // after the SOB line, not news
+		const bool sobRules = again.find("tracking again") == 0 && !t->rebuilding && t->InView() == 1 &&
+			t->liveRestarts == 3;
+		snprintf(detail, sizeof detail, "boot '%s' one %d two %d full %d (in view %d) over %d sob %d",
+			started.c_str(), oneHolds, twoClear, full, t->InView(), over, sobRules);
+		check("lighthouse state: a solution rebuilt from SECONDARY lines",
+			started.find("started a new solution from S-13") == 0 && oneHolds && twoClear && full &&
+			over && sobRules, detail);
 	}
 
 	vis.Reset();

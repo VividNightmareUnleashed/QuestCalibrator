@@ -444,6 +444,8 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			out << " none";
 		for (int c : d.visible)
 			out << " " << ctx.lighthouse.StationName(c);
+		for (uint32_t id : d.unmappedIds)
+			out << " " << LighthouseVisibility::IdName(id);
 		out << "; drops " << d.drops << ", losses " << d.losses << ", bootstraps " << d.bootstraps;
 		if (!d.lastDisturbanceText.empty())
 			out << "; last: " << d.lastDisturbanceText;

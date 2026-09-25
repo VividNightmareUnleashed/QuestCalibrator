@@ -630,8 +630,14 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 		std::string note = ctx.lighthouse.Apply(e, ringTime);
 		if (!note.empty())
 			ctx.Log(e.serial + " " + note + "\n");
-		else if (!e.historical && e.visibleKnown)
-			LighthouseDigest.Note(e.serial, static_cast<int>(e.visibleChannels.size()));
+		else if (!e.historical)
+		{
+			// The device's count, not the line's: a SECONDARY line names one
+			// station and the set it joined is the model's.
+			const LighthouseVisibility::Device *seen = ctx.lighthouse.Find(e.serial);
+			if (seen && seen->visibleKnown)
+				LighthouseDigest.Note(e.serial, seen->InView());
+		}
 	}
 }
 

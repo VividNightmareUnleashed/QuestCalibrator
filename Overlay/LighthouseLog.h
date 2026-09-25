@@ -20,7 +20,12 @@
 //   LHR-A3C36EA5 C: SOB: drop S-8 seeing S-5 S-9 S-16
 //   LHR-A3C36EA5 C: No base stations seen...
 //   LHR-A3C36EA5 C: ----- BOOTSTRAPPED base F210FBA6 (best) distance 2.1m ... -----
+//   LHR-A3C36EA5 C: ----- SECONDARY base 4921060B distance 2.01m  -----
 //   LHR-A3C36EA5 C: Trying to start tracking from base D3D4E73B: Not enough ...
+//
+// Not every device prints the SOB lines. A VIVE Tracker 3.0 in a four-station
+// room (live 2026-09-25) printed none in six hours; after each bootstrap it
+// named the stations joining its new solution only in SECONDARY lines.
 //
 // S-N is the station's channel; the hex in parentheses is the station id,
 // which equals the serial SteamVR stores for it (a leading zero is printed
@@ -43,6 +48,7 @@ struct Event
 		NoneSeen,          // the device sees no station at all
 		Bootstrapped,      // a fresh solution started from one station
 		BootstrapFailed,   // it tried to start one and could not
+		SecondaryAdded,    // a station joined a solution after its bootstrap (id only)
 	};
 	Kind kind = Kind::StationAdded;
 	std::string serial;              // "LHR-A3C36EA5"

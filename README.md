@@ -121,12 +121,12 @@ A paused Quest loop does not correct its way out of a large disagreement. With t
 default configuration it resumes after five seconds of readings below 1° yaw and
 2.5 cm at the head, or thirty seconds below the 2° / 5 cm that paused it. Readings
 that stay off but hold still for thirty seconds become the calibration instead,
-unless the headset tracker restarted its lighthouse tracking around the time they
-moved: that tracker's own fault waits for the resume. If the readings later return
-to the calibration it replaced, that one comes back. Tilt of 1.5° or more waits
-without pausing, and becomes the calibration the same way if it holds still. If
-tracking is clean but alignment stays wrong, use **Recalibrate with the headset
-tracker**. Waiting in a particular posture is
+unless the headset tracker restarted its lighthouse tracking in the two minutes
+before they moved, or since: that tracker's own fault waits for the resume. If the
+readings later return to the calibration it replaced, that one comes back. Tilt of
+1.5° or more waits without pausing, and becomes the calibration the same way if it
+holds still. If tracking is clean but alignment stays wrong, use **Recalibrate
+with the headset tracker**. Waiting in a particular posture is
 not a calibration step. Manual profile editing changes the base transform; it does
 not relearn the mounted tracker relationship.
 

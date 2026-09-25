@@ -652,8 +652,9 @@ void ContinuousAlignment::TryReanchor(double now, const WindowEstimate &est,
 
 	// A restart of the target shortly before the episode, or during it, says
 	// the target moved rather than the universes: freeze on it (live
-	// 2026-09-25, every remaining freeze came within 30 s of one). Follow mode
-	// takes the target's word regardless, as OpenVR-SpaceCalibrator does.
+	// 2026-09-25, every remaining freeze came within two minutes of one).
+	// Follow mode takes the target's word regardless, as
+	// OpenVR-SpaceCalibrator does.
 	const bool attributed = episodeSince >= 0.0 &&
 		lastTargetResolveTime >= episodeSince - config.resolveAttributionSeconds;
 	if (attributed && !followMode)

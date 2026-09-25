@@ -54,6 +54,15 @@ public:
 		std::string serial;
 		bool visibleKnown = false;
 		std::vector<int> visible;   // channels, ascending
+		// Stations a rebuild counted whose channel no line has named yet.
+		std::vector<uint32_t> unmappedIds;
+		// A bootstrap started a new solution from one station, and only
+		// SECONDARY lines have named the ones that joined it since. The set
+		// is known (the driver says which stations the solution holds), but
+		// it is not the list an SOB line reports, so the SOB line that
+		// follows is read as the first news about the device, as it always
+		// was.
+		bool rebuilding = false;
 		uint32_t events = 0;
 		uint32_t drops = 0;         // stations dropped, any count remaining
 		uint32_t losses = 0;        // times it saw no station at all
@@ -71,6 +80,9 @@ public:
 		uint32_t liveDisturbances = 0;
 		uint32_t liveRestarts = 0;
 		double lastRestart = -1e9;
+
+		// Stations in the device's solution; meaningful when visibleKnown.
+		int InView() const { return static_cast<int>(visible.size() + unmappedIds.size()); }
 	};
 
 	LighthouseVisibility() = default;

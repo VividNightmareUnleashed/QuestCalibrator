@@ -74,7 +74,27 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 		return IdName(id);
 	};
 
-	const int before = d.visibleKnown ? static_cast<int>(d.visible.size()) : -1;
+	// A rebuilt set was never an SOB line's, so the first SOB line after a
+	// bootstrap reads as it always did.
+	const int before = d.visibleKnown && !d.rebuilding ? static_cast<int>(d.visible.size()) : -1;
+	auto addById = [&](uint32_t id)
+	{
+		for (const auto &kv : stations)
+			if (kv.second.id == id)
+			{
+				d.visible.push_back(kv.first);
+				d.visible = Sorted(d.visible);
+				return;
+			}
+		if (std::find(d.unmappedIds.begin(), d.unmappedIds.end(), id) == d.unmappedIds.end())
+			d.unmappedIds.push_back(id);
+	};
+	if (e.kind == Event::Kind::StationAdded || e.kind == Event::Kind::StationDropped ||
+		e.kind == Event::Kind::NoneSeen)
+	{
+		d.rebuilding = false;
+		d.unmappedIds.clear();
+	}
 	std::string what;
 	bool restart = false;
 	switch (e.kind)
@@ -119,12 +139,23 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 
 	case Event::Kind::Bootstrapped:
 		d.bootstraps++;
-		// The add lines that follow rebuild the set; until then it is
-		// whatever the new solution starts from.
+		// The new solution holds the one station it started from until the
+		// SOB or SECONDARY lines that follow add the rest.
 		d.visible.clear();
-		d.visibleKnown = false;
+		d.unmappedIds.clear();
+		d.visibleKnown = e.stationId != 0;
+		d.rebuilding = d.visibleKnown;
+		if (d.rebuilding)
+			addById(e.stationId);
 		what = "started a new solution from " + nameById(e.stationId);
 		restart = true;
+		break;
+
+	case Event::Kind::SecondaryAdded:
+		// News only while a bootstrap's solution is rebuilt: once an SOB line
+		// has reported the set, that is the device's own account of it.
+		if (d.rebuilding)
+			addById(e.stationId);
 		break;
 
 	case Event::Kind::BootstrapFailed:
@@ -132,8 +163,7 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 		break;
 	}
 
-	d.degraded = !d.visibleKnown ||
-		static_cast<int>(d.visible.size()) < config.cleanStations;
+	d.degraded = !d.visibleKnown || d.InView() < config.cleanStations;
 
 	if (what.empty())
 		return std::string();
@@ -155,7 +185,7 @@ bool LighthouseVisibility::Settling(const std::string &serial, double ringTime) 
 	const Device *d = Find(serial);
 	if (!d)
 		return false;
-	if (d->visibleKnown && static_cast<int>(d->visible.size()) < config.cleanStations)
+	if (d->visibleKnown && d->InView() < config.cleanStations)
 		return true;
 	return Within(d->lastDisturbance, ringTime, config.disturbedSeconds);
 }

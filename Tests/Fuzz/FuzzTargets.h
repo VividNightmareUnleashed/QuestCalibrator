@@ -266,6 +266,10 @@ inline std::string CheckLighthouseLine(const uint8_t *data, size_t size)
 		if (!e.visibleKnown || !e.visibleChannels.empty())
 			return "no station seen, yet some visible";
 		break;
+	case Event::Kind::SecondaryAdded:
+		if (e.stationId == 0 || e.channel >= 0 || e.visibleKnown)
+			return "a secondary line names no station, or claims a channel or a visible set";
+		break;
 	default:
 		if (e.visibleKnown)
 			return "a bootstrap line claims a visible set";
@@ -514,6 +518,8 @@ inline std::vector<std::string> LighthouseSeeds()
 		prefix + "LHR-A3C36EA5 C: SOB: drop S-5 (D3D4E73B) seeing S-8 (170EE067) S-16 ( 4D47FB4)",
 		prefix + "LHR-3E61E6B7 C: No base stations seen...",
 		prefix + "LHR-3E61E6B7 C: ----- BOOTSTRAPPED base F210FBA6 (best) distance 2.14m -----",
+		prefix + "LHR-D520226E C: ----- SECONDARY base 4921060B distance 2.01m  -----",
+		prefix + "LHR-D520226E C: ----- SECONDARY base  4D47FB4 distance 3.03m   -----",
 		prefix + "LHR-3E61E6B7 C: Trying to start tracking from base D3D4E73B: Not enough samples",
 	};
 }

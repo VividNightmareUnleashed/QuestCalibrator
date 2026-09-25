@@ -118,8 +118,13 @@ public:
 		// between the two thresholds and hold the freeze for the whole session.
 		double resumeInBandSeconds = 30.0;
 		// A freeze confirmed this soon after the target's own tracking restarted
-		// (NoteTargetResolved) is reported as that, not as universe drift.
-		double resolveAttributionSeconds = 30.0;
+		// (NoteTargetResolved) is reported as that, not as universe drift, and
+		// is not re-anchored. A restarted solution can go bad well after the
+		// restart, with every station back in it: live 2026-09-25 01:25, the
+		// headset tracker restarted, had all four stations 8 s later, and read
+		// 6 deg of tilt 71 s after the restart until SteamVR reset it as out of
+		// bounds. It restarted about every 90 s while the player lay down.
+		double resolveAttributionSeconds = 120.0;
 
 		// --- re-anchor: a freeze or a tilt hold whose estimate holds still for
 		// reanchorConfirmSeconds, from a settled target that did not restart

@@ -6395,6 +6395,65 @@ void RunContinuousScenarios()
 				yawErr < 0.3 && tiltErr < 0.3 && posErr < 0.01 &&
 				sim.ca.GetState() == ContinuousAlignment::State::Tracking, detail);
 		}
+
+		// The same fault 70 s after a restart of the headset tracker, as at
+		// 01:25 (restart 01:23:49, all four stations back 8 s later, the fault
+		// 71 s after the restart), cleared by the next restart at 170 s. A
+		// restart within resolveAttributionSeconds of the freeze keeps it
+		// frozen on the right calibration; the 30 s window this replaced let
+		// the fault become the calibration first.
+		auto restartedFault = [&](double window, int &reanchors, int &attributed, int &resumes,
+			double &yawErr, double &posErr, ContinuousAlignment::State &state)
+		{
+			std::mt19937 rng(2506);
+			ContinuousSim sim;
+			ContinuousAlignment::Config cfg = sim.ca.GetConfig();
+			cfg.resolveAttributionSeconds = window;
+			sim.ca.SetConfig(cfg);
+			sim.ca.SetExtrinsic(trueExtrinsic);
+			sim.solvedOffset = baseTruth.latency;
+			sim.calRot = baseTruth.rotation;
+			sim.calTrans = baseTruth.translation;
+			auto faultFrom80To170 = [&](double t) { return t >= 80.0 && t < 170.0 ? faulted : baseTruth; };
+			bool first = false, second = false;
+			RunContinuousSegment(sim, scene, 0.0, 200.0, rng, faultFrom80To170, constMount, alwaysVisible,
+				nullptr, false,
+				[&](double t)
+				{
+					if (!first && t >= 10.3)
+					{
+						first = true;
+						sim.ca.NoteTargetResolved(t);
+					}
+					if (!second && t >= 170.3)
+					{
+						second = true;
+						sim.ca.NoteTargetResolved(t);
+					}
+					sim.ca.SetTargetSettling((t >= 10.3 && t < 20.3) || (t >= 170.3 && t < 180.3));
+				});
+			reanchors = sim.reanchors;
+			attributed = sim.resolveFreezes;
+			resumes = sim.resumes;
+			CalError(sim, baseTruth, 200.0, yawErr, posErr);
+			state = sim.ca.GetState();
+		};
+		int heldReanchors = 0, heldAttributed = 0, heldResumes = 0;
+		int oldReanchors = 0, oldAttributed = 0, oldResumes = 0;
+		double heldYaw = 0.0, heldPos = 0.0, oldYaw = 0.0, oldPos = 0.0;
+		ContinuousAlignment::State heldState{}, oldState{};
+		restartedFault(ContinuousAlignment::Config().resolveAttributionSeconds, heldReanchors, heldAttributed,
+			heldResumes, heldYaw, heldPos, heldState);
+		restartedFault(30.0, oldReanchors, oldAttributed, oldResumes, oldYaw, oldPos, oldState);
+		snprintf(detail, sizeof detail,
+			"now: re-anchors %d, freeze attributed %d, resumes %d, end %.3f deg / %.1f mm, state %d; "
+			"with 30 s: re-anchors %d, attributed %d (the freeze after the clearing restart)",
+			heldReanchors, heldAttributed, heldResumes, heldYaw, heldPos * 1000.0, static_cast<int>(heldState),
+			oldReanchors, oldAttributed);
+		Check("continuous: a fault a minute after a target restart is not followed",
+			heldReanchors == 0 && heldAttributed == 1 && heldResumes == 1 &&
+			heldYaw < 0.3 && heldPos < 0.01 && heldState == ContinuousAlignment::State::Tracking &&
+			oldReanchors >= 1, detail);
 	}
 }
 

@@ -217,7 +217,7 @@ void BuildLighthouseScreen(const VRState &state)
 		}
 		else
 		{
-			const int inView = static_cast<int>(seen->visible.size());
+			const int inView = seen->InView();
 			const int total = std::max(CalCtx.lighthouse.StationCount(), inView);
 			figure = FormatString("%d of %d in view", inView, total);
 			figureColor = inView < clean ? Pal::Bad : Pal::Text;
@@ -240,10 +240,12 @@ void BuildLighthouseScreen(const VRState &state)
 		if (hov && reporting)
 		{
 			std::string tip = "In view:";
-			if (seen->visible.empty())
+			if (seen->InView() == 0)
 				tip += " no base station";
 			for (int c : seen->visible)
 				tip += " " + CalCtx.lighthouse.StationName(c);
+			for (uint32_t id : seen->unmappedIds)
+				tip += " " + LighthouseVisibility::IdName(id);
 			if (!seen->lastDisturbanceText.empty())
 				tip += "\nLast change: " + seen->lastDisturbanceText;
 			if (seen->bootstraps > 0)
