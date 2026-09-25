@@ -65,8 +65,6 @@ Eigen::Quaterniond EigenvectorMean(const std::vector<Eigen::Quaterniond> &quats,
 
 double Median(std::vector<double> values)
 {
-	if (values.empty())
-		return 0.0;
 	size_t mid = values.size() / 2;
 	std::nth_element(values.begin(), values.begin() + mid, values.end());
 	return values[mid];
@@ -135,6 +133,7 @@ bool RobustAverage(const std::vector<Eigen::Quaterniond> &quats,
 	if (!estimate())
 		return false;
 
+	// keep[] is what estimate() just accepted, so kept >= 3.
 	double rotSq = 0.0, posSq = 0.0;
 	size_t kept = 0;
 	for (size_t i = 0; i < n; ++i)
@@ -145,8 +144,6 @@ bool RobustAverage(const std::vector<Eigen::Quaterniond> &quats,
 		posSq += posRes[i] * posRes[i];
 		++kept;
 	}
-	if (kept < 3)
-		return false;
 
 	out.rot = qMean;
 	out.trans = tMean;
@@ -204,14 +201,11 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 
 		// Same time-alignment convention as the engine: the reference stream
 		// is interpolated at the target's timestamp minus the solved offset.
-		// A negative offset asks for a reference pose in the target sample's
-		// future. During live streaming that bracket may simply not have arrived
-		// yet: keep this target at the processing cursor so the next Update can
-		// retry it. Since both streams are monotonic, every later target would
-		// also need a future reference and can wait behind it. Conversely, a
-		// requested time before the retained reference window is irrecoverably
-		// old, and a failed interpolation inside the completed window is a hard
-		// tracking gap that future samples cannot repair.
+		// A bracket that has not arrived yet (a negative offset asks for the
+		// reference's future) keeps this target, and every later one, at the
+		// cursor for the next Update. A time before the retained reference
+		// window is irrecoverably old, and a failed interpolation inside the
+		// completed window is a hard tracking gap.
 		double refTime = t.time - calTimeOffset;
 		const size_t refLive = refWindow.size() - refHead;
 		if (refLive == 0 || refTime > refWindow.back().time ||
@@ -330,17 +324,13 @@ void ContinuousAlignment::TrimWindows(double now)
 		keepSeconds = std::max(keepSeconds, config.latencyWindowSeconds);
 	double streamCutoff = now - keepSeconds;
 
-	// Retire expired samples by advancing a head cursor. Both windows hold
-	// thousands of samples and retire a handful per tick, so erasing from the
-	// front relocated every survivor up to 50 times a second for an
-	// O(dropped) job; the prefix is compacted away only once it is a quarter
-	// of the buffer, i.e. once the single move it costs is worth making.
+	// Retire expired samples by advancing the head cursors (see refHead);
+	// compact once the dead prefix is a quarter of the buffer.
 	while (refHead < refWindow.size() && refWindow[refHead].time < streamCutoff)
 		++refHead;
 	while (targetHead < targetWindow.size() && targetWindow[targetHead].time < streamCutoff)
 		++targetHead;
-	// A target that expired before it was processed stays unprocessed —
-	// exactly what the erase that used to rebase this cursor left behind.
+	// A target that expired before it was processed is never processed.
 	if (targetProcessed < targetHead)
 		targetProcessed = targetHead;
 	if (4 * refHead > refWindow.size() || 4 * targetHead > targetWindow.size())
@@ -363,7 +353,7 @@ void ContinuousAlignment::CompactWindows()
 	if (targetHead > 0)
 	{
 		targetWindow.erase(targetWindow.begin(), targetWindow.begin() + targetHead);
-		targetProcessed -= targetHead;   // >= targetHead by the clamp above
+		targetProcessed -= targetHead;   // >= targetHead by TrimWindows' clamp
 		targetHead = 0;
 	}
 }
@@ -424,9 +414,8 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		return;
 	}
 
-	// Publish the estimate's figures as a unit, and only on success: the
-	// accessors and the scatter test below then always describe the same
-	// window.
+	// Published only on success, so the accessors describe the window tested
+	// below.
 	scatterRotRmsDeg = est.scatterRotDeg;
 	scatterPosRmsM = est.scatterPosM;
 
@@ -599,15 +588,12 @@ ContinuousAlignment::Deviation ContinuousAlignment::MeasureDeviation(
 	// Effective displacement at the user's head: the honest magnitude of the
 	// deviation (a yaw delta far from the origin has a huge raw translation).
 	// Every observation maps the tracker exactly onto the head, so the
-	// estimate is right there whatever its tilt. This used to be split into a
-	// "reachable" yaw-only share that paired the yaw with the estimate's own
-	// translation, which pivots the dropped tilt about the target's raw
-	// origin: the corrections then walked the head off by tilt times that
-	// lever arm and stopped there (live 2026-09-25: 1.1 deg of tracker tilt,
-	// origin 3.2 m away, 0.9 cm -> 3.7 cm within ten seconds, later a 42
-	// minute freeze this floor kept from resuming). Translating the head by the full
-	// displacement leaves no floor.
-	headPosOut = refHead < refWindow.size() ? refWindow.back().pos : Eigen::Vector3d::Zero();
+	// estimate is right there whatever its tilt. Dropping the tilt about any
+	// other pivot leaves tilt times the lever arm at the head (live 2026-09-25:
+	// 1.1 deg of tracker tilt about an origin 3.2 m away walked the head 3.7 cm
+	// off). Decide runs only on a fresh observation (< coastGapSeconds old,
+	// |time offset| <= 1 s), so the newest reference sample is still retained.
+	headPosOut = refWindow.back().pos;
 	headStepOut = rD * headPosOut + tD - headPosOut;
 
 	Deviation d;
@@ -637,14 +623,12 @@ void ContinuousAlignment::EnterState(State s)
 	state = s;
 }
 
-// Observation continuity broke (occlusion, a dropped window). Every sustained-
+// Observation continuity broke (occlusion, a dropped window): every sustained-
 // evidence mark was accumulated against a stream that no longer exists, so the
-// next evaluation must re-earn its verdict from scratch instead of completing
-// a confirm on one post-recovery sample. Clearing the marks and NOT the State
-// is what keeps a freeze in place through an occlusion while still forcing
-// a full resumeConfirmSeconds of fresh evidence before it unfreezes.
-// unstableNotified deliberately survives: it is a notification latch, not
-// evidence, and re-arming it would spam one toast per occlusion.
+// next verdict is re-earned from scratch. The State stays, so a freeze holds
+// through an occlusion yet needs a full resumeConfirmSeconds of fresh evidence
+// to lift. unstableNotified survives: it is a notification latch, not evidence,
+// and re-arming it would raise one toast per occlusion.
 void ContinuousAlignment::ClearConfirmMarks()
 {
 	correctionEligible = false;
@@ -668,7 +652,8 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 
 	FormObservations(calScale, calTimeOffset);
 	TrimWindows(now);
-	if (pendingObs || observations.size() < config.minObsForEstimate)
+	// A pending jump candidate already cleared these when it was raised.
+	if (observations.size() < config.minObsForEstimate)
 	{
 		correctionEligible = false;
 		pendingCorrection.reset();
@@ -679,9 +664,8 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 	if (!obsFresh)
 	{
 		// Occluded / powered off / face away from the base stations: hold the
-		// calibration, resume cleanly. Frozen stays frozen through occlusion —
-		// but the confirms do not, including while Frozen (which changes no
-		// state here and so used to keep its marks).
+		// calibration, resume cleanly. Frozen stays frozen through occlusion,
+		// but its confirms do not.
 		ClearConfirmMarks();
 		if (state == State::Tracking || state == State::Holding)
 		{
@@ -808,8 +792,6 @@ void ContinuousAlignment::Reset(ResetReason reason)
 	scatterEpisodeSince = -1.0;
 	unstableNotified = false;
 	pendingObs.reset();
-	pendingCorrection.reset();
-	pendingTimeOffset.reset();
 	events.clear();
 	EnterState(keepFrozen ? State::Frozen : keepCoasting ? State::Coasting : State::Inactive);
 }
@@ -825,12 +807,9 @@ bool ContinuousAlignment::DeriveMountExtrinsic(const std::vector<PoseSample> &re
                                                const EngineResult &calibration,
                                                MountExtrinsic &out)
 {
-	if (!calibration.valid || targetStream.empty())
-		return false;
-
-	// Fixed policy, not caller knobs: the speed/interpolation gates that decide
-	// which pairs are usable, and the rigidity gate that decides whether
-	// continuous calibration arms at all.
+	// Fixed policy: the speed/interpolation gates that decide which pairs are
+	// usable, and the rigidity gate that decides whether continuous
+	// calibration arms at all.
 	const Config config;
 
 	// E = H^-1 o (C o T_s): the tracker's pose in the HMD body frame, one

@@ -10,14 +10,14 @@
 // original can choose it, and so the two can be compared on the same data.
 //
 // The translation solve uses the equivalent centered system instead of all
-// pairwise differences. Poses have no OpenVR types, the metrics sink is gone,
-// and log lines go to an optional callback instead of a global context.
+// pairwise differences. Poses have no OpenVR types, and the source's metrics,
+// log output, jitter statistics and outlier pass (never enabled here) are not
+// ported.
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
 
 #include <deque>
-#include <functional>
 #include <vector>
 
 namespace questcal {
@@ -29,14 +29,8 @@ struct Pose
 	Eigen::Vector3d trans;
 
 	Pose() { }
-	Pose(const Eigen::AffineCompact3d &transform)
-	{
-		rot = transform.rotation();
-		trans = transform.translation();
-	}
 	Pose(const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translation)
 		: rot(rotation.toRotationMatrix()), trans(translation) { }
-	Pose(double x, double y, double z) : trans(Eigen::Vector3d(x, y, z)) { }
 
 	Eigen::Matrix4d ToAffine() const
 	{
@@ -68,21 +62,9 @@ public:
 	bool enableStaticRecalibration;
 	bool lockRelativePosition = false;
 
-	// Where the source wrote to the application log.
-	std::function<void(const char *)> log;
-
 	const Eigen::AffineCompact3d Transformation() const { return m_estimatedTransformation; }
 
-	const Eigen::Vector3d EulerRotation() const
-	{
-		auto rot = m_estimatedTransformation.rotation();
-		return rot.canonicalEulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
-	}
-
 	bool isValid() const { return m_isValid; }
-
-	const Eigen::AffineCompact3d RelativeTransformation() const { return m_refToTargetPose; }
-	bool isRelativeTransformationCalibrated() const { return m_relativePosCalibrated; }
 
 	void setRelativeTransformation(const Eigen::AffineCompact3d transform, bool calibrated)
 	{
@@ -93,26 +75,19 @@ public:
 	void PushSample(const Sample &sample);
 	void Clear();
 
-	double ReferenceJitter() const;
-	double TargetJitter() const;
-
+	// `ignoreOutliers` is accepted for the source's signature and ignored.
 	bool ComputeOneshot(const bool ignoreOutliers);
 	bool ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers);
 
 	size_t SampleCount() const { return m_samples.size(); }
 
-	void ShiftSample()
-	{
-		if (!m_samples.empty())
-			m_samples.pop_front();
-	}
+	// Every caller shifts only from a full window.
+	void ShiftSample() { m_samples.pop_front(); }
 
-	CalibrationCalc() : enableStaticRecalibration(true), m_calcCycle(0), m_isValid(false) { }
+	CalibrationCalc() : enableStaticRecalibration(true), m_isValid(false) { }
 
 	// Debug fields
-	Eigen::Vector3d m_posOffset;
 	double m_axisVariance = 0.0;
-	long m_calcCycle;
 	// The retargeting error of the last accepted estimate (meters).
 	double m_lastError = 0.0;
 
@@ -129,18 +104,17 @@ private:
 
 	std::deque<Sample> m_samples;
 
-	std::vector<bool> DetectOutliers() const;
-	Eigen::Vector3d CalibrateRotation(const bool ignoreOutliers) const;
+	Eigen::Vector3d CalibrateRotation() const;
 	Eigen::Vector3d CalibrateTranslation(const Eigen::Matrix3d &rotation) const;
 
-	Eigen::AffineCompact3d ComputeCalibration(const bool ignoreOutliers) const;
+	Eigen::AffineCompact3d ComputeCalibration() const;
 
 	double RetargetingErrorRMS(const Eigen::Vector3d &hmdToTargetPos, const Eigen::AffineCompact3d &calibration) const;
 	Eigen::Vector3d ComputeRefToTargetOffset(const Eigen::AffineCompact3d &calibration) const;
 
-	Eigen::Vector4d ComputeAxisVariance(const Eigen::AffineCompact3d &calibration) const;
+	Eigen::Vector4d ComputeAxisVariance() const;
 
-	[[nodiscard]] bool ValidateCalibration(const Eigen::AffineCompact3d &calibration, double *errorOut = nullptr, Eigen::Vector3d *posOffsetV = nullptr);
+	[[nodiscard]] bool ValidateCalibration(const Eigen::AffineCompact3d &calibration, double *errorOut = nullptr);
 
 	Eigen::AffineCompact3d EstimateRefToTargetPose(const Eigen::AffineCompact3d &calibration) const;
 	bool CalibrateByRelPose(Eigen::AffineCompact3d &out) const;

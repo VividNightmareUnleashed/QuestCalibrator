@@ -19,11 +19,8 @@
 namespace
 {
 
-// Heading component of a rotation: the scalar form of the shared yaw
-// projection. The heuristic path regresses an ANGLE against time (a quaternion
-// cannot be least-squares fitted), so it needs the scalar; the exact path needs
-// the quaternion. Both come off questcal::YawOnlyRotation so there is one
-// projection convention, not two — see the comment there.
+// Heading of a rotation as a scalar, which the heuristic path's line fit needs;
+// taken from questcal::YawOnlyRotation so both paths share one projection.
 double YawOf(const Eigen::Quaterniond &q)
 {
 	Eigen::Quaterniond yaw = questcal::YawOnlyRotation(q);
@@ -47,8 +44,6 @@ Eigen::Quaterniond YawQuat(double yaw)
 // frame pair would bake one frame of noise into the profile permanently, and
 // extrapolating heading via angular velocity is biased when the device is
 // pitched (the twist rate is not the world-Y angular velocity component).
-// File scope rather than inside the candidate loop: it is the one piece of the
-// heuristic path with self-contained, checkable behaviour.
 struct WindowFit
 {
 	int n = 0;
@@ -98,9 +93,6 @@ std::string Format(const char *fmt, ...)
 
 void JumpDetector::Push(const protocol::DevicePoseSample &s)
 {
-	if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
-		return;
-
 	auto &dev = devices[s.deviceId];
 	auto breakObservationContinuity = [&](const std::string &reason)
 	{
@@ -143,10 +135,8 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	if (dev.lastValidTime >= 0.0 && t - dev.lastValidTime > config.gapSeconds)
 	{
 		gaps.push_back({ s.deviceId, t - dev.lastValidTime, t });
-		// Same three actions as an observed bad frame, and they must stay the
-		// same three: a gap must never be bridged by driver-local state the
-		// bad-frame path correctly refuses to bridge. Deliberately no return —
-		// this sample is still processed.
+		// Broken exactly like an observed bad frame, but this sample is still
+		// processed.
 		breakObservationContinuity(!detailed ? std::string() :
 			Format("a %.1f s gap in the stream", t - dev.lastValidTime));
 		resumed = true;
@@ -226,7 +216,7 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	else
 		dev.repeatedPositions = 0;
 	dev.hist.push_back(h);
-	while (!dev.hist.empty() && h.t - dev.hist.front().t > 2.0 * config.window)
+	while (h.t - dev.hist.front().t > 2.0 * config.window)
 		dev.hist.pop_front();
 
 	dev.wfdRot = p.wfdRot;
@@ -279,8 +269,8 @@ void JumpDetector::DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist &incoming)
 {
 	const Hist &prev = dev.hist.back();
-	double dt = incoming.t - prev.t;
-	if (dt <= 0.0 || dt > config.maxFrameGap)
+	double dt = incoming.t - prev.t;   // > 0: Push rejects out-of-order samples
+	if (dt > config.maxFrameGap)
 		return;
 
 	Eigen::Vector3d meanVel = 0.5 * (prev.vel + incoming.vel);
@@ -311,9 +301,7 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	c.needsCorroboration = posErr < config.discontinuityPos && yawErr < config.discontinuityYawRad;
 	c.followDeadline = c.t + config.window + config.controllerFollowSeconds;
 	c.lastHoldCheck = c.t;
-	// Keep only the pre-jump window, in order: find where it starts and copy
-	// the suffix once (erasing the expired head one element at a time
-	// relocated the remainder on every step).
+	// Keep only the pre-jump window.
 	size_t first = 0;
 	while (first < dev.hist.size() && c.t - dev.hist[first].t > config.window)
 		++first;
@@ -375,11 +363,9 @@ void JumpDetector::EvaluatePendingCandidates()
 				yawSq += yawError * yawError;
 				++r.count;
 			}
-			if (r.count > 0)
-			{
-				r.pos = std::sqrt(posSq / r.count);
-				r.yaw = std::sqrt(yawSq / r.count);
-			}
+			// count is the fit's own n, at least 3.
+			r.pos = std::sqrt(posSq / r.count);
+			r.yaw = std::sqrt(yawSq / r.count);
 			return r;
 		};
 		const FitResidual before = residual(c.preWindow, pre, false), after = residual(dev.hist, post, true);
@@ -433,12 +419,11 @@ void JumpDetector::EvaluatePendingCandidates()
 			c.deviceId, dYaw * 180.0 / EIGEN_PI, c.trans.norm(), moved,
 			c.frameJumpPos, c.frameJumpYawRad * 180.0 / EIGEN_PI);
 		const double resumeAge = ResumeAge(dev, c.t);
-		if (resumeAge >= 0.0 && resumeAge <= config.recentResumeSeconds)
+		if (resumeAge <= config.recentResumeSeconds)
 			note += Format(" (%.1f s after the stream resumed)", resumeAge);
 
-		// Decide the headset-only acceptance here, once, while the evidence
-		// is in hand; TryAccept only reads the verdict. Both refusals are
-		// logged so a later reader can tell a gated step from a small one.
+		// Decide the headset-only acceptance once, here; TryAccept only reads
+		// the verdict. Refusals are logged to tell a gated step from a small one.
 		if (c.deviceId == vr::k_unTrackedDeviceIndex_Hmd)
 		{
 			c.heldPosition = HeldPositionSignature(c.preWindow);
@@ -672,9 +657,6 @@ void JumpDetector::TryAccept()
 				c0.deviceId, driftCatchUps));
 			continue;
 		}
-		// Sum the discarded steps as one transform: the log then shows
-		// whether what was ignored adds up to the drift a recalibration
-		// later removes, the evidence the next threshold change needs.
 		ignoredSteps++;
 		ignoredYaw = WrapAngle(ignoredYaw + YawOf(c0.rot));
 		ignoredTranslation += c0.trans;
@@ -721,42 +703,6 @@ bool JumpDetector::OthersLockedStill(double now) const
 			return false;
 	}
 	return others > 0;
-}
-
-bool JumpDetector::PollDelta(UniverseDelta &out)
-{
-	if (accepted.empty())
-		return false;
-	out = accepted.front();
-	accepted.pop_front();
-	return true;
-}
-
-bool JumpDetector::PollGap(GapEvent &out)
-{
-	if (gaps.empty())
-		return false;
-	out = gaps.front();
-	gaps.pop_front();
-	return true;
-}
-
-bool JumpDetector::PollNote(std::string &out)
-{
-	if (notes.empty())
-		return false;
-	out = notes.front();
-	notes.pop_front();
-	return true;
-}
-
-bool JumpDetector::PollDetail(std::string &out)
-{
-	if (details.empty())
-		return false;
-	out = details.front();
-	details.pop_front();
-	return true;
 }
 
 void JumpDetector::Drop(Candidate &c, const std::string &reason)

@@ -18,9 +18,9 @@
 // the buffered history.
 //
 // The shmem queue itself only holds a few seconds of slack before producers
-// safely discard old poses, and the UI thread (which used to own the reader)
-// can stall longer than that on a minimized window, blocking IPC, or a
-// registry save. The hub's job is to keep it drained on a guaranteed cadence,
+// safely discard old poses, and the UI thread can stall longer than that on a
+// minimized window, blocking IPC, or a registry save. The hub's job is to keep
+// it drained on a guaranteed cadence,
 // propagate source-drop counts to every consumer, and hold a longer window
 // locally so consumers do not bridge observation gaps across a UI stall.
 class PoseStreamHub
@@ -34,6 +34,7 @@ public:
 
 	~PoseStreamHub();
 
+	// Once per hub; there is no restart after Stop.
 	void Start(const char *shmemName);
 	void Stop();
 
@@ -55,8 +56,9 @@ public:
 	// Copies a bounded snapshot without consuming any reader's backlog.
 	Diagnostics ReadDiagnostics();
 
-	// A consumer id is a private cursor. Samples buffered before the consumer
-	// was created are not delivered to it.
+	// A consumer id is a private cursor; the calls below take only ids this
+	// returned. Samples buffered before the consumer was created are not
+	// delivered to it.
 	int CreateConsumer();
 
 	// Fills `out` (cleared first) with every sample since this consumer's
@@ -145,13 +147,12 @@ private:
 	// Drain's body, appending to `out` instead of replacing it.
 	uint64_t DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole &hole);
 	void AppendSampleLocked(const protocol::DevicePoseSample &sample);
-	void AppendGapLocked(uint64_t count);
+	void AppendGapLocked(uint64_t count);   // count > 0: the ring reader never reports an empty gap
 	// Publishes an observation hole: discards every consumer's backlog (it may
 	// predate a universe rebase) and marks the position so the next drain
 	// reports a gap rather than bridging it.
 	void AppendSessionBoundaryLocked();
-	// Thread entry: catches, so an allocation failure stops the drain instead of
-	// terminating the process without unwinding.
+	// Thread entry: an exception stops the drain, not the process.
 	void DrainLoop(const std::string &shmemName);
 	void DrainRing(const std::string &shmemName);
 

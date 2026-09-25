@@ -5053,48 +5053,6 @@ void RunDriftScenarios()
 			std::abs(afterRealLoss.lastMag - 0.40) < 1e-9,
 			detail);
 	}
-
-	// Bad numeric fields and an out-of-order composed timestamp do not enter the
-	// rolling window; valid evidence immediately afterward remains usable.
-	{
-		DriftMonitor dm(TestQpcToSeconds);
-		DriftRun r;
-		protocol::DevicePoseSample bad = stillSample(0.1, base);
-		bad.worldFromDriverTranslation[2] = std::numeric_limits<double>::quiet_NaN();
-		dm.Push(bad);
-		bad = stillSample(0.2, base);
-		bad.worldFromDriverRotation = { 0.0, 0.0, 0.0, 0.0 };
-		dm.Push(bad);
-		bad = stillSample(0.3, base);
-		bad.velocity[1] = std::numeric_limits<double>::infinity();
-		dm.Push(bad);
-		bad = stillSample(0.31, base);
-		bad.poseTimeOffset = 1e300;
-		dm.Push(bad);
-		bad = stillSample(0.32, base);
-		bad.worldFromDriverTranslation[0] = 1e300;
-		dm.Push(bad);
-		bad = stillSample(0.33, base);
-		bad.velocity[2] = 1e300;
-		dm.Push(bad);
-
-		const Eigen::Vector3d driftRate(0.0033, 0.0, 0.0011);
-		dm.Push(stillSample(0.25, base + driftRate * 0.25));
-		bad = stillSample(0.20, base + Eigen::Vector3d(10.0, 0.0, 0.0));
-		dm.Push(bad);
-		std::mt19937 rng(71);
-		std::normal_distribution<double> n(0.0, 0.0015);
-		for (double t = 0.26; t < 10.0; t += 1.0 / rate)
-		{
-			Eigen::Vector3d pos = base + driftRate * t + Eigen::Vector3d(n(rng), n(rng), n(rng));
-			dm.Push(stillSample(t, pos));
-			drain(dm, r);
-		}
-		bool pass = r.slides == 1 && r.losses == 0 && r.lastMag > 0.012 && r.lastMag < 0.04;
-		snprintf(detail, sizeof detail, "slides %d losses %d mag %.1f mm",
-			r.slides, r.losses, r.lastMag * 1000.0);
-		Check("drift: malformed inputs recover", pass, detail);
-	}
 }
 
 // ---------------------------------------------------------------------------

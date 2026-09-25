@@ -16,6 +16,16 @@ std::vector<int> Sorted(std::vector<int> channels)
 	return channels;
 }
 
+// Within [-1 s, window] of a live event at `at` (a log line can be stamped
+// just after the pose it explains); -1e9 marks no event yet.
+bool Within(double at, double ringTime, double window)
+{
+	if (at <= -1e8)
+		return false;
+	const double since = ringTime - at;
+	return since >= -1.0 && since <= window;
+}
+
 } // namespace
 
 std::string LighthouseVisibility::IdName(uint32_t id)
@@ -38,13 +48,9 @@ std::string LighthouseVisibility::StationName(int channel) const
 
 std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 {
-	if (e.serial.empty())
-		return std::string();
 	Device &d = devices[e.serial];
 	d.serial = e.serial;
 	d.events++;
-	if (!e.historical)
-		d.lastEvent = ringTime;
 
 	auto note = [&](int channel, uint32_t id)
 	{
@@ -57,7 +63,7 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 	};
 	note(e.channel, e.stationId);
 	for (size_t i = 0; i < e.visibleChannels.size(); ++i)
-		note(e.visibleChannels[i], i < e.visibleIds.size() ? e.visibleIds[i] : 0);
+		note(e.visibleChannels[i], e.visibleIds[i]);
 
 	// A station named only by id (bootstrap lines) still deserves a name.
 	auto nameById = [&](uint32_t id)
@@ -151,33 +157,20 @@ bool LighthouseVisibility::Settling(const std::string &serial, double ringTime) 
 		return false;
 	if (d->visibleKnown && static_cast<int>(d->visible.size()) < config.cleanStations)
 		return true;
-	if (d->lastDisturbance <= -1e8)
-		return false;
-	const double since = ringTime - d->lastDisturbance;
-	return since >= -1.0 && since <= config.disturbedSeconds;
+	return Within(d->lastDisturbance, ringTime, config.disturbedSeconds);
 }
 
 bool LighthouseVisibility::RestartedWithin(const std::string &serial, double ringTime,
 	double seconds) const
 {
 	const Device *d = Find(serial);
-	if (!d || d->lastRestart <= -1e8)
-		return false;
-	const double since = ringTime - d->lastRestart;
-	return since >= -1.0 && since <= seconds;
+	return d && Within(d->lastRestart, ringTime, seconds);
 }
 
 bool LighthouseVisibility::Disturbed(const std::string &serial, double ringTime) const
 {
 	const Device *d = Find(serial);
-	if (!d)
-		return false;
-	if (d->degraded)
-		return true;
-	if (d->lastDisturbance <= -1e8)
-		return false;
-	const double since = ringTime - d->lastDisturbance;
-	return since >= -1.0 && since <= config.disturbedSeconds;
+	return d && (d->degraded || Within(d->lastDisturbance, ringTime, config.disturbedSeconds));
 }
 
 const LighthouseVisibility::Device *LighthouseVisibility::Find(const std::string &serial) const
