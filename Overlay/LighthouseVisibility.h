@@ -62,8 +62,7 @@ public:
 		// is a single-baseline fit or an IMU coast for as long as this holds.
 		// State, not timing, so replayed lines set it too.
 		bool degraded = false;
-		double lastEvent = -1e9;    // ring seconds; live lines only
-		double lastDisturbance = -1e9;
+		double lastDisturbance = -1e9;   // ring seconds; live lines only
 		std::string lastDisturbanceText;
 		// Live lines only, so a consumer can tell a new one from the last it
 		// saw by the count. Restarts are the subset that begin a new solution
@@ -77,7 +76,8 @@ public:
 	LighthouseVisibility() = default;
 	explicit LighthouseVisibility(const Config &c) : config(c) { }
 
-	// Folds one line in. Returns a short description when the line is a
+	// Folds one parsed line in (an LHR serial; visibleIds parallel to
+	// visibleChannels). Returns a short description when the line is a
 	// disturbance worth a session-log line ("lost its last station
 	// (S-5 D3D4E73B)"), empty for routine handoffs and for replayed lines.
 	std::string Apply(const lighthouselog::Event &e, double ringTime);

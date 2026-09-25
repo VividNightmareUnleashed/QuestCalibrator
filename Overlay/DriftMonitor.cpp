@@ -6,26 +6,13 @@
 
 void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 {
-	if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
-		return;
-	if (!std::isfinite(linearScale) || linearScale < protocol::limits::MinScale ||
-		linearScale > protocol::limits::MaxScale)
-		return;
-
-	bool valid = s.poseIsValid && s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK);
-	if (!valid || !IsUsableRingSample(s, qpcToSeconds))
-		return;   // absence; loss classification happens on recovery
-
 	auto &dev = devices[s.deviceId];
 	double t = RingSampleTime(s, qpcToSeconds);
 	bool haveLast = dev.lastValid.time >= 0.0;
-	if (haveLast && t <= dev.lastValid.time)
-		return;
 
-	// Scale is part of this device's coordinate basis. Never compare samples
-	// across an intentional profile/scale edit: the same raw pose would appear
-	// to move solely because its units changed. Drops the window too — the
-	// retained positions are in the old units.
+	// Scale is part of this device's coordinate basis: across a profile scale
+	// edit the same raw pose would appear to move, so the window and the
+	// last sample (both in the old units) are dropped.
 	if (haveLast &&
 		std::abs(linearScale - dev.lastValid.linearScale) >
 			1e-6 * (1.0 + std::abs(dev.lastValid.linearScale)))
@@ -60,15 +47,14 @@ void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 		}
 	}
 
-	dev.lastValid = LastValid{ t, linearScale, pos, velocity };   // all four, always together
+	dev.lastValid = LastValid{ t, linearScale, pos, velocity };
 
 	dev.window.push_back({ t, pos });
-	while (!dev.window.empty() && t - dev.window.front().t > config.window)
+	while (t - dev.window.front().t > config.window)
 		dev.window.pop_front();
 
-	// Judging on every push would be wasted work at ring rate; a few times a
-	// second is plenty for a signal this slow.
-	if (!dev.window.empty() && t - dev.window.front().t > config.window * 0.95 &&
+	// A few evaluations a second is plenty for a signal this slow.
+	if (t - dev.window.front().t > config.window * 0.95 &&
 		t - dev.lastEvalTime > 0.25)
 	{
 		dev.lastEvalTime = t;
@@ -80,26 +66,15 @@ void DriftMonitor::EvaluateWindow(uint32_t id, DeviceState &dev)
 {
 	const double t0 = dev.window.front().t;
 	const double span = dev.window.back().t - t0;
-	if (span <= 0.0)
-		return;
 
+	// Push evaluates only once span exceeds 0.95 * window, and trims it to at
+	// most window, so this is 7 or 8 chunks of about chunkSeconds each.
 	constexpr int MaxChunks = 16;
-	int chunks = static_cast<int>(span / config.chunkSeconds);
-	if (chunks < 6)
-		return;
-	if (chunks > MaxChunks)
-		chunks = MaxChunks;
-
-	// The width the gates below actually describe: the span is divided evenly
-	// among the chunks, so it is at least the configured chunkSeconds and
-	// grows past it once the MaxChunks clamp binds. chunkJitter and chunkStep
-	// are tuned against this timescale, not against config.chunkSeconds — a
-	// window long enough to bind the clamp is applying them to a longer one.
+	const int chunks = static_cast<int>(span / config.chunkSeconds);
 	const double chunkWidth = span / chunks;
 
-	// One record per chunk: filled in two passes (the stable two-pass variance,
-	// not the catastrophically-cancelling sum-of-squares form on room-scale
-	// coordinates) and read as a unit.
+	// Two-pass variance: the sum-of-squares form cancels catastrophically on
+	// room-scale coordinates.
 	struct Chunk
 	{
 		Eigen::Vector3d mean = Eigen::Vector3d::Zero();
@@ -163,8 +138,6 @@ void DriftMonitor::Reset()
 {
 	for (auto &dev : devices)
 	{
-		// Everything: a calibration change invalidates the retained window and
-		// the last-sample record alike.
 		dev.window.clear();
 		dev.lastEvalTime = -1.0;
 		dev.lastValid = LastValid();

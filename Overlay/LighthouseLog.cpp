@@ -274,7 +274,7 @@ std::string DefaultLogPath()
 	for (char &c : steam)
 		if (c == '/')
 			c = '\\';
-	if (!steam.empty() && steam.back() == '\\')
+	if (steam.back() == '\\')
 		steam.pop_back();
 	return steam + "\\logs\\vrserver.txt";
 }

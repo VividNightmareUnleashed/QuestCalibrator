@@ -40,7 +40,6 @@ namespace {
 
 	DSample DeltaRotationSamples(const Sample &s1, const Sample &s2)
 	{
-		// Difference in rotation between samples.
 		auto dref = s1.ref.rot * s2.ref.rot.transpose();
 		auto dtarget = s1.target.rot * s2.target.rot.transpose();
 
@@ -148,149 +147,57 @@ void CalibrationCalc::Clear()
 	m_relativePosCalibrated = false;
 }
 
-std::vector<bool> CalibrationCalc::DetectOutliers() const
-{
-	// Use bigger step to get a rough rotation.
-	std::vector<DSample> deltas;
-	const size_t step = 5;
-	for (size_t i = 0; i < m_samples.size(); i += step)
-	{
-		for (size_t j = 0; j < i; j += step)
-		{
-			auto delta = DeltaRotationSamples(m_samples[i], m_samples[j]);
-			if (delta.valid)
-				deltas.push_back(delta);
-		}
-	}
-	if (deltas.empty())
-		return std::vector<bool>(m_samples.size(), true);
-
-	// Kabsch algorithm
-	Eigen::MatrixXd refPoints(deltas.size(), 3), targetPoints(deltas.size(), 3);
-	Eigen::Vector3d refCentroid(0, 0, 0), targetCentroid(0, 0, 0);
-
-	for (size_t i = 0; i < deltas.size(); i++)
-	{
-		refPoints.row(i) = deltas[i].ref;
-		refCentroid += deltas[i].ref;
-		targetPoints.row(i) = deltas[i].target;
-		targetCentroid += deltas[i].target;
-	}
-
-	refCentroid /= (double)deltas.size();
-	targetCentroid /= (double)deltas.size();
-
-	for (size_t i = 0; i < deltas.size(); i++)
-	{
-		refPoints.row(i) -= refCentroid;
-		targetPoints.row(i) -= targetCentroid;
-	}
-
-	auto crossCV = refPoints.transpose() * targetPoints;
-
-	Eigen::BDCSVD<Eigen::MatrixXd, Eigen::ComputeThinU | Eigen::ComputeThinV> svd(crossCV);
-
-	Eigen::Matrix3d i = Eigen::Matrix3d::Identity();
-	if ((svd.matrixU() * svd.matrixV().transpose()).determinant() < 0)
-		i(2, 2) = -1;
-
-	Eigen::Matrix3d rot = svd.matrixV() * i * svd.matrixU().transpose();
-	rot.transposeInPlace();
-
-	// Optimize an extrinsic from reference to target.
-	// Detect the outliers by comparing the extrinc computed from each pair of rotation to the optimized extrinsic.
-	Eigen::MatrixXd coefficients(m_samples.size() * 4, 4);
-	Eigen::VectorXd constraints(m_samples.size() * 4);
-	std::vector<bool> valids(m_samples.size());
-	for (size_t i = 0; i < m_samples.size(); i++)
-	{
-		Eigen::Matrix3d rotExtTmp = (m_samples[i].ref.rot.transpose() * rot * m_samples[i].target.rot);
-		Eigen::Quaterniond quatExtTmp(rotExtTmp);
-		quatExtTmp.normalize();
-		coefficients.block<4, 4>(4 * i, 0) = Eigen::Matrix4d::Identity();
-		constraints.block<4, 1>(4 * i, 0) = Eigen::Vector4d(quatExtTmp.w(), quatExtTmp.x(), quatExtTmp.y(), quatExtTmp.z());
-	}
-	Eigen::Vector4d result = coefficients.bdcSvd<Eigen::ComputeThinU | Eigen::ComputeThinV>().solve(constraints);
-	Eigen::Quaterniond quatExt(result(0), result(1), result(2), result(3));
-	quatExt.normalize();
-	const double threshold = 0.99;
-
-	for (size_t i = 0; i < m_samples.size(); i++)
-	{
-		Eigen::Matrix3d rotExtTmp = (m_samples[i].ref.rot.transpose() * rot * m_samples[i].target.rot);
-		Eigen::Quaterniond quatExtTmp(rotExtTmp);
-		double cosHalfAngle = quatExtTmp.w() * quatExt.w() + quatExtTmp.vec().dot(quatExt.vec());
-		valids[i] = !(std::abs(cosHalfAngle) < threshold);
-	}
-	return valids;
-}
-
-Eigen::Vector3d CalibrationCalc::CalibrateRotation(const bool ignoreOutliers) const
+Eigen::Vector3d CalibrationCalc::CalibrateRotation() const
 {
 	std::vector<DSample> deltas;
-	std::vector<bool> valids = ignoreOutliers ? DetectOutliers() : std::vector<bool>();
-
 	for (size_t i = 0; i < m_samples.size(); i++)
 	{
 		for (size_t j = 0; j < i; j++)
 		{
-			if (ignoreOutliers && (!valids[i] || !valids[j]))
-				continue;
 			auto delta = DeltaRotationSamples(m_samples[i], m_samples[j]);
 			if (delta.valid)
 				deltas.push_back(delta);
 		}
 	}
 
-	// Kabsch algorithm
-
-	// Initialize 2D points and centroids
+	// Kabsch algorithm on the horizontal (x, z) components of the rotation axes.
 	Eigen::MatrixXd refPoints(deltas.size(), 2), targetPoints(deltas.size(), 2);
 	Eigen::Vector2d refCentroid(0, 0), targetCentroid(0, 0);
 
-	// Fill matrices and calculate centroids
 	for (size_t i = 0; i < deltas.size(); i++)
 	{
-		refPoints.row(i) << deltas[i].ref[0], deltas[i].ref[2];  // Take only the x and z components
+		refPoints.row(i) << deltas[i].ref[0], deltas[i].ref[2];
 		refCentroid += refPoints.row(i);
 
-		targetPoints.row(i) << deltas[i].target[0], deltas[i].target[2];  // Take only the x and z components
+		targetPoints.row(i) << deltas[i].target[0], deltas[i].target[2];
 		targetCentroid += targetPoints.row(i);
 	}
 
 	refCentroid /= (double)deltas.size();
 	targetCentroid /= (double)deltas.size();
 
-	// Center the points
 	for (size_t i = 0; i < deltas.size(); i++)
 	{
 		refPoints.row(i) -= refCentroid;
 		targetPoints.row(i) -= targetCentroid;
 	}
 
-	// Calculate cross-covariance matrix
 	auto crossCV = refPoints.transpose() * targetPoints;
 
-	// Singular Value Decomposition (SVD)
 	Eigen::JacobiSVD<Eigen::MatrixXd, Eigen::ComputeThinU | Eigen::ComputeThinV> svd(crossCV);
 
-	// Calculate 2D rotation matrix
 	Eigen::Matrix2d i = Eigen::Matrix2d::Identity();
 	Eigen::Matrix2d rot = svd.matrixV() * i * svd.matrixU().transpose();
 
-	// Calculate yaw angle in radians
 	double yaw = std::atan2(rot(1, 0), rot(0, 0));
 
-	// Convert to degrees
-	Eigen::Vector3d euler(0.0, yaw * 180.0 / EIGEN_PI, 0.0);
+	Eigen::Vector3d euler(0.0, yaw * 180.0 / EIGEN_PI, 0.0);   // degrees
 	return euler;
 }
 
 Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation) const
 {
 	const size_t count = m_samples.size();
-	if (count < 2)
-		return Eigen::Vector3d::Zero();
 	Eigen::VectorXd constants(count * 6);
 	Eigen::MatrixXd coefficients(count * 6, 3);
 	for (int family = 0; family < 2; ++family)
@@ -325,9 +232,9 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	return coefficients.bdcSvd<Eigen::ComputeThinU | Eigen::ComputeThinV>().solve(constants);
 }
 
-Eigen::AffineCompact3d CalibrationCalc::ComputeCalibration(const bool ignoreOutliers) const
+Eigen::AffineCompact3d CalibrationCalc::ComputeCalibration() const
 {
-	Eigen::Vector3d rotation = CalibrateRotation(ignoreOutliers);
+	Eigen::Vector3d rotation = CalibrateRotation();
 	Eigen::Matrix3d rotationMat = RotationFromEulerDeg(rotation);
 	Eigen::Vector3d translation = CalibrateTranslation(rotationMat);
 
@@ -348,88 +255,14 @@ double CalibrationCalc::RetargetingErrorRMS(
 	{
 		if (!sample.valid) continue;
 
-		// Apply transformation
 		const auto updatedPose = ApplyTransform(sample.target, calibration);
-
 		const Eigen::Vector3d hmdPoseSpace = sample.ref.rot * hmdToTargetPos + sample.ref.trans;
-
-		// Compute error term
 		double error = (updatedPose.trans - hmdPoseSpace).squaredNorm();
 		errorAccum += error;
 		sampleCount++;
 	}
 
 	return sqrt(errorAccum / sampleCount);
-}
-
-double CalibrationCalc::ReferenceJitter() const
-{
-	Eigen::Vector3d m_oldM, m_newM, m_oldS, m_newS;
-	int sampleCount = 0;
-
-	for (auto &sample : m_samples)
-	{
-		if (!sample.valid) continue;
-
-		if (sampleCount == 0)
-		{
-			m_oldM = m_newM = sample.ref.trans;
-			m_oldS = Eigen::Vector3d();
-		}
-		else
-		{
-			m_newM = m_oldM + (sample.ref.trans - m_oldM) / sampleCount;
-			m_newS = m_oldS + (sample.ref.trans - m_oldM).cwiseProduct(sample.ref.trans - m_newM);
-
-			// set up for next iteration
-			m_oldM = m_newM;
-			m_oldS = m_newS;
-		}
-
-		sampleCount++;
-	}
-
-	double var_x = sqrt(((sampleCount > 1) ? m_newS.x() / (sampleCount - 1) : 0.0));
-	double var_y = sqrt(((sampleCount > 1) ? m_newS.y() / (sampleCount - 1) : 0.0));
-	double var_z = sqrt(((sampleCount > 1) ? m_newS.z() / (sampleCount - 1) : 0.0));
-
-	// Take magnitude of standard deviation vector
-	return sqrt(var_x * var_x + var_y * var_y + var_z * var_z);
-}
-
-double CalibrationCalc::TargetJitter() const
-{
-	Eigen::Vector3d m_oldM, m_newM, m_oldS, m_newS;
-	int sampleCount = 0;
-
-	for (auto &sample : m_samples)
-	{
-		if (!sample.valid) continue;
-
-		if (sampleCount == 0)
-		{
-			m_oldM = m_newM = sample.target.trans;
-			m_oldS = Eigen::Vector3d();
-		}
-		else
-		{
-			m_newM = m_oldM + (sample.target.trans - m_oldM) / sampleCount;
-			m_newS = m_oldS + (sample.target.trans - m_oldM).cwiseProduct(sample.target.trans - m_newM);
-
-			// set up for next iteration
-			m_oldM = m_newM;
-			m_oldS = m_newS;
-		}
-
-		sampleCount++;
-	}
-
-	double var_x = sqrt(((sampleCount > 1) ? std::abs(m_newS.x() / (sampleCount - 1)) : 0.0));
-	double var_y = sqrt(((sampleCount > 1) ? std::abs(m_newS.y() / (sampleCount - 1)) : 0.0));
-	double var_z = sqrt(((sampleCount > 1) ? std::abs(m_newS.z() / (sampleCount - 1)) : 0.0));
-
-	// Take magnitude of standard deviation vector
-	return sqrt(var_x * var_x + var_y * var_y + var_z * var_z);
 }
 
 Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCompact3d &calibration) const
@@ -441,7 +274,6 @@ Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCom
 	{
 		if (!sample.valid) continue;
 
-		// Apply transformation
 		const auto updatedPose = ApplyTransform(sample.target, calibration);
 
 		// Now move the transform from world to HMD space
@@ -457,9 +289,8 @@ Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCom
 	return accum;
 }
 
-Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(const Eigen::AffineCompact3d &calibration) const
+Eigen::Vector4d CalibrationCalc::ComputeAxisVariance() const
 {
-	(void)calibration;
 	// We want to determine if the user rotated in enough axis to find a unique solution.
 	// It's sufficient to rotate in two axis - this is because once we constrain the mapping
 	// of those two orthogonal basis vectors, the third is determined by the cross product of
@@ -485,11 +316,8 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(const Eigen::AffineCompact3
 
 		points.push_back(point);
 	}
-	if (points.empty())
-		return Eigen::Vector4d::Zero();
-	mean /= (double)points.size();
+	mean /= (double)points.size();   // a full window, at least 100 samples
 
-	// Compute covariance matrix
 	Eigen::Matrix4d covMatrix = Eigen::Matrix4d::Zero();
 
 	for (auto &point : points)
@@ -506,7 +334,7 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(const Eigen::AffineCompact3
 	return solver.eigenvalues();
 }
 
-[[nodiscard]] bool CalibrationCalc::ValidateCalibration(const Eigen::AffineCompact3d &calibration, double *error, Eigen::Vector3d *posOffsetV)
+[[nodiscard]] bool CalibrationCalc::ValidateCalibration(const Eigen::AffineCompact3d &calibration, double *error)
 {
 	if (!calibration.matrix().allFinite())
 		return false;
@@ -516,8 +344,6 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(const Eigen::AffineCompact3
 	const auto posOffset = ComputeRefToTargetOffset(calibration);
 	if (!posOffset.allFinite())
 		return false;
-
-	if (posOffsetV) *posOffsetV = posOffset;
 
 	double rmsError = RetargetingErrorRMS(posOffset, calibration);
 	if (!std::isfinite(rmsError) || rmsError > 0.1) ok = false;
@@ -547,19 +373,10 @@ Eigen::AffineCompact3d CalibrationCalc::EstimateRefToTargetPose(const Eigen::Aff
 	return avg;
 }
 
-// S = R^-1 * C * T
-// R * S * T^-1 = C
-//
-// R * (R^-1 * C * T) * T^-1 = C
-
-/*
- * This calibration routine attempts to use the estimated refToTargetPose to derive the
- * playspace calibration based on the relative position of reference and target device.
- * This computation can be performed even when the devices are not moving.
- */
+// C = R * S * T^-1, from the estimated refToTargetPose: this works even when
+// the devices are not moving.
 bool CalibrationCalc::CalibrateByRelPose(Eigen::AffineCompact3d &out) const
 {
-	// R * S * T^-1 = C
 	out = PoseAverager::AverageFor(m_samples, [&](const auto &sample) {
 		return Eigen::AffineCompact3d(sample.ref.ToAffine() * m_refToTargetPose * sample.target.ToAffine().inverse());
 	});
@@ -567,34 +384,24 @@ bool CalibrationCalc::CalibrateByRelPose(Eigen::AffineCompact3d &out) const
 	return true;
 }
 
-bool CalibrationCalc::ComputeOneshot(const bool ignoreOutliers)
+bool CalibrationCalc::ComputeOneshot(const bool)
 {
-	auto calibration = ComputeCalibration(ignoreOutliers);
-
-	bool valid = ValidateCalibration(calibration, &m_lastError);
-
-	if (valid)
-	{
-		m_estimatedTransformation = calibration; // @NOTE: Normal calibration
-		m_isValid = true;
-		return true;
-	}
-	else
-	{
-		if (log) log("Not updating: Low-quality calibration result\n");
+	auto calibration = ComputeCalibration();
+	if (!ValidateCalibration(calibration, &m_lastError))
 		return false;
-	}
+	m_estimatedTransformation = calibration;
+	m_isValid = true;
+	return true;
 }
 
-bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool ignoreOutliers)
+bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double relPoseMaxError, const bool)
 {
 	if (lockRelativePosition)
 	{
 		Eigen::AffineCompact3d byRelPose;
 		double relPoseError = INFINITY;
-		Eigen::Vector3d relPosOffset;
 		if (CalibrateByRelPose(byRelPose) &&
-			ValidateCalibration(byRelPose, &relPoseError, &relPosOffset))
+			ValidateCalibration(byRelPose, &relPoseError))
 		{
 			m_isValid = true;
 			m_estimatedTransformation = byRelPose;
@@ -603,12 +410,10 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		}
 	}
 
+	// Only the error it writes is wanted here.
 	double priorCalibrationError = INFINITY;
-	Eigen::Vector3d priorPosOffset;
-	if (m_isValid && ValidateCalibration(m_estimatedTransformation, &priorCalibrationError, &priorPosOffset))
-	{
-		// (metrics only in the source)
-	}
+	if (m_isValid)
+		(void)ValidateCalibration(m_estimatedTransformation, &priorCalibrationError);
 
 	double newError = INFINITY;
 	bool newCalibrationValid = false;
@@ -619,8 +424,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 
 	if (enableStaticRecalibration && CalibrateByRelPose(byRelPose))
 	{
-		Eigen::Vector3d relPosOffset;
-		if (ValidateCalibration(byRelPose, &relPoseError, &relPosOffset))
+		if (ValidateCalibration(byRelPose, &relPoseError))
 		{
 			if (relPoseError < 0.010 || (m_relativePosCalibrated && relPoseError < 0.025))
 			{
@@ -644,9 +448,9 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	{
 		// Axis diversity is observable directly from the samples. Check it before
 		// running either SVD: an initial low-diversity window has no prior
-		// variance to compare against and used to accept an arbitrary finite
+		// variance to compare against and would accept an arbitrary finite
 		// calibration from jitter or single-axis motion.
-		newVariance = ComputeAxisVariance(Eigen::AffineCompact3d::Identity())(1);
+		newVariance = ComputeAxisVariance()(1);
 		if (!std::isfinite(newVariance) || newVariance < AxisVarianceThreshold)
 		{
 			newCalibrationValid = false;
@@ -654,8 +458,8 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 		}
 		else
 		{
-			calibration = ComputeCalibration(ignoreOutliers);
-			newCalibrationValid = ValidateCalibration(calibration, &newError, &m_posOffset);
+			calibration = ComputeCalibration();
+			newCalibrationValid = ValidateCalibration(calibration, &newError);
 
 			if (m_isValid)
 			{
@@ -673,7 +477,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	if (!newCalibrationValid && shouldRapidCorrect)
 	{
 		double existingPoseErrorUsingRelPosition = RetargetingErrorRMS(m_refToTargetPose.translation(), m_estimatedTransformation);
-		if (relPoseError * threshold < existingPoseErrorUsingRelPosition || (newCalibrationValid && relPoseError < newError))
+		if (relPoseError * threshold < existingPoseErrorUsingRelPosition)
 		{
 			newCalibrationValid = true;
 			usingRelPose = true;
@@ -686,18 +490,9 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold, double re
 	{
 		lerp = m_isValid;
 		m_relativePosCalibrated = m_relativePosCalibrated || newError < 0.005;
-		if (log)
-		{
-			if (!m_isValid)
-				log("Applying initial transformation...");
-			else if (m_relativePosCalibrated)
-				log("Applying updated transformation...");
-			else
-				log("Applying temporary transformation...");
-		}
 
 		m_isValid = true;
-		m_estimatedTransformation = calibration; // @NOTE: Continuous calibration
+		m_estimatedTransformation = calibration;
 		m_axisVariance = newVariance;
 		m_lastError = newError;
 

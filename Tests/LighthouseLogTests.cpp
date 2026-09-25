@@ -5,6 +5,7 @@
 #include "../Overlay/DriftMonitor.h"
 #include "../Overlay/LighthouseLog.h"
 #include "../Overlay/LighthouseVisibility.h"
+#include "../Overlay/RingPoseMath.h"
 
 #include <chrono>
 #include <cmath>
@@ -351,7 +352,9 @@ Verdict Judge(const vlighthouse::Output &run, const vlighthouse::Config &cfg,
 			}
 			++next;
 		}
-		monitor.Push(f.sample);
+		// The overlay feeds the monitor trusted samples only.
+		if (IsTrustedRingSample(f.sample, cfg.qpcToSeconds))
+			monitor.Push(f.sample);
 		DriftMonitor::Event ev;
 		while (monitor.PollEvent(ev))
 		{

@@ -23,18 +23,14 @@
 //    windows on both sides of the discontinuity, never a single frame pair.
 //
 // Accepted deltas are constrained to yaw + translation (a recenter preserves
-// gravity). On the exact path the discarded tilt magnitude is reported as the
-// non-rigid residual; on the heuristic path only a scalar heading is
-// regressed, so residualTiltRad stays at its default there. Nothing consumes
-// either residual today - they are reported for diagnostics, and drift
-// staleness is scored from age, slide events and loss events alone. Times are
-// ring-sample seconds (QPC * QpcToSeconds), not UI time.
+// gravity). The exact path reports the discarded tilt as residualTiltRad; the
+// heuristic path regresses heading only and leaves it 0. Both residuals are
+// diagnostics only. Times are ring-sample seconds (QPC * QpcToSeconds), not
+// UI time.
 class JumpDetector
 {
 public:
-	// Fixed detection policy, not a caller knob: no code outside this class
-	// ever varied it, so the values live here as a named-constant block with
-	// their rationale rather than behind a setter nobody called.
+	// Fixed detection policy.
 	struct Config
 	{
 		double wfdRotEpsRad = 1e-5;        // wfd rotation change that counts as a rebase
@@ -57,101 +53,59 @@ public:
 		double agreePosTol = 0.10;         // meters between per-device delta translations
 		double agreeYawTolRad = 3.0 * 3.14159265358979 / 180.0;
 		// Each Quest Pro controller is its own tracking frontend on the shared
-		// map. After the headset switches map, the engine lets a controller
-		// keep its previous 6DoF frame for up to 30 s before it follows, so
-		// the HMD steps alone and the matching controller step arrives
-		// seconds later. An HMD candidate no
-		// device confirmed inside agreeWindow is therefore held this long for
-		// that follow-up instead of being discarded. A step the HMD sees
-		// alone and no controller ever follows - a 3DoF-to-6DoF catch-up
-		// after a wake, a stream hiccup - still expires unapplied.
-		// The clock pauses while every other reference device is locked
-		// still: the engine's static prior freezes a controller that has
-		// been stationary for a second (its position then repeats bit for
-		// bit, which a tracked 6DoF position never does), and a frozen
-		// controller cannot step until the hand moves again. Hands resting
-		// through a headset reset would otherwise expire the step and leave
-		// the whole error in place; instead the candidate waits for the
-		// hands and is confirmed by their first movement, or expires 30 s
-		// after they move without stepping.
+		// map and may keep its previous frame for up to 30 s after the headset
+		// switches map, so an HMD candidate no device confirmed inside
+		// agreeWindow is held this long for the controller's step; one no
+		// controller follows (a 3DoF catch-up after a wake) still expires. The
+		// clock pauses while every other reference device is locked still: the
+		// engine's static prior freezes a resting controller (its position
+		// repeats bit for bit), and it cannot step until the hand moves again.
 		double controllerFollowSeconds = 30.0;
-		// The controller frontend's anchor follower has no grace period and
-		// snaps a delta above 5 cm at once, while the headset smoother slides
-		// for the rest of its 5 s grace after a reset before it resets
-		// again. The second of two close map moves therefore reaches the
-		// controllers up to 5 s before the headset. A controller step this
-		// far ahead of the HMD's counts as confirmation; the deltas still
-		// have to match.
+		// The controller follower snaps a delta above 5 cm at once while the
+		// headset smoother slides for its 5 s grace, so the second of two close
+		// map moves can reach the controllers up to 5 s before the headset. A
+		// controller step that far ahead still confirms if the deltas match.
 		double controllerLeadSeconds = 5.0;
 		double soloPosThreshold = 0.30;    // single-device heuristic acceptance floor
 		double soloYawThresholdRad = 10.0 * 3.14159265358979 / 180.0;
-		// Headset-only setups (the primary population: a Quest headset with
-		// lighthouse trackers and controllers, no Quest controllers) never
-		// have a second reference device to confirm a step, so every SLAM
-		// correction under the solo floor used to be fitted, found
-		// persistent, and discarded. One session logged three same-sign
-		// steps of 1 to 4 cm and 0.5 to 3 deg inside three minutes: the
-		// drift a recalibration later removes. A clean persistent HMD step
-		// with no other device tracking is therefore accepted alone down to
-		// the corroborated floor, once the two ways a false step arises are
-		// excluded: the stream must have been continuous for
+		// Headset-only setups (the primary population) never have a second
+		// reference device to confirm a step; one session logged three 1-4 cm
+		// same-sign steps in three minutes that a recalibration later removed.
+		// A clean persistent HMD step is therefore accepted alone down to the
+		// corroborated floor once the stream has been continuous for
 		// soloSettledSeconds (a wake, a stream restart and Virtual Desktop's
-		// reconnect re-zeroing all fall inside the first minute), and the
-		// pre-window must carry no held-position signature. The engine's
-		// 3DoF fallback holds the last tracked position bit-for-bit while the
-		// IMU orientation keeps moving, and the snap back to 6DoF is a clean
-		// step; in 6DoF the SLAM position never repeats between frames
-		// (0 of 4,331 live streamed frames on 2026-09-11).
+		// reconnect re-zeroing all fall inside the first minute) and the
+		// pre-window shows no held position: the 3DoF fallback holds position
+		// bit for bit, which 6DoF never did (0 of 4,331 frames, 2026-09-11).
 		double soloSettledPos = 0.05;
 		double soloSettledYawRad = 2.0 * 3.14159265358979 / 180.0;
 		double soloSettledSeconds = 60.0;
-		// The engine removes odometry drift through its correction smoother:
-		// it slides toward the map target while the head moves and, once the
-		// remaining offset exceeds its reset threshold (10 cm or 10 deg on
-		// the examined build, checked every frame after a 5 s grace), snaps
-		// the rest in one step. Drift grows by a fraction of a millimetre or
-		// a thousandth of a degree per frame, so that snap is a step of
-		// almost exactly the threshold. Such a snap restores the alignment
-		// (it cancels error accrued since the calibration) and compensating
-		// it would put the drift back; a frame change lands on the threshold
-		// only by coincidence. A headset step whose translation or yaw sits
-		// inside this band is therefore never applied alone (unless
-		// continuous alignment has followed the drift: SetDriftFollowed); a matching
-		// controller step still confirms it, and controllers never step on
-		// drift because their follower slews it continuously. A frame change
-		// of exactly the threshold is the cost: it is logged and left for
-		// the next correction. The thresholds are compiled defaults read
-		// from the library, not from the device; solo steps clustering at
-		// some other size in the log would show a different build's values.
+		// The engine's correction smoother slides toward the map target while
+		// the head moves and, once the remaining offset exceeds its reset
+		// threshold (10 cm or 10 deg, compiled defaults of the examined build,
+		// after a 5 s grace), snaps the rest in one step of almost exactly the
+		// threshold. That snap restores the alignment; compensating it would put
+		// the drift back. A headset step inside this band is never applied alone
+		// unless continuous alignment has followed the drift (SetDriftFollowed);
+		// a matching controller step still confirms it. A real frame change of
+		// exactly the threshold is logged and left for the next correction.
 		double driftCatchUpPos = 0.10;
 		double driftCatchUpPosBand = 0.005;
 		double driftCatchUpYawRad = 10.0 * 3.14159265358979 / 180.0;
 		double driftCatchUpYawBandRad = 0.3 * 3.14159265358979 / 180.0;
-		// The translation band only holds for a step without yaw. The engine
-		// measures its remaining offset about the map's origin, which the
-		// stream does not show, and a yaw step's translation depends on the
-		// point it is measured about: heading drift 1.5 m from the map origin
-		// snaps at 10 cm there (3.8 deg), and the same step measured about
-		// Virtual Desktop's origin 13 cm away is 9.1 cm, outside the band.
-		// Heading drift is what the smoother leaves behind when the user
-		// turns slowly in place (under its yaw dead zone; walking slides the
-		// translation away continuously), so it accrues about where the head
-		// is, and its catch-up turns the frame about the head: the heading
-		// steps, the head does not move. A frame change turns about the
-		// map's own points and moves the head by its distance from them
-		// times the angle, unless the head happens to sit on the pivot. A
-		// headset step turning no more than the yaw threshold while the head
-		// moves no more than this is therefore a drift catch-up too; a frame
-		// change pivoting within about 30 cm of the head at a few degrees is
-		// the cost, left for the next correction like the band's.
+		// The translation band only holds for a step without yaw: the smoother
+		// measures about the map origin, which the stream does not show. Heading
+		// drift accrues where the user turns slowly in place, so its catch-up
+		// turns the frame about the head, while a frame change moves the head by
+		// its distance from the pivot times the angle. A headset step within the
+		// yaw threshold that moves the head no more than this is a catch-up too;
+		// a frame change pivoting within ~30 cm of the head is the cost.
 		double driftCatchUpHeadShift = 0.02;
 		double gapSeconds = 2.0;           // reference stream gap => no compensation, event only
 		// A discontinuity this soon after the device's stream (re)started is
-		// annotated with its resume age. Observed on a Quest Pro through
-		// Virtual Desktop: after the headset wakes, poses resume while the
-		// tracking engine is still in 3DoF, and the snap to the relocalized
-		// 6DoF pose a few seconds later looks exactly like a universe jump.
-		// The age lets a log reader tell the two apart.
+		// annotated with its resume age: after a Quest Pro wakes (seen through
+		// Virtual Desktop) poses resume in 3DoF, and the snap to 6DoF a few
+		// seconds later looks exactly like a universe jump.
 		double recentResumeSeconds = 60.0;
 	};
 
@@ -167,7 +121,7 @@ public:
 		double residualSpread = 0.0;       // meters; disagreement between devices (heuristic)
 		// Seconds between the reporting device's most recent stream (re)start
 		// (its first valid sample ever, or the first after a gap) and the
-		// jump; < 0 when unknown. Reported, never used to gate acceptance.
+		// jump. Reported, never used to gate acceptance.
 		double secondsSinceStreamResume = -1.0;
 		// Heuristic path: seconds between the HMD's step and the confirming
 		// device's step when the confirmation arrived outside agreeWindow:
@@ -194,39 +148,31 @@ public:
 
 	explicit JumpDetector(double qpcToSeconds) : qpcToSeconds(qpcToSeconds) { }
 
-	// Feed one reference-system sample (any device of the reference system,
-	// in ring order). Non-reference devices must not be pushed.
+	// Feed one reference-system sample, in ring order and valid or not (a bad
+	// frame breaks continuity). The caller bounds deviceId; non-reference
+	// devices must not be pushed.
 	void Push(const protocol::DevicePoseSample &sample);
 
-	// An accepted jump, if one is ready. Call until it returns false.
-	bool PollDelta(UniverseDelta &out);
-
-	// A reference-stream gap, if one occurred. Call until it returns false.
-	bool PollGap(GapEvent &out);
-
-	// Human-readable notes (wfd rebases seen, candidates expired, ...) for the
-	// calibration log; drained by the caller.
-	bool PollNote(std::string &out);
+	// Queued output, each drained by the caller until it returns false: an
+	// accepted jump, a reference-stream gap, and human-readable notes (wfd
+	// rebases seen, candidates expired, ...) for the calibration log.
+	bool PollDelta(UniverseDelta &out) { return PopFront(accepted, out); }
+	bool PollGap(GapEvent &out) { return PopFront(gaps, out); }
+	bool PollNote(std::string &out) { return PopFront(notes, out); }
 
 	// The caller's copy of the stream is missing a few samples (the driver
 	// drops an isolated pose when two device threads contend for a queue
-	// claim). Which device lost one, and whether it was a bad frame, is
-	// unknown, so no device's step may be measured across the hole: every
-	// device's continuity breaks as it does for an observed bad frame, and a
-	// candidate whose fit window was still filling dies. What the hole says
-	// nothing about stays: the resume clock (the headset's stream did not
-	// stop), a Ready candidate (both of its windows closed before the hole)
-	// and the session totals. A dozen devices drop a pose every few seconds
-	// to minutes, so treating each as a Reset meant soloSettledSeconds was
-	// never reached and the ignored-step total never passed one.
+	// claim). Which device lost one is unknown, so every device's continuity
+	// breaks as for an observed bad frame and a candidate whose fit window was
+	// still filling dies. The resume clock, Ready candidates and the session
+	// totals stay: such drops come every few seconds to minutes, and treating
+	// each as a Reset would keep soloSettledSeconds from ever being reached.
 	void NoteStreamHole();
-	// Whether continuous alignment is keeping the calibration on an
-	// independent reference (a mounted tracker, or the legacy loop's
-	// trackers). Its calibration has then followed the drift that a
-	// catch-up cancels, so the catch-up moves the frame away from it like
-	// any other step and is compensated like one. Without it the
-	// calibration still carries the drift and the catch-up restores it.
-	// The caller refreshes this every tick; Reset leaves it alone.
+	// Whether continuous alignment keeps the calibration on an independent
+	// reference (a mounted tracker, or the legacy loop's trackers). The
+	// calibration has then followed the drift, so a drift catch-up moves the
+	// frame away from it and is compensated like any other step. The caller
+	// refreshes this every tick; Reset leaves it alone.
 	void SetDriftFollowed(bool followed) { driftFollowed = followed; }
 	// Detailed logging: each candidate's evidence (the frame jump that raised
 	// it, both fitted states and their residuals, the samples around the
@@ -238,7 +184,7 @@ public:
 		if (!on)
 			details.clear();
 	}
-	bool PollDetail(std::string &out);
+	bool PollDetail(std::string &out) { return PopFront(details, out); }
 
 	// Drop all per-device state (calibration started, monitors disabled, a
 	// stall-sized hole or a driver session boundary in the stream, ...).
@@ -261,9 +207,6 @@ private:
 	};
 
 	// Which detection path produced a candidate, and where it is in its life.
-	// Kept as two enums rather than three booleans: of the eight boolean
-	// combinations only four ever meant anything, and every consumer had to
-	// re-derive which four by writing the same three-term filter again.
 	enum class Kind { Exact, Heuristic };
 	enum class Life
 	{
@@ -272,10 +215,7 @@ private:
 		Dead,      // expired unconfirmed, or its observation continuity broke
 	};
 
-	// The absolute worldFromDriver endpoint the exact path captured. One
-	// sub-struct rather than two loose fields, so "these two are meaningful
-	// only for Kind::Exact" is a property of the record: the heuristic path
-	// never writes it and leaves the identity it was born with.
+	// The worldFromDriver endpoints the exact path captured.
 	struct ExactEndpoint
 	{
 		Eigen::Quaterniond rotation{ 1, 0, 0, 0 };
@@ -303,22 +243,18 @@ private:
 		double frameJumpPos = 0.0, frameJumpYawRad = 0.0;
 		bool needsCorroboration = false;
 		bool held = false;   // HMD heuristic: past agreeWindow, awaiting a controller follow-up
-		// HMD heuristic: when the follow-up wait ends. Starts at
-		// t + window + controllerFollowSeconds and moves out by every second
-		// the other reference devices spend locked still (see
-		// controllerFollowSeconds); `heldLocked` marks that the extension
-		// was logged.
+		// HMD heuristic: when the follow-up wait ends, pushed out while the
+		// other reference devices are locked still; `heldLocked` marks that
+		// the extension was logged.
 		double followDeadline = 0.0;
 		double lastHoldCheck = -1.0;
 		bool heldLocked = false;
 		// HMD heuristic, decided once when the fit completes. `heldPosition`:
-		// the pre-window carried the 3DoF fallback's signature, so this step
-		// is a catch-up onto tracking that resumed, never a frame change;
-		// no solo path applies it. `driftCatchUp`: the step is the size of
-		// the engine's reset threshold, so it is most likely the smoother
-		// cancelling accrued drift; no solo path applies it (see
-		// driftCatchUp* in Config). `settledSolo`: the step may be applied
-		// with no other reference device tracking (see soloSettled*).
+		// the pre-window shows the 3DoF fallback, so this is a catch-up onto
+		// resumed tracking. `driftCatchUp`: shaped like the smoother's reset
+		// (see driftCatchUp* in Config). No solo path applies either.
+		// `settledSolo`: may be applied with no other reference device
+		// tracking (see soloSettled*).
 		bool heldPosition = false;
 		bool driftCatchUp = false;
 		bool settledSolo = false;
@@ -346,9 +282,21 @@ private:
 		std::deque<Hist> hist;
 	};
 
+	// A candidate's device has always had a valid sample since the last
+	// Reset, and a gap after the candidate kills it, so this is never negative.
 	static double ResumeAge(const DeviceState &dev, double t)
 	{
-		return dev.streamResumeTime >= 0.0 ? t - dev.streamResumeTime : -1.0;
+		return t - dev.streamResumeTime;
+	}
+
+	template <typename T>
+	static bool PopFront(std::deque<T> &queue, T &out)
+	{
+		if (queue.empty())
+			return false;
+		out = queue.front();
+		queue.pop_front();
+		return true;
 	}
 
 	// The engine's 3DoF fallback: position held bit-for-bit between frames
