@@ -286,6 +286,36 @@ void VisibilityScenarios(Check check)
 		ranked.size() == 3 && ranked[0].channel == 5 && ranked[0].drops == 2 &&
 		vis.StationName(5) == "S-5 (0000A005)", detail);
 
+	// Settling, for the continuous loop: a device the log never named and one
+	// whose set is not known yet are settled, a live restart is counted and
+	// holds for the window, and fewer than two known stations hold for as
+	// long as they last.
+	{
+		const bool unknownSettled = !vis.Settling("LHR-3", 500.0);
+		vis.Apply(Made(K::Bootstrapped, "LHR-4", 5, {}, true), 0.0);
+		const LighthouseVisibility::Device *replayed = vis.Find("LHR-4");
+		const bool replayedSettled = !vis.Settling("LHR-4", 500.0) && vis.Disturbed("LHR-4", 500.0) &&
+			replayed->liveRestarts == 0 && replayed->liveDisturbances == 0;
+
+		vis.Apply(Made(K::Bootstrapped, "LHR-3", 5, {}), 500.0);
+		const LighthouseVisibility::Device *three = vis.Find("LHR-3");
+		const bool bootCounted = three->liveRestarts == 1 && three->liveDisturbances == 1 &&
+			vis.RestartedWithin("LHR-3", 503.0, 5.0) && !vis.RestartedWithin("LHR-3", 506.0, 5.0) &&
+			vis.Settling("LHR-3", 505.0);
+		vis.Apply(Made(K::StationAdded, "LHR-3", 5, { 5 }), 500.1);   // "tracking again": a restart too
+		vis.Apply(Made(K::StationAdded, "LHR-3", 8, { 5, 8 }), 501.0); // "back to 2": disturbance only
+		three = vis.Find("LHR-3");
+		const bool windowOnly = three->liveRestarts == 2 && three->liveDisturbances == 3 &&
+			vis.Settling("LHR-3", 510.0) && !vis.Settling("LHR-3", 512.0);
+		vis.Apply(Made(K::StationDropped, "LHR-3", 8, { 5 }), 520.0);
+		const bool singleHolds = vis.Settling("LHR-3", 535.0) && vis.Find("LHR-3")->liveRestarts == 2;
+
+		snprintf(detail, sizeof detail, "unknown %d replayed %d boot %d window %d single %d",
+			unknownSettled, replayedSettled, bootCounted, windowOnly, singleHolds);
+		check("lighthouse state: settling and restart counts for the continuous loop",
+			unknownSettled && replayedSettled && bootCounted && windowOnly && singleHolds, detail);
+	}
+
 	vis.Reset();
 	check("lighthouse state: reset forgets everything",
 		vis.Devices().empty() && vis.StationCount() == 0, "");

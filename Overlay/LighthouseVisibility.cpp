@@ -70,13 +70,17 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 
 	const int before = d.visibleKnown ? static_cast<int>(d.visible.size()) : -1;
 	std::string what;
+	bool restart = false;
 	switch (e.kind)
 	{
 	case Event::Kind::StationAdded:
 		d.visible = Sorted(e.visibleChannels);
 		d.visibleKnown = true;
 		if (before == 0 || (before < 0 && d.visible.size() == 1))
+		{
 			what = "tracking again from " + StationName(e.channel);
+			restart = true;
+		}
 		else if (before > 0 && before < config.cleanStations &&
 			static_cast<int>(d.visible.size()) >= config.cleanStations)
 			what = "back to " + std::to_string(d.visible.size()) + " stations with " +
@@ -114,6 +118,7 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 		d.visible.clear();
 		d.visibleKnown = false;
 		what = "started a new solution from " + nameById(e.stationId);
+		restart = true;
 		break;
 
 	case Event::Kind::BootstrapFailed:
@@ -130,7 +135,36 @@ std::string LighthouseVisibility::Apply(const Event &e, double ringTime)
 	if (e.historical)
 		return std::string();
 	d.lastDisturbance = ringTime;
+	d.liveDisturbances++;
+	if (restart)
+	{
+		d.liveRestarts++;
+		d.lastRestart = ringTime;
+	}
 	return what;
+}
+
+bool LighthouseVisibility::Settling(const std::string &serial, double ringTime) const
+{
+	const Device *d = Find(serial);
+	if (!d)
+		return false;
+	if (d->visibleKnown && static_cast<int>(d->visible.size()) < config.cleanStations)
+		return true;
+	if (d->lastDisturbance <= -1e8)
+		return false;
+	const double since = ringTime - d->lastDisturbance;
+	return since >= -1.0 && since <= config.disturbedSeconds;
+}
+
+bool LighthouseVisibility::RestartedWithin(const std::string &serial, double ringTime,
+	double seconds) const
+{
+	const Device *d = Find(serial);
+	if (!d || d->lastRestart <= -1e8)
+		return false;
+	const double since = ringTime - d->lastRestart;
+	return since >= -1.0 && since <= seconds;
 }
 
 bool LighthouseVisibility::Disturbed(const std::string &serial, double ringTime) const

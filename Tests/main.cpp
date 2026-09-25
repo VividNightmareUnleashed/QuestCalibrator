@@ -5903,7 +5903,7 @@ struct ContinuousSim
 
 	int corrections = 0;
 	int freezes = 0, resumes = 0, losses = 0, recoveries = 0;
-	int scatterFreezes = 0;   // subset of freezes that came via the scatter path
+	int resolveFreezes = 0;   // subset attributed to a NoteTargetResolved
 	int unstables = 0;
 	double maxCorrRotDeg = 0.0;   // largest single emitted correction
 	double maxCorrPosM = 0.0;     // measured as displacement at the head
@@ -6022,12 +6022,9 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 			{
 				switch (e.type)
 				{
-				case ContinuousAlignment::Event::FrozenLargeDeviation: sim.freezes++; break;
-				// Both are freezes. Counting only the first would silently miss
-				// every scatter-path freeze, and /W3 does not warn on the gap.
-				case ContinuousAlignment::Event::FrozenMountScatter:
+				case ContinuousAlignment::Event::FrozenLargeDeviation:
 					sim.freezes++;
-					sim.scatterFreezes++;
+					sim.resolveFreezes += e.afterTargetResolve ? 1 : 0;
 					break;
 				case ContinuousAlignment::Event::Resumed: sim.resumes++; break;
 				case ContinuousAlignment::Event::TrackerLost: sim.losses++; break;
@@ -6305,10 +6302,10 @@ void RunContinuousScenarios()
 			sim.correctionsAfter >= 1 && yawErr < 0.15 && posErr < 0.008, detail);
 	}
 
-	// 6. Mount slip: the physical mount shifts 3 deg / 2 cm mid-run while the
-	// stored extrinsic stays put. The deviation (whose error rotates with the
-	// head) must freeze auto-apply — one event, no corrections once frozen, no
-	// resume — because a real slip can only be fixed by recalibrating.
+	// 6. The mount's real pose differs 3 deg / 2 cm from the stored extrinsic
+	// from mid-run on (a mount measured badly, or knocked). The error rotates
+	// with the head, so the window scatters: the loop must hold and apply
+	// nothing measured through it, and scatter alone never freezes.
 	{
 		std::mt19937 rng(505);
 		auto slipMount = [&](double t, Eigen::Quaterniond &r, Eigen::Vector3d &p)
@@ -6325,11 +6322,11 @@ void RunContinuousScenarios()
 
 		RunContinuousSegment(sim, scene, 0.0, 75.0, rng, constTruth, slipMount, alwaysVisible);
 
-		bool frozenAtEnd = sim.ca.GetState() == ContinuousAlignment::State::Frozen;
-		snprintf(detail, sizeof detail, "freezes %d  resumes %d  late corr %d  frozen %d",
-			sim.freezes, sim.resumes, sim.correctionsAfter, frozenAtEnd);
-		Check("continuous: mount slip freezes",
-			sim.freezes >= 1 && sim.resumes == 0 && sim.correctionsAfter == 0 && frozenAtEnd, detail);
+		bool holdingAtEnd = sim.ca.GetState() == ContinuousAlignment::State::Holding;
+		snprintf(detail, sizeof detail, "freezes %d  late corr %d  unstable %d  state %d",
+			sim.freezes, sim.correctionsAfter, sim.unstables, static_cast<int>(sim.ca.GetState()));
+		Check("continuous: a changed mount holds, never corrects",
+			sim.freezes == 0 && sim.correctionsAfter == 0 && holdingAtEnd, detail);
 	}
 
 	// 7. Occlusion + reset: short and long tracker dropouts coast (hold the
@@ -6693,10 +6690,9 @@ void RunContinuousScenarios()
 	}
 
 	// 12. Degraded tracking: mid-frequency warble (grazing lighthouse geometry
-	// while lying down) inflates window scatter past the gates but decorrelates
-	// between consecutive observations, so the classifier calls it noise — the
-	// loop must hold quietly with one informational event, never freeze with
-	// the mount warning, and resume by itself once tracking settles.
+	// while lying down) inflates window scatter past the gates. The loop must
+	// hold quietly with one informational event, never freeze, and resume by
+	// itself once tracking settles.
 	{
 		std::mt19937 rng(1010);
 		auto warble = [&](double t, PoseSample &s)
@@ -6792,43 +6788,11 @@ void RunContinuousScenarios()
 			detail);
 	}
 
-	// 14. Mount slip during degraded tracking: a long run of unstructured
-	// warble votes must not indefinitely delay the freeze once the mount then
-	// genuinely slips — the sliding vote window bounds the delay to
-	// ~scatterVoteWindow evaluations instead of the episode's whole history.
-	{
-		std::mt19937 rng(1111);
-		auto warble = [&](double t, PoseSample &s)
-		{
-			ApplyTrackingWarble(t, 90.0, s);
-		};
-		auto slipMount = [&](double t, Eigen::Quaterniond &r, Eigen::Vector3d &p)
-		{
-			SetMountAfterSlip(t, 45.0, r, p);
-		};
-
-		ContinuousSim sim;
-		sim.ca.SetExtrinsic(trueExtrinsic);
-		sim.solvedOffset = baseTruth.latency;
-		sim.calRot = baseTruth.rotation;
-		sim.calTrans = baseTruth.translation;
-
-		RunContinuousSegment(sim, scene, 0.0, 45.0, rng, constTruth, slipMount, alwaysVisible, warble);
-		bool quietBefore = sim.freezes == 0;
-		RunContinuousSegment(sim, scene, 45.0, 90.0, rng, constTruth, slipMount, alwaysVisible, warble);
-		bool frozeAfter = sim.freezes >= 1 &&
-			sim.ca.GetState() == ContinuousAlignment::State::Frozen;
-
-		snprintf(detail, sizeof detail, "quiet-before %d  freezes %d  frozen-at-end %d",
-			quietBefore, sim.freezes, frozeAfter);
-		Check("continuous: slip during warble freezes", quietBefore && frozeAfter, detail);
-	}
-
 	// 15. Corrections are yaw-only (invariant 15). Every other scenario starts
 	// from a pure-yaw offset and only measures correction MAGNITUDE, so a Decide
 	// that reconstructed the correction from the full delta rD -- which is
 	// sitting right there, already computed -- would converge just as well and
-	// pass all of them, while quietly folding mount creep and lighthouse noise
+	// pass all of them, while quietly folding tracker orientation bias and lighthouse noise
 	// into the playspace as pitch and roll. Start 0.3 deg of yaw AND 0.6 deg of
 	// pitch from truth, both inside the freeze band: the yaw must be walked out,
 	// the tilt must survive bit-for-bit, and no correction may carry an off-axis
@@ -6851,9 +6815,11 @@ void RunContinuousScenarios()
 		double yawErr, posErr;
 		CalError(sim, baseTruth, 25.0, yawErr, posErr);
 
-		// posErr is NOT asserted: the surviving tilt shows up there as ~17 mm of
-		// effective displacement at the head, and removing it is exactly what
-		// this scenario forbids.
+		// The tilt survives in the rotation, but the position at the head is
+		// corrected in full: the yaw pivots there. What is left is the tilt
+		// times how far the head moved since the last correction (the path
+		// sweeps +-0.35 m), about 4 mm at 0.6 deg. Pivoting the dropped tilt
+		// about the target origin instead used to leave ~17 mm here for good.
 		snprintf(detail, sizeof detail,
 			"corr %d  offAxis %.2e  tilt %.4f -> %.4f deg (built 0.6)  yaw %.3f deg  pos %.1f mm",
 			sim.corrections, sim.maxCorrOffAxis, startTilt, endTilt, yawErr, posErr * 1000.0);
@@ -6861,7 +6827,7 @@ void RunContinuousScenarios()
 			sim.corrections >= 1 && sim.freezes == 0 &&
 			sim.maxCorrOffAxis < 1e-12 &&
 			std::abs(startTilt - 0.6) < 1e-9 && std::abs(endTilt - startTilt) < 1e-6 &&
-			yawErr < 0.12, detail);
+			yawErr < 0.12 && posErr < 0.007, detail);
 	}
 
 	// 16. Frozen -> Tracking. The resume hysteresis (deviation below the freeze
@@ -7061,6 +7027,159 @@ void RunContinuousScenarios()
 			heldRejected && releaseObserved && confirmedLatest &&
 			bypassedWhenDisabled && !gate.HasPending(),
 			"held trigger rejected, latest retained, opt-out bypasses, reset clears");
+	}
+
+	// 21. The dropped tilt pivots at the head (live 2026-09-25). The target's
+	// raw origin sits ~2.3 m from the head and the calibration carries 1 deg of
+	// tilt the observations do not, while matching them exactly at the head.
+	// A yaw-only correction that kept the estimate's own translation pivoted
+	// the tilt about the raw origin: it walked the head ~4 cm off, left it
+	// there as a floor, and the next few centimeters of drift froze the loop.
+	// Now what is left at the head is the tilt times how far the head moved
+	// since the last evaluation (the path sweeps +-0.35 m at up to 0.3 m/s,
+	// decisions come every 2 s): about a centimeter at worst, a few
+	// millimeters on average, and no offset that stays.
+	{
+		std::mt19937 rng(2101);
+		GroundTruth farTruth = baseTruth;
+		farTruth.translation = Eigen::Vector3d(-1.2, 2.2, -1.7);
+		auto farConst = [&](double) { return farTruth; };
+
+		ContinuousSim sim;
+		sim.ca.SetExtrinsic(trueExtrinsic);
+		sim.solvedOffset = farTruth.latency;
+		const Eigen::Quaterniond tilt(Eigen::AngleAxisd(
+			1.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.0, 0.4).normalized()));
+		sim.calRot = (tilt.conjugate() * farTruth.rotation).normalized();
+		const Eigen::Vector3d head(0.0, 1.25, 0.0);   // the head path's centre
+		const Eigen::Vector3d headRaw = farTruth.rotation.conjugate() * (head - farTruth.translation);
+		sim.calTrans = head - sim.calRot * headRaw;
+
+		const double startTilt = CalTiltDeg(sim, farTruth);
+		double worstPos = 0.0, sumPos = 0.0;
+		int samples = 0;
+		RunContinuousSegment(sim, scene, 0.0, 60.0, rng, farConst, constMount, alwaysVisible,
+			nullptr, false,
+			[&](double t)
+			{
+				if (t < 20.0)
+					return;
+				double yawErr, posErr;
+				CalError(sim, farTruth, t, yawErr, posErr);
+				worstPos = std::max(worstPos, posErr);
+				sumPos += posErr;
+				++samples;
+			});
+		const double endTilt = CalTiltDeg(sim, farTruth);
+		const double meanPos = samples > 0 ? sumPos / samples : 1.0;
+
+		snprintf(detail, sizeof detail,
+			"tilt %.4f -> %.4f deg  head mean %.1f mm, worst %.1f mm  corr %d  freezes %d",
+			startTilt, endTilt, meanPos * 1000.0, worstPos * 1000.0, sim.corrections, sim.freezes);
+		Check("continuous: dropped tilt pivots at the head",
+			sim.freezes == 0 && std::abs(endTilt - startTilt) < 1e-6 &&
+			meanPos < 0.007 && worstPos < 0.016, detail);
+	}
+
+	// 22. A freeze whose deviation settles inside the freeze band but not
+	// inside the fast resume band resumes after resumeInBandSeconds, and the
+	// loop then corrects what is left. Before, nothing could: Frozen applies
+	// no correction, so a deviation of 2.5 to 5 cm held the freeze for the
+	// rest of the session (42 minutes live on 2026-09-25).
+	{
+		std::mt19937 rng(2202);
+		ContinuousSim sim;
+		sim.ca.SetExtrinsic(trueExtrinsic);
+		sim.solvedOffset = baseTruth.latency;
+		sim.calRot = baseTruth.rotation;
+		sim.calTrans = baseTruth.translation;
+
+		RunContinuousSegment(sim, scene, 0.0, 15.0, rng, constTruth, constMount, alwaysVisible);
+		const Eigen::Quaterniond kick(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		sim.calRot = (kick * sim.calRot).normalized();
+		RunContinuousSegment(sim, scene, 15.0, 34.0, rng, constTruth, constMount, alwaysVisible);
+		const bool froze = sim.freezes == 1 && sim.ca.GetState() == ContinuousAlignment::State::Frozen;
+
+		// 1.1 deg left: past the 1.0 deg fast band, inside the 2 deg freeze.
+		const Eigen::Quaterniond residual(Eigen::AngleAxisd(1.1 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		sim.calRot = (residual * kick.conjugate() * sim.calRot).normalized();
+		RunContinuousSegment(sim, scene, 34.0, 60.0, rng, constTruth, constMount, alwaysVisible);
+		const bool heldAtFirst = sim.resumes == 0 && sim.ca.GetState() == ContinuousAlignment::State::Frozen;
+		RunContinuousSegment(sim, scene, 60.0, 110.0, rng, constTruth, constMount, alwaysVisible);
+		double yawErr, posErr;
+		CalError(sim, baseTruth, 110.0, yawErr, posErr);
+
+		snprintf(detail, sizeof detail, "froze %d  held at 60 s %d  resumes %d  freezes %d  end %.3f deg / %.1f mm",
+			froze, heldAtFirst, sim.resumes, sim.freezes, yawErr, posErr * 1000.0);
+		Check("continuous: in-band freeze resumes and corrects",
+			froze && heldAtFirst && sim.resumes == 1 && sim.freezes == 1 &&
+			sim.ca.GetState() == ContinuousAlignment::State::Tracking &&
+			yawErr < 0.15 && posErr < 0.008, detail);
+	}
+
+	// 23. The target's own tracking restarts (live 2026-09-25: a headset
+	// tracker's lighthouse solution started from one base station and read
+	// 4.4 deg / 33 cm off until its next restart put it back). While the
+	// target settles nothing is decided; a freeze confirmed afterwards is
+	// attributed to the restart; the restart that puts it back keeps the
+	// freeze through the window reset and it resumes on fresh evidence.
+	{
+		std::mt19937 rng(2303);
+		GroundTruth offTruth = baseTruth;
+		const Eigen::Quaterniond off(Eigen::AngleAxisd(4.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		offTruth.rotation = (off * baseTruth.rotation).normalized();
+		offTruth.translation = off * baseTruth.translation + Eigen::Vector3d(0.2, 0.0, -0.1);
+		auto restartTruth = [&](double t) { return (t >= 20.0 && t < 50.0) ? offTruth : baseTruth; };
+
+		ContinuousSim sim;
+		sim.ca.SetExtrinsic(trueExtrinsic);
+		sim.solvedOffset = baseTruth.latency;
+		sim.calRot = baseTruth.rotation;
+		sim.calTrans = baseTruth.translation;
+
+		bool firstNoted = false, secondNoted = false;
+		int settleCorrections = 0, settleFreezes = 0, lastCorrections = 0;
+		bool holdingWhileSettling = false;
+		RunContinuousSegment(sim, scene, 0.0, 80.0, rng, restartTruth, constMount, alwaysVisible,
+			nullptr, false,
+			[&](double t)
+			{
+				// The log line lags the pose step by a few hundred milliseconds.
+				if (!firstNoted && t >= 20.3)
+				{
+					firstNoted = true;
+					sim.ca.NoteTargetResolved(t);
+				}
+				if (!secondNoted && t >= 50.3)
+				{
+					secondNoted = true;
+					sim.ca.NoteTargetResolved(t);
+				}
+				const bool settling = (t >= 20.3 && t < 30.3) || (t >= 50.3 && t < 60.3);
+				if (settling)
+					settleCorrections += sim.corrections - lastCorrections;
+				if (t < 30.3)
+					settleFreezes = sim.freezes;   // none may confirm before the first settle ends
+				if (t >= 28.0 && t < 30.0 && sim.ca.GetState() == ContinuousAlignment::State::Holding)
+					holdingWhileSettling = true;
+				lastCorrections = sim.corrections;
+				sim.ca.SetTargetSettling(settling);
+			});
+		double yawErr, posErr;
+		CalError(sim, baseTruth, 80.0, yawErr, posErr);
+		const auto diagnostics = sim.ca.GetDiagnostics();
+		const uint64_t restartResets = diagnostics.resets[static_cast<size_t>(
+			ContinuousAlignment::ResetReason::TargetResolved)];
+
+		snprintf(detail, sizeof detail,
+			"freezes %d (attributed %d, while settling %d)  resumes %d  settle corr %d  holding %d  resets %llu  end %.3f deg / %.1f mm",
+			sim.freezes, sim.resolveFreezes, settleFreezes, sim.resumes, settleCorrections,
+			holdingWhileSettling, static_cast<unsigned long long>(restartResets), yawErr, posErr * 1000.0);
+		Check("continuous: target restart settles, attributes, resumes",
+			sim.freezes == 1 && sim.resolveFreezes == 1 && settleFreezes == 0 &&
+			settleCorrections == 0 && holdingWhileSettling && sim.resumes == 1 &&
+			restartResets == 2 && sim.ca.GetState() == ContinuousAlignment::State::Tracking &&
+			yawErr < 0.15 && posErr < 0.008, detail);
 	}
 }
 

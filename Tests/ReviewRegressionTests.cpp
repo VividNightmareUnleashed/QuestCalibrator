@@ -505,14 +505,20 @@ void FrozenRecoveryBoundaryScenario(Check check)
 	MountExtrinsic mount;
 	mount.valid = true;
 	engine.SetExtrinsic(mount);
+	// 3 cm is inside the 5 cm freeze band but outside the 2.5 cm fast resume
+	// band: it must not resume on the 5 s confirm, and must on the long in-band
+	// one. Frozen corrects nothing, so without the second path a disagreement
+	// between the two bands held the freeze for good (42 minutes live on
+	// 2026-09-25) although Tracking would have corrected it without freezing.
 	bool frozen = false, stayedFrozen = true, resumed = false;
-	for (int i = 1; i <= 4000; ++i)
+	double resumedAt = -1.0;
+	for (int i = 1; i <= 5000; ++i)
 	{
 		double time = i * 0.02;
 		PoseSample h, t;
 		h.time = t.time = 1000 + time;
 		t.pos = Eigen::Vector3d(0, 1.6, 0);
-		h.pos = t.pos + Eigen::Vector3d(time < 20 ? 0.08 : time < 55 ? 0.03 : 0.01, 0, 0);
+		h.pos = t.pos + Eigen::Vector3d(time < 20 ? 0.08 : 0.03, 0, 0);
 		engine.PushReference(h);
 		engine.PushTarget(t);
 		engine.Update(h.time, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1, 0);
@@ -520,13 +526,19 @@ void FrozenRecoveryBoundaryScenario(Check check)
 		bool emitted = engine.PollCorrection(correction);
 		if (time > 15 && time < 20)
 			frozen |= engine.GetState() == ContinuousAlignment::State::Frozen;
-		if (time > 35 && time < 55)
+		if (time > 35 && time < 50)
 			stayedFrozen &= engine.GetState() == ContinuousAlignment::State::Frozen && !emitted;
-		if (time > 70)
-			resumed |= engine.GetState() == ContinuousAlignment::State::Tracking;
+		if (time > 50 && !resumed && engine.GetState() == ContinuousAlignment::State::Tracking)
+		{
+			resumed = true;
+			resumedAt = time;
+		}
 	}
-	check("continuous: clean 3 cm disagreement stays frozen", frozen && stayedFrozen && resumed,
-		"after 8 cm freeze: clean 3 cm holds; 1 cm permits confirmed resume");
+	char detail[128];
+	snprintf(detail, sizeof detail, "after an 8 cm freeze, 3 cm held past the fast confirm and resumed at %.1f s",
+		resumedAt);
+	check("continuous: clean 3 cm disagreement holds, then resumes in band",
+		frozen && stayedFrozen && resumed && resumedAt < 70.0, detail);
 }
 
 void LegacyTranslationScenario(Check check)

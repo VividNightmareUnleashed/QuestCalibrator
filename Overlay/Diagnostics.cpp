@@ -271,7 +271,8 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 		<< ", pending targets " << engine.pendingTargets << ", observations " << engine.observations
 		<< "/" << engine.requiredObservations << " required\n";
 	out << "Quest pairing totals: out of order reference " << engine.referenceOutOfOrder
-		<< " / target " << engine.targetOutOfOrder << ", speed rejected reference " << engine.referenceSpeedRejected
+		<< " (same time " << engine.referenceSameTime << ") / target " << engine.targetOutOfOrder
+		<< " (same time " << engine.targetSameTime << "), speed rejected reference " << engine.referenceSpeedRejected
 		<< " / target " << engine.targetSpeedRejected << ", reference too old " << engine.referenceTooOld
 		<< ", interpolation rejected " << engine.interpolationRejected
 		<< ", waiting for reference (update attempts) " << engine.referenceWaitUpdates << "\n";
@@ -282,6 +283,7 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 	out << "Quest window resets: stream gap " << resets(Reason::StreamGap)
 		<< ", universe jump " << resets(Reason::UniverseJump) << ", suspended " << resets(Reason::Suspended)
 		<< ", mode changed " << resets(Reason::ModeChanged) << ", requested " << resets(Reason::Requested)
+		<< ", headset tracker lighthouse " << resets(Reason::TargetResolved)
 		<< ", observation discontinuity " << engine.jumpGuardResets << "\n";
 	const auto &legacy = input.legacy;
 	out << "Legacy window: samples " << legacy.samples << ", valid solve " << OnOff(legacy.valid)

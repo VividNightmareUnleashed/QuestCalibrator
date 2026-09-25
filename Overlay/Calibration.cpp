@@ -101,6 +101,10 @@ static std::unique_ptr<questcal::ContinuousAlignment> Continuous;
 static int ContinuousConsumer = -1;
 static std::vector<protocol::DevicePoseSample> ContinuousScratch;
 static bool ContinuousActive = false;
+// The headset tracker's live lighthouse disturbance count last acted on, so
+// each new one restarts the window exactly once.
+static std::string ContinuousLighthouseSerial;
+static uint32_t ContinuousLighthouseDisturbances = 0;
 
 static void ResetContinuousObservations(CalibrationContext &ctx,
 	questcal::ContinuousAlignment::ResetReason reason)
@@ -500,6 +504,19 @@ static void NotifyStaleAlignment(CalibrationContext &ctx)
 		"Your calibration looks off. Recalibrate.",
 		CalibrationContext::Tone::Warn,
 		"QuestCalibrator: your calibration looks off. Recalibrate.",
+		ctx.notifyPoorCalibration);
+}
+
+// A freeze right after the headset tracker's lighthouse solution restarted.
+// Its next restart usually puts it back, and a recalibration now would measure
+// the misplaced solution into every lighthouse tracker, so the advice is to
+// wait rather than recalibrate.
+static void NotifyResolveFreeze(CalibrationContext &ctx)
+{
+	NotifyOnce(ctx, Monitors.freezeNotified,
+		"Continuous calibration paused: the headset tracker's base station tracking restarted and doesn't match the headset yet. It resumes on its own once that settles.",
+		CalibrationContext::Tone::Warn,
+		"QuestCalibrator: continuous calibration paused while the headset tracker's base station tracking settles. It resumes on its own, so don't recalibrate yet.",
 		ctx.notifyPoorCalibration);
 }
 
@@ -1176,6 +1193,31 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		return;
 	double ringNow = static_cast<double>(qnow.QuadPart) * QpcToSeconds;
 
+	// The headset tracker's own lighthouse tracking (LighthouseVisibility.h).
+	// A new solution or a change of stations can move its pose by centimeters
+	// and a single-baseline fit swims, so a window must not straddle one and no
+	// verdict is drawn while it settles. Without the log nothing changes here.
+	const LighthouseVisibility::Device *trackerSeen = ctx.continuousTrackerSerial.empty()
+		? nullptr : ctx.lighthouse.Find(ctx.continuousTrackerSerial);
+	if (!trackerSeen)
+	{
+		ContinuousLighthouseSerial.clear();
+	}
+	else
+	{
+		if (trackerSeen->serial == ContinuousLighthouseSerial &&
+			trackerSeen->liveDisturbances != ContinuousLighthouseDisturbances)
+		{
+			Continuous->NoteTargetResolved(trackerSeen->lastDisturbance);
+			ctx.continuousCorrectionGate.Clear();
+			ctx.Diag("continuous: window restarted, headset tracker " + trackerSeen->lastDisturbanceText);
+		}
+		ContinuousLighthouseSerial = trackerSeen->serial;
+		ContinuousLighthouseDisturbances = trackerSeen->liveDisturbances;
+	}
+	Continuous->SetTargetSettling(trackerSeen &&
+		ctx.lighthouse.Settling(ctx.continuousTrackerSerial, ringNow));
+
 	// Re-evaluate the current field for each retained observation. Comparing a
 	// multi-position history with only the latest spot turns healthy anchor
 	// gradients into apparent temporal drift as the user walks through them.
@@ -1283,39 +1325,30 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		char buf[256];
 		switch (ev.type)
 		{
-		// Both freeze causes keep their evidence in the detail line. What the
-		// player reads is the fact (the readings disagree with the calibration
-		// by more than the loop will correct on its own), not a diagnosis: a
-		// strapped tracker does not move, and blaming it sent people to check
-		// hardware that was fine.
+		// The freeze keeps its evidence in the detail line. What the player
+		// reads is the fact (the readings disagree with the calibration by more
+		// than the loop will correct on its own), not a diagnosis: a mounted
+		// tracker does not move, and blaming it sent people to check hardware
+		// that was fine.
 		case questcal::ContinuousAlignment::Event::FrozenLargeDeviation:
 			snprintf(buf, sizeof buf,
-				"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm\n",
-				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0);
+				"Continuous calibration frozen: deviation yaw %.2f deg, tilt %.2f deg, %.1f cm%s\n",
+				ev.deviation.yawDeg, ev.deviation.tiltDeg, ev.deviation.posM * 100.0,
+				ev.afterTargetResolve ? " -- after the headset tracker's base station tracking restarted" : "");
 			ctx.Log(buf);
-			NotifyOnce(ctx, Monitors.freezeNotified,
-				"Continuous calibration paused: readings drifted too far from the calibration to correct safely.",
-				CalibrationContext::Tone::Warn,
-				"QuestCalibrator: continuous calibration paused; readings drifted too far to correct safely. Recalibrate with the headset tracker to resume.",
-				ctx.notifyPoorCalibration);
-			break;
-		case questcal::ContinuousAlignment::Event::FrozenMountScatter:
-			// The event now carries the scatter it froze on, so this no longer
-			// re-reads live accessors that have moved on since it was raised.
-			snprintf(buf, sizeof buf,
-				"Continuous calibration frozen: observation scatter %.2f deg / %.1f cm stays far above the tracking noise -- structured scatter\n",
-				ev.scatterRotDeg, ev.scatterPosM * 100.0);
-			ctx.Log(buf);
-			NotifyOnce(ctx, Monitors.freezeNotified,
-				"Continuous calibration paused: readings are inconsistent with the headset tracker measurement.",
-				CalibrationContext::Tone::Warn,
-				"QuestCalibrator: continuous calibration paused; readings are inconsistent. Recalibrate with the headset tracker to resume.",
-				ctx.notifyPoorCalibration);
+			if (ev.afterTargetResolve)
+				NotifyResolveFreeze(ctx);
+			else
+				NotifyOnce(ctx, Monitors.freezeNotified,
+					"Continuous calibration paused: readings drifted too far from the calibration to correct safely.",
+					CalibrationContext::Tone::Warn,
+					"QuestCalibrator: continuous calibration paused; readings drifted too far to correct safely. Recalibrate with the headset tracker to resume.",
+					ctx.notifyPoorCalibration);
 			break;
 		case questcal::ContinuousAlignment::Event::ObservationsUnstable:
 			snprintf(buf, sizeof buf,
 				"Mounted tracker observations unstable (scatter %.2f deg / %.1f cm) -- alignment updates paused until tracking settles\n",
-				Continuous->ScatterRotRmsDeg(), Continuous->ScatterPosRmsM() * 100.0);
+				ev.scatterRotDeg, ev.scatterPosM * 100.0);
 			ctx.Log(buf);
 			NotifyOnce(ctx, Monitors.unstableNotified,
 				"Tracking is noisy here; continuous calibration is waiting and resumes on its own.",
@@ -1390,6 +1423,23 @@ static std::string DeviceName(const CalibrationContext &ctx, const std::string &
 	if (!model.empty())
 		return model;
 	return reference ? "The reference device" : "The target device";
+}
+
+// Live lighthouse restarts (LighthouseVisibility::Device::liveRestarts) of the
+// device with this serial; 0 for a device the log never named.
+static uint32_t LighthouseRestarts(const CalibrationContext &ctx, const std::string &serial)
+{
+	const LighthouseVisibility::Device *seen = serial.empty() ? nullptr : ctx.lighthouse.Find(serial);
+	return seen ? seen->liveRestarts : 0;
+}
+
+static bool LighthouseRestartedRecently(const CalibrationContext &ctx, const std::string &serial)
+{
+	LARGE_INTEGER qpcNow{};
+	if (serial.empty() || !QueryPerformanceCounter(&qpcNow))
+		return false;
+	return ctx.lighthouse.RestartedWithin(serial,
+		static_cast<double>(qpcNow.QuadPart) * QpcToSeconds, 5.0);
 }
 
 // Reading of a refused solve for the modal: what went wrong and what to
@@ -1556,6 +1606,26 @@ static void FinishCalibration(CalibrationContext &ctx)
 	snprintf(buf, sizeof buf, "Collected %zu reference / %zu target samples, solving%s...\n",
 		run.referenceSamples.size(), run.targetSamples.size(), asAnchor ? " (field anchor)" : "");
 	ctx.Log(buf);
+
+	// A lighthouse device that began a new solution mid-collection gave poses
+	// from two solutions that can sit centimeters apart (4.4 deg / 33 cm live
+	// on 2026-09-25). The solve would blend them or refuse them, and the
+	// player would be told to move differently when the motion was fine.
+	const bool referenceRestarted =
+		LighthouseRestarts(ctx, run.referenceSerial) != run.referenceRestartsAtStart;
+	if (referenceRestarted ||
+		LighthouseRestarts(ctx, run.targetSerial) != run.targetRestartsAtStart)
+	{
+		AbortCalibration(ctx, {
+			(referenceRestarted
+				? DeviceName(ctx, run.referenceModel, run.referenceSerial, true)
+				: DeviceName(ctx, run.targetModel, run.targetSerial, false)) +
+				"'s base station tracking restarted during the measurement.",
+			"Keep it in view of its base stations for the whole countdown.",
+			"Lighthouse solution restarted during collection",
+			CalibrationContext::GuideHint::WaitForTracking });
+		return;
+	}
 	if (run.toleratedGaps > 0)
 	{
 		snprintf(buf, sizeof buf, "raw collection rode through %llu short pose stream gap(s), %llu sample(s) lost",
@@ -1835,6 +1905,8 @@ bool StartAnchorCalibration()
 static void BeginCollection(CalibrationContext &ctx, double time)
 {
 	auto &run = ctx.run;
+	run.referenceRestartsAtStart = LighthouseRestarts(ctx, run.referenceSerial);
+	run.targetRestartsAtStart = LighthouseRestarts(ctx, run.targetSerial);
 	run.collectionStart = time;
 	run.lastReferenceSample = time;
 	run.lastTargetSample = time;
@@ -2015,6 +2087,22 @@ void CalibrationTick(double time)
 				CalibrationContext::GuideHint::TrackingLost });
 			return;
 		}
+		// A lighthouse solution started moments ago can sit centimeters off
+		// before it converges, and a calibration would measure that offset
+		// into every lighthouse tracker.
+		const bool referenceRestarted = LighthouseRestartedRecently(ctx, run.referenceSerial);
+		if (referenceRestarted || LighthouseRestartedRecently(ctx, run.targetSerial))
+		{
+			AbortCalibration(ctx, {
+				(referenceRestarted
+					? DeviceName(ctx, run.referenceModel, run.referenceSerial, true)
+					: DeviceName(ctx, run.targetModel, run.targetSerial, false)) +
+					"'s base station tracking just restarted.",
+				"Let tracking settle for a few seconds, then start again.",
+				"Lighthouse solution restarted within the last 5 s",
+				CalibrationContext::GuideHint::WaitForTracking });
+			return;
+		}
 
 		auto matchesCapturedSystem = [](uint32_t id, const std::string &expected)
 		{
@@ -2082,7 +2170,9 @@ void CalibrationTick(double time)
 		run.usesPoseRing = hasClock && PoseHub.RingOpen() && PreflightPoseRing(
 			run, CollectorScratch,
 			static_cast<double>(qpcNow.QuadPart) * QpcToSeconds, preflightReason);
-		snprintf(buf, sizeof buf, "pose preflight: %s; batch %zu samples, reported loss %llu",
+		// The loss is the idle collector's backlog overflowing since its last
+		// run (every sample of a long session reads as lost), not stream health.
+		snprintf(buf, sizeof buf, "pose preflight: %s; batch %zu samples, dropped while idle %llu",
 			preflightReason, CollectorScratch.size(), static_cast<unsigned long long>(preflightDropped));
 		ctx.Diag(buf);
 
