@@ -180,8 +180,10 @@
     <ClInclude Include="..\Overlay\JumpDetector.h" />
     <ClInclude Include="..\Overlay\ProfileRecordJson.h" />
     <ClInclude Include="..\Overlay\PersistenceState.h" />
+    <ClInclude Include="..\Overlay\ProfileScalarValidation.h" />
     <ClInclude Include="..\Overlay\ProfileValidation.h" />
     <ClInclude Include="..\Overlay\RingPoseMath.h" />
+    <ClInclude Include="..\Overlay\RingSampleGate.h" />
     <ClInclude Include="..\Overlay\UpdatePolicy.h" />
     <ClInclude Include="..\Overlay\PoseStreamHub.h" />
   </ItemGroup>

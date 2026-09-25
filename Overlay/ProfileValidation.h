@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../common/TransformLimits.h"
+#include "ProfileScalarValidation.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -73,13 +74,8 @@ inline bool IsValidTrackingSystemPair(
 	return !reference.empty() && !target.empty() && reference != target;
 }
 
-inline bool IsValidScale(double scale)
-{
-	// The solver normally stays within [0.85, 1.15]. This wider range
-	// preserves intentional manual edits while rejecting destructive input.
-	return std::isfinite(scale) && scale >= protocol::limits::MinScale &&
-		scale <= protocol::limits::MaxScale;
-}
+// IsValidScale, IsValidResidual, IsValidTimeOffset and IsValidRecordUnixTime
+// are in ProfileScalarValidation.h.
 
 inline bool IsBoundedVector(const Eigen::Vector3d &value, double maxAbs)
 {
@@ -109,25 +105,6 @@ inline bool IsValidFieldAnchor(const Eigen::Vector3d &position,
 		(rotation.normalized() * baseRotation.normalized().conjugate()).normalized();
 	Eigen::Vector3d deltaTranslation = translation - deltaRotation * baseTranslation;
 	return IsBoundedVector(deltaTranslation, protocol::limits::MaxAbsAnchorDeltaMeters);
-}
-
-inline bool IsValidResidual(double value)
-{
-	return std::isfinite(value) && value >= 0.0;
-}
-
-inline bool IsValidTimeOffset(double seconds)
-{
-	return std::isfinite(seconds) &&
-		std::abs(seconds) <= protocol::limits::MaxAbsTimeOffsetSeconds;
-}
-
-// Unix seconds of the last successful solve, or of the room copy; 0 means
-// "unknown", which older records legitimately carry.
-inline bool IsValidRecordUnixTime(double seconds)
-{
-	return std::isfinite(seconds) && seconds >= 0.0 &&
-		seconds <= protocol::limits::MaxPlausibleUnixTimeSeconds;
 }
 
 // A raw worldFromDriver baseline: the headset universe a calibration or a

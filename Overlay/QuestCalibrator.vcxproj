@@ -111,8 +111,10 @@
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
     <ClInclude Include="PersistenceState.h" />
+    <ClInclude Include="ProfileScalarValidation.h" />
     <ClInclude Include="ProfileValidation.h" />
     <ClInclude Include="RingPoseMath.h" />
+    <ClInclude Include="RingSampleGate.h" />
     <ClInclude Include="ContinuousAlignment.h" />
     <ClInclude Include="ContinuousCorrectionGate.h" />
     <ClInclude Include="DriftMonitor.h" />
