@@ -55,9 +55,10 @@ Quest tracking shifts during a session: the headset re-centres, loses and finds 
 map, or corrects its own drift. QuestCalibrator watches for these jumps and follows
 them.
 
-For the best result, strap a spare lighthouse tracker firmly to your headset, turn on
-**Continuous calibration** in Settings and pick that tracker. QuestCalibrator then
-keeps the two systems lined up the whole time you play, with no recalibrating. You
+If you have a spare lighthouse tracker, you can also try **Continuous calibration**:
+strap the tracker firmly to your headset, turn the option on in Settings and pick
+that tracker. QuestCalibrator then uses it to keep the two systems lined up while
+you play. You
 can hide that tracker from games so full-body setups don't mistake it for a body
 tracker.
 
