@@ -11,37 +11,6 @@ namespace
 
 constexpr double RadToDeg = 180.0 / EIGEN_PI;
 
-bool HasPoseStep(const std::vector<PoseSample> &samples, double begin, double end,
-                const ContinuousAlignment::Config &config)
-{
-	auto next = std::upper_bound(samples.begin(), samples.end(), begin,
-		[](double time, const PoseSample &s) { return time < s.time; });
-	auto stop = std::lower_bound(samples.begin(), samples.end(), end,
-		[](const PoseSample &s, double time) { return s.time < time; });
-	// The reference pose may interpolate against the first sample after end.
-	if (stop != samples.end())
-		++stop;
-	if (next == samples.begin() && next != samples.end())
-		++next;
-	for (; next < stop; ++next)
-	{
-		const auto &previous = *(next - 1);
-		double dt = next->time - previous.time;
-		if (dt > config.maxInterpolationGap)
-			continue;
-		Eigen::Vector3d positionError = next->pos - previous.pos -
-			0.5 * (previous.vel + next->vel) * dt;
-		Eigen::Vector3d angularStep = 0.5 * (previous.angVel + next->angVel) * dt;
-		Eigen::Quaterniond predicted = previous.rot;
-		if (angularStep.norm() > 1e-12)
-			predicted = Eigen::Quaterniond(Eigen::AngleAxisd(angularStep.norm(), angularStep.normalized())) * predicted;
-		if (positionError.norm() > config.jumpGuardPosM ||
-			next->rot.angularDistance(predicted) * RadToDeg > config.jumpGuardRotDeg)
-			return true;
-	}
-	return false;
-}
-
 // Hemisphere-safe quaternion mean (Markley eigenvector method): the maximal
 // eigenvector of M = sum q q^T. The outer product is invariant under q -> -q,
 // so the double cover needs no bookkeeping.
@@ -65,6 +34,8 @@ Eigen::Quaterniond EigenvectorMean(const std::vector<Eigen::Quaterniond> &quats,
 
 double Median(std::vector<double> values)
 {
+	if (values.empty())
+		return 0.0;
 	size_t mid = values.size() / 2;
 	std::nth_element(values.begin(), values.begin() + mid, values.end());
 	return values[mid];
@@ -133,7 +104,6 @@ bool RobustAverage(const std::vector<Eigen::Quaterniond> &quats,
 	if (!estimate())
 		return false;
 
-	// keep[] is what estimate() just accepted, so kept >= 3.
 	double rotSq = 0.0, posSq = 0.0;
 	size_t kept = 0;
 	for (size_t i = 0; i < n; ++i)
@@ -144,6 +114,8 @@ bool RobustAverage(const std::vector<Eigen::Quaterniond> &quats,
 		posSq += posRes[i] * posRes[i];
 		++kept;
 	}
+	if (kept < 3)
+		return false;
 
 	out.rot = qMean;
 	out.trans = tMean;
@@ -160,28 +132,14 @@ void ContinuousAlignment::PushReference(const PoseSample &s)
 	// Per-device ring order is monotonic; drop the odd inversion rather than
 	// hand InterpolateAt an unsorted stream.
 	if (!refWindow.empty() && s.time <= refWindow.back().time)
-	{
-		++diagnostics.referenceOutOfOrder;
-		if (s.time == refWindow.back().time)
-			++diagnostics.referenceSameTime;
 		return;
-	}
-	if (!refWindow.empty() && s.time - refWindow.back().time >= config.maxStreamGapSeconds)
-		Reset(ResetReason::StreamGap);
 	refWindow.push_back(s);
 }
 
 void ContinuousAlignment::PushTarget(const PoseSample &s)
 {
 	if (!targetWindow.empty() && s.time <= targetWindow.back().time)
-	{
-		++diagnostics.targetOutOfOrder;
-		if (s.time == targetWindow.back().time)
-			++diagnostics.targetSameTime;
 		return;
-	}
-	if (!targetWindow.empty() && s.time - targetWindow.back().time >= config.maxStreamGapSeconds)
-		Reset(ResetReason::StreamGap);
 	targetWindow.push_back(s);
 }
 
@@ -194,44 +152,32 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 		// Speed gates on both sides: residual timing error converts speed
 		// directly into observation error through the mount lever arm.
 		if (t.angVel.norm() > config.maxAngularSpeed || t.vel.norm() > config.maxLinearSpeed)
-		{
-			++diagnostics.targetSpeedRejected;
 			continue;
-		}
 
 		// Same time-alignment convention as the engine: the reference stream
 		// is interpolated at the target's timestamp minus the solved offset.
-		// A bracket that has not arrived yet (a negative offset asks for the
-		// reference's future) keeps this target, and every later one, at the
-		// cursor for the next Update. A time before the retained reference
-		// window is irrecoverably old, and a failed interpolation inside the
-		// completed window is a hard tracking gap.
+		// A negative offset asks for a reference pose in the target sample's
+		// future. During live streaming that bracket may simply not have arrived
+		// yet: keep this target at the processing cursor so the next Update can
+		// retry it. Since both streams are monotonic, every later target would
+		// also need a future reference and can wait behind it. Conversely, a
+		// requested time before the retained reference window is irrecoverably
+		// old, and a failed interpolation inside the completed window is a hard
+		// tracking gap that future samples cannot repair.
 		double refTime = t.time - calTimeOffset;
 		const size_t refLive = refWindow.size() - refHead;
 		if (refLive == 0 || refTime > refWindow.back().time ||
 			(refLive < 2 && refTime >= refWindow[refHead].time))
-		{
-			++diagnostics.referenceWaitUpdates;
 			break;
-		}
 		if (refTime < refWindow[refHead].time)
-		{
-			++diagnostics.referenceTooOld;
 			continue;
-		}
 
 		PoseSample h;
 		if (!CalibrationEngine::InterpolateAt(refWindow, refTime,
 			config.maxInterpolationGap, h))
-		{
-			++diagnostics.interpolationRejected;
 			continue;
-		}
 		if (h.angVel.norm() > config.maxAngularSpeed || h.vel.norm() > config.maxLinearSpeed)
-		{
-			++diagnostics.referenceSpeedRejected;
 			continue;
-		}
 
 		// C_obs = H o E o T_s^-1 (see header). Independent of the currently
 		// applied calibration: both poses are raw-universe.
@@ -240,7 +186,7 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 
 		Observation obs{ t.time, qObs, tObs, t.pos };
 
-		// Discontinuity guard: a fast step may indicate a universe jump.
+		// Discontinuity guard: a step this large this fast is a universe jump.
 		// JumpDetector owns jumps; a window straddling one must never be
 		// averaged into a "correction". A real jump shifts every subsequent
 		// observation, while a single-sample tracking glitch is one-off — so a
@@ -253,17 +199,13 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 			// glitched ref sample corrupts every obs interpolated across it
 			// with correlated errors, which would otherwise self-confirm.
 			if (obs.time - pendingObs->time < config.jumpConfirmSpacing)
-			{
-				++diagnostics.jumpGuardRejected;
 				continue;
-			}
 			double dRot = qObs.angularDistance(pendingObs->rot) * RadToDeg;
 			double dPos = (tObs - pendingObs->trans).norm();
 			// Consumed either way: confirmed below, or discarded as a glitch.
 			pendingObs.reset();
 			if (dRot <= config.jumpGuardRotDeg && dPos <= config.jumpGuardPosM)
 			{
-				++diagnostics.jumpGuardResets;
 				observations.clear();
 				refWindow.clear();
 				targetWindow.clear();
@@ -284,18 +226,9 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 			{
 				double dRot = qObs.angularDistance(prev.rot) * RadToDeg;
 				double dPos = (tObs - prev.trans).norm();
-				// Sparse, speed-gated observations can turn continuous tracking
-				// noise into an apparent step. Require a discontinuity in the raw
-				// adjacent poses before discarding the estimation window.
-				if ((dRot > config.jumpGuardRotDeg || dPos > config.jumpGuardPosM) &&
-					(HasPoseStep(refWindow, prev.time - calTimeOffset, obs.time - calTimeOffset, config) ||
-					 HasPoseStep(targetWindow, prev.time, obs.time, config)))
+				if (dRot > config.jumpGuardRotDeg || dPos > config.jumpGuardPosM)
 				{
-					++diagnostics.jumpGuardRejected;
 					pendingObs = obs;
-					correctionEligible = false;
-					pendingCorrection.reset();
-					pendingTimeOffset.reset();
 					continue;
 				}
 			}
@@ -305,13 +238,11 @@ void ContinuousAlignment::FormObservations(double calScale, double calTimeOffset
 		// this before normal thinning so a healthy high-rate stream does not coast,
 		// but rejected jump candidates cannot leave stale state marked Tracking.
 		lastObsTime = obs.time;
-		++diagnostics.observationsFormed;
 
 		if (obs.time - lastKeptObsTime < config.obsMinSpacing)
 			continue;
 		lastKeptObsTime = obs.time;
 		observations.push_back(obs);
-		++diagnostics.observationsKept;
 	}
 }
 
@@ -324,13 +255,17 @@ void ContinuousAlignment::TrimWindows(double now)
 		keepSeconds = std::max(keepSeconds, config.latencyWindowSeconds);
 	double streamCutoff = now - keepSeconds;
 
-	// Retire expired samples by advancing the head cursors (see refHead);
-	// compact once the dead prefix is a quarter of the buffer.
+	// Retire expired samples by advancing a head cursor. Both windows hold
+	// thousands of samples and retire a handful per tick, so erasing from the
+	// front relocated every survivor up to 50 times a second for an
+	// O(dropped) job; the prefix is compacted away only once it is a quarter
+	// of the buffer, i.e. once the single move it costs is worth making.
 	while (refHead < refWindow.size() && refWindow[refHead].time < streamCutoff)
 		++refHead;
 	while (targetHead < targetWindow.size() && targetWindow[targetHead].time < streamCutoff)
 		++targetHead;
-	// A target that expired before it was processed is never processed.
+	// A target that expired before it was processed stays unprocessed —
+	// exactly what the erase that used to rebase this cursor left behind.
 	if (targetProcessed < targetHead)
 		targetProcessed = targetHead;
 	if (4 * refHead > refWindow.size() || 4 * targetHead > targetWindow.size())
@@ -353,7 +288,7 @@ void ContinuousAlignment::CompactWindows()
 	if (targetHead > 0)
 	{
 		targetWindow.erase(targetWindow.begin(), targetWindow.begin() + targetHead);
-		targetProcessed -= targetHead;   // >= targetHead by TrimWindows' clamp
+		targetProcessed -= targetHead;   // >= targetHead by the clamp above
 		targetHead = 0;
 	}
 }
@@ -398,6 +333,52 @@ bool ContinuousAlignment::EstimateWindow(const Eigen::Quaterniond &calRotation,
 	out.trans = stats.trans;
 	out.scatterRotDeg = stats.rotRmsDeg;
 	out.scatterPosM = stats.posRmsM;
+
+	// Short-term noise: robust scatter-equivalent from obs pairs ~0.2 s apart.
+	// A slipped mount's head-orientation-locked error barely moves over that
+	// span while tracking noise — white, or the mid-frequency warble of
+	// grazing lighthouse geometry — decorrelates, so the ratio of window
+	// scatter to this estimate is what separates the two. ~0.2 s rather than
+	// one spacing because warble is still partially correlated over the
+	// shorter span and would read as structure. The partner is chosen by
+	// ELAPSED TIME, not by a fixed index lag: obsMinSpacing is only a lower
+	// bound (both speed gates, interpolation failures and the jump guard all
+	// skip observations), so a fixed lag-2 can span up to ~0.5 s — over which
+	// a slipped mount's error HAS moved, inflating the estimate and
+	// misclassifying the slip as ordinary noise. At the nominal ~0.1 s
+	// spacing the nearest partner is still exactly lag 2. Median-based so
+	// glitch pairs don't inflate it (they would push a real slip toward the
+	// harmless "noise" verdict).
+	// The deltas are norms of 3D differences — Maxwell-distributed for
+	// Gaussian noise, median 1.5382 * (sigma * sqrt(2)) per axis — while the
+	// window scatter under pure noise is sigma * sqrt(3), so the median is
+	// scaled by sqrt(3) / (1.5382 * sqrt(2)) to make noiseX directly
+	// comparable to scatterX: unstructured windows sit at a ratio of ~1 and
+	// structuredScatterFactor compares like with like. (The scalar-Gaussian
+	// MAD constant used before overstated the estimate by ~32%, silently
+	// raising the effective structured threshold to ~2.1x the designed 1.6x.)
+	// RobustAverage refuses fewer than 3 samples, so at least one pair exists
+	// here — the re-test that used to guard this block could never be false.
+	const double noiseLag = 2.0 * config.obsMinSpacing;
+	std::vector<double> dRot, dPos;
+	dRot.reserve(quats.size());
+	dPos.reserve(quats.size());
+	size_t j = 0;
+	for (size_t i = 2; i < quats.size(); ++i)
+	{
+		// Observation times ascend, so |span - noiseLag| is V-shaped in j and
+		// the best partner never moves backward: walk j forward while it
+		// improves.
+		while (j + 1 < i &&
+			std::abs(observations[i].time - observations[j + 1].time - noiseLag) <=
+			std::abs(observations[i].time - observations[j].time - noiseLag))
+			++j;
+		dRot.push_back(quats[i].angularDistance(quats[j]) * RadToDeg);
+		dPos.push_back((vecs[i] - vecs[j]).norm());
+	}
+	constexpr double k = 1.7320508075688772 / (1.5382 * 1.4142135623730951);
+	out.noiseRotDeg = k * Median(dRot);
+	out.noisePosM = k * Median(dPos);
 	return true;
 }
 
@@ -405,8 +386,6 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
                                  const Eigen::Vector3d &calTranslationMeters,
                                  const ExpectedCalibrationAt &expectedAt)
 {
-	correctionEligible = false;
-	pendingCorrection.reset();
 	WindowEstimate est;
 	if (!EstimateWindow(calRotation, calTranslationMeters, expectedAt, est))
 	{
@@ -414,162 +393,159 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		return;
 	}
 
-	// Published only on success, so the accessors describe the window tested
-	// below.
+	// Publish the estimate's figures as a unit, and only on success: the
+	// accessors and the structured-scatter test below then always describe the
+	// same window.
 	scatterRotRmsDeg = est.scatterRotDeg;
 	scatterPosRmsM = est.scatterPosM;
+	noiseRotDeg = est.noiseRotDeg;
+	noisePosM = est.noisePosM;
+	const Eigen::Quaterniond &rBar = est.rot;
+	const Eigen::Vector3d &tBar = est.trans;
 
+	// Scatter sanity: a noisy window means the pair itself is untrustworthy —
+	// never correct from it. Whether it is also a FAULT depends on structure:
+	// window scatter far above the short-term noise estimate means the error
+	// is locked to head orientation (slipped mount) and freezes after a
+	// confirm; scatter explained by per-sample noise is degraded tracking
+	// (grazing lighthouse angles while lying down) and only holds until it
+	// settles. The vote counters make a flickering classification converge to
+	// its majority instead of resetting the episode.
 	bool rotExceed = scatterRotRmsDeg > config.maxScatterRotDeg;
 	bool posExceed = scatterPosRmsM > config.maxScatterPosM;
-
-	double yawAngle = 0.0;
-	Eigen::Vector3d headStep, headPos;
-
-	// The target's own tracking says its pose is unsettled: a single-baseline
-	// lighthouse fit swims along the remaining line of sight, and a restarted
-	// solution can land centimeters away before it converges (live 2026-09-25:
-	// a headset tracker's restarted solution read 4.4 deg / 33 cm off for ten
-	// minutes and returned on its next restart). Nothing measured
-	// through that is evidence about the universes, so every
-	// verdict waits: the deviation is still published for the log and pane.
-	// Follow mode takes the target's word regardless.
-	if (targetSettling && !followMode)
-	{
-		freezeExceededSince = -1.0;
-		resumeBelowSince = -1.0;
-		resumeInBandSince = -1.0;
-		reanchorSince = -1.0;
-		undoSince = -1.0;
-		if (rotExceed || posExceed)
-			deviation.valid = false;
-		else
-			deviation = MeasureDeviation(est, calRotation, calTranslationMeters,
-				yawAngle, headStep, headPos);
-		if (state != State::Frozen)
-			EnterState(State::Holding);
-		return;
-	}
-
-	// Scatter sanity: a noisy window means the pair is untrustworthy right
-	// now (grazing lighthouse angles while lying down, partial occlusion):
-	// never correct from it and never freeze on it, only hold until it
-	// settles. A long episode is reported once.
 	if (rotExceed || posExceed)
 	{
 		deviation.valid = false;
 		freezeExceededSince = -1.0;   // no deviation can confirm through noise
-		reanchorSince = -1.0;         // nor can a re-anchor, or its undoing
-		undoSince = -1.0;
 		if (state == State::Frozen)
 		{
 			resumeBelowSince = -1.0;
-			resumeInBandSince = -1.0;
 			return;
 		}
 
+		bool structured =
+			(rotExceed && scatterRotRmsDeg > config.structuredScatterFactor * noiseRotDeg) ||
+			(posExceed && scatterPosRmsM > config.structuredScatterFactor * noisePosM);
+
+		if (scatterSince < 0.0)
+		{
+			scatterSince = now;
+			scatterStructuredVotes.clear();
+		}
 		if (scatterEpisodeSince < 0.0)
 			scatterEpisodeSince = now;
-		EnterState(State::Holding);
-		if (!unstableNotified && now - scatterEpisodeSince >= config.scatterNotifySeconds)
+		// Sliding vote window: a mount slip that starts deep into a long
+		// degraded-tracking episode must only outvote the window, not the
+		// episode's whole history, so the freeze delay stays bounded by
+		// ~scatterVoteWindow evaluations.
+		scatterStructuredVotes.push_back(structured ? 1 : 0);
+		if (scatterStructuredVotes.size() > static_cast<size_t>(config.scatterVoteWindow))
+			scatterStructuredVotes.pop_front();
+
+		int structuredVotes = 0;
+		for (char v : scatterStructuredVotes)
+			structuredVotes += v;
+		bool structuredMajority =
+			2 * structuredVotes > static_cast<int>(scatterStructuredVotes.size());
+		// Both scatter-path events carry the window scatter that classified
+		// them; the deviation stays invalid because no deviation was measured
+		// through this noise.
+		auto scatterEvent = [&](Event::Type type)
 		{
-			unstableNotified = true;
-			// The event carries the scatter it was raised on; the deviation
-			// stays invalid because none was measured through this noise.
 			Event e;
-			e.type = Event::ObservationsUnstable;
+			e.type = type;
 			e.scatterRotDeg = scatterRotRmsDeg;
 			e.scatterPosM = scatterPosRmsM;
-			events.push_back(e);
+			return e;
+		};
+
+		if (now - scatterSince >= config.scatterFreezeConfirmSeconds && structuredMajority)
+		{
+			EnterState(State::Frozen);
+			events.push_back(scatterEvent(Event::FrozenMountScatter));
+			return;
+		}
+
+		EnterState(State::Holding);
+		if (!unstableNotified && !structuredMajority &&
+			now - scatterEpisodeSince >= config.scatterNotifySeconds)
+		{
+			unstableNotified = true;
+			events.push_back(scatterEvent(Event::ObservationsUnstable));
 		}
 		return;
 	}
+	scatterSince = -1.0;
 	scatterEpisodeSince = -1.0;
 	unstableNotified = false;   // next sustained episode logs again
 	if (state == State::Holding)
 		EnterState(State::Tracking);   // settled; resumes silently below
 
-	deviation = MeasureDeviation(est, calRotation, calTranslationMeters,
-		yawAngle, headStep, headPos);
+	// Deviation of the windowed estimate from the current calibration, as a
+	// left delta D: newCal = D o oldCal.
+	Eigen::Quaterniond rD = (rBar * calRotation.conjugate()).normalized();
+	if (rD.w() < 0.0)
+		rD.coeffs() = -rD.coeffs();
+	double yawAngle = 2.0 * std::atan2(rD.y(), rD.w());
+	Eigen::Quaterniond rYaw(Eigen::AngleAxisd(yawAngle, Eigen::Vector3d::UnitY()));
+	double tiltDeg = rYaw.angularDistance(rD) * RadToDeg;
+	Eigen::Vector3d tD = tBar - rD * calTranslationMeters;
+
+	// Effective displacement at the user's head: the honest magnitude of the
+	// deviation (a yaw delta far from the origin has a huge raw translation).
+	Eigen::Vector3d headPos =
+		refHead < refWindow.size() ? refWindow.back().pos : Eigen::Vector3d::Zero();
+	double dEff = (rD * headPos + tD - headPos).norm();
+
+	// The correction below is yaw-only, so the share of that displacement the
+	// tilt contributes cannot be reduced by it. Measure the reachable part
+	// separately: gating and clamping on the full delta gives any real mount
+	// tilt a floor no correction can get under, and the loop then emits a
+	// near-zero correction every cycle forever - each one re-stamping the
+	// drift counters and pinning alignment health at Fresh. deviation.posM
+	// keeps the full delta, because tilt is the mount-fault signal the freeze
+	// and resume tests exist to catch.
+	Eigen::Vector3d tPrime = tBar - rYaw * calTranslationMeters;
+	double dEffYaw = (rYaw * headPos + tPrime - headPos).norm();
+
+	deviation.valid = true;
+	deviation.yawDeg = std::abs(yawAngle) * RadToDeg;
+	deviation.tiltDeg = tiltDeg;
+	deviation.posM = dEff;
 
 	bool exceed = deviation.yawDeg >= config.freezeYawDeg
+		|| deviation.tiltDeg >= config.freezeTiltDeg
 		|| deviation.posM >= config.freezePosM;
-	bool tilted = deviation.tiltDeg >= config.holdTiltDeg;
-
-	// Follow mode, OpenVR-SpaceCalibrator's behaviour: what would freeze or
-	// hold becomes the calibration now, with no confirm and no wait for the
-	// estimate to hold still. Inside the band it tracks like Standard. A
-	// window in front of an unresolved jump-guard step authorizes nothing.
-	if (followMode && (exceed || tilted))
-	{
-		if (pendingObs)
-			return;
-		pendingReanchor = DeltaToEstimate(est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
-		Event e;
-		e.type = Event::Reanchored;
-		e.deviation = deviation;
-		e.afterTargetResolve = now - lastTargetResolveTime <= config.resolveAttributionSeconds;
-		events.push_back(e);
-		EnterState(State::Tracking);
-		return;
-	}
 
 	if (state == State::Frozen)
 	{
-		// Resume hysteresis: a deviation that fell well inside the freeze band
-		// unfreezes after a short confirm (a cleared tracking fault, or a
-		// recalibration that resets us anyway); one anywhere inside the band
-		// after a long one, since Tracking would correct it without freezing.
-		// A persisting fault stays outside the band and never does. A tilted
-		// window holds, so it confirms neither.
+		// Resume hysteresis: only a deviation that fell well inside the freeze
+		// band and stayed there (a cleared tracking fault, or a recalibration
+		// that resets us anyway) unfreezes. A genuine mount slip never does.
 		bool below = deviation.yawDeg < config.freezeYawDeg * config.resumeFactor
-			&& deviation.posM < config.freezePosM * config.resumeFactor
-			&& !tilted;
+			&& deviation.tiltDeg < config.freezeTiltDeg * config.resumeFactor
+			&& deviation.posM < config.freezePosM * config.resumeFactor;
 		if (below)
 		{
 			if (resumeBelowSince < 0.0)
 				resumeBelowSince = now;
+			else if (now - resumeBelowSince >= config.resumeConfirmSeconds)
+			{
+				EnterState(State::Tracking);
+				Event e;
+				e.type = Event::Resumed;
+				events.push_back(e);
+			}
 		}
 		else
 		{
 			resumeBelowSince = -1.0;
 		}
-		if (!exceed && !tilted)
-		{
-			if (resumeInBandSince < 0.0)
-				resumeInBandSince = now;
-		}
-		else
-		{
-			resumeInBandSince = -1.0;
-		}
-		if ((resumeBelowSince >= 0.0 && now - resumeBelowSince >= config.resumeConfirmSeconds) ||
-			(resumeInBandSince >= 0.0 && now - resumeInBandSince >= config.resumeInBandSeconds))
-		{
-			EnterState(State::Tracking);
-			episodeSince = -1.0;
-			reanchorSince = -1.0;
-			undoSince = -1.0;
-			Event e;
-			e.type = Event::Resumed;
-			events.push_back(e);
-			return;
-		}
-		// Still off by the freeze thresholds or tilted: the deviation that
-		// stays put is followed. Anything inside the band waits for the resume.
-		if (exceed || tilted)
-			TryReanchor(now, est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
-		else
-			reanchorSince = undoSince = -1.0;
 		return;
 	}
 
 	if (exceed)
 	{
-		// A tilt hold that grew into a deviation is a new episode, which the
-		// freeze starts.
-		episodeSince = -1.0;
-		reanchorSince = -1.0;
-		undoSince = -1.0;
 		if (freezeExceededSince < 0.0)
 		{
 			freezeExceededSince = now;
@@ -577,221 +553,35 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 		else if (now - freezeExceededSince >= config.freezeConfirmSeconds)
 		{
 			EnterState(State::Frozen);
-			episodeSince = now;
 			Event e;
 			e.type = Event::FrozenLargeDeviation;
 			e.deviation = deviation;
-			e.afterTargetResolve = now - lastTargetResolveTime <= config.resolveAttributionSeconds;
 			events.push_back(e);
 		}
 		// Suspicious either way: never correct while confirming.
 		return;
 	}
 
-	// Tilted: hold like scatter, with the deviation still published. Only
-	// sustained yaw or position at the head freezes; a tilt that stays put
-	// re-anchors like a freeze does.
-	if (tilted)
-	{
-		freezeExceededSince = -1.0;
-		if (episodeSince < 0.0)
-			episodeSince = now;
-		EnterState(State::Holding);
-		TryReanchor(now, est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
-		return;
-	}
-
-	episodeSince = -1.0;
-	reanchorSince = -1.0;
-	undoSince = -1.0;
 	EnterState(State::Tracking);
 
-	if (deviation.yawDeg < config.deadbandYawDeg && deviation.posM < config.deadbandPosM)
+	if (deviation.yawDeg < config.deadbandYawDeg && dEffYaw < config.deadbandPosM)
 		return;
 
-	// Clamp displacement at the head together with yaw. Scaling translation
-	// coefficients alone breaks the pivot cancellation of a fractional yaw.
+	// Yaw + translation correction only (see header). The translation is
+	// chosen so a full step lands the calibration's translation exactly on the
+	// windowed estimate; a clamped fractional step is second-order accurate
+	// and the next cycle corrects the remainder.
 	double f = 1.0;
 	if (deviation.yawDeg > config.maxStepYawDeg)
 		f = std::min(f, config.maxStepYawDeg / deviation.yawDeg);
-	if (deviation.posM > config.maxStepPosM)
-		f = std::min(f, config.maxStepPosM / deviation.posM);
+	if (dEffYaw > config.maxStepPosM)
+		f = std::min(f, config.maxStepPosM / dEffYaw);
 
-	// Yaw about the head, then the head moved by the full displacement: the
-	// tilt stays out of the calibration and nothing of it is left at the head.
 	Correction correction;
 	correction.rotation = Eigen::Quaterniond(
 		Eigen::AngleAxisd(f * yawAngle, Eigen::Vector3d::UnitY()));
-	correction.translation = headPos + f * headStep - correction.rotation * headPos;
+	correction.translation = f * tPrime;
 	pendingCorrection = correction;
-	correctionEligible = true;
-}
-
-void ContinuousAlignment::TryReanchor(double now, const WindowEstimate &est,
-                                      const Eigen::Quaterniond &calRotation,
-                                      const Eigen::Vector3d &calTranslationMeters,
-                                      double yawAngle, const Eigen::Vector3d &headStep,
-                                      const Eigen::Vector3d &headPos)
-{
-	// The readings are back on the calibration the last re-anchor replaced:
-	// what it followed has cleared. Nothing new is followed meanwhile, and a
-	// restart does not hold this back, since a restart is what usually
-	// clears a fault of the target.
-	if (replaced)
-	{
-		double undoYaw = 0.0;
-		Eigen::Vector3d undoStep, undoHead;
-		const Deviation back = MeasureDeviation(est, replaced->rot, replaced->trans,
-			undoYaw, undoStep, undoHead);
-		if (back.yawDeg < config.freezeYawDeg * config.resumeFactor &&
-			back.posM < config.freezePosM * config.resumeFactor &&
-			back.tiltDeg < config.holdTiltDeg)
-		{
-			reanchorSince = -1.0;
-			if (undoSince < 0.0)
-				undoSince = now;
-			if (now - undoSince < config.resumeConfirmSeconds || pendingObs)
-				return;
-			Correction undo;
-			undo.rotation = (replaced->rot * calRotation.conjugate()).normalized();
-			undo.translation = replaced->trans - undo.rotation * calTranslationMeters;
-			pendingReanchor = undo;
-			Event e;
-			e.type = Event::ReanchorUndone;
-			e.deviation = deviation;
-			events.push_back(e);
-			replaced.reset();
-			episodeSince = -1.0;
-			undoSince = -1.0;
-			EnterState(State::Tracking);
-			return;
-		}
-		undoSince = -1.0;
-	}
-
-	// A restart of the target shortly before the episode, or during it, says
-	// the target moved rather than the universes: freeze on it (live
-	// 2026-09-25, every remaining freeze came within two minutes of one).
-	// Where no restart could be seen, none can clear the episode either, so
-	// it stays frozen as it did before re-anchoring existed.
-	const bool attributed = episodeSince >= 0.0 &&
-		lastTargetResolveTime >= episodeSince - config.resolveAttributionSeconds;
-	if (attributed || !restartsVisible)
-	{
-		reanchorSince = -1.0;
-		return;
-	}
-
-	// The estimate has to hold still, not merely stay off: compared with the
-	// one the run began on, at the same head position, so the head moving
-	// through a large rotation does not read as the estimate moving.
-	if (reanchorSince >= 0.0)
-	{
-		double driftYaw = 0.0;
-		Eigen::Vector3d driftStep, driftHead;
-		const Deviation drift = MeasureDeviation(est, reanchorRef.rot, reanchorRef.trans,
-			driftYaw, driftStep, driftHead);
-		if (drift.yawDeg >= config.reanchorSteadyDeg || drift.tiltDeg >= config.reanchorSteadyDeg ||
-			drift.posM >= config.reanchorSteadyPosM)
-			reanchorSince = -1.0;
-	}
-	if (reanchorSince < 0.0)
-	{
-		reanchorSince = now;
-		reanchorRef = est;
-		return;
-	}
-	if (now - reanchorSince < config.reanchorConfirmSeconds)
-		return;
-	// A window in front of an unresolved jump-guard step authorizes nothing,
-	// this included; the confirm carries on and completes on the next one.
-	if (pendingObs)
-		return;
-
-	pendingReanchor = DeltaToEstimate(est, calRotation, calTranslationMeters, yawAngle, headStep, headPos);
-	replaced = Replaced{ calRotation, calTranslationMeters };
-	Event e;
-	e.type = Event::Reanchored;
-	e.deviation = deviation;
-	events.push_back(e);
-	episodeSince = -1.0;
-	reanchorSince = -1.0;
-	EnterState(State::Tracking);
-}
-
-// A tilt this large is the lighthouse frame's own and goes in whole; below
-// it, what tilt there is reads as the tracker's orientation bias, and the
-// delta turns about the head exactly as a correction would, without the step
-// cap.
-ContinuousAlignment::Correction ContinuousAlignment::DeltaToEstimate(const WindowEstimate &est,
-	const Eigen::Quaterniond &calRotation, const Eigen::Vector3d &calTranslationMeters,
-	double yawAngle, const Eigen::Vector3d &headStep, const Eigen::Vector3d &headPos) const
-{
-	Correction delta;
-	if (deviation.tiltDeg >= config.holdTiltDeg)
-	{
-		Eigen::Quaterniond rD = (est.rot * calRotation.conjugate()).normalized();
-		delta.rotation = rD;
-		delta.translation = est.trans - rD * calTranslationMeters;
-	}
-	else
-	{
-		delta.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(yawAngle, Eigen::Vector3d::UnitY()));
-		delta.translation = headPos + headStep - delta.rotation * headPos;
-	}
-	return delta;
-}
-
-void ContinuousAlignment::SetFollowMode(bool follow)
-{
-	if (follow == followMode)
-		return;
-	followMode = follow;
-	// Neither mode inherits the other's episode: follow mode keeps none, and
-	// Standard must not undo a calibration it did not replace. A freeze left
-	// behind is only a hold until the next evaluation decides afresh.
-	freezeExceededSince = -1.0;
-	resumeBelowSince = -1.0;
-	resumeInBandSince = -1.0;
-	episodeSince = -1.0;
-	reanchorSince = -1.0;
-	undoSince = -1.0;
-	replaced.reset();
-	if (state == State::Frozen)
-		EnterState(State::Holding);
-}
-
-ContinuousAlignment::Deviation ContinuousAlignment::MeasureDeviation(
-	const WindowEstimate &est, const Eigen::Quaterniond &calRotation,
-	const Eigen::Vector3d &calTranslationMeters,
-	double &yawAngleOut, Eigen::Vector3d &headStepOut, Eigen::Vector3d &headPosOut) const
-{
-	// Deviation of the windowed estimate from the current calibration, as a
-	// left delta D: newCal = D o oldCal.
-	Eigen::Quaterniond rD = (est.rot * calRotation.conjugate()).normalized();
-	if (rD.w() < 0.0)
-		rD.coeffs() = -rD.coeffs();
-	yawAngleOut = 2.0 * std::atan2(rD.y(), rD.w());
-	Eigen::Quaterniond rYaw(Eigen::AngleAxisd(yawAngleOut, Eigen::Vector3d::UnitY()));
-	Eigen::Vector3d tD = est.trans - rD * calTranslationMeters;
-
-	// Effective displacement at the user's head: the honest magnitude of the
-	// deviation (a yaw delta far from the origin has a huge raw translation).
-	// Every observation maps the tracker exactly onto the head, so the
-	// estimate is right there whatever its tilt. Dropping the tilt about any
-	// other pivot leaves tilt times the lever arm at the head (live 2026-09-25:
-	// 1.1 deg of tracker tilt about an origin 3.2 m away walked the head 3.7 cm
-	// off). Decide runs only on a fresh observation (< coastGapSeconds old,
-	// |time offset| <= 1 s), so the newest reference sample is still retained.
-	headPosOut = refWindow.back().pos;
-	headStepOut = rD * headPosOut + tD - headPosOut;
-
-	Deviation d;
-	d.valid = true;
-	d.yawDeg = std::abs(yawAngleOut) * RadToDeg;
-	d.tiltDeg = rYaw.angularDistance(rD) * RadToDeg;
-	d.posM = headStepOut.norm();
-	return d;
 }
 
 // One owner for the freeze hysteresis' paired sentinels: entering either end
@@ -799,44 +589,28 @@ ContinuousAlignment::Deviation ContinuousAlignment::MeasureDeviation(
 // site has to remember which mark its own transition invalidates.
 void ContinuousAlignment::EnterState(State s)
 {
-	if (s != State::Tracking)
-	{
-		correctionEligible = false;
-		pendingCorrection.reset();
-	}
 	if (s == State::Frozen || s == State::Tracking)
 	{
 		freezeExceededSince = -1.0;
 		resumeBelowSince = -1.0;
-		resumeInBandSince = -1.0;
-	}
-	// Without an estimate there is no stuck episode to follow; a freeze keeps
-	// its own through a gap by not passing through here.
-	if (s == State::Inactive || s == State::Coasting)
-	{
-		episodeSince = -1.0;
-		reanchorSince = -1.0;
-		undoSince = -1.0;
 	}
 	state = s;
 }
 
-// Observation continuity broke (occlusion, a dropped window): every sustained-
+// Observation continuity broke (occlusion, a dropped window). Every sustained-
 // evidence mark was accumulated against a stream that no longer exists, so the
-// next verdict is re-earned from scratch. The State stays, so a freeze holds
-// through an occlusion yet needs a full resumeConfirmSeconds of fresh evidence
-// to lift. unstableNotified survives: it is a notification latch, not evidence,
-// and re-arming it would raise one toast per occlusion.
+// next evaluation must re-earn its verdict from scratch instead of completing
+// a confirm on one post-recovery sample. Clearing the marks and NOT the State
+// is what keeps a Frozen mount frozen through an occlusion while still forcing
+// a full resumeConfirmSeconds of fresh evidence before it unfreezes.
+// unstableNotified deliberately survives: it is a notification latch, not
+// evidence, and re-arming it would spam one toast per occlusion.
 void ContinuousAlignment::ClearConfirmMarks()
 {
-	correctionEligible = false;
-	pendingCorrection.reset();
-	pendingTimeOffset.reset();
 	freezeExceededSince = -1.0;
 	resumeBelowSince = -1.0;
-	resumeInBandSince = -1.0;
-	reanchorSince = -1.0;
-	undoSince = -1.0;
+	scatterSince = -1.0;
+	scatterStructuredVotes.clear();
 }
 
 void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotation,
@@ -852,20 +626,14 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 
 	FormObservations(calScale, calTimeOffset);
 	TrimWindows(now);
-	// A pending jump candidate already cleared these when it was raised.
-	if (observations.size() < config.minObsForEstimate)
-	{
-		correctionEligible = false;
-		pendingCorrection.reset();
-		pendingTimeOffset.reset();
-	}
 
 	bool obsFresh = lastObsTime > 0.0 && (now - lastObsTime) <= config.coastGapSeconds;
 	if (!obsFresh)
 	{
 		// Occluded / powered off / face away from the base stations: hold the
-		// calibration, resume cleanly. Frozen stays frozen through occlusion,
-		// but its confirms do not.
+		// calibration, resume cleanly. Frozen stays frozen through occlusion —
+		// but the confirms do not, including while Frozen (which changes no
+		// state here and so used to keep its marks).
 		ClearConfirmMarks();
 		if (state == State::Tracking || state == State::Holding)
 		{
@@ -899,19 +667,12 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 	}
 
 	Decide(now, calRotation, calTranslationMeters, expectedAt);
-	if (pendingObs)
-	{
-		// Continue evaluating tracking faults, but a window preceding
-		// an unresolved step cannot authorize a correction.
-		correctionEligible = false;
-		pendingCorrection.reset();
-	}
 
 	// Opt-in online latency measurement, only while actively Tracking (a
 	// frozen or coasting pair proves nothing). Runs on the raw stream windows,
 	// so it measures the true current latency independent of calTimeOffset;
 	// the engine's correlation floor rejects motionless windows.
-	if (config.latencyReestimation && state == State::Tracking && !pendingObs &&
+	if (config.latencyReestimation && state == State::Tracking &&
 		now - lastLatencyEstimateTime >= config.latencyIntervalSeconds)
 	{
 		lastLatencyEstimateTime = now;
@@ -920,8 +681,12 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 		CompactWindows();
 		EngineConfig engineCfg;
 		double measured = 0.0;
+		// No input validation: the two push methods are the only way into
+		// these windows and already enforce the monotonicity IsValidStream
+		// re-scans, while the caller gates usability at ingestion. Re-scanning
+		// ~20 s of both streams here costs a frame on the render thread.
 		if (CalibrationEngine::EstimateTimeOffset(refWindow, targetWindow, engineCfg,
-			measured))
+			measured, nullptr, nullptr, false))
 			pendingTimeOffset = measured;
 	}
 }
@@ -944,15 +709,6 @@ bool ContinuousAlignment::PollCorrection(Correction &out)
 	return true;
 }
 
-bool ContinuousAlignment::PollReanchor(Correction &out)
-{
-	if (!pendingReanchor)
-		return false;
-	out = *pendingReanchor;
-	pendingReanchor.reset();
-	return true;
-}
-
 bool ContinuousAlignment::PollEvent(Event &out)
 {
 	if (events.empty())
@@ -962,26 +718,8 @@ bool ContinuousAlignment::PollEvent(Event &out)
 	return true;
 }
 
-ContinuousAlignment::Diagnostics ContinuousAlignment::GetDiagnostics() const
+void ContinuousAlignment::Reset()
 {
-	Diagnostics result = diagnostics;
-	result.referenceSamples = refWindow.size() - refHead;
-	result.targetSamples = targetWindow.size() - targetHead;
-	result.pendingTargets = targetWindow.size() - targetProcessed;
-	result.observations = observations.size();
-	result.requiredObservations = config.minObsForEstimate;
-	result.lastObservationTime = lastObsTime;
-	return result;
-}
-
-void ContinuousAlignment::Reset(ResetReason reason)
-{
-	// A break in the target's own tracking is a gap too: the fault a freeze
-	// recorded is not cleared by it, only by fresh evidence afterwards.
-	const bool gap = reason == ResetReason::StreamGap || reason == ResetReason::TargetResolved;
-	const bool keepFrozen = gap && state == State::Frozen;
-	const bool keepCoasting = gap && state == State::Coasting;
-	++diagnostics.resets[static_cast<size_t>(reason)];
 	refWindow.clear();
 	targetWindow.clear();
 	refHead = 0;
@@ -993,21 +731,16 @@ void ContinuousAlignment::Reset(ResetReason reason)
 	deviation = Deviation();
 	scatterRotRmsDeg = 0.0;
 	scatterPosRmsM = 0.0;
+	noiseRotDeg = 0.0;
+	noisePosM = 0.0;
 	ClearConfirmMarks();
 	scatterEpisodeSince = -1.0;
 	unstableNotified = false;
 	pendingObs.reset();
-	pendingReanchor.reset();
-	if (!gap)
-		replaced.reset();
+	pendingCorrection.reset();
+	pendingTimeOffset.reset();
 	events.clear();
-	EnterState(keepFrozen ? State::Frozen : keepCoasting ? State::Coasting : State::Inactive);
-}
-
-void ContinuousAlignment::NoteTargetResolved(double time)
-{
-	Reset(ResetReason::TargetResolved);
-	lastTargetResolveTime = time;
+	EnterState(State::Inactive);
 }
 
 bool ContinuousAlignment::DeriveMountExtrinsic(const std::vector<PoseSample> &refStream,
@@ -1015,9 +748,12 @@ bool ContinuousAlignment::DeriveMountExtrinsic(const std::vector<PoseSample> &re
                                                const EngineResult &calibration,
                                                MountExtrinsic &out)
 {
-	// Fixed policy: the speed/interpolation gates that decide which pairs are
-	// usable, and the rigidity gate that decides whether continuous
-	// calibration arms at all.
+	if (!calibration.valid || targetStream.empty())
+		return false;
+
+	// Fixed policy, not caller knobs: the speed/interpolation gates that decide
+	// which pairs are usable, and the rigidity gate that decides whether
+	// continuous calibration arms at all.
 	const Config config;
 
 	// E = H^-1 o (C o T_s): the tracker's pose in the HMD body frame, one

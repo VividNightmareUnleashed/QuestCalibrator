@@ -24,6 +24,7 @@ struct GuideMetrics
 {
 	bool valid = false;          // enough samples to say anything at all
 	double coverage = 0.0;       // 0..1: rotation-axis diversity, 1 = well past the gate
+	size_t coveragePairs = 0;
 	double gatedFraction = 0.0;  // share of recent target samples over the speed gates
 	bool rigidityValid = false;
 	double rigidityDeg = 0.0;    // RMS spread of the reference->target relative rotation
@@ -49,12 +50,13 @@ struct GuideConfig
 // ratio of that matrix. Rotation about one axis alone leaves the ratio near
 // zero however long it goes on; that is exactly the failure this is meant to
 // show before the solve does.
-//
-// The helpers below take the collection ComputeGuideMetrics has already sized:
-// at least 8 target samples.
 inline double GuideAxisCoverage(const std::vector<PoseSample> &stream,
-                                const GuideConfig &config)
+                                const GuideConfig &config, size_t &pairsOut)
 {
+	pairsOut = 0;
+	if (stream.size() < 8)
+		return 0.0;
+
 	// Subsample to ~200 points so the cost stays flat over a 35 s run.
 	const size_t stride = std::max<size_t>(1, stream.size() / 200);
 	std::vector<Eigen::Quaterniond> q;
@@ -63,7 +65,6 @@ inline double GuideAxisCoverage(const std::vector<PoseSample> &stream,
 		q.push_back(stream[i].rot);
 
 	Eigen::Matrix3d scatter = Eigen::Matrix3d::Zero();
-	size_t pairs = 0;
 	static const size_t lags[] = { 1, 2, 4, 8, 16, 32 };
 	for (size_t lag : lags)
 	{
@@ -75,17 +76,22 @@ inline double GuideAxisCoverage(const std::vector<PoseSample> &stream,
 			const double angle = 2.0 * std::acos(std::min(1.0, d.w()));
 			if (angle < config.minPairAngle || angle > config.maxPairAngle)
 				continue;
-			// |axis| = sin(angle / 2) >= sin(minPairAngle / 2).
-			const Eigen::Vector3d axis = d.vec().normalized();
+			Eigen::Vector3d axis = d.vec();
+			const double n = axis.norm();
+			if (n < 1e-9)
+				continue;
+			axis /= n;
 			scatter += axis * axis.transpose();
-			++pairs;
+			++pairsOut;
 		}
 	}
-	if (pairs < 5)
+	if (pairsOut < 5)
 		return 0.0;
 
 	Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(scatter);
-	const Eigen::Vector3d ev = es.eigenvalues();   // ascending; ev(2) >= pairs / 3
+	const Eigen::Vector3d ev = es.eigenvalues();   // ascending
+	if (ev(2) <= 0.0)
+		return 0.0;
 	const double spread = ev(1) / ev(2);
 	return std::min(1.0, spread / config.fullSpread);
 }
@@ -94,6 +100,8 @@ inline double GuideAxisCoverage(const std::vector<PoseSample> &stream,
 inline double GuideGatedFraction(const std::vector<PoseSample> &target,
                                  const GuideConfig &config)
 {
+	if (target.empty())
+		return 0.0;
 	const double cutoff = target.back().time - config.windowSeconds;
 	size_t total = 0, gated = 0;
 	for (size_t i = target.size(); i-- > 0;)
@@ -105,7 +113,7 @@ inline double GuideGatedFraction(const std::vector<PoseSample> &target,
 		if (s.vel.norm() > config.maxLinearSpeed || s.angVel.norm() > config.maxAngularSpeed)
 			++gated;
 	}
-	return static_cast<double>(gated) / static_cast<double>(total);   // the last sample counts
+	return total > 0 ? static_cast<double>(gated) / static_cast<double>(total) : 0.0;
 }
 
 // How differently the two devices rotate over short, timestamp-aligned
@@ -119,6 +127,8 @@ inline bool GuideRigidity(const std::vector<PoseSample> &ref,
                           const GuideConfig &config, double &rmsDegOut)
 {
 	rmsDegOut = 0.0;
+	if (ref.size() < 2 || target.empty())
+		return false;
 	const double cutoff = target.back().time - config.windowSeconds;
 	constexpr double comparisonSeconds = 0.2;
 	double sq = 0.0;
@@ -140,6 +150,8 @@ inline bool GuideRigidity(const std::vector<PoseSample> &ref,
 		const double referenceAngle = previousRef.rot.angularDistance(currentRef.rot);
 		const double targetAngle = previousTarget.rot.angularDistance(currentTarget.rot);
 		const double difference = referenceAngle - targetAngle;
+		if (!std::isfinite(difference))
+			continue;
 		sq += difference * difference;
 		++comparisons;
 	}
@@ -157,7 +169,7 @@ inline GuideMetrics ComputeGuideMetrics(const std::vector<PoseSample> &ref,
 	if (target.size() < 8)
 		return m;
 	m.valid = true;
-	m.coverage = GuideAxisCoverage(target, config);
+	m.coverage = GuideAxisCoverage(target, config, m.coveragePairs);
 	m.gatedFraction = GuideGatedFraction(target, config);
 	m.rigidityValid = GuideRigidity(ref, target, config, m.rigidityDeg);
 	return m;

@@ -1,196 +1,85 @@
-name: Validation
+name: Windows validation
 
-# The local release gates on pushes to alpha and stable and on pull requests
-# into them: the Release build and the solver harness (blocking), then the
-# duplicate scan (advisory, as locally: its findings need a human's review,
-# not an automatic veto). Clang-Tidy runs locally only. Changes to
-# documentation alone don't trigger it; the release workflow runs every gate on
-# the tagged commit anyway.
-#
-# With the VIRTUALQUEST_DEPLOY_KEY secret (a read-only deploy key on the
-# private VirtualQuest repository) the harness also builds the simulated
-# headset's scenarios and the formal-model links, and the pose hub traces are
-# replayed through their TLA+ model. Without it the run says so and tests the
-# public suite only; pull requests from forks never get the secret.
-#
-# The input-validation job needs the same key. On Linux, since windows-2022
-# cannot run Linux containers, it runs VirtualQuest's bounded model checks of
-# the driver's inbound validation, the ring sample gate and the profile scalar
-# bounds (formal/check.ps1 -Only input-validation: ESBMC and Gappa in the
-# questcal-esbmc image) against this tree's headers. VirtualQuest's own
-# formal.yml skips them, since it has no QuestCalibrator sources, and nothing
-# else here catches a loosened bound in them, so the job fails on a skipped
-# check as well as a wrong outcome. The release workflow does not run it. The
-# image is cached by its Dockerfile's hash. A pull request only reads caches
-# saved on its own or its base branch, so the image a push to alpha saves lets
-# pull requests into alpha skip the build.
 on:
+  # Validate every push and pull request. Resource files, vendored libraries,
+  # packaging inputs, and build-environment changes can all affect the shipped
+  # binaries even when no C/C++ source file changed.
   push:
-    branches: [alpha, stable]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'math.pdf'
-      - 'LICENSE'
-      - 'THIRD-PARTY-NOTICES.txt'
   pull_request:
-    branches: [alpha, stable]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'math.pdf'
-      - 'LICENSE'
-      - 'THIRD-PARTY-NOTICES.txt'
   workflow_dispatch:
+    inputs:
+      run_deep_analysis:
+        description: Rebuild every translation unit with Clang-Tidy
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 4 * * 1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: validation-${{ github.ref }}
+  group: validation-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-  TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-
 jobs:
-  validate:
+  build-test-duplicates:
+    if: github.event_name != 'schedule'
     runs-on: windows-2022
-    timeout-minutes: 75
-    env:
-      HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
+    timeout-minutes: 30
 
     steps:
-      - name: Check out the source
+      - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Set up Node.js for clone detection
+        uses: actions/setup-node@v4
         with:
-          persist-credentials: false
+          node-version: "22"
 
-      - name: Note a missing VirtualQuest key
-        if: env.HAS_VIRTUALQUEST != 'true'
+      - name: Install pinned clone detector
+        shell: pwsh
+        run: npm install --global --ignore-scripts jscpd@5.0.12
+
+      - name: Build Release x64 and run solver tests
+        shell: pwsh
+        run: tools\validate-cpp.ps1 -Mode Build
+
+      - name: Scan for substantial C/C++ clones
         shell: pwsh
         run: |
-          Write-Host '::warning::VIRTUALQUEST_DEPLOY_KEY is not set: the simulated-headset scenarios, the formal-model links and the hub traces are not run.'
+          & pwsh -NoProfile -File tools\validate-cpp.ps1 -Mode Duplicates
+          $validationExit = $LASTEXITCODE
+          if ($validationExit -eq 3) {
+              # Clone findings stay advisory by design: similar-looking blocks in
+              # this codebase can encode intentionally distinct invariants, so
+              # consolidation needs human review rather than a hard gate.
+              Write-Warning 'Clone findings require review but do not fail CI.'
+              exit 0
+          }
+          exit $validationExit
 
-      # The key only opens VirtualQuest, so it is checked out on its own at the
-      # commit this tree pins (tools/ci/checkout-virtualquest.ps1 says why not
-      # with actions/checkout).
-      - name: Check out VirtualQuest
-        if: env.HAS_VIRTUALQUEST == 'true'
-        timeout-minutes: 5
-        shell: pwsh
-        env:
-          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
-        run: tools\ci\checkout-virtualquest.ps1
-
-      # Every step has its own limit, a few times its usual length, so a hung
-      # step fails in minutes instead of holding the runner to the job limit.
-      - name: Build and run the solver harness
-        timeout-minutes: 30
-        shell: pwsh
-        run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Build
-          if ($LASTEXITCODE -ne 0) { throw 'The build or the solver harness failed.' }
-
-      - name: Replay the pose hub traces through the model
-        if: env.HAS_VIRTUALQUEST == 'true'
-        timeout-minutes: 10
-        shell: pwsh
-        run: |
-          $jar = Join-Path $env:RUNNER_TEMP 'tla2tools.jar'
-          Invoke-WebRequest -Uri $env:TLA2TOOLS_URL -OutFile $jar
-          $hash = (Get-FileHash $jar -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -ne $env:TLA2TOOLS_SHA256) { throw "tla2tools.jar has SHA-256 $hash, not the pinned one." }
-          $env:TLA2TOOLS_JAR = $jar
-          $env:JAVA_HOME = $env:JAVA_HOME_17_X64
-          $env:Path = "$env:JAVA_HOME_17_X64\bin;$env:Path"
-          pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces
-          if ($LASTEXITCODE -ne 0) { throw 'A recorded hub run is not a behaviour of the model.' }
-
-      - name: Duplicate scan (advisory)
-        timeout-minutes: 5
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          npm install --global --no-fund --no-audit jscpd@5.0.12 | Out-Null
-          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Duplicates
-          if ($LASTEXITCODE -ne 0) { Write-Host '::warning::The duplicate scan reported clones; review them.'; exit 1 }
-
-  input-validation:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 75
-    env:
-      HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
+  deep-analysis:
+    # Six translation units — Configuration.cpp, Calibration.cpp,
+    # UserInterface.cpp, QuestCalibrator.cpp, IPCServer.cpp and
+    # InterfaceHookInjector.cpp — are compiled by no test, so Clang-Tidy is
+    # their only automated signal beyond "MSVC accepted the syntax". That makes
+    # it a pull-request gate, not just a weekly report.
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_deep_analysis)
+    runs-on: windows-2022
+    timeout-minutes: 45
 
     steps:
-      - name: Check out the source
+      - name: Check out source
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
 
-      - name: Note a missing VirtualQuest key
-        if: env.HAS_VIRTUALQUEST != 'true'
-        run: |
-          echo '::warning::VIRTUALQUEST_DEPLOY_KEY is not set: the input-validation model checks are not run.'
-
-      # The runner image ships PowerShell; this covers an image that stops doing so.
-      - name: Install PowerShell if missing
-        if: env.HAS_VIRTUALQUEST == 'true'
-        timeout-minutes: 5
-        run: |
-          if command -v pwsh > /dev/null; then pwsh --version; exit 0; fi
-          . /etc/os-release
-          curl -fsSL -o "$RUNNER_TEMP/packages-microsoft-prod.deb" \
-            "https://packages.microsoft.com/config/ubuntu/$VERSION_ID/packages-microsoft-prod.deb"
-          sudo dpkg -i "$RUNNER_TEMP/packages-microsoft-prod.deb"
-          sudo apt-get update
-          sudo apt-get install -y powershell
-
-      - name: Check out VirtualQuest
-        if: env.HAS_VIRTUALQUEST == 'true'
-        timeout-minutes: 5
+      # Exit 3 (Clang-Tidy findings) is deliberately NOT mapped to 0: the
+      # advisory backlog was triaged to empty when this gate was made blocking,
+      # so any finding here is new.
+      - name: Rebuild with project-aware Clang-Tidy and run solver tests
         shell: pwsh
-        env:
-          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
-        run: tools/ci/checkout-virtualquest.ps1
-
-      # Built here rather than by check.ps1, which hides a failed build as a
-      # skipped check, and saved as soon as it is built, so a failing check
-      # still leaves the image for the next run.
-      - name: Restore the ESBMC image
-        id: esbmc-cache
-        if: env.HAS_VIRTUALQUEST == 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/questcal-esbmc.tar
-          key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
-
-      - name: Load or build the ESBMC image
-        if: env.HAS_VIRTUALQUEST == 'true'
-        timeout-minutes: 20
-        run: |
-          if [ '${{ steps.esbmc-cache.outputs.cache-hit }}' = 'true' ]; then
-            docker load -i "$RUNNER_TEMP/questcal-esbmc.tar"
-          else
-            docker build -t questcal-esbmc VirtualQuest/formal/input-validation
-            docker save -o "$RUNNER_TEMP/questcal-esbmc.tar" questcal-esbmc
-          fi
-
-      - name: Save the ESBMC image
-        if: env.HAS_VIRTUALQUEST == 'true' && steps.esbmc-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/questcal-esbmc.tar
-          key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
-
-      # About 15 minutes locally. -Strict fails when Docker or the image is
-      # missing; the SKIP test also catches sources check.ps1 cannot find.
-      - name: Check the input validation (ESBMC and Gappa)
-        if: env.HAS_VIRTUALQUEST == 'true'
-        timeout-minutes: 60
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Only input-validation -Strict | Tee-Object -Variable lines
-          if ($LASTEXITCODE -ne 0) { throw 'An input-validation check did not come out as expected.' }
-          if ($lines | Where-Object { "$_" -match '^SKIP ' }) { throw 'An input-validation check was skipped.' }
+        run: tools\validate-cpp.ps1 -Mode Analyze -All

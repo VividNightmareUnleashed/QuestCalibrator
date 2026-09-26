@@ -23,18 +23,13 @@ void CheckProtectedChaperone(CalibrationContext &ctx);
 // Universe-jump observation is fed from the shared runtime-monitor stream so
 // its accepted deltas land before drift and continuous-calibration decisions.
 void ObserveUniversePose(const protocol::DevicePoseSample &sample);
-// A few samples went missing from the monitor's drain (JumpDetector::NoteStreamHole).
-void NoteUniverseStreamHole();
 void ResetUniverseObservations(CalibrationContext &ctx);
 bool FinishUniverseObservations(CalibrationContext &ctx, double now);
 
 // Applies a reference-space delta to every profile-owned spatial value.
-// moveChaperone: the reference space itself moved (a headset re-center), so
-// the protected chaperone moves with it; a correction or a re-anchor moves
-// only the target side and leaves it.
 bool ApplyCalibrationDelta(CalibrationContext &ctx,
 	const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translation,
-	bool snap, double now, bool moveChaperone);
+	bool snap, double now);
 
 // Rebinds physical-HMD and raw-universe ownership after a successful base
 // calibration and disarms a room snapshot that no longer belongs to it.

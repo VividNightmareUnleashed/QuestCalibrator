@@ -6,11 +6,17 @@ namespace questcal
 {
 
 // Overlay-side bookkeeping for the asynchronous driver sync: which submission
-// is current, and whether the driver's last verdict still stands. A submitted
-// state is applied optimistically; a completed refusal withdraws it and holds
-// across resubmissions of the identical state until a changed state is sent.
-// Submissions and verdicts are noted on one thread, and the single worker
-// completes submissions in order.
+// is current, and whether the driver's last verdict still stands.
+//
+// The identities the runtime monitors steer by are derived on the submitting
+// thread from the same devices the worker ships (DeriveDriverSlotState), so a
+// sync in flight is not a reason to disable anything: a submitted state is
+// applied optimistically and only a completed refusal withdraws it. That
+// refusal then holds across resubmissions of the identical state -- the scan
+// resubmits the same state every second, and re-deriving "enabled" from the
+// gates alone flipped a refused profile back on for one round trip each time.
+// A changed state lifts the hold: it is a different question, and the driver
+// has not answered it yet.
 struct DriverSyncTracker
 {
 	uint64_t latestSequence = 0;
@@ -38,13 +44,17 @@ struct DriverSyncTracker
 		return sequence == latestSequence;
 	}
 
-	// Records the driver's verdict. Only a completion older than the latest
-	// state change is ignored: a retry of the same state does not make an older
-	// completion stale, or a transport slower than the retry interval would
-	// never deliver a verdict.
+	// Records the driver's verdict. Periodic retries of the same desired state
+	// do not make an older completion stale: a slow or timing-out transport can
+	// take longer than the retry interval, and rejecting every such completion
+	// would prevent the caller from ever observing the driver's verdict. Only a
+	// completion older than the latest actual state change, a duplicate, or a
+	// future sequence is ignored.
 	bool NoteVerdict(uint64_t sequence, bool synchronized)
 	{
-		if (sequence < latestStateChangeSequence)
+		if (sequence > latestSequence ||
+			sequence < latestStateChangeSequence ||
+			sequence <= lastAcceptedVerdictSequence)
 			return false;
 		lastAcceptedVerdictSequence = sequence;
 		lastVerdictRefused = !synchronized;

@@ -1,8 +1,6 @@
 // PCH-free on purpose: SolverTests compiles this file standalone.
 #include "AlignmentField.h"
-#include "PoseTransform.h"
 
-#include <algorithm>
 #include <cmath>
 
 namespace alignfield
@@ -11,16 +9,19 @@ namespace alignfield
 void BlendAt(const protocol::SetAlignmentField &field, const double (&basePos)[3],
              vr::HmdQuaternion_t &rotOut, double (&transOut)[3])
 {
-	// Blend where each transform sends the query point. Averaging translation
-	// coefficients instead makes the answer depend on the playspace origin.
+	// Identity contributes only to the total weight and the quaternion's w
+	// component; its translation is zero.
 	double wSum = IdentityFloorWeight;
 	double q[4] = { IdentityFloorWeight, 0.0, 0.0, 0.0 };   // w, x, y, z
-	double p[3] = { IdentityFloorWeight * basePos[0],
-		IdentityFloorWeight * basePos[1], IdentityFloorWeight * basePos[2] };
+	double t[3] = { 0.0, 0.0, 0.0 };
 
-	double invTwoSigmaSq = 1.0 / (2.0 * field.sigmaMeters * field.sigmaMeters);
+	double sigma = field.sigmaMeters > 0.01 ? field.sigmaMeters : 1.5;
+	double invTwoSigmaSq = 1.0 / (2.0 * sigma * sigma);
 
-	for (uint32_t i = 0; i < field.anchorCount; ++i)
+	uint32_t count = field.anchorCount < protocol::SetAlignmentField::MaxAnchors
+		? field.anchorCount : protocol::SetAlignmentField::MaxAnchors;
+
+	for (uint32_t i = 0; i < count; ++i)
 	{
 		const protocol::FieldAnchor &a = field.anchors[i];
 
@@ -39,9 +40,8 @@ void BlendAt(const protocol::SetAlignmentField &field, const double (&basePos)[3
 		q[2] += sign * w * a.rotationDelta.y;
 		q[3] += sign * w * a.rotationDelta.z;
 
-		auto rotated = questcal::driverpose::RotateVector(a.rotationDelta, basePos);
 		for (int k = 0; k < 3; ++k)
-			p[k] += w * (rotated.v[k] + a.translationDelta[k]);
+			t[k] += w * a.translationDelta[k];
 
 		wSum += w;
 	}
@@ -49,9 +49,8 @@ void BlendAt(const protocol::SetAlignmentField &field, const double (&basePos)[3
 	double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
 	rotOut = { q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm };
 
-	auto rotated = questcal::driverpose::RotateVector(rotOut, basePos);
 	for (int k = 0; k < 3; ++k)
-		transOut[k] = p[k] / wSum - rotated.v[k];
+		transOut[k] = t[k] / wSum;
 }
 
 void Evaluate(const protocol::SetAlignmentField &field, const double (&basePos)[3],
@@ -60,20 +59,12 @@ void Evaluate(const protocol::SetAlignmentField &field, const double (&basePos)[
 	vr::HmdQuaternion_t targetRot;
 	double targetTrans[3];
 	BlendAt(field, basePos, targetRot, targetTrans);
-	SlewTowardAt(targetRot, targetTrans, basePos, nowSeconds, FieldSlewLimits, field.generation, state);
+	SlewToward(targetRot, targetTrans, nowSeconds, FieldSlewLimits, field.generation, state);
 }
 
 void SlewToward(const vr::HmdQuaternion_t &targetRot, const double (&targetTrans)[3],
                 double nowSeconds, const SlewLimits &limits, uint32_t generation,
                 EvalState &state)
-{
-	const double origin[3] = {};
-	SlewTowardAt(targetRot, targetTrans, origin, nowSeconds, limits, generation, state);
-}
-
-void SlewTowardAt(const vr::HmdQuaternion_t &targetRot, const double (&targetTrans)[3],
-                  const double (&position)[3], double nowSeconds,
-                  const SlewLimits &limits, uint32_t generation, EvalState &state)
 {
 	double dt = nowSeconds - state.lastTime;
 	state.lastTime = nowSeconds;
@@ -93,20 +84,20 @@ void SlewTowardAt(const vr::HmdQuaternion_t &targetRot, const double (&targetTra
 		return;
 	}
 
-	// Limit the device's displacement, not transform coefficients: a rotation
-	// about a distant pivot needs translation that cancels its orbital motion.
-	auto currentPoint = questcal::driverpose::RotateVector(state.rot, position);
-	auto targetPoint = questcal::driverpose::RotateVector(targetRot, position);
-	double step[3], len2 = 0.0;
-	for (int k = 0; k < 3; ++k)
+	// Translation: cap the step length.
 	{
-		currentPoint.v[k] += state.trans[k];
-		step[k] = targetPoint.v[k] + targetTrans[k] - currentPoint.v[k];
-		len2 += step[k] * step[k];
+		double step[3], len2 = 0.0;
+		for (int k = 0; k < 3; ++k)
+		{
+			step[k] = targetTrans[k] - state.trans[k];
+			len2 += step[k] * step[k];
+		}
+		double len = std::sqrt(len2);
+		double maxStep = limits.maxTranslationPerSec * dt;
+		double f = len > maxStep ? maxStep / len : 1.0;
+		for (int k = 0; k < 3; ++k)
+			state.trans[k] += f * step[k];
 	}
-	double len = std::sqrt(len2);
-	double maxStep = limits.maxTranslationPerSec * dt;
-	double f = len > maxStep ? maxStep / len : 1.0;
 
 	// Rotation: cap the angular step, then nlerp (both quaternions are near
 	// identity and near each other, so nlerp error is negligible).
@@ -119,9 +110,8 @@ void SlewTowardAt(const vr::HmdQuaternion_t &targetRot, const double (&targetTra
 			c = 1.0;
 
 		double angle = 2.0 * std::acos(c);
-		double maxAngle = limits.maxRotationPerSec * dt;
-		if (angle > maxAngle)
-			f = std::min(f, maxAngle / angle);
+		double maxStep = limits.maxRotationPerSec * dt;
+		double f = angle > maxStep ? maxStep / angle : 1.0;
 
 		double q[4] = {
 			(1.0 - f) * state.rot.w + f * sign * targetRot.w,
@@ -132,9 +122,6 @@ void SlewTowardAt(const vr::HmdQuaternion_t &targetRot, const double (&targetTra
 		double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
 		state.rot = { q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm };
 	}
-	auto rotated = questcal::driverpose::RotateVector(state.rot, position);
-	for (int k = 0; k < 3; ++k)
-		state.trans[k] = currentPoint.v[k] + f * step[k] - rotated.v[k];
 }
 
 } // namespace alignfield

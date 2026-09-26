@@ -17,8 +17,10 @@
 
 static constexpr DWORD MaxRegistryValueBytes = 16u * 1024u * 1024u;
 
-// PersistedCalibrationSpeed mirrors this enum (see ProfileValidation.h); pin
-// the two together where both are visible.
+// The persisted speed range is spelled in ProfileValidation.h because the
+// record layer cannot include Calibration.h (openvr.h vs the test harness's
+// openvr_driver.h). Pin the two spellings together here, where both are
+// visible, so a reordered enum cannot silently widen what a record may carry.
 static_assert(static_cast<int>(CalibrationContext::FAST) ==
 	static_cast<int>(questcal::PersistedCalibrationSpeed::Fast) &&
 	static_cast<int>(CalibrationContext::SLOW) ==
@@ -33,9 +35,13 @@ using questcal::PersistedRevision;
 using questcal::ProfileParseResult;
 using questcal::ProfileRecord;
 
-// Narrow records holding exactly what Config and Settings store. The profile
-// half lives in ProfileValidation.h / ProfileRecordJson.h so tests can reach
-// it; the chaperone half needs the OpenVR geometry types and stays here.
+// Serialization owns narrow records rather than cloning CalibrationContext.
+// These contain exactly the values represented in Config/Settings; live poses,
+// solver buffers, monitor state, UI messages and retry metadata never cross the
+// persistence boundary. The profile half lives in ProfileValidation.h /
+// ProfileRecordJson.h so its write -> read identity and its validation are
+// reachable from a test; the chaperone half stays here because it needs the
+// OpenVR geometry types and ChaperoneMath.h.
 struct ChaperoneRecord
 {
 	bool valid = false;
@@ -60,8 +66,6 @@ struct SettingsRecord
 	bool solveScale = false;
 	bool applyTimeOffset = true;
 	bool detailedLogging = false;
-	bool automaticUpdates = false;
-	std::string language;
 	std::map<std::string, std::string> deviceNames;
 	ChaperoneRecord chaperone;
 };
@@ -96,13 +100,16 @@ static SettingsRecord CaptureSettingsRecord(const CalibrationContext &ctx)
 	record.solveScale = ctx.solveScale;
 	record.applyTimeOffset = ctx.applyTimeOffset;
 	record.detailedLogging = ctx.detailedLogging;
-	record.automaticUpdates = ctx.automaticUpdates;
-	record.language = ctx.language;
 	record.deviceNames = ctx.deviceNames;
 	record.chaperone = CaptureChaperoneRecord(ctx.chaperone);
 	return record;
 }
 
+// The record's anchor type is deliberately not CalibrationContext's — see
+// ProfileValidation.h. The two are field-identical; this function is the only
+// place that has to know that, which is why a caller assembling a candidate
+// anchor set (Calibration.cpp's anchor store) converts through it rather than
+// copying the three members itself.
 questcal::PersistedFieldAnchor PersistedAnchor(
 	const CalibrationContext::FieldAnchor &anchor)
 {
@@ -137,7 +144,7 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.continuousTrackerSerial = ctx.continuousTrackerSerial;
 	record.continuousLatencyReestimation = ctx.continuousLatencyReestimation;
 	record.continuousRequireTrigger = ctx.continuousRequireTrigger;
-	record.continuousNoPause = ctx.continuousNoPause;
+	record.continuousMode = static_cast<int>(ctx.continuousMode);
 	record.hideMountedTracker = ctx.hideMountedTracker;
 	record.mountExtrinsic.valid = ctx.mountExtrinsic.valid;
 	record.mountExtrinsic.rotation = ctx.mountExtrinsic.rot;
@@ -161,6 +168,9 @@ static void ApplyChaperoneRecord(CalibrationContext &ctx, ChaperoneRecord record
 	applied.standingCenter = record.standingCenter;
 	applied.playSpaceSize = record.playSpaceSize;
 	applied.copyUnixTime = record.copyUnixTime;
+	// Runtime verification/cooldown state deliberately starts fresh after load.
+	applied.baselineVerifiedThisSession = false;
+	applied.lastRestoreTime = 0.0;
 	ctx.chaperone = std::move(applied);
 }
 
@@ -173,15 +183,17 @@ static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 	ctx.solveScale = record.solveScale;
 	ctx.applyTimeOffset = record.applyTimeOffset;
 	ctx.detailedLogging = record.detailedLogging;
-	ctx.automaticUpdates = record.automaticUpdates;
-	ctx.language = record.language;
 	ctx.deviceNames = record.deviceNames;
 	ApplyChaperoneRecord(ctx, std::move(record.chaperone));
 }
 
-// The preference half of a profile record (spatial field, continuous pick and
-// mount), shared by the load path and SaveProfileFieldEdit. The edit path must
-// not re-apply the base transform, which would bump baseGeneration per toggle.
+// The half of a profile record that describes preferences rather than the
+// calibration itself: the spatial field, the continuous-calibration pick and
+// its learned mount. Shared by the load path below and by SaveProfileFieldEdit,
+// so a member added to ProfileRecord cannot reach one and miss the other — and
+// so the edit path can adopt a persisted candidate without also re-applying the
+// base transform (which would bump baseGeneration on every toggle) or the
+// profile identity.
 static void ApplyProfilePreferences(
 	CalibrationContext &ctx, const ProfileRecord &record)
 {
@@ -200,10 +212,12 @@ static void ApplyProfilePreferences(
 	ctx.continuousTrackerSerial = record.continuousTrackerSerial;
 	ctx.continuousLatencyReestimation = record.continuousLatencyReestimation;
 	ctx.continuousRequireTrigger = record.continuousRequireTrigger;
-	ctx.continuousNoPause = record.continuousNoPause;
+	ctx.continuousMode = record.continuousMode == 1 ? ContinuousMode::Legacy : ContinuousMode::Quest;
 	ctx.hideMountedTracker = record.hideMountedTracker;
-	// Only the persisted members: MountExtrinsic::pairs is a runtime statistic
-	// that the load path resets and a preference edit must keep.
+	// Only the members the record carries. MountExtrinsic::pairs is a runtime
+	// derivation statistic with no persisted counterpart, so it is not this
+	// function's to clear — the load path below resets the whole extrinsic first,
+	// while a preference edit must leave everything it did not state alone.
 	ctx.mountExtrinsic.valid = record.mountExtrinsic.valid;
 	ctx.mountExtrinsic.rot = record.mountExtrinsic.rotation;
 	ctx.mountExtrinsic.pos = record.mountExtrinsic.translationMeters;
@@ -223,6 +237,8 @@ static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
 	ctx.profileHmdSerial = std::move(record.universeHmdSerial);
 	ctx.profileWorldFromDriverRotation = record.universeRotation;
 	ctx.profileWorldFromDriverTranslation = record.universeTranslation;
+	// Adopting a record replaces the extrinsic wholesale, runtime statistics
+	// included; a preference edit does not (see ApplyProfilePreferences).
 	ctx.mountExtrinsic = questcal::MountExtrinsic();
 	ApplyProfilePreferences(ctx, record);
 	ctx.validProfile = record.valid;
@@ -235,9 +251,14 @@ using questcal::LoadFloatArray;
 using questcal::ReadPersistenceRevision;
 using questcal::RejectExcessiveJsonNesting;
 
-// One definition of a well-formed chaperone snapshot for parser and writer.
-// Only the writer requires a complete owner: the load path disarms an ownerless
-// snapshot instead of failing the whole record (and a good calibration with it).
+// One definition of a well-formed chaperone snapshot. The parser and the
+// writer used to hold separate copies of these bounds, and had already
+// drifted: the writer additionally demanded a complete owner baseline, so a
+// legacy Config-embedded room could parse and arm but could never be written
+// back. That asymmetry is preserved deliberately — the load path disarms an
+// ownerless snapshot rather than rejecting the whole record, so the parser must
+// not reject it — but it is now one flag on one function instead of two
+// unrelated expressions seven hundred lines apart.
 static bool ValidateChaperoneRecord(const ChaperoneRecord &record,
 	bool requireCompleteOwner, std::string &why)
 {
@@ -305,7 +326,9 @@ static void ParseChaperone(SettingsRecord &settings, const picojson::object &obj
 		Eigen::Vector3d baselineTranslation(
 			GetDouble(translation[0]), GetDouble(translation[1]),
 			GetDouble(translation[2]));
-		// Before normalizing: normalized() of a degenerate quaternion is NaN.
+		// Checked here as well as in ValidateChaperoneRecord below: normalized()
+		// on a degenerate quaternion produces NaNs, so the guard has to precede
+		// the normalize rather than only judge the finished record.
 		if (!questcal::IsValidUniverseBaseline(baselineRotation, baselineTranslation))
 			throw std::runtime_error("invalid chaperone worldFromDriver baseline");
 
@@ -314,7 +337,12 @@ static void ParseChaperone(SettingsRecord &settings, const picojson::object &obj
 		parsed.worldFromDriverValid = true;
 	}
 
-	// Required, unlike the optional fields above.
+	// Required, unlike every optional field above. These were read with a bare
+	// .at(), so a missing key threw out_of_range carrying picojson's own
+	// "invalid map<K, T> key" - naming neither the field nor the record - and
+	// failed the WHOLE record: on the Config path a damaged room snapshot
+	// discarded a good calibration, on the Settings path it locked every
+	// settings write permanently. Same inputs rejected, but say what broke.
 	for (const char *required : { "play_space_size", "standing_center", "geometry" })
 		if (!HasTypedValue<picojson::array>(chaperone, required))
 			throw std::runtime_error(
@@ -334,13 +362,18 @@ static void ParseChaperone(SettingsRecord &settings, const picojson::object &obj
 		throw std::runtime_error("chaperone geometry has invalid length");
 
 	parsed.geometry.resize(geometry.size() / floatsPerQuad);
-	LoadFloatArray(chaperone.at("geometry"),
-		reinterpret_cast<float *>(parsed.geometry.data()), geometry.size());
+	if (!geometry.empty())
+		LoadFloatArray(chaperone.at("geometry"),
+			reinterpret_cast<float *>(parsed.geometry.data()), geometry.size());
 
 	if (HasTypedValue<double>(chaperone, "copy_time"))
 		parsed.copyUnixTime = GetDouble(chaperone.at("copy_time"));
 
 	parsed.valid = true;
+	// The parser deliberately does not require a complete owner baseline: the
+	// load path disarms such a snapshot with its own message rather than
+	// failing the whole record, which on the Config path would discard a good
+	// calibration over a damaged room.
 	std::string why;
 	if (!ValidateChaperoneRecord(parsed, false, why))
 		throw std::runtime_error(why);
@@ -385,9 +418,15 @@ static void WriteChaperone(const SettingsRecord &settings, picojson::object &obj
 	obj["chaperone"].set<picojson::object>(std::move(chaperone));
 }
 
-// The Settings-owned half of a legacy Config record: older releases embedded
-// the global settings alongside the profile. An absent key leaves the caller's
-// already-loaded value alone rather than resetting it to a default.
+// The whole Settings-owned half of a Config record, in one pass with a name.
+// Older releases embedded the global settings alongside the profile, and this
+// is the one-time migration `legacySettingsMigrationPending` and
+// CanMaterializeSettings exist to protect — so which keys are Settings-owned
+// rather than Config-owned is stated here instead of being seven statements
+// interleaved among the profile fields.
+//
+// Only what the record actually carried: an absent legacy key must leave the
+// caller's already-loaded value alone rather than reset it to a default.
 static void ParseLegacyEmbeddedSettings(const questcal::LegacyProfileSettings &legacy,
 	const picojson::object &obj, SettingsRecord &settings)
 {
@@ -406,8 +445,10 @@ static void ParseLegacyEmbeddedSettings(const questcal::LegacyProfileSettings &l
 	ParseChaperone(settings, obj);
 }
 
-// The shared codec reads the profile; this adds what it cannot see: the legacy
-// embedded settings and the chaperone snapshot.
+// Reads the profile-owned fields through the shared codec, then layers on the
+// two things this record carries that the codec cannot see: the global
+// settings Config-only releases embedded alongside the profile, and the
+// chaperone snapshot (whose record needs the OpenVR geometry types).
 static ProfileParseResult ParseProfile(ProfileRecord &profile,
 	SettingsRecord &legacySettings, std::istream &stream)
 {
@@ -417,6 +458,9 @@ static ProfileParseResult ParseProfile(ProfileRecord &profile,
 	questcal::LegacyProfileSettings legacy;
 	ProfileParseResult result = questcal::ParseProfileObject(
 		profile, legacy, obj, protocol::SetAlignmentField::MaxAnchors);
+
+	// Stays after the transform parse: the suspicious-legacy-scale verdict in
+	// `result` is about the scale the codec just read.
 	ParseLegacyEmbeddedSettings(legacy, obj, legacySettings);
 	return result;
 }
@@ -437,9 +481,6 @@ static void WriteSettings(const SettingsRecord &record,
 	settings["solve_scale"].set<bool>(record.solveScale);
 	settings["apply_time_offset"].set<bool>(record.applyTimeOffset);
 	settings["detailed_logging"].set<bool>(record.detailedLogging);
-	settings["automatic_updates"].set<bool>(record.automaticUpdates);
-	if (!record.language.empty())
-		settings["language"].set<std::string>(record.language);
 	if (!record.deviceNames.empty())
 	{
 		picojson::object names;
@@ -457,7 +498,7 @@ static void WriteSettings(const SettingsRecord &record,
 static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &stream)
 {
 	picojson::value value;
-	std::string err = questcal::ParseRecordJson(value, stream);
+	std::string err = picojson::parse(value, stream);
 	if (!err.empty())
 		throw std::runtime_error(err);
 	if (!value.is<picojson::object>())
@@ -483,16 +524,6 @@ static PersistedRevision ParseSettings(SettingsRecord &settings, std::istream &s
 		settings.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
 	if (HasTypedValue<bool>(obj, "detailed_logging"))
 		settings.detailedLogging = obj.at("detailed_logging").get<bool>();
-	if (HasTypedValue<bool>(obj, "automatic_updates"))
-		settings.automaticUpdates = obj.at("automatic_updates").get<bool>();
-	// A code this build does not know is dropped, not refused: it reads as
-	// "follow Windows", and the rest of the record still loads.
-	if (HasTypedValue<std::string>(obj, "language"))
-	{
-		const std::string code = obj.at("language").get<std::string>();
-		if (code == "en" || code == "ja" || code == "it")
-			settings.language = code;
-	}
 	if (HasTypedValue<picojson::object>(obj, "device_names"))
 	{
 		// Bounded on read as on write: a hand-edited record cannot grow the
@@ -540,9 +571,11 @@ static std::string RegistryError(LSTATUS result)
 
 static const char *RegistryKey = "Software\\QuestCalibrator";
 
-// HKEY_CURRENT_USER_LOCAL_SETTINGS resolves under HKCU\Software\Classes\Local
-// Settings, which regedit does not label. An unreadable record is never
-// overwritten, so the error text must say where to delete it by hand.
+// HKEY_CURRENT_USER_LOCAL_SETTINGS is a predefined handle, not a location
+// regedit displays: it resolves under HKCU\Software\Classes\Local Settings.
+// An unreadable record is fail-closed by design (it must never be silently
+// overwritten), so clearing it by hand is the only escape - and the error text
+// is the only place the user can learn where "it" actually is.
 static const char *RegistryKeyDisplayPath =
 	"HKEY_CURRENT_USER\\Software\\Classes\\Local Settings\\Software\\QuestCalibrator";
 
@@ -628,9 +661,14 @@ static bool WriteRegistryValue(const char *valueName, const std::string &str, st
 	return true;
 }
 
-// Runs once, at startup, on a context whose load states are still Missing.
 void LoadProfile(CalibrationContext &ctx)
 {
+	// profileUniverseUnsafe is deliberately not cleared here: the latch is part
+	// of the record now, so a profile that lost raw-universe continuity stays
+	// disabled across the restart instead of being handed back enabled.
+	ctx.chaperone.baselineVerifiedThisSession = false;
+	ctx.profileLoadState = questcal::RecordLoadState::Missing;
+	ctx.settingsLoadState = questcal::RecordLoadState::Missing;
 	PersistedRevision profileRevision;
 	PersistedRevision settingsRevision;
 	bool settingsRewriteNeeded = false;
@@ -639,9 +677,7 @@ void LoadProfile(CalibrationContext &ctx)
 	if (profileRead.status == RegistryReadStatus::Error)
 	{
 		ctx.profileLoadState = questcal::RecordLoadState::Unreadable;
-		ctx.Log("Calibration profile read failed: " + profileRead.error + "\n");
-		ctx.ReportError("Couldn't read the saved calibration, so it was left as it is. "
-			"Restart QuestCalibrator. If this repeats, save a diagnostics file in Settings and report it.\n",
+		ctx.ReportError("Could not read the calibration profile: " + profileRead.error + "\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 	}
 	else if (profileRead.status == RegistryReadStatus::Missing || profileRead.value.empty())
@@ -688,19 +724,20 @@ void LoadProfile(CalibrationContext &ctx)
 		}
 	}
 
-	// Settings keeps chaperone protection and global preferences alive even
-	// with no calibration profile.
+	// Independent settings keep chaperone protection and global preferences
+	// alive even when there is no calibration profile. Existing Config-only
+	// installations continue to load their embedded copies unchanged.
 	auto settingsRead = ReadRegistryValue("Settings");
 	if (settingsRead.status == RegistryReadStatus::Error)
 	{
 		ctx.settingsLoadState = questcal::RecordLoadState::Unreadable;
-		ctx.Log("Settings read failed: " + settingsRead.error + "\n");
-		ctx.ReportError("Couldn't read QuestCalibrator's settings, so they were left as they are. "
-			"Restart QuestCalibrator. If this repeats, save a diagnostics file in Settings and report it.\n",
+		ctx.ReportError("Could not read application settings: " + settingsRead.error + "\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 	}
-	// Missing or empty keeps whatever the (possibly legacy) Config load produced;
-	// PlanPersistenceLoad decides whether to materialize Settings from it.
+	// Missing or empty deliberately takes no branch: it keeps whatever the
+	// (possibly legacy Config-embedded) load above produced. Materializing a
+	// Settings record from those defaults is a migration, and CanMaterializeSettings
+	// is what decides whether it is allowed — never this branch.
 	else if (settingsRead.status == RegistryReadStatus::Present && !settingsRead.value.empty())
 	{
 		try
@@ -724,8 +761,11 @@ void LoadProfile(CalibrationContext &ctx)
 				CalibrationContext::ErrorSource::SettingsPersistence);
 		}
 	}
-	// PlanPersistenceLoad decides everything from these facts; this block only
-	// gathers them and applies the verdict.
+	// The whole load-time state machine - which record wins, which revision is
+	// adopted, what gets disarmed and whether a rewrite is even permitted - is
+	// one pure function over the facts gathered above. Keeping it out of here is
+	// what makes every cell of that matrix reachable from a test; this block only
+	// collects facts and applies the verdict.
 	questcal::PersistenceLoadFacts facts;
 	facts.profile = ctx.profileLoadState;
 	facts.settings = ctx.settingsLoadState;
@@ -741,6 +781,11 @@ void LoadProfile(CalibrationContext &ctx)
 
 	questcal::PersistenceLoadPlan plan = questcal::PlanPersistenceLoad(facts);
 	settingsRewriteNeeded = plan.settingsRewriteNeeded;
+	// Through the setter like every other write to this field: the reader already
+	// rejects a parsed revision below 1, so the plan can only produce non-zero
+	// values today, but the "never zero" rule has exactly one home
+	// (PersistenceState.h) and a load path that assigns around it is how a
+	// fourth variant starts.
 	ctx.persistence.SetRevision(plan.persistenceRevision);
 	if (plan.legacySettingsMigrationPending)
 		ctx.persistence.legacySettingsMigrationPending = true;
@@ -759,9 +804,16 @@ void LoadProfile(CalibrationContext &ctx)
 	case questcal::ChaperoneLoadGate::Armed:
 		break;
 	case questcal::ChaperoneLoadGate::ProfileUnreadable:
+		// Config may be a legacy Config-only record containing the sole copy of
+		// the protected room and global preferences. With no separately parsed
+		// Settings record, do not persist this conservative in-memory disarm over
+		// recoverable data.
 		ctx.Log("Protected chaperone left disarmed because the calibration profile could not be read\n");
 		break;
 	case questcal::ChaperoneLoadGate::SettingsUnreadable:
+		// A successfully parsed Config may contain a legacy fallback snapshot,
+		// but a present-yet-unreadable Settings record is authoritative.  Keep
+		// the parse error visible and never arm the fallback implicitly.
 		ctx.Log("Protected chaperone left disarmed because application settings could not be read\n");
 		break;
 	case questcal::ChaperoneLoadGate::IncompleteOwner:
@@ -778,14 +830,6 @@ void LoadProfile(CalibrationContext &ctx)
 		break;
 	}
 
-	// A new coupled revision, not the stranded one: if only Config lands, the
-	// two records still differ and the next load still fails closed.
-	if (plan.profileRewriteNeeded)
-	{
-		ctx.persistence.AdvanceRevision();
-		ctx.persistence.MarkProfile(ctx.timeLastTick);
-	}
-
 	if (settingsRewriteNeeded)
 	{
 		ctx.persistence.MarkSettings(ctx.timeLastTick);
@@ -798,14 +842,19 @@ void LoadProfile(CalibrationContext &ctx)
 	ctx.pendingTargetTrackingSystem = ctx.targetTrackingSystem;
 }
 
-// SaveProfile/SaveSettings coordinate the two records: either may commit the
-// other first to keep the Config-before-Settings order and shared revision.
-// Write*Record writes exactly one record and never calls a coordinator, which
-// is what terminates SaveSettings -> SaveProfile -> WriteConfigRecord ->
-// WriteSettingsRecord.
+// Two layers, and the names now say which is which. SaveProfile/SaveSettings
+// COORDINATE the two registry records: either may commit the other half first
+// to keep the Config-before-Settings ordering and the shared revision. The
+// Write*Record pair below writes exactly ONE record and never calls a
+// coordinator — that is what terminates the graph
+// (SaveSettings -> SaveProfile -> WriteConfigRecord -> WriteSettingsRecord),
+// which previously rested on picking the right one of two names a token apart.
 static bool WriteSettingsRecord(CalibrationContext &ctx);
 
-// Logged once per record per session, so a preview never silently "saves".
+// The preview no-op is the only write outcome that reports success without
+// writing, so it gets a line in the session log. Once per record per session:
+// this is a "the mode you are in is not persisting" notice, not a per-write
+// event, and preview sessions save often.
 static void NotePreviewWriteSkipped(CalibrationContext &ctx, const char *what,
 	bool &announced)
 {
@@ -826,6 +875,10 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 	case questcal::PersistenceWriteGate::Allowed:
 		break;
 	case questcal::PersistenceWriteGate::SkippedPreview:
+		// UI preview runs on fake state; never let it clobber the real profile.
+		// It still reports success so every caller path stays exercised by the
+		// -frames smoke run, which is precisely why the skip has to be audible:
+		// this is the one place the overlay says "saved" without saving.
 		{
 			static bool announced = false;
 			NotePreviewWriteSkipped(ctx, "the calibration profile", announced);
@@ -833,33 +886,33 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 		return true;
 	case questcal::PersistenceWriteGate::RefusedConfigUnreadable:
 		ctx.ReportError(
-			"Couldn't save the calibration because the saved one couldn't be read. "
-			"It was left untouched so it can be recovered.\n",
+			"Could not save the calibration profile because the existing Config record "
+			"could not be read. It was left untouched for recovery.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	case questcal::PersistenceWriteGate::RefusedSettingsUnreadable:
 		ctx.ReportError(
-			"Couldn't save the calibration because QuestCalibrator's settings couldn't be read. "
-			"They were left untouched so they can be recovered.\n",
+			"Could not save the calibration profile because the existing Settings record "
+			"could not be read. It was left untouched for recovery.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
 	if (ctx.persistence.legacySettingsMigrationPending && !WriteSettingsRecord(ctx))
 	{
 		ctx.ReportError(
-			"Couldn't save the calibration because settings from an older version haven't been "
-			"moved over safely yet. Restart QuestCalibrator and try again.\n",
+			"Could not save the calibration profile because the legacy settings copy "
+			"has not yet been migrated safely.\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
+	ctx.persistence.SetRevision(ctx.persistence.revision);
 	// The same definition the parser enforces, so a record that saves is a
 	// record that will load again.
 	std::string why;
 	if (!questcal::ValidateProfileRecord(
 		record, protocol::SetAlignmentField::MaxAnchors, why))
 	{
-		ctx.Log("Calibration profile rejected: " + why + "\n");
-		ctx.ReportError("Couldn't save the calibration because it failed a safety check. Recalibrate.\n",
+		ctx.ReportError("Could not save the calibration profile: " + why + "\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
@@ -871,8 +924,7 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 	std::string error;
 	if (!WriteRegistryValue("Config", profile.str(), error))
 	{
-		ctx.Log("Calibration profile write failed: " + error + "\n");
-		ctx.ReportError("Couldn't save the calibration. It will be lost when QuestCalibrator closes.\n",
+		ctx.ReportError("Could not save the calibration profile: " + error + "\n",
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
@@ -912,7 +964,15 @@ bool SaveProfileTransformEdit(CalibrationContext &ctx,
 {
 	ProfileRecord candidate = CaptureProfileRecord(ctx);
 	if (rotationEdited)
+	{
+		if (!questcal::IsValidRotation(rotation))
+		{
+			ctx.ReportError("Could not save the calibration profile: the edited rotation is invalid\n",
+				CalibrationContext::ErrorSource::ProfilePersistence);
+			return false;
+		}
 		candidate.rotation = rotation.normalized();
+	}
 	candidate.translationMeters = translationMeters;
 	candidate.scale = scale;
 
@@ -940,12 +1000,22 @@ bool SaveProfileFieldEdit(CalibrationContext &ctx,
 	const std::function<void(questcal::ProfileRecord &)> &mutate,
 	bool bumpFieldGeneration)
 {
+	// Candidate first, exactly as SaveProfileTransformEdit does: the write gates
+	// (preview short-circuit, CanPersistConfig, the legacy-migration
+	// precondition), the record validation and the registry write all run before
+	// a single live member moves. A refused write therefore has nothing to roll
+	// back — which is the whole point, because WriteConfigRecord's own state
+	// changes (the load state it rewrites, the migration latch a nested Settings
+	// write clears) are not restorable by a caller holding a copy of one bool.
 	ProfileRecord candidate = CaptureProfileRecord(ctx);
 	mutate(candidate);
 	if (!WriteConfigRecord(ctx, candidate))
 		return false;
 
 	ApplyProfilePreferences(ctx, candidate);
+	// Only for an edit the driver's spatial-field blend can actually see: the
+	// generation is the snap discriminator, so bumping it for a tracker-pick or a
+	// hide-in-games toggle would make the driver snap for an edit it never sees.
 	if (bumpFieldGeneration)
 		ctx.fieldGeneration++;
 	return true;
@@ -967,26 +1037,27 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 		return true;
 	case questcal::PersistenceWriteGate::RefusedConfigUnreadable:
 		ctx.ReportError(
-			"Couldn't save QuestCalibrator's settings because the saved calibration couldn't be read. "
-			"Nothing was changed, so both can still be recovered.\n",
+			"Could not save QuestCalibrator settings because the existing Config record "
+			"could not be read. Neither record was changed so legacy settings remain recoverable.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	case questcal::PersistenceWriteGate::RefusedSettingsUnreadable:
 		ctx.ReportError(
-			"Couldn't save QuestCalibrator's settings because the saved ones couldn't be read. "
-			"They were left untouched so they can be recovered.\n",
+			"Could not save QuestCalibrator settings because the existing Settings record "
+			"could not be read. It was left untouched for recovery.\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
+	ctx.persistence.SetRevision(ctx.persistence.revision);
 	SettingsRecord record = CaptureSettingsRecord(ctx);
-	// An unowned room cannot be restored, so refuse to write one.
+	// A snapshot with no owner is refused rather than written: an unowned room
+	// cannot be safely restored, so persisting one only produces a record the
+	// restore path will reject later, with nothing said at the time.
 	std::string why;
 	if (!ValidateChaperoneRecord(record.chaperone, true, why))
 	{
-		ctx.Log("Settings rejected: " + why + "\n");
 		ctx.ReportError(
-			"Couldn't save QuestCalibrator's settings because the protected chaperone failed a safety check. "
-			"Protect it again.\n",
+			"Could not save QuestCalibrator settings because " + why + "\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
@@ -996,8 +1067,7 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 	std::string error;
 	if (!WriteRegistryValue("Settings", settings.str(), error))
 	{
-		ctx.Log("Settings write failed: " + error + "\n");
-		ctx.ReportError("Couldn't save QuestCalibrator's settings. Changes will be lost when it closes.\n",
+		ctx.ReportError("Could not save QuestCalibrator settings: " + error + "\n",
 			CalibrationContext::ErrorSource::SettingsPersistence);
 		return false;
 	}
@@ -1010,24 +1080,49 @@ static bool WriteSettingsRecord(CalibrationContext &ctx)
 
 bool SaveSettings(CalibrationContext &ctx)
 {
-	return SaveSettingsWithResult(ctx).AllSaved();
-}
-
-// profileDirty implies validProfile: every MarkProfile site requires a valid
-// profile, and Clear() (the only way to lose one) drops the pending write.
-questcal::SettingsSaveResult SaveSettingsWithResult(CalibrationContext &ctx)
-{
-	return ctx.persistence.SaveSettings(
-		[&]() { return SaveProfile(ctx); },
-		[&]() { return WriteSettingsRecord(ctx); });
+	// A caller may directly save a setting while Config is waiting to be
+	// persisted (including after a universe-revision bump). Never let Settings
+	// overtake it: commit Config first, then leave only unfinished stages dirty.
+	bool profileSaved = true;
+	if (ctx.persistence.profileDirty)
+	{
+		if (!ctx.validProfile)
+		{
+			ctx.ReportError(PendingProfileWithoutValidProfileMessage,
+				CalibrationContext::ErrorSource::ProfilePersistence);
+			profileSaved = false;
+		}
+		else
+			profileSaved = SaveProfile(ctx);
+	}
+	// Only a coupled rebase — both records carrying the same revision bump —
+	// makes the Settings half wait for the Config half. Otherwise one Config
+	// failure would also swallow the fail-closed chaperone disarms, which live
+	// in Settings, and the next launch would auto-restore a stale armed
+	// snapshot. An uncoupled mismatch is detected and failed closed at load.
+	if (!profileSaved && ctx.persistence.coupled)
+		return false;
+	bool settingsSaved = WriteSettingsRecord(ctx);
+	if (!ctx.persistence.HasDirty())
+		ctx.persistence.coupled = false;
+	return profileSaved && settingsSaved;
 }
 
 bool SavePendingChanges(CalibrationContext &ctx)
 {
 	if (ctx.persistence.settingsDirty)
 		return SaveSettings(ctx);
-	if (ctx.persistence.profileDirty && !SaveProfile(ctx))
-		return false;
+	if (ctx.persistence.profileDirty)
+	{
+		if (!ctx.validProfile)
+		{
+			ctx.ReportError(PendingProfileWithoutValidProfileMessage,
+				CalibrationContext::ErrorSource::ProfilePersistence);
+			return false;
+		}
+		if (!SaveProfile(ctx))
+			return false;
+	}
 	ctx.persistence.coupled = false;
 	return true;
 }

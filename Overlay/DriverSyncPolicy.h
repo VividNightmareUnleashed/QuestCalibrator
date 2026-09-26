@@ -33,9 +33,13 @@ inline vr::HmdVector3d_t WireVector(const Eigen::Vector3d &meters)
 	return out;
 }
 
-// The vr::ETrackedDeviceClass values a decision reads. Invalid is what OpenVR
-// reports for an id it no longer exposes; the driver slot outlives that, so it
-// still has to be retired.
+// A plain mirror of the three vr::ETrackedDeviceClass values this file cares
+// about. Invalid is what OpenVR reports for an id it no longer exposes, and
+// that is the one a decision reads: the driver slot outlives the
+// disappearance, so the slot still has to be retired. Hmd and Other are
+// distinguished because the headset is identified by id here (OpenVR pins it to
+// slot 0) while the caller's own pre-loop identity gate matches on the class,
+// and a fact set that collapsed them would not describe what was enumerated.
 enum class SyncDeviceClass
 {
 	Invalid,
@@ -43,9 +47,10 @@ enum class SyncDeviceClass
 	Other,
 };
 
-// One enumerated device, as the decision reads it. A failed property read
-// ("known" false) retires the slot; an empty string would instead be compared
-// against the profile and could match an empty profile field.
+// One enumerated device, as the decision reads it. The "known" flags are
+// separate from empty strings because a failed property read is not a device on
+// an unnamed system: the first retires the slot conservatively, the second
+// would be compared against the profile and could match an empty profile field.
 struct SyncDevice
 {
 	uint32_t id = vr::k_unTrackedDeviceIndexInvalid;
@@ -76,8 +81,12 @@ struct DriverSyncDesired
 	// Seconds added to the target devices' poseTimeOffset (runtime latency
 	// re-prediction), already clamped and validated by the caller.
 	double timeShift = 0.0;
-	// SetDeviceTransform::generation. CalibrationContext::SetCalibration bumps
-	// it for every intentional change; continuous corrections leave it alone.
+	// Snap/slew discriminator (protocol v5). CalibrationContext::SetCalibration
+	// bumps it so every intentional change snaps; only continuous-calibration
+	// corrections leave it alone so the driver slews. Losing this assignment
+	// would route every recalibration, jump compensation and profile edit
+	// through the driver's slew path, smearing a whole recalibration delta over
+	// seconds of visibly drifting world.
 	uint32_t baseGeneration = 0;
 	bool continuousArmed = false;
 	bool hideMountedTracker = false;
@@ -104,36 +113,43 @@ enum class SlotAction { None, ApplyTransform };
 struct SlotDecision
 {
 	SlotAction action = SlotAction::None;
-	// Complete wire message, valid only when action == ApplyTransform.
+	// Complete wire message, valid only when action == ApplyTransform. The whole
+	// message is built here rather than field-by-field at the call site so there
+	// is no per-field copy for `generation` to fall out of.
 	protocol::SetDeviceTransform transform;
-	// Runtime device masks for this slot; false when the tracking system could
-	// not be read.
+	// Runtime device masks for this slot. False whenever the tracking system
+	// could not be read, which matches the caller clearing both masks up front.
 	bool referenceDevice = false;
 	bool targetDevice = false;
 	bool continuousTracker = false;
 	// The headset reports a different tracking system than the profile's
-	// reference. Reported rather than acted on because the caller owns
-	// ctx.enabled.
+	// reference: this is a different rig and the profile must stop being applied
+	// to it. Reported rather than acted on because the caller owns ctx.enabled.
 	bool disableProfile = false;
 };
 
-// Whether resolving this slot needs its serial number, so the enumerator can
-// skip the property read. The decision uses the same predicate.
+// Whether resolving this slot needs its serial number. Reading one is an OpenVR
+// string property read per device, so the enumerator asks this before paying it
+// for all 64 slots. Same predicate the decision uses, so an enumerator that
+// skips a read can never disagree with a decision that expected one.
 inline bool SlotNeedsSerial(const DriverSyncDesired &desired, const SyncDevice &device)
 {
 	return !desired.continuousTrackerSerial.empty() &&
+		device.id < vr::k_unMaxTrackedDeviceCount &&
 		device.id != vr::k_unTrackedDeviceIndex_Hmd &&
 		device.deviceClass != SyncDeviceClass::Invalid &&
 		device.trackingSystemKnown &&
 		device.trackingSystem == desired.targetTrackingSystem;
 }
 
-// `device.id` is the slot index, below k_unMaxTrackedDeviceCount.
 inline SlotDecision DecideSlot(const DriverSyncDesired &desired,
 	const SyncDevice &device)
 {
 	SlotDecision decision;
 	const uint32_t id = device.id;
+	if (id >= vr::k_unMaxTrackedDeviceCount)
+		return decision;
+
 	if (device.deviceClass == SyncDeviceClass::Invalid || !device.trackingSystemKnown)
 		return decision;
 

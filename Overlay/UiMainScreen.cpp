@@ -2,6 +2,10 @@
 #include "stdafx.h"
 #include "UiInternal.h"
 
+// ---------------------------------------------------------------------------
+// Plain-language calibration rating (simple mode)
+// ---------------------------------------------------------------------------
+
 bool s_showSettings = false;
 
 // The driver's pose channel feeds every runtime monitor. Preview mode has no
@@ -58,7 +62,7 @@ const char *ContinuousStateWord(ContinuousStatus status)
 	case ContinuousStatus::Off:        return "Off";
 	case ContinuousStatus::NoTracker:  return "Needs a tracker";
 	case ContinuousStatus::NeedsMount: return "Needs setup";
-	case ContinuousStatus::NotRunning: return "Waiting";
+	case ContinuousStatus::NotRunning: return "Paused";
 	case ContinuousStatus::Tracking:   return "Active";
 	case ContinuousStatus::Coasting:   return "Waiting";
 	case ContinuousStatus::Frozen:     return "Paused";
@@ -67,24 +71,23 @@ const char *ContinuousStateWord(ContinuousStatus status)
 	}
 }
 
-// The main screen's line about the loop, as a whole sentence so it reads
-// (and translates) as one. Written for the question the player has ("will
-// this fix itself?"): waiting states resolve on their own, paused ones name
-// what they need. NotRunning covers a sleeping tracker, a disabled
-// calibration and a closed pose channel alike, so it claims no cause.
+// The rest of the sentence that starts "Continuous calibration", for the
+// main screen's band. Written for the question the player has ("will this
+// fix itself?"): waiting states resolve on their own, paused ones name what
+// they need. One sentence, no colons: the band already has a label.
 const char *ContinuousStatusLine(ContinuousStatus status)
 {
 	switch (status)
 	{
-	case ContinuousStatus::Off:        return "Continuous calibration is off.";
-	case ContinuousStatus::NoTracker:  return "Continuous calibration needs a headset tracker. Pick one in Settings.";
-	case ContinuousStatus::NeedsMount: return "Continuous calibration needs the headset tracker set up. Do it in Settings.";
-	case ContinuousStatus::NotRunning: return "Continuous calibration is waiting. It resumes when tracking is available.";
-	case ContinuousStatus::Tracking:   return "Continuous calibration is active.";
-	case ContinuousStatus::Coasting:   return "Continuous calibration is waiting. The headset tracker isn't being seen.";
-	case ContinuousStatus::Frozen:     return "Continuous calibration is paused. Readings drifted too far to correct.";
-	case ContinuousStatus::Holding:    return "Continuous calibration is waiting. It resumes when tracking settles.";
-	default:                           return "Continuous calibration is warming up.";
+	case ContinuousStatus::Off:        return " is off.";
+	case ContinuousStatus::NoTracker:  return " needs a headset tracker. Pick one in Settings.";
+	case ContinuousStatus::NeedsMount: return " needs one run with the headset tracker.";
+	case ContinuousStatus::NotRunning: return " paused. The headset tracker is off or asleep.";
+	case ContinuousStatus::Tracking:   return " is active.";
+	case ContinuousStatus::Coasting:   return " is waiting. The headset tracker isn't being seen.";
+	case ContinuousStatus::Frozen:     return " paused. Readings drifted too far to correct.";
+	case ContinuousStatus::Holding:    return " is waiting. Tracking is too noisy here.";
+	default:                           return " is warming up.";
 	}
 }
 
@@ -154,8 +157,10 @@ CalRating ComputeCalibrationRating(ContinuousStatus continuous)
 
 	// Staleness/drift only degrade the rating when nothing is maintaining the
 	// alignment; a healthy continuous loop re-measures it constantly. A frozen
-	// loop gets its own line and action instead: a calibration that solved
-	// well is still good when the headset tracker gets nudged.
+	// loop is reported on its own line with its own action, not folded into
+	// this verdict: a calibration that solved well ten minutes ago is still
+	// good when the headset tracker gets nudged, and calling it Poor sent
+	// people to redo a good calibration or to switch the feature off.
 	bool continuouslyMaintained = continuous == ContinuousStatus::Tracking;
 	if (!continuouslyMaintained)
 	{
@@ -167,10 +172,14 @@ CalRating ComputeCalibrationRating(ContinuousStatus continuous)
 			r = Rating_VeryPoor;
 	}
 
-	// Solve residuals are not persisted, so a restored profile has no evidence
-	// behind the quality half of this verdict. With nothing demoting it, say
-	// "Not measured" rather than Good, unless the continuous loop is measuring
-	// live.
+	// Solve residuals live only in lastResult, which FinishCalibration sets and
+	// nothing persists, so a profile restored from the registry has no evidence
+	// behind the quality half of this verdict. If none of the monitors above
+	// found a reason to demote it, what we have is an absence of evidence, not
+	// a good measurement -- say so instead of asserting the best label.
+	// A running continuous loop is a live measurement of the same thing, so
+	// after a restart it is evidence enough: "Not measured" beside "maintained
+	// continuously" would deny a measurement the app has.
 	const bool measured = CalCtx.lastResult.valid ||
 		((continuous == ContinuousStatus::Tracking || continuous == ContinuousStatus::Frozen) &&
 			CalCtx.continuousDeviation.valid);
@@ -189,11 +198,26 @@ const char *RatingLabel(CalRating r)
 	return r == Rating_Unknown ? "Not measured" : RatingLabels[r];
 }
 
+// The band a fresh solve's residuals land in; shared with the last-calibration
+// row so its colour follows the numbers instead of a hardcoded green.
+CalRating SolveQualityRating(const questcal::EngineResult &result)
+{
+	if (!result.valid)
+		return Rating_Unknown;
+	double rot = result.rotationRmsDeg;
+	double pos = result.translationRmsMeters * 100.0;
+	return (rot <= 3.0 && pos <= 1.5) ? Rating_Good :
+		(rot <= 6.0 && pos <= 3.0) ? Rating_Decent :
+		(rot <= 12.0 && pos <= 6.0) ? Rating_Poor : Rating_VeryPoor;
+}
+
 ImVec4 RatingColor(CalRating r)
 {
 	switch (r)
 	{
-	// Unknown claims nothing in either direction, so it gets the neutral ink.
+	// Unknown claims nothing in either direction, so it gets the neutral ink
+	// rather than the green of a verdict we cannot support or the red of one
+	// we have no reason to give.
 	case Rating_Unknown: return Pal::Dim;
 	case Rating_Good:    return Pal::Good;
 	case Rating_Decent:  return Pal::Warn;
@@ -202,23 +226,28 @@ ImVec4 RatingColor(CalRating r)
 	}
 }
 
-// The recalibration nudge, derived from the rating alone so every screen gives
-// the same advice. Null when there is nothing to advise.
+// The one recalibration nudge both screens render. The rating already folds
+// solve quality, staleness, drift and a bumped mount into a single verdict;
+// re-deriving "should I nag" from alignment on one screen and from the rating
+// on the other let identical state produce contradictory advice. Returns null
+// when there is nothing to advise.
 const char *RecalibrationNudge(CalRating rating)
 {
 	if (rating < Rating_Poor)
 		return nullptr;
 	return rating == Rating_VeryPoor
-		? "Your trackers won't line up like this. Recalibrate."
-		: "Recalibrate to tighten the alignment.";
+		? "Your trackers won't line up like this. Run a new calibration."
+		: "Run a new calibration.";
 }
 
-// Empty when the timestamp (0 = unknown) or the clock is unusable; each caller
-// words its own fallback.
+// Empty when the timestamp is unusable. "Unknown" is a property of the data,
+// not a rendered phrase: returning it as an empty optional lets every caller
+// word its own fallback, instead of the wording being baked into a buffer and
+// recovered downstream by comparing against the literal.
 std::optional<std::string> FormatUnixAge(double unixTime)
 {
 	double now = static_cast<double>(std::time(nullptr));
-	if (unixTime <= 0.0 || now <= 0.0)
+	if (!std::isfinite(unixTime) || unixTime <= 0.0 || now <= 0.0)
 		return std::nullopt;
 
 	double seconds = now - unixTime;
@@ -237,8 +266,11 @@ std::optional<std::string> FormatUnixAge(double unixTime)
 }
 
 // The age of the alignment, from the same base UpdateDriftScore ages from:
-// the later of the manual solve and the last auto-correction. Anything shown
-// beside a score-derived verdict must use that base and say which one it is.
+// the later of the manual solve and the last auto-correction, because a
+// continuously maintained calibration is not aging. Anything rendered next to
+// a score-derived verdict must use that base and say which one it is --
+// showing the solve time alone put "calibrated 3.5 days ago" beside
+// "Alignment fresh" whenever the loop had just corrected it.
 std::optional<std::string> FormatAlignmentAge()
 {
 	if (CalCtx.lastAutoCorrectionUnixTime > CalCtx.calibrationUnixTime)
@@ -263,49 +295,14 @@ bool ProtectChaperone()
 // When the one-time drift warning modal was opened; gates its accept button.
 double g_chapWarnOpenedAt = 0.0;
 
-// Pinned below the scrolling content by BuildMainWindow. Its height goes
-// through s_bottomReserve so the next frame's content child leaves room for it.
 float s_bottomReserve = 48.0f;
 void BuildStatusBand(const VRState &state)
 {
+	const float gap = 12.0f;
 	// ---- Status ----
 	// The verdict strip renders in both modes; advanced mode adds the
 	// numbers as quiet lines under the verdict instead of replacing it.
 	const ContinuousStatus continuous = ContinuousStatusNow();
-	if (CalCtx.validProfile && continuous == ContinuousStatus::Frozen)
-	{
-		const float width = ImGui::GetContentRegionAvail().x;
-		const float actionW = 280.0f;
-		const float bandH = CalCtx.uiAdvanced ? 220.0f : 184.0f;
-		s_bottomReserve = bandH;
-		ImGui::SetCursorPosY(ImGui::GetWindowHeight() - bandH + 18.0f);
-		const ImVec2 p = ImGui::GetCursorScreenPos();
-		ImGui::PushFont(g_fontTitle);
-		ImGui::TextUnformatted(Tr("Continuous calibration paused"));
-		ImGui::PopFont();
-		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + width - actionW - 36.0f);
-		ImGui::TextWrapped("%s", Tr("Tracking no longer matches the saved alignment. Recalibrate with the headset tracker."));
-		ImGui::PopTextWrapPos();
-		ImGui::SetCursorScreenPos(ImVec2(p.x + width - actionW, p.y));
-		if (IconButton("fixmount", "Recalibrate", IconPlay, ImVec2(actionW, 46.0f), BtnKind::Primary))
-			StartMountSetup(state);
-		ImGui::SetCursorScreenPos(ImVec2(p.x + width - actionW, p.y + 54.0f));
-		if (IconButton("stopcont", "Turn off continuous calibration", nullptr, ImVec2(actionW, 38.0f), BtnKind::Ghost))
-			SaveProfileFieldEdit(CalCtx, [](questcal::ProfileRecord &candidate) {
-				candidate.continuousEnabled = false;
-			});
-		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + 108.0f));
-		if (CalCtx.uiAdvanced && CalCtx.continuousDeviation.valid)
-		{
-			ImGui::PushFont(g_fontSmall);
-			ImGui::TextColored(Pal::Dim, "%s", Tr(FormatString(
-				"Difference: %.1f deg yaw, %.1f deg tilt, %.1f cm position",
-				CalCtx.continuousDeviation.yawDeg, CalCtx.continuousDeviation.tiltDeg,
-				CalCtx.continuousDeviation.posM * 100.0)).c_str());
-			ImGui::PopFont();
-		}
-		return;
-	}
 	const CalRating rating = CalCtx.validProfile ? ComputeCalibrationRating(continuous) : Rating_Unknown;
 	const char *nudge = CalCtx.validProfile ? RecalibrationNudge(rating) : nullptr;
 
@@ -314,13 +311,18 @@ void BuildStatusBand(const VRState &state)
 		std::string text;
 		ImVec4 color;
 	};
-	// Detail lines share one quiet ink and a role word each; the verdict owns
-	// the colour, so a detail line never reads as a second opinion.
 	std::vector<DetailLine> details;
 	if (CalCtx.uiAdvanced && CalCtx.validProfile)
 	{
 		if (CalCtx.lastResult.valid)
 		{
+			// Colour follows the solve's own quality band; a hardcoded
+			// green tick called an 11-degree solve a success.
+			CalRating solve = SolveQualityRating(CalCtx.lastResult);
+			// Detail lines share one quiet ink and a role word each; the
+			// verdict above owns the colour. A green solve row under a red
+			// verdict read as a second opinion.
+			(void)solve;
 			details.push_back({ FormatString("Solve: %.2f deg / %.1f cm, %+.1f ms%s",
 					CalCtx.lastResult.rotationRmsDeg,
 					CalCtx.lastResult.translationRmsMeters * 100.0,
@@ -347,7 +349,8 @@ void BuildStatusBand(const VRState &state)
 				CalCtx.alignment == CalibrationContext::AlignmentHealth::Aging ? "aging" : "fresh";
 			// The age is on the verdict line already.
 			std::string line = FormatString("Drift: %s", healthLabel);
-			// Evidence only when there is some.
+			// Evidence only when there is some: "0 tracking glitch(es)" was
+			// a developer's plural on a zero.
 			if (CalCtx.driftSlideEvents > 0)
 				line += FormatString("; %u slip%s up to %.1f cm while standing still",
 					CalCtx.driftSlideEvents, CalCtx.driftSlideEvents == 1 ? "" : "s",
@@ -379,17 +382,23 @@ void BuildStatusBand(const VRState &state)
 	}
 
 	// Bottom band: the verdict, the advanced detail lines, the
-	// continuous-calibration line and the nudge.
+	// continuous-calibration line with its own action when it has paused, and the
+	// nudge.
 	{
 		const bool showContinuous = CalCtx.validProfile && continuous != ContinuousStatus::Off;
-		const float lineH = g_fontBody->LegacySize + 6.0f;
-		const float detailH = g_fontSmall->LegacySize + 6.0f;
+		const bool frozen = continuous == ContinuousStatus::Frozen;
+		const float lineH = g_fontBody->FontSize + 6.0f;
+		const float detailH = g_fontSmall->FontSize + 6.0f;
 		int lines = CalCtx.validProfile ? 1 + (showContinuous ? 1 : 0) + (nudge ? 1 : 0) : 1;
 		float stripH = lineH * (float)lines + (lines > 1 ? 4.0f : 0.0f)
-			+ detailH * (float)details.size() + (details.empty() ? 0.0f : 4.0f);
+			+ detailH * (float)details.size() + (details.empty() ? 0.0f : 4.0f)
+			+ (frozen ? 48.0f : 0.0f);
 
-		// Full-bleed inset surface with a hairline top edge, anchored to the
-		// bottom of the window.
+		// Full-bleed inset surface with a hairline top edge, so the status
+		// text sits on something instead of floating.
+		// Anchored to the bottom when there is room, pushed down by the
+		// content when there isn't; the surface is painted either way so
+		// the band never loses its inset when the screen is busy.
 		const float bandH = stripH + 14.0f + 44.0f;
 		const float bandTop = ImGui::GetWindowHeight() - bandH;
 		s_bottomReserve = bandH;
@@ -411,13 +420,12 @@ void BuildStatusBand(const VRState &state)
 		{
 			// Line 1: the verdict word carries the colour; the age beside it
 			// is information, so it gets Dim rather than Faint.
-			float ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
+			float ty = y + lineH * 0.5f - g_fontBody->FontSize * 0.5f;
 			float x = p.x;
-			const char *label = Tr(RatingLabel(rating));
-			const char *heading = Tr("Alignment: ");
-			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(Pal::Text), heading);
-			x += ImGui::CalcTextSize(heading).x;
-			dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(x, ty), Pal::U32(RatingColor(rating)), label);
+			const char *label = RatingLabel(rating);
+			dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(Pal::Text), "Tracking quality: ");
+			x += ImGui::CalcTextSize("Tracking quality: ").x;
+			dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(RatingColor(rating)), label);
 			x += ImGui::CalcTextSize(label).x;
 
 			std::string ageLine;
@@ -434,47 +442,67 @@ void BuildStatusBand(const VRState &state)
 				auto age = FormatAlignmentAge();
 				ageLine = age ? *age : std::string("calibration time unknown");
 			}
-			dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-				ImVec2(x + 18.0f, y + lineH * 0.5f - g_fontSmall->LegacySize * 0.5f + 2.0f),
-				Pal::U32(Pal::Dim), Tr(ageLine.c_str()));
+			dl->AddText(g_fontSmall, g_fontSmall->FontSize,
+				ImVec2(x + 18.0f, y + lineH * 0.5f - g_fontSmall->FontSize * 0.5f + 2.0f),
+				Pal::U32(Pal::Dim), ageLine.c_str());
 			y += lineH;
 
-			// Advanced mode: the numbers, small and quiet under the verdict.
+			// Advanced mode: the numbers, small and in the colour of the
+			// verdict they support.
 			for (const auto &detail : details)
 			{
-				dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-					ImVec2(p.x, y + detailH * 0.5f - g_fontSmall->LegacySize * 0.5f),
-					Pal::U32(detail.color), Tr(detail.text.c_str()));
+				dl->AddText(g_fontSmall, g_fontSmall->FontSize,
+					ImVec2(p.x, y + detailH * 0.5f - g_fontSmall->FontSize * 0.5f),
+					Pal::U32(detail.color), detail.text.c_str());
 				y += detailH;
 			}
 			if (!details.empty())
 				y += 4.0f;
 
-			// Line 2: the loop's own state, one sentence in its own colour.
+			// Line 2: the loop's own state in its own colour and, when it
+			// has paused, the two things the player can do about it.
 			if (showContinuous)
 			{
 				y += 4.0f;
-				ty = y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f;
-				dl->AddText(g_fontBody, g_fontBody->LegacySize, ImVec2(p.x, ty),
-					Pal::U32(ContinuousStatusColor(continuous)), Tr(ContinuousStatusLine(continuous)));
+				ty = y + lineH * 0.5f - g_fontBody->FontSize * 0.5f;
+				x = p.x;
+				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty), Pal::U32(Pal::Text), "Continuous calibration");
+				x += ImGui::CalcTextSize("Continuous calibration").x;
+				dl->AddText(g_fontBody, g_fontBody->FontSize, ImVec2(x, ty),
+					Pal::U32(ContinuousStatusColor(continuous)), ContinuousStatusLine(continuous));
 				y += lineH;
+				if (frozen)
+				{
+					ImGui::SetCursorScreenPos(ImVec2(p.x, y + 4.0f));
+					std::string fix = FormatString("Recalibrate with the headset tracker (%.0f s)",
+						CalCtx.CollectionSeconds());
+					if (IconButton("fixmount", fix.c_str(), IconPlay, ImVec2(440.0f, 38.0f), BtnKind::Primary))
+						StartMountSetup(state);
+					ImGui::SameLine(0.0f, gap);
+					if (IconButton("stopcont", "Turn off continuous calibration", nullptr, ImVec2(270.0f, 38.0f), BtnKind::Ghost))
+						SaveProfileFieldEdit(CalCtx,
+							[](questcal::ProfileRecord &candidate) {
+								candidate.continuousEnabled = false;
+							});
+					y += 48.0f;
+				}
 			}
 
 			if (nudge)
 			{
 				if (!showContinuous)
 					y += 4.0f;
-				dl->AddText(g_fontBody, g_fontBody->LegacySize,
-					ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Violet), Tr(nudge));
+				dl->AddText(g_fontBody, g_fontBody->FontSize,
+					ImVec2(p.x, y + lineH * 0.5f - g_fontBody->FontSize * 0.5f),
+					Pal::U32(Pal::Violet), nudge);
 			}
 		}
 		else
 		{
-			dl->AddText(g_fontBody, g_fontBody->LegacySize,
-				ImVec2(p.x, y + lineH * 0.5f - g_fontBody->LegacySize * 0.5f),
+			dl->AddText(g_fontBody, g_fontBody->FontSize,
+				ImVec2(p.x, y + lineH * 0.5f - g_fontBody->FontSize * 0.5f),
 				Pal::U32(Pal::Dim),
-				Tr("Not calibrated yet. Pick a device on each side and press Start calibration."));
+				"Not calibrated yet. Pick a device on each side and press Start calibration.");
 		}
 
 		ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + stripH));
@@ -484,7 +512,7 @@ void BuildStatusBand(const VRState &state)
 
 void BuildMainScreen(const VRState &state)
 {
-	float cw = ImGui::GetContentRegionAvail().x;
+	float cw = ImGui::GetWindowContentRegionWidth();
 	const float gap = 12.0f;
 
 	{
@@ -492,14 +520,15 @@ void BuildMainScreen(const VRState &state)
 			std::vector<StatusRowData> warn;
 			if (CalCtx.validProfile && !CalCtx.enabled)
 			{
-				// Each disable reason wants a different action, so each gets
-				// its own sentence.
+				// Six conditions disable a calibration and each wants a
+				// different action; naming the headset for all of them sent
+				// people to check hardware that was working.
 				using Reason = CalibrationContext::DisableReason;
 				std::string why;
 				switch (CalCtx.disableReason)
 				{
 				case Reason::HmdMismatch:
-					why = FormatString("%s headset isn't connected. Calibration is off until it's back.",
+					why = FormatString("%s headset not detected; calibration disabled until it's back",
 						FriendlySystemName(CalCtx.referenceTrackingSystem).c_str());
 					break;
 				case Reason::DriverUnreachable:
@@ -509,10 +538,10 @@ void BuildMainScreen(const VRState &state)
 					why = "The saved calibration doesn't match the connected hardware. Recalibrate.";
 					break;
 				case Reason::InvalidTransform:
-					why = "The saved calibration is damaged. Recalibrate.";
+					why = "The saved calibration is corrupt. Recalibrate.";
 					break;
 				case Reason::UniverseUnsafe:
-					why = "The headset re-centered while QuestCalibrator wasn't watching, so the saved alignment is off. Recalibrate.";
+					why = "The headset re-centred while QuestCalibrator wasn't watching, so the saved alignment is off. Recalibrate.";
 					break;
 				case Reason::None:
 					// Never borrow another cause's sentence: a universe change
@@ -531,14 +560,6 @@ void BuildMainScreen(const VRState &state)
 						CalCtx.driverPoseHookMask & protocol::PoseHook006 ? "active" : "missing");
 				warn.push_back({ IconInfo, Pal::Warn, why });
 			}
-			const questcal::update::Snapshot update =
-				questcal::update::AppUpdater.GetSnapshot();
-			if (update.state == questcal::update::State::Ready)
-			{
-				warn.push_back({ IconDownload, Pal::Good,
-					"QuestCalibrator " + update.version +
-					" is ready. Open Settings to install it." });
-			}
 			if (!warn.empty())
 			{
 				DrawStatusCard(warn);
@@ -550,27 +571,19 @@ void BuildMainScreen(const VRState &state)
 		// beside it so the whole screen fits without scrolling ----
 		bool haveProfile = CalCtx.validProfile;
 		const float bh = 56.0f;
-		const float clearW = ButtonWidthFor("Clear calibration", true, 190.0f);
-		const float segItemW = 112.0f;
+		const float clearW = 190.0f;
+		const float segItemW = 80.0f;
 		const float segW = segItemW * 3.0f + 8.0f;
 		float startW = cw - segW - gap - (haveProfile ? clearW + gap : 0.0f);
 
 		ImVec2 rowA = ImGui::GetCursorScreenPos();
-		const bool recovering = ContinuousStatusNow() == ContinuousStatus::Frozen;
-		if (IconButton("start", "Start calibration", IconPlay, ImVec2(startW, bh),
-			recovering ? BtnKind::Ghost : BtnKind::Primary))
+		if (IconButton("start", "Start calibration", IconPlay, ImVec2(startW, bh), BtnKind::Primary))
 			OpenGuide(false, false);
 
+		// Measurement length. A duration, not a speed: "Fast" read as the good
+		// choice and fought the instruction to move slowly.
 		{
-			// Labelled by length: "Slow" reads as an instruction to move slowly.
-			std::string speedLabels[3];
-			const char *speeds[3];
-			for (int i = 0; i < 3; ++i)
-			{
-				speedLabels[i] = FormatString("%.0f s", CalibrationContext::CollectionSecondsFor(
-					static_cast<CalibrationContext::Speed>(i)));
-				speeds[i] = speedLabels[i].c_str();
-			}
+			const char *speeds[] = { "10 s", "20 s", "35 s" };
 			ImVec2 sp = ImVec2(rowA.x + startW + gap, rowA.y);
 			ImGui::SetCursorScreenPos(ImVec2(sp.x, sp.y + (bh - 46.0f) * 0.5f));
 			auto previousSpeed = CalCtx.calibrationSpeed;
@@ -579,7 +592,7 @@ void BuildMainScreen(const VRState &state)
 			if (CalCtx.calibrationSpeed != previousSpeed)
 				SaveSettingOrRestore(CalCtx.calibrationSpeed, previousSpeed);
 			if (ImGui::IsMouseHoveringRect(sp, ImVec2(sp.x + segW, sp.y + bh)) && !ImGui::IsAnyItemActive())
-				ShowTip("How long calibration collects tracking data. Longer can be more accurate.\nMove gently at every setting.");
+				ShowTip("How long to measure. Longer is more accurate.");
 		}
 
 		if (haveProfile)
@@ -624,10 +637,10 @@ void BuildMainScreen(const VRState &state)
 			if (ImGui::IsItemHovered())
 			{
 				ShowTip(
-					"Saves your current chaperone (SteamVR's walls) and puts it\n"
-					"back automatically if SteamVR or the headset ever loses it.\n"
-					"Redrew your chaperone? Press again to protect the new one.\n"
-					"Prefer the Quest boundary imported fresh each session? Don't use this.");
+					"Saves your current chaperone bounds (SteamVR's walls) and puts\n"
+					"them back automatically if SteamVR or the headset ever loses them.\n"
+					"Redrew your chaperone? Press again to save the new one.\n"
+					"Prefer the Quest's Guardian imported fresh each session? Don't use this.");
 			}
 			if (anchors)
 			{
@@ -644,30 +657,41 @@ void BuildMainScreen(const VRState &state)
 			}
 		}
 
-		// Current state stays in the pinned band; historical events are optional.
-		ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0, 0, 0, 0));
-		ImGui::PushStyleColor(ImGuiCol_HeaderHovered, Pal::CardHov);
-		ImGui::PushStyleColor(ImGuiCol_HeaderActive, Pal::Inset);
-		const bool showActivity = !CalCtx.activity.empty() && ImGui::CollapsingHeader(
-			(std::string(Tr("Recent activity")) + "###recentactivity").c_str());
-		ImGui::PopStyleColor(3);
-		if (showActivity)
+		// ---- Activity: the last few things the monitors told the player ----
+		// The calibration pane only renders inside the modal, so without this
+		// a freeze, a resume or a waiting correction never reached anyone.
+		// Newest three here (two with the advanced lines below); the full
+		// history is in the log.
+		if (!CalCtx.activity.empty())
 		{
+			ImGui::Spacing();
 			const size_t shown = std::min<size_t>(CalCtx.activity.size(), CalCtx.uiAdvanced ? 2 : 3);
+			const float lineH = g_fontSmall->FontSize + 8.0f;
+			const float padY = 10.0f;
+			float h = padY * 2.0f + lineH * (float)shown;
+			ImVec2 p = BeginRowCard(h);
+			ImDrawList *dl = ImGui::GetWindowDrawList();
+			float y = p.y + padY;
 			for (size_t i = CalCtx.activity.size() - shown; i < CalCtx.activity.size(); ++i)
 			{
 				const auto &entry = CalCtx.activity[i];
+				using Tone = CalibrationContext::Tone;
+				ImVec4 col = entry.tone == Tone::Good ? Pal::Good :
+					entry.tone == Tone::Warn ? Pal::Warn :
+					entry.tone == Tone::Bad ? Pal::Bad : Pal::Dim;
 				char stamp[16] = "";
 				std::time_t t = static_cast<std::time_t>(entry.unixTime);
 				std::tm tm;
 				if (localtime_s(&tm, &t) == 0)
 					std::strftime(stamp, sizeof stamp, "%H:%M", &tm);
-				ImGui::PushFont(g_fontSmall);
-				ImGui::TextColored(Pal::Dim, "%s", stamp);
-				ImGui::PopFont();
-				ImGui::TextWrapped("%s", Tr(entry.text.c_str()));
-				ImGui::Spacing();
+				dl->AddCircleFilled(ImVec2(p.x + 22.0f, y + lineH * 0.5f), 3.5f, Pal::U32(col), 10);
+				dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(p.x + 36.0f, y + 4.0f),
+					Pal::U32(Pal::Faint), stamp);
+				dl->AddText(g_fontSmall, g_fontSmall->FontSize, ImVec2(p.x + 84.0f, y + 4.0f),
+					Pal::U32(entry.tone == Tone::Neutral ? Pal::Dim : col), entry.text.c_str());
+				y += lineH;
 			}
+			EndRowCard(p, h);
 		}
 
 	}

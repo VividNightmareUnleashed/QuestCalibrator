@@ -25,16 +25,20 @@ struct DriverTransportResult
 	std::string error;
 	// Valid only when completed.
 	protocol::Response response;
-	// The transport's connection generation AFTER the attempt, whether or not
-	// it succeeded: SendBlocking reconnects and replays internally, so a request
-	// can land on a different pipe than the one the batch started on.
+	// The transport's connection generation AFTER the attempt, reported whether
+	// or not the attempt succeeded. IPCClient::SendBlocking reconnects and
+	// replays internally, so a request can be accepted on a pipe other than the
+	// one the batch started on — and a request that ultimately failed can still
+	// have advanced the generation on the way. Every batch rule below is written
+	// against this number, so a transport that only reported it on success would
+	// silently disable the reconnect handling.
 	uint64_t connectionGeneration = 0;
 };
 
 using DriverTransport = std::function<DriverTransportResult(const protocol::Request &)>;
 
-// Enumerate the OpenVR device at `id` (the result carries that id) as the slot
-// decision reads it. Called once per slot.
+// Enumerate one OpenVR device as the slot decision reads it. Called at most
+// once per slot, and only for slots the loop actually reaches.
 using DriverDeviceEnumerator =
 	std::function<SyncDevice(uint32_t id, const DriverSyncDesired &desired)>;
 
@@ -45,9 +49,12 @@ struct DriverApplyRequest
 	// have already run by this point; a slot decision can still withdraw it.
 	bool enabled = false;
 	DriverSyncDesired desired;
-	// The field the caller would ship; `enabled` is only the caller's half of the
-	// predicate (profile live, anchors present). The session also requires at
-	// least one enabled slot and builds the canonical disable itself.
+	// The spatial correction field the caller would ship, with `enabled`
+	// carrying only the caller's own half of the predicate: the profile is live
+	// and there is something to blend. The session ANDs in the half only it
+	// knows — a complete base-transform batch on this same connection — and
+	// builds the canonical disable itself, so a bad base can still clear a stale
+	// field.
 	protocol::SetAlignmentField field;
 
 	bool operator==(const DriverApplyRequest &other) const
@@ -57,19 +64,23 @@ struct DriverApplyRequest
 	}
 };
 
-// Why the session stopped applying the profile; the UI tells the user which.
+// Why the session stopped applying the profile. Distinct causes rather than one
+// "disabled" flag because the UI tells the user what to go and check: a dead
+// pipe and a foreign headset send them to different places.
 enum class DriverDisableCause
 {
 	None,
 	// The live headset reports a different tracking system than the profile's
-	// reference.
+	// reference. This is a different rig.
 	HmdMismatch,
 	// The batch did not complete on one connection.
 	DriverUnreachable,
 };
 
-// What the caller mirrors into its own state. Fail-closed: short of a complete
-// batch, the masks, the tracker id and `enabled` come back cleared.
+// What the caller mirrors into its own derived state. Already fail-closed: on
+// anything short of a complete batch the masks, the tracker id and `enabled`
+// come back cleared, so a caller that simply assigns this cannot leave the
+// monitors believing the driver matches the profile.
 struct DriverApplyResult
 {
 	bool enabled = false;
@@ -82,9 +93,12 @@ struct DriverApplyResult
 	uint32_t poseHookMask = 0;
 };
 
-// The per-slot half of one reconciliation, derived from the enumerated devices
-// alone. Pure, so the submitting thread and the session derive the same
-// identities from the same devices.
+// The per-slot half of one reconciliation, read off the enumerated devices
+// alone: which slots carry the transform and which of those are hidden, which
+// devices the monitors treat as reference and target, where the mounted
+// tracker is, and whether the live headset withdraws the profile. Pure, so the
+// thread that submits a state derives the identities it steers by from the
+// same devices the session later ships, and the two cannot disagree.
 struct DriverSlotState
 {
 	uint64_t enabledMask = 0;
@@ -101,7 +115,11 @@ inline DriverSlotState DeriveDriverSlotState(const DriverSyncDesired &desired,
 	DriverSlotState state;
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
-		const SyncDevice device = enumerate(id, desired);
+		SyncDevice device;
+		device.id = id;
+		if (enumerate)
+			device = enumerate(id, desired);
+
 		const SlotDecision decision = DecideSlot(desired, device);
 		state.referenceDeviceMask[id] = decision.referenceDevice;
 		state.targetDeviceMask[id] = decision.targetDevice;
@@ -195,8 +213,11 @@ public:
 		bool driverSynchronized = batch.connectionReady && SendRequest(stateRequest,
 			"applying the complete driver state", &batchConnectionGeneration);
 
-		// Short of a complete batch the monitors must not believe the driver
-		// matches the profile; the next periodic scan retries the whole state.
+		// Never let the jump/drift/continuous monitors infer that the live driver
+		// matches the profile after a partial pipe failure. The next periodic scan
+		// rebuilds and retries the complete desired state, including after
+		// vrserver restarts; until then, all device identities are deliberately
+		// unavailable.
 		result.synchronized = driverSynchronized;
 		if (!driverSynchronized)
 		{
@@ -211,20 +232,22 @@ public:
 		}
 		else
 		{
-			clearError();
+			if (clearError)
+				clearError();
 			lastErrorTime = -1e9;
 		}
 		return result;
 	}
 
 	// Retire one slot outside any batch: the pre-collection reset, which must
-	// clear a stale transform off the device about to be sampled.
+	// clear a stale transform off the device about to be sampled. No batch
+	// generation to check, and deliberately no ledger update — this path does not
+	// speak for what the profile left live, and a mark here would let a lost
+	// response be forgotten without a confirmed disable behind it.
 	bool DisableDeviceTransform(uint32_t id, double atTime)
 	{
 		now = atTime;
-		protocol::Request req(protocol::RequestSetDeviceTransform);
-		req.setDeviceTransform = protocol::SetDeviceTransform(id, false);
-		return SendRequest(req, "disabling a device transform", nullptr);
+		return SendDisable(id, nullptr);
 	}
 
 private:
@@ -240,14 +263,19 @@ private:
 		return batch;
 	}
 
-	// Every request goes through here. A refused response and a failed transport
-	// are one verdict (the state was not applied) and share one 30 s debounce,
-	// so a dead pipe cannot rewrite the user's banner on every scan.
+	// Every request in this file goes through here. A refused response and a
+	// failed transport are one verdict — the requested state was not applied —
+	// and share one 30 s debounce, so a dead pipe cannot rewrite the user's
+	// banner 65 times a second.
 	bool SendRequest(const protocol::Request &request, const char *operation,
 		uint64_t *batchConnectionGeneration,
 		protocol::Response *acceptedResponse = nullptr)
 	{
-		const DriverTransportResult result = transport(request);
+		DriverTransportResult result;
+		if (transport)
+			result = transport(request);
+		else
+			result.error = "no driver transport is installed";
 		if (result.completed)
 		{
 			bool accepted = result.response.type == protocol::ResponseSuccess ||
@@ -264,8 +292,9 @@ private:
 						*batchConnectionGeneration = result.connectionGeneration;
 					else if (*batchConnectionGeneration != result.connectionGeneration)
 					{
-						// Accepted by a different connection than the batch began
-						// on; not an error to report.
+						// Accepted, but by a different driver connection than the one
+						// this batch has been building state on. Not an error to
+						// report — the caller reacts to the generation itself.
 						return false;
 					}
 				}
@@ -284,17 +313,26 @@ private:
 	{
 		if (now - lastErrorTime >= 30.0)
 		{
-			reportError(message);
+			if (reportError)
+				reportError(message);
 			lastErrorTime = now;
 		}
 	}
 
-	// All four are installed before use (DriverWorker, and every test fixture).
+	bool SendDisable(uint32_t id, uint64_t *batchConnectionGeneration)
+	{
+		protocol::Request req(protocol::RequestSetDeviceTransform);
+		req.setDeviceTransform = protocol::SetDeviceTransform(id, false);
+		return SendRequest(req, "disabling a device transform", batchConnectionGeneration);
+	}
+
 	DriverTransport transport;
 	DriverDeviceEnumerator enumerate;
 	std::function<void(const std::string &)> reportError;
 	std::function<void()> clearError;
 
+	// The transport's generation as of the last request, successful or not. Read
+	// after a send to notice a reconnect the response itself does not announce.
 	// Error debounce clock, in the caller's tick time. -1e9 means "re-armed":
 	// the next failure reports immediately.
 	double lastErrorTime = -1e9;

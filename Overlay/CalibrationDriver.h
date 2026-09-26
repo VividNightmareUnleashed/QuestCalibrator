@@ -1,7 +1,6 @@
 #pragma once
 
 #include <openvr.h>
-#include "DriverSyncTracker.h"
 
 #include <array>
 #include <cstdint>
@@ -23,7 +22,6 @@ void StartCalibrationDriver();
 void StopCalibrationDriver();
 void SynchronizeCalibrationDriver(CalibrationContext &ctx);
 void PollCalibrationDriver(CalibrationContext &ctx);
-DriverSyncTracker CaptureDriverSyncDiagnostics();
 std::optional<DriverNeutralizationResult> TakeCalibrationNeutralization(
 	uint64_t sequence);
 uint64_t NeutralizeCalibrationDevices(
@@ -33,21 +31,5 @@ void ReleaseCalibrationDeviceNeutralization();
 bool ReadTrackedDeviceString(uint32_t id,
 	vr::ETrackedDeviceProperty property, std::string &value);
 bool ReadCurrentHmdIdentity(std::string &trackingSystem, std::string &serial);
-
-// Axis types describe rAxis slots; their enum values are not slot indices.
-template<typename ReadAxisType>
-bool ControllerTriggerPressed(const vr::VRControllerState_t &state,
-	const ReadAxisType &readAxisType)
-{
-	for (uint32_t axis = 0; axis < vr::k_unControllerStateAxisCount; ++axis)
-	{
-		const auto property = static_cast<vr::ETrackedDeviceProperty>(
-			vr::Prop_Axis0Type_Int32 + axis);
-		if (state.rAxis[axis].x > 0.75f &&
-			readAxisType(property) == vr::k_eControllerAxis_Trigger)
-			return true;
-	}
-	return false;
-}
 
 } // namespace questcal

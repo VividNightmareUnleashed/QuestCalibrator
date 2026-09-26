@@ -20,9 +20,9 @@ private:
 	protocol::Response SendBlockingConnected(const protocol::Request &request);
 	void SendConnected(const protocol::Request &request);
 	protocol::Response ReceiveConnected();
-	// Completes one overlapped operation, or throws on error/timeout. On timeout
-	// it cancels and drains the operation first, so the kernel never writes into
-	// a dead buffer.
+	// Completes one overlapped operation, or throws on error/timeout. Cancels
+	// the operation before returning so the caller can close the handle without
+	// leaving the kernel writing into a dead buffer.
 	DWORD AwaitOverlapped(OVERLAPPED &ov, const char *what);
 
 	HANDLE pipe = INVALID_HANDLE_VALUE;

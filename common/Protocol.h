@@ -7,18 +7,36 @@
 #endif
 
 #define QUESTCALIBRATOR_PIPE_NAME "\\\\.\\pipe\\QuestCalibratorDriver"
-// Versioned by PoseRing::LayoutVersion, independently of the pipe protocol: a
-// named mapping outlives the process that made it, so an old name could strand
-// an upgraded driver behind an incompatible overlay-held mapping.
-#define QUESTCALIBRATOR_SHMEM_NAME "Local\\QuestCalibratorPoseRing.v6.layout4"
+// The mapping name is layout-versioned independently from the pipe protocol.
+// A named mapping survives while either process still has it open, so reusing
+// an earlier name after PoseRing changes layout could strand an upgraded driver
+// behind an incompatible overlay-held mapping.
+#define QUESTCALIBRATOR_SHMEM_NAME "Local\\QuestCalibratorPoseRing.v6.layout3"
 
 namespace protocol
 {
-	// The handshake requires exact version equality, so every bump costs users a
-	// driver reinstall and a SteamVR restart. v9: the field blends
-	// field-transformed query positions, and both peers must share those
-	// semantics because continuous calibration predicts the driver's output.
-	const uint32_t Version = 9;
+	// v3: SetDeviceTransform always carries the full transform (no partial-update
+	// flags — a partial update against unknown driver-side state is how positions
+	// used to collapse to zero), and the shared-memory pose ring was added.
+	// v4: SetDeviceTransform carries timeOffset (runtime latency re-prediction),
+	// and SetAlignmentField ships the spatial-correction anchor set.
+	// v5: SetDeviceTransform carries `generation` (snap/slew discriminator for
+	// continuous calibration) and `hidden` (displace the HMD-mounted tracker out
+	// of games' reach). The complete wire format is defined up front (the
+	// handshake requires exact version equality, so every bump costs users a
+	// driver reinstall + SteamVR restart); the driver may store-and-ignore
+	// fields until the matching feature lands.
+	// v6: the driver validates complete transform/field messages transactionally,
+	// pipe flags are canonical fixed-width integers, every mutating request is
+	// versioned and requires a same-version handshake on that connection, and the
+	// shared-memory pose ring uses race-free ownership. Older overlays must
+	// reinstall the driver rather than silently relying on prior trust semantics.
+	// v7: one SetRuntimeState atomically validates the complete 64-slot transform
+	// mask and alignment field. Reconciliation is one bounded pipe transaction,
+	// not up to 65 blocking requests with partial-state recovery bookkeeping.
+	// v8: handshake replies expose which supported server-host bindings have
+	// actually been hooked, so setup/load-order failures are diagnosable.
+	const uint32_t Version = 8;
 	const uint32_t PoseHook005 = 1u << 0;
 	const uint32_t PoseHook006 = 1u << 1;
 
@@ -55,11 +73,12 @@ namespace protocol
 		// pose newer, shortening vrserver's forward prediction (a delay); this is
 		// how the solved inter-system time offset is applied to target devices.
 		double timeOffset = 0.0;
-		// Snap/slew discriminator (SetAlignmentField::generation works the same
-		// way): a changed generation marks an intentional discontinuity
-		// (recalibration, universe jump, profile edit) and the driver snaps; an
-		// unchanged generation with a changed transform is a continuous-calibration
-		// correction and the driver slews toward it.
+		// Snap/slew discriminator for the base transform, mirroring
+		// SetAlignmentField::generation: a changed generation marks an intentional
+		// discontinuity (recalibration, universe jump, profile edit) and the
+		// driver snaps to the new transform; an unchanged generation with a
+		// changed transform is a continuous-calibration correction and the driver
+		// slews toward it instead.
 		uint32_t generation = 0;
 		// Displace this device's forwarded pose far away so applications ignore
 		// it (the HMD-mounted continuous-calibration tracker). The raw pose the
@@ -98,10 +117,11 @@ namespace protocol
 		}
 	};
 
-	// Spatial correction field. The driver blends the anchor deltas with
-	// Gaussian RBF weights over each device's own base-calibrated position and
-	// applies blendedDelta ∘ base. `generation` snaps or slews exactly as
-	// SetDeviceTransform::generation does.
+	// Spatial correction field. The driver blends the anchor deltas
+	// with Gaussian RBF weights over each device's own base-calibrated position
+	// and applies base ∘ blendedDelta. `generation` bumps on any recalibration
+	// or universe-jump compensation so driver-side smoothing snaps instead of
+	// smearing an intentional change over time.
 	struct SetAlignmentField
 	{
 		static const uint32_t MaxAnchors = 8;
@@ -136,8 +156,9 @@ namespace protocol
 	};
 
 	// Raw driver-space pose as captured by the pose hook inside vrserver, stamped
-	// with QueryPerformanceCounter at capture. Protocol-owned because the overlay
-	// compiles against openvr.h, which has no DriverPose_t.
+	// with QueryPerformanceCounter at capture. Field set mirrors what the solver
+	// needs from vr::DriverPose_t; kept protocol-owned because the overlay compiles
+	// against openvr.h, which has no DriverPose_t.
 	struct DevicePoseSample
 	{
 		int64_t sampleTimeQpc = 0;
@@ -155,8 +176,8 @@ namespace protocol
 	};
 
 	// Fixed-size wire messages; the whole struct crosses the pipe via sizeof.
-	// Every field has an initializer (padding is not scrubbed; the pipe never
-	// leaves this machine).
+	// Every field has an initializer so no meaningful byte is ever indeterminate
+	// (padding bytes are not scrubbed — the pipe never leaves this machine).
 	struct Request
 	{
 		Protocol protocol;
@@ -178,17 +199,27 @@ namespace protocol
 		explicit Response(ResponseType type) : type(type) { }
 	};
 
-	// The pipe carries a version but no layout identity, and the two ends get the
-	// OpenVR types from different headers (openvr_driver.h vs openvr.h), so equal
-	// versions do not prove equal bytes. When one of these fires on purpose, bump
-	// protocol::Version and update the size. x64 is the only target, so these
-	// sizes are exact.
+	// The pipe carries a version number but no layout identity, and the two ends
+	// do not compile these structs against the same header: the driver gets
+	// vr::HmdQuaternion_t and friends from openvr_driver.h, the overlay from
+	// openvr.h (see the _OPENVR_API guard at the top). Equal versions are
+	// therefore not proof of equal bytes. Pinning the sizes here — in the one
+	// header both ends include — turns a field added on one side, a reordering,
+	// or a vendored-header change that moves a member into a build failure on
+	// whichever side diverged, instead of a garbled decode at runtime.
+	//
+	// When one of these fires: if the layout change is intentional, bump
+	// protocol::Version (the handshake requires exact equality, so old and new
+	// binaries refuse each other) and update the expected size. If it is not
+	// intentional, the two ends have drifted and shipping them together would
+	// corrupt every message. x64 is the only build target, so these are exact.
 	static_assert(sizeof(SetDeviceTransform) == 88, "SetDeviceTransform wire layout changed");
 	static_assert(sizeof(FieldAnchor) == 80, "FieldAnchor wire layout changed");
 	static_assert(sizeof(SetAlignmentField) == 664, "SetAlignmentField wire layout changed");
 	static_assert(sizeof(SetRuntimeState) == 768, "SetRuntimeState wire layout changed");
 	static_assert(sizeof(Request) == 864, "Request wire layout changed");
 	static_assert(sizeof(Response) == 12, "Response wire layout changed");
-	// Crosses the shared-memory ring: bump PoseRing::LayoutVersion instead.
+	// Crosses the shared-memory ring rather than the pipe; the mapping name
+	// carries its own layout version (QUESTCALIBRATOR_SHMEM_NAME) to bump.
 	static_assert(sizeof(DevicePoseSample) == 192, "DevicePoseSample layout changed");
 }

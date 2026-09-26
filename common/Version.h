@@ -3,20 +3,7 @@
 // Included by the .rc files as well as C++, so keep this header free of
 // anything the resource compiler's preprocessor can't handle.
 #define QUESTCAL_VERSION_MAJOR 1
-#define QUESTCAL_VERSION_MINOR 2
+#define QUESTCAL_VERSION_MINOR 1
 #define QUESTCAL_VERSION_PATCH 0
 
-// Prerelease identity, and the thing that puts this build on the hand-installed
-// lane rather than the stable one. A final release leaves the label empty and
-// the ordinal 0; a prerelease sets both, so "alpha" with 3 is 1.2.0-alpha.3.
-// A build with a label never asks the stable feed for anything: the updater
-// says which prerelease this is and leaves the move to the tester.
-//
-// Making a final release means clearing these two back to "" and 0 in the
-// same commit that drops the suffix from the string below.
-#define QUESTCAL_VERSION_PRERELEASE_LABEL "rc"
-#define QUESTCAL_VERSION_PRERELEASE_ORDINAL 1
-
-// The resource compiler cannot build this from the numbers above, so it is
-// written out by hand; the solver harness asserts the two agree.
-#define QUESTCAL_VERSION_STRING "1.2.0-rc.1"
+#define QUESTCAL_VERSION_STRING "1.1.0"

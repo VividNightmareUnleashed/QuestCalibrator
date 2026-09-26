@@ -77,7 +77,7 @@ Runtime alignment maintenance uses the timestamped pose ring and calibration sol
   tracker's slide or re-appearance as drift evidence while it sees fewer than
   two stations and for ten seconds after it lost or regained one.
   Nothing changes when the log is unavailable. See
-  [docs/lighthouse-visibility.md](lighthouse-visibility.md).
+  [docs/lighthouse-visibility.md](https://github.com/VividNightmareUnleashed/QuestCalibrator/blob/alpha/docs/lighthouse-visibility.md).
 - **Field anchors (spatial correction field)** — multi-point calibration interpolated by each
   device's own position (Gaussian RBF blending in the driver), correcting SLAM map
   deformation that a single rigid transform cannot represent.

@@ -14,8 +14,12 @@
 #include <Eigen/Geometry>
 
 // The flattened OpenVR headers both define the vr types but cannot coexist in
-// one TU. The harness and JumpDetector.cpp (PCH-free, in both builds) reach
-// openvr_driver.h through Protocol.h, so this include must stay conditional.
+// one TU; the test harness already has openvr_driver.h via Protocol.h, the
+// overlay uses openvr.h — except JumpDetector.cpp, which is PCH-free and
+// reaches openvr_driver.h through Protocol.h in both builds. So the guard is
+// load-bearing in the shipped overlay too, not only in the harness: replacing
+// it with an unconditional include breaks that TU. Only the yaw projection
+// below is shared with it, and that one names no vr type.
 #if !defined(_OPENVR_API) && !defined(_OPENVR_DRIVER_API)
 #include <openvr.h>
 #endif
@@ -29,14 +33,25 @@
 namespace questcal
 {
 
-// The single yaw projection behind every raw-universe delta in the overlay, so
-// the jump path's applied delta and the chaperone re-anchor are the same
-// transform. A recenter preserves gravity, so only the twist around +Y may be
-// applied; worldFromDriver's tiny tilt residual would move gravity itself.
-// `unitRotation` must be normalized; the optional residual (the discarded tilt)
-// is diagnostic only. Normalizing the twist directly keeps x and z exactly
-// zero, and a rotation of almost exactly 180 degrees about a horizontal axis,
-// which has no recoverable heading, answers identity.
+// The single yaw projection behind every raw-universe delta in the overlay.
+// A recenter preserves gravity, so only the twist around +Y may ever be
+// applied: worldFromDriver may carry a tiny tilt residual, and applying that
+// tilt to a room-scale calibration would move gravity itself. Contract
+// invariants 14/15 require the jump path's applied delta and the chaperone
+// path's standing-center re-anchor to be the *same* transform, so both derive
+// it here — they used to be two implementations with nothing linking them, and
+// a change to the projection convention applied to one would have moved the
+// room relative to the calibration by the difference.
+//
+// `unitRotation` must be normalized: the residual is an angular distance,
+// which is defined only between unit quaternions. Only JumpDetector consumes
+// the residual (reported for diagnostics, never applied), hence an opt-in
+// out-param rather than a second return.
+//
+// The twist is normalized directly rather than round-tripped through
+// atan2/AngleAxisd: that keeps x and z exactly zero, and the degenerate case —
+// a rotation of almost exactly 180 degrees about a horizontal axis, which has
+// no recoverable heading at all — has to answer identity either way.
 inline Eigen::Quaterniond YawOnlyRotation(
 	const Eigen::Quaterniond &unitRotation, double *residualTiltRadians = nullptr)
 {
@@ -51,29 +66,39 @@ inline Eigen::Quaterniond YawOnlyRotation(
 	return yaw;
 }
 
-// The gravity-preserving (yaw + translation) raw-universe delta between two
-// worldFromDriver transforms, which come from trusted ring samples or a
-// validated snapshot. Fails when the delta's translation is out of bounds.
+// Derive the same gravity-preserving (yaw + translation) raw-universe delta
+// used by JumpDetector: a thin validated wrapper over the shared projection
+// above, with the trust-boundary checks that only this side needs — the
+// chaperone path fails closed on out-of-bounds input, while JumpDetector's
+// samples have already cleared the ring boundary.
 inline bool WorldFromDriverDelta(
 	const Eigen::Quaterniond &oldRotation, const Eigen::Vector3d &oldTranslation,
 	const Eigen::Quaterniond &newRotation, const Eigen::Vector3d &newTranslation,
 	Eigen::Quaterniond &deltaRotation, Eigen::Vector3d &deltaTranslation)
 {
+	if (!IsValidRotation(oldRotation) || !IsValidRotation(newRotation) ||
+		!IsBoundedVector(oldTranslation, protocol::limits::MaxAbsTranslationMeters) ||
+		!IsBoundedVector(newTranslation, protocol::limits::MaxAbsTranslationMeters))
+		return false;
+
 	Eigen::Quaterniond fullDelta =
 		(newRotation.normalized() * oldRotation.normalized().conjugate()).normalized();
 	Eigen::Quaterniond yaw = YawOnlyRotation(fullDelta);
 
 	deltaRotation = yaw;
 	deltaTranslation = newTranslation - yaw * oldTranslation;
-	return IsBoundedVector(deltaTranslation, protocol::limits::MaxAbsTranslationMeters);
+	return IsValidRotation(deltaRotation) &&
+		IsBoundedVector(deltaTranslation, protocol::limits::MaxAbsTranslationMeters);
 }
 
-// Inputs come from trusted ring samples or values validated when loaded.
 inline bool WorldFromDriverChanged(
 	const Eigen::Quaterniond &oldRotation, const Eigen::Vector3d &oldTranslation,
 	const Eigen::Quaterniond &newRotation, const Eigen::Vector3d &newTranslation,
 	double rotationEpsilonRadians = 1e-5, double translationEpsilonMeters = 1e-4)
 {
+	if (!IsValidRotation(oldRotation) || !IsValidRotation(newRotation) ||
+		!IsFinite(oldTranslation) || !IsFinite(newTranslation))
+		return true;
 	return oldRotation.normalized().angularDistance(newRotation.normalized()) >
 			rotationEpsilonRadians ||
 		(newTranslation - oldTranslation).norm() > translationEpsilonMeters;
@@ -109,11 +134,10 @@ inline vr::HmdMatrix34_t DeltaTimesPose(
 
 // Corner-wise geometry comparison with a tolerance: the snapshot round-trips
 // through JSON and SteamVR's live copy, so exact float equality is too strict.
-// A non-finite corner (SteamVR's live copy is unchecked) never matches.
 inline bool QuadsMatch(const std::vector<vr::HmdQuad_t> &a,
 	const std::vector<vr::HmdQuad_t> &b, float epsMeters)
 {
-	if (a.size() != b.size())
+	if (!std::isfinite(epsMeters) || epsMeters < 0.0f || a.size() != b.size())
 		return false;
 
 	for (size_t i = 0; i < a.size(); ++i)

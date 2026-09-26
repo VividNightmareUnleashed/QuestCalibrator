@@ -8,10 +8,27 @@ PoseStreamHub::~PoseStreamHub()
 
 void PoseStreamHub::Start(const char *shmemName)
 {
+	if (drainThread.joinable())
+		return;
+
 	{
-		std::lock_guard<std::mutex> lock(mutex);   // like every other history access
-		history.resize(static_cast<size_t>(capacity));
+		// Under the mutex like every other history access, even though no drain
+		// thread is running yet: the consumers touched below are readable from
+		// any thread that already holds a consumer id.
+		std::lock_guard<std::mutex> lock(mutex);
+		history.resize(static_cast<size_t>(HistoryCapacity));
+
+		// A restart is an observation hole of unknown length. Without a boundary
+		// here, post-restart samples would land directly adjacent to
+		// pre-restart ones and consumers would bridge a gap they were never
+		// told about - exactly the condition the monitors Reset() on.
+		if (head != 0)
+			AppendSessionBoundaryLocked();
 	}
+#ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
+	resetDeferralsForTest.store(0, std::memory_order_relaxed);
+#endif
+	stopRequested.store(false, std::memory_order_release);
 	drainThread = std::thread(&PoseStreamHub::DrainLoop, this, std::string(shmemName));
 }
 
@@ -30,82 +47,34 @@ int PoseStreamHub::CreateConsumer()
 	return static_cast<int>(consumers.size()) - 1;
 }
 
-PoseStreamHub::Diagnostics PoseStreamHub::ReadDiagnostics()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	Diagnostics snapshot = diagnostics;
-	snapshot.reportedLoss = sourceDropCount;
-	snapshot.open = RingOpen();
-	return snapshot;
-}
-
 void PoseStreamHub::AccountForHistoryOverflowLocked(int consumer, uint64_t &dropped)
 {
 	auto &cursor = consumers[consumer];
-	uint64_t oldest = head > capacity ? head - capacity : 0;
+	uint64_t oldest = head > HistoryCapacity ? head - HistoryCapacity : 0;
 	if (cursor.historyPosition >= oldest)
 		return;
 
 	// History also contains standalone gap markers. Count only actual samples
 	// overwritten here; their source-drop payload is accounted independently by
 	// sourceDropCountBefore on the first retained entry.
-	uint64_t oldestSampleCount = history[oldest % capacity].sampleCountBefore;
+	uint64_t oldestSampleCount = history[oldest % HistoryCapacity].sampleCountBefore;
 	dropped += oldestSampleCount - cursor.samplePosition;
-	cursor.holeSize += oldestSampleCount - cursor.samplePosition;
 	cursor.samplePosition = oldestSampleCount;
 	cursor.historyPosition = oldest;
 }
 
-uint64_t PoseStreamHub::Drain(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole *hole)
+uint64_t PoseStreamHub::Drain(int consumer, std::vector<protocol::DevicePoseSample> &out)
 {
 	out.clear();
-	Hole found;
-	const uint64_t dropped = DrainAppend(consumer, out, found);
-	if (hole)
-		*hole = found;
-	return dropped;
-}
 
-PoseStreamHub::DrainSummary PoseStreamHub::DrainThroughGaps(int consumer,
-	std::vector<protocol::DevicePoseSample> &out)
-{
-	out.clear();
-	DrainSummary summary;
-	// Each pass ends at a gap or at the head as it stood when the pass began.
-	// The bound only guards against a producer that outruns the copy; in
-	// practice a pass or two reaches the head.
-	for (int pass = 0; pass < 64; ++pass)
-	{
-		const size_t before = out.size();
-		Hole hole;
-		const uint64_t dropped = DrainAppend(consumer, out, hole);
-		if (dropped > 0)
-		{
-			summary.loss += dropped;
-			++summary.gaps;
-		}
-		// The whole hole, which an earlier pass or call may have begun.
-		summary.largestGap = (std::max)(summary.largestGap, hole.size);
-		if (dropped == 0 && out.size() == before)
-			break;
-	}
-	return summary;
-}
-
-uint64_t PoseStreamHub::StreamBoundaries()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	return diagnostics.streamBoundaries;
-}
-
-uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole &hole)
-{
-	const size_t start = out.size();
 	uint64_t dropped = 0;
 	uint64_t snapshotHead = 0;
 	size_t reserveCount = 0;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		if (consumer < 0 || consumer >= static_cast<int>(consumers.size()))
+			return 0;
+
 		AccountForHistoryOverflowLocked(consumer, dropped);
 		uint64_t &cursor = consumers[consumer].historyPosition;
 		snapshotHead = head;
@@ -114,11 +83,12 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 	// One allocation for the whole backlog, taken OUTSIDE the mutex. Reserving
 	// only a chunk would move the growth into the copy loop below, which runs
 	// under the producer mutex - the opposite of what the chunking is for.
-	out.reserve(start + reserveCount);
+	out.reserve(reserveCount);
 
 	// Do not hold the producer mutex through an arbitrarily large backlog copy.
 	// A fixed snapshot makes this loop finite; chunking lets the dedicated
 	// ring-drain thread publish between batches.
+	constexpr uint64_t CopyChunk = 512;
 	for (;;)
 	{
 		bool copyComplete = false;
@@ -130,7 +100,7 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 			auto &consumerCursor = consumers[consumer];
 			uint64_t &cursor = consumerCursor.historyPosition;
 			uint64_t &dropCursor = consumerCursor.sourceDropPosition;
-			const uint64_t end = snapshotHead;   // head only grows
+			uint64_t end = std::min(snapshotHead, head);
 			uint64_t copiedThisChunk = 0;
 			for (;;)
 			{
@@ -140,11 +110,11 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 				// contract - never acknowledge a gap after copying an older
 				// prefix. Reporting it before the NEXT batch's front is what
 				// makes `dropped` always describe out.front().
-				uint64_t oldest = head > capacity ? head - capacity : 0;
+				uint64_t oldest = head > HistoryCapacity ? head - HistoryCapacity : 0;
 				bool overflowPending = cursor < oldest;
 				bool sourcePending = !overflowPending && cursor < end &&
-					history[cursor % capacity].sourceDropCountBefore > dropCursor;
-				if ((overflowPending || sourcePending) && out.size() > start)
+					history[cursor % HistoryCapacity].sourceDropCountBefore > dropCursor;
+				if ((overflowPending || sourcePending) && !out.empty())
 					return dropped;
 
 				if (overflowPending)
@@ -155,33 +125,22 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 				}
 				if (sourcePending)
 				{
-					const auto &gapEntry = history[cursor % capacity];
+					const auto &gapEntry = history[cursor % HistoryCapacity];
 					dropped += gapEntry.sourceDropCountBefore - dropCursor;
-					consumerCursor.holeSize += gapEntry.sourceDropCountBefore - dropCursor;
 					dropCursor = gapEntry.sourceDropCountBefore;
 				}
-				if (cursor >= end || copiedThisChunk >= copyChunk)
+				if (cursor >= end || copiedThisChunk >= CopyChunk)
 					break;
 
-				const auto &entry = history[cursor % capacity];
+				const auto &entry = history[cursor % HistoryCapacity];
 				++cursor;
 				++copiedThisChunk;
 				consumerCursor.samplePosition = entry.sampleCountBefore +
 					(entry.hasSample ? 1 : 0);
 				if (entry.hasSample)
-				{
-					// The batch's first sample closes the hole in front of it.
-					if (out.size() == start)
-						hole = { consumerCursor.holeSize, consumerCursor.holeHasBoundary };
-					consumerCursor.holeSize = 0;
-					consumerCursor.holeHasBoundary = false;
 					out.push_back(entry.sample);
-				}
 			}
 			copyComplete = cursor >= end;
-			// Nothing copied: report the hole still open, under this lock.
-			if (copyComplete && out.size() == start)
-				hole = { consumerCursor.holeSize, consumerCursor.holeHasBoundary };
 #ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
 			chunkHook = drainChunkHookForTest;
 #endif
@@ -200,19 +159,13 @@ uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePo
 void PoseStreamHub::DiscardBacklog(int consumer)
 {
 	std::lock_guard<std::mutex> lock(mutex);
-	consumers[consumer] = { head, sampleCount, sourceDropCount };
+	if (consumer >= 0 && consumer < static_cast<int>(consumers.size()))
+		consumers[consumer] = { head, sampleCount, sourceDropCount };
 }
 
 void PoseStreamHub::AppendSampleLocked(const protocol::DevicePoseSample &sample)
 {
-	if (sample.deviceId < diagnostics.devices.size())
-	{
-		auto &device = diagnostics.devices[sample.deviceId];
-		++device.received;
-		device.streamBoundary = diagnostics.streamBoundaries;
-		device.latest = sample;
-	}
-	auto &entry = history[head % capacity];
+	auto &entry = history[head % HistoryCapacity];
 	entry = HistoryEntry{};
 	entry.sample = sample;
 	entry.sourceDropCountBefore = sourceDropCount;
@@ -224,8 +177,9 @@ void PoseStreamHub::AppendSampleLocked(const protocol::DevicePoseSample &sample)
 
 void PoseStreamHub::AppendGapLocked(uint64_t count)
 {
-	++diagnostics.gapMarkers;
-	auto &entry = history[head % capacity];
+	if (count == 0)
+		return;
+	auto &entry = history[head % HistoryCapacity];
 	entry = HistoryEntry{};
 	entry.sourceDropCountBefore = (sourceDropCount += count);
 	entry.sampleCountBefore = sampleCount;
@@ -234,12 +188,12 @@ void PoseStreamHub::AppendGapLocked(uint64_t count)
 
 void PoseStreamHub::AppendSessionBoundaryLocked()
 {
-	++diagnostics.streamBoundaries;
-	// The single-count marker says "there is a hole here" (see Drain). The open
-	// hole keeps its size and now holds a boundary, which the drain reports
-	// with the first sample after it.
+	// Everything buffered may predate a universe rebase, so discard it rather
+	// than hand a consumer positionally incoherent history. The marker is a
+	// single count deliberately: it says "there is a hole here", not how many
+	// samples were behind it (see Drain's contract in the header).
 	for (auto &consumer : consumers)
-		consumer = { head, sampleCount, sourceDropCount, consumer.holeSize, true };
+		consumer = { head, sampleCount, sourceDropCount };
 	AppendGapLocked(1);
 }
 
@@ -248,7 +202,7 @@ void PoseStreamHub::AppendSampleForTest(const protocol::DevicePoseSample &sample
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	if (history.empty())
-		history.resize(static_cast<size_t>(capacity));
+		history.resize(static_cast<size_t>(HistoryCapacity));
 	AppendSampleLocked(sample);
 }
 
@@ -256,16 +210,8 @@ void PoseStreamHub::AppendGapForTest(uint64_t count)
 {
 	std::lock_guard<std::mutex> lock(mutex);
 	if (history.empty())
-		history.resize(static_cast<size_t>(capacity));
+		history.resize(static_cast<size_t>(HistoryCapacity));
 	AppendGapLocked(count);
-}
-
-void PoseStreamHub::AppendSessionBoundaryForTest()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	if (history.empty())
-		history.resize(static_cast<size_t>(capacity));
-	AppendSessionBoundaryLocked();
 }
 
 void PoseStreamHub::SetDrainChunkHookForTest(std::function<void()> hook)
@@ -273,24 +219,16 @@ void PoseStreamHub::SetDrainChunkHookForTest(std::function<void()> hook)
 	std::lock_guard<std::mutex> lock(mutex);
 	drainChunkHookForTest = std::move(hook);
 }
-
-void PoseStreamHub::SetGeometryForTest(uint64_t historyCapacity, uint64_t chunk)
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	if (head != 0 || historyCapacity == 0 || chunk == 0)
-		return;
-	capacity = historyCapacity;
-	copyChunk = chunk;
-	history.assign(static_cast<size_t>(capacity), HistoryEntry{});
-}
 #endif
 
 void PoseStreamHub::DrainLoop(const std::string &shmemName)
 {
-	// An exception escaping a thread entry calls std::terminate with no
-	// unwind, so ShutdownCalibrator would never flush the debounced profile
-	// and settings writes. The scratch buffer grows to a full ring drain, so
-	// bad_alloc is reachable: stop draining instead, and RingOpen() reads false.
+	// An exception escaping a thread entry calls std::terminate, with no
+	// unwind: wWinMain's catch blocks would never run, so ShutdownCalibrator
+	// would never flush the debounced profile and settings writes. The scratch
+	// buffer can hold a full ring drain and the history append allocates, so
+	// bad_alloc is reachable here. Give up draining instead of killing the
+	// process - RingOpen() then reads false and the UI reports no driver.
 	try
 	{
 		DrainRing(shmemName);
@@ -304,7 +242,10 @@ void PoseStreamHub::DrainLoop(const std::string &shmemName)
 void PoseStreamHub::DrainRing(const std::string &shmemName)
 {
 	protocol::PoseRingReader reader;
-	// A sample or a gap, as the ring reader's two callbacks delivered it.
+	// A pending entry is a sample OR a gap; the tag is explicit because the
+	// ring reader delivers the two through separate callbacks and the history
+	// stores them with their own flag. Inferring it from a non-zero count would
+	// publish a zero-count gap as a default-constructed pose.
 	struct PendingEntry
 	{
 		bool isGap = false;

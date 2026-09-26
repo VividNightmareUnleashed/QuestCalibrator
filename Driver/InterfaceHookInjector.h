@@ -15,9 +15,3 @@ uint32_t PoseUpdateHookMask();
 // resident with its hooks disabled, and anything a detour reads (the pose ring
 // above all) must not be released by the caller.
 bool DisableHooks();
-
-#ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
-// Called inside TryInstallPoseHook with the setup mutex held, after the accept
-// recheck and before the ready flag is read.
-extern void (*TryInstallAfterAcceptCheckForTest)();
-#endif

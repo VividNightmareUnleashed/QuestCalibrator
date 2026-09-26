@@ -51,13 +51,18 @@ protocol::SetAlignmentField BuildAlignmentField(const CalibrationContext &ctx)
 	return field;
 }
 
-// Only reached with the profile enabled, after SynchronizeCalibrationDriver has
-// already used VRSystem().
 SyncDevice EnumerateDevice(uint32_t id, const DriverSyncDesired &desired)
 {
 	SyncDevice device;
+	if (id >= vr::k_unMaxTrackedDeviceCount)
+		return device;
+
 	device.id = id;
-	switch (vr::VRSystem()->GetTrackedDeviceClass(id))
+	auto system = vr::VRSystem();
+	if (!system)
+		return device;
+
+	switch (system->GetTrackedDeviceClass(id))
 	{
 	case vr::TrackedDeviceClass_Invalid:
 		return device;
@@ -144,7 +149,7 @@ bool ReadTrackedDeviceString(uint32_t id,
 		return false;
 
 	value.assign(buffer, size - 1);
-	return true;
+	return !value.empty();
 }
 
 bool ReadCurrentHmdIdentity(std::string &trackingSystem, std::string &serial)
@@ -179,11 +184,6 @@ void StartCalibrationDriver()
 void StopCalibrationDriver()
 {
 	Worker.Stop();
-}
-
-DriverSyncTracker CaptureDriverSyncDiagnostics()
-{
-	return Tracker;
 }
 
 void SynchronizeCalibrationDriver(CalibrationContext &ctx)
@@ -255,14 +255,20 @@ void SynchronizeCalibrationDriver(CalibrationContext &ctx)
 		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 			job.devices[id] = EnumerateDevice(id, desired);
 
-	// Derive the monitors' device identities now, from the devices the worker
-	// ships, so a sync in flight never reads as a disabled profile. The
-	// completion re-applies the same identities plus the driver's verdict.
+	// The identities the monitors steer by are read off the enumerated devices,
+	// not off the driver's answer: derive them now, from the very devices the
+	// worker ships, so a sync in flight never reads as a disabled profile and
+	// the jump/drift/continuous monitors keep their history across the round
+	// trip. The completion re-applies the same identities -- the same function
+	// of the same devices -- and adds only the driver's verdict.
 	ClearDeviceIdentities(ctx);
 	if (job.request.enabled)
 	{
 		const DriverSlotState slots = DeriveDriverSlotState(desired,
-			[&job](uint32_t id, const DriverSyncDesired &) { return job.devices[id]; });
+			[&job](uint32_t id, const DriverSyncDesired &)
+			{
+				return id < job.devices.size() ? job.devices[id] : SyncDevice();
+			});
 		if (slots.hmdMismatch)
 		{
 			ctx.enabled = false;

@@ -2,7 +2,6 @@
 
 #include "CalibrationEngine.h"
 #include "ProfileValidation.h"
-#include "RingSampleGate.h"
 
 #include "../common/NumericValidation.h"
 #include "../common/Protocol.h"
@@ -18,7 +17,9 @@
 // composes world poses from the shared-memory stream, plus the pure ingestion
 // policy that governs them: the trust boundary a sample must clear, the
 // composition itself, and which composed samples may feed the drift monitor.
-// Kept here, not in Calibration.cpp, so the harness can drive it.
+// The overlay used to spell those policies out at each consumer inside
+// Calibration.cpp, which no test compiles; they live here so there is one copy
+// and the harness can drive it.
 struct RingSampleParts
 {
 	Eigen::Quaterniond wfdRot;
@@ -47,7 +48,6 @@ struct DriverLocalPoseSample
 // A worldFromDriver transition describes a real raw-universe rebase only if
 // adjacent driver-local poses remain on their reported trajectory. An inverse
 // local-pose rewrite is bookkeeping that leaves the composed raw pose still.
-// Both samples come from trusted ring samples (IsUsableRingSample).
 inline bool IsDriverLocalPoseContinuous(
 	const DriverLocalPoseSample &previous,
 	const DriverLocalPoseSample &current,
@@ -56,7 +56,17 @@ inline bool IsDriverLocalPoseContinuous(
 	double maxRotationErrorRadians = MaxLocalRotationErrorRadians)
 {
 	double dt = current.time - previous.time;
-	if (dt <= 0.0 || dt > maxFrameSeconds)
+	auto validRotation = [](const Eigen::Quaterniond &rotation) {
+		double normSquared = rotation.squaredNorm();
+		return rotation.coeffs().allFinite() && std::isfinite(normSquared) &&
+			normSquared > 1e-12;
+	};
+	if (!std::isfinite(dt) || dt <= 0.0 || dt > maxFrameSeconds ||
+		!validRotation(previous.rotation) || !validRotation(current.rotation) ||
+		!previous.position.allFinite() || !current.position.allFinite() ||
+		!previous.velocity.allFinite() || !current.velocity.allFinite() ||
+		!previous.angularVelocity.allFinite() ||
+		!current.angularVelocity.allFinite())
 		return false;
 
 	Eigen::Vector3d predictedPosition = previous.position +
@@ -65,6 +75,8 @@ inline bool IsDriverLocalPoseContinuous(
 	Eigen::Vector3d meanAngularVelocity =
 		0.5 * (previous.angularVelocity + current.angularVelocity);
 	double predictedAngle = meanAngularVelocity.norm() * dt;
+	if (!std::isfinite(predictedAngle))
+		return false;
 	if (predictedAngle > 1e-12)
 	{
 		predictedRotation = Eigen::Quaterniond(Eigen::AngleAxisd(
@@ -84,43 +96,48 @@ inline bool IsDriverLocalPoseContinuous(
 inline bool IsFreshCaptureTime(
 	double sampleTime, double qpcNow, double maxAgeSeconds)
 {
-	double age = qpcNow - sampleTime;   // NaN fails both comparisons
-	return age >= 0.0 && age <= maxAgeSeconds;
-}
-
-// Raw collection rides through the isolated poses the driver drops when two
-// device threads contend for a queue claim: one or two at a time, every few
-// seconds to minutes with a dozen devices on the ring. The solver already
-// refuses to interpolate across a dropout, so a short hole costs a pair or
-// two. A gap past this size (about 40 ms of a dozen devices' traffic) means
-// the overlay stalled, and a session boundary means the samples on either
-// side may not share a clock or a universe; either stops the collection.
-constexpr uint64_t MaxToleratedCollectionGap = 256;
-
-inline bool CollectionGapTolerable(uint64_t largestGap, bool crossedSessionBoundary)
-{
-	return !crossedSessionBoundary && largestGap <= MaxToleratedCollectionGap;
-}
-
-// The runtime monitors and both continuous loops ride through the same
-// contended-publish drops, on a much shorter leash. All of them judge
-// continuity by sample time, so a lost pose costs them a pair, not a window.
-// The leash is set by the drift monitor, which tells a tracking loss from a
-// hole in its own input by time alone, so a tolerated hole must never span
-// its 0.3 s lossGap: eight poses of a lone 72 Hz headset, the sparsest stream
-// there is, last 110 ms. Anything larger, and any session boundary, still
-// resets them.
-constexpr uint64_t MaxToleratedMonitorGap = 8;
-
-inline bool MonitorGapTolerable(uint64_t gap, bool crossedSessionBoundary)
-{
-	return !crossedSessionBoundary && gap <= MaxToleratedMonitorGap;
+	if (!std::isfinite(sampleTime) || !std::isfinite(qpcNow) ||
+		!std::isfinite(maxAgeSeconds) || maxAgeSeconds < 0.0)
+		return false;
+	double age = qpcNow - sampleTime;
+	return std::isfinite(age) && age >= 0.0 && age <= maxAgeSeconds;
 }
 
 } // namespace ringpose
 
-// IsUsableRingSample and IsTrustedRingSample, the accept-or-drop gate, are in
-// RingSampleGate.h.
+// The per-field numeric checks are the shared wire vocabulary
+// (common/NumericValidation.h), not a ring-private one: the driver's inbound
+// gate asks the same questions of the same two C-array types, and a bound added
+// to TransformLimits.h has to reach both. IsAcceptableQuaternion in particular
+// is the ACCEPT-OR-DROP half of the shared quaternion pair - deliberately not
+// the driver's sanitizing NormalizeQuaternion, which would turn a huge finite
+// quaternion into accepted data here instead of tracking absence.
+using questcal::numeric::IsAcceptableQuaternion;
+using questcal::numeric::IsBoundedVector3;
+
+// A driver can mark a pose Running_OK while still supplying malformed numeric
+// fields. Validate the complete raw sample before any solver or runtime monitor
+// composes it; invalid samples are treated as tracking absence.
+inline bool IsUsableRingSample(const protocol::DevicePoseSample &s, double qpcToSeconds)
+{
+	if (!std::isfinite(qpcToSeconds) || qpcToSeconds <= 0.0 ||
+		!std::isfinite(s.poseTimeOffset) ||
+		std::abs(s.poseTimeOffset) > protocol::limits::MaxAbsTimeOffsetSeconds ||
+		!IsAcceptableQuaternion(s.worldFromDriverRotation) ||
+		!IsAcceptableQuaternion(s.rotation) ||
+		!IsBoundedVector3(s.worldFromDriverTranslation,
+			protocol::limits::MaxAbsTranslationMeters) ||
+		!IsBoundedVector3(s.position, protocol::limits::MaxAbsPosePositionMeters) ||
+		!IsBoundedVector3(s.velocity,
+			protocol::limits::MaxAbsLinearVelocityMetersPerSecond) ||
+		!IsBoundedVector3(s.angularVelocity,
+			protocol::limits::MaxAbsAngularVelocityRadiansPerSecond))
+		return false;
+
+	double composedTime = static_cast<double>(s.sampleTimeQpc) * qpcToSeconds + s.poseTimeOffset;
+	return std::isfinite(composedTime) &&
+		std::abs(composedTime) <= protocol::limits::MaxAbsPoseTimestampSeconds;
+}
 
 inline double RingSampleTime(const protocol::DevicePoseSample &s, double qpcToSeconds)
 {
@@ -144,6 +161,20 @@ inline RingSampleParts UnpackRingSample(const protocol::DevicePoseSample &s)
 	};
 }
 
+// The complete overlay-side trust boundary for one ring sample: the driver must
+// claim the pose is valid AND that the device is actually tracking, and the
+// numeric fields must survive validation. Spelled once because every consumer
+// (chaperone baseline, collector, runtime monitor, continuous loop) must ask the
+// same question — a bound added to the numeric half has to reach all four, and
+// they used to carry four hand-written copies of this conjunction.
+inline bool IsTrustedRingSample(
+	const protocol::DevicePoseSample &s, double qpcToSeconds)
+{
+	return s.poseIsValid &&
+		s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK) &&
+		IsUsableRingSample(s, qpcToSeconds);
+}
+
 // A misbehaving driver can publish poseIsValid=true with field values that pass
 // the per-field ring checks yet compose into something unusable; gate the
 // composed pose too so no consumer (solver, continuous alignment, drift
@@ -163,8 +194,11 @@ inline bool IsUsableComposedSample(const questcal::PoseSample &s)
 // Compose the raw-world pose (worldFromDriver * driver pose) from a ring sample
 // and convert its capture timestamp to seconds on the QPC clock — the single
 // ingestion path from the shared-memory stream into solver/monitor space.
-// Returns false for anything the trust boundary rejects and leaves `out`
-// untouched: an invalid sample is tracking absence, never a defaulted pose.
+//
+// Returns false for anything the trust boundary rejects, and leaves `out`
+// untouched so a rejection can never be mistaken for data: an invalid sample is
+// tracking absence, never a defaulted pose. `qpcToSeconds` is a parameter rather
+// than a file-static so this stays pure and the harness can drive it.
 inline bool TryComposeRingSample(const protocol::DevicePoseSample &s,
 	double qpcToSeconds, questcal::PoseSample &out)
 {
@@ -187,32 +221,6 @@ inline bool TryComposeRingSample(const protocol::DevicePoseSample &s,
 	out = composed;
 	return true;
 }
-
-struct RingInputDiagnostics
-{
-	uint64_t received = 0, accepted = 0;
-	uint64_t trackingRejected = 0, numericRejected = 0;
-	double lastCaptureTime = 0.0, lastAcceptedCaptureTime = 0.0;
-
-	bool Compose(const protocol::DevicePoseSample &s, double qpcToSeconds,
-		questcal::PoseSample &out)
-	{
-		++received;
-		lastCaptureTime = RingCaptureTime(s, qpcToSeconds);
-		if (TryComposeRingSample(s, qpcToSeconds, out))
-		{
-			++accepted;
-			lastAcceptedCaptureTime = lastCaptureTime;
-			return true;
-		}
-		if (!s.deviceIsConnected || !s.poseIsValid ||
-			s.trackingResult != static_cast<uint32_t>(vr::TrackingResult_Running_OK))
-			++trackingRejected;
-		else
-			++numericRejected;
-		return false;
-	}
-};
 
 namespace ringpose
 {
@@ -242,19 +250,14 @@ inline Eigen::Vector3d BaseCalibratedPosition(
 // the user is right next to, and a supported resting body passes the
 // stationarity gates then "slides" with slow posture creep.
 //
-// A base station is on the target side too, but it is the universe, not a
-// device in it: its early poses move by metres while SteamVR settles where it
-// stands (one session read two as losses recovered 2.3 m away). A device whose
-// class has not been read yet (the scan runs every 2 s) is held back likewise.
-//
-// The mounted-tracker exclusion is the only thing keeping a resting head out of
-// the drift feed, which would otherwise call an actively maintained
-// calibration stale.
+// All three rules are load-bearing and are one predicate on purpose. The
+// mounted-tracker exclusion in particular is the only thing keeping a resting
+// head out of the drift feed: without it the monitor logs StationarySlide,
+// UpdateDriftScore crosses the stale threshold, and the user is told a
+// calibration that is being actively maintained looks poor.
 struct DriftFeedCandidate
 {
 	uint32_t deviceId = vr::k_unTrackedDeviceIndexInvalid;
-	// Invalid until the property scan has read it.
-	vr::ETrackedDeviceClass deviceClass = vr::TrackedDeviceClass_Invalid;
 	bool referenceSide = false;   // device is in the reference tracking system
 	bool targetSide = false;      // ... the target tracking system
 	// The HMD-mounted continuous-calibration tracker, or invalid when the
@@ -278,20 +281,9 @@ struct DriftFeedCandidate
 // what counts as "within arm's reach".
 constexpr double DriftHmdProximityWindowSeconds = 3.0;
 constexpr double DriftHmdProximityMeters = 1.2;
-// The sphere misses the lower body: knee and foot trackers sit 1.2 to 1.7 m
-// below the head of a standing user, pass the stationarity gates while the
-// user stands still, and "slide" a centimetre with each weight shift. One
-// session built a stale verdict out of five such events. Anything below the
-// headset within this horizontal radius is worn, or set down at the user's
-// feet, and says nothing about either universe.
-constexpr double DriftHmdBodyRadiusMeters = 0.8;
 
 inline bool AnchorsUniverse(const DriftFeedCandidate &c)
 {
-	if (c.deviceClass == vr::TrackedDeviceClass_Invalid ||
-		c.deviceClass == vr::TrackedDeviceClass_TrackingReference)
-		return false;
-
 	bool anchors =
 		(c.deviceId == vr::k_unTrackedDeviceIndex_Hmd && c.referenceSide) ||
 		(c.targetSide && c.deviceId != c.mountedTrackerId);
@@ -301,11 +293,7 @@ inline bool AnchorsUniverse(const DriftFeedCandidate &c)
 	{
 		Eigen::Vector3d refPos = BaseCalibratedPosition(c.calibratedRotation,
 			c.calibratedTranslationMeters, c.calibratedScale, c.rawPosition);
-		Eigen::Vector3d fromHead = refPos - c.hmdRawPosition;
-		if (fromHead.norm() < DriftHmdProximityMeters)
-			anchors = false;
-		else if (fromHead.y() < 0.0 &&
-			std::hypot(fromHead.x(), fromHead.z()) < DriftHmdBodyRadiusMeters)
+		if ((refPos - c.hmdRawPosition).norm() < DriftHmdProximityMeters)
 			anchors = false;
 	}
 	return anchors;

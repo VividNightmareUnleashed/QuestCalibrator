@@ -7,9 +7,14 @@
 #include <cmath>
 
 // Pure validation/sanitization for messages crossing from the overlay process
-// into vrserver: which field is checked against which bound (predicates in
-// common/NumericValidation.h). Setters publish only the returned copy, so a
-// malformed request cannot partially replace a previously good transform.
+// into vrserver. Setters publish only the returned copy, so a malformed request
+// cannot partially replace a previously good transform.
+//
+// The finite/bounded/normalize predicates themselves live in
+// common/NumericValidation.h alongside the bounds they read, because the ring
+// gate in the other direction (Overlay/RingPoseMath.h) asks the same questions
+// of the same two wire types. What stays here is the message shape: which field
+// is checked against which bound, and the transactional copy-out.
 namespace questcal
 {
 namespace driverinput
@@ -17,6 +22,8 @@ namespace driverinput
 
 using questcal::numeric::IsBoundedVector3;
 using questcal::numeric::IsFiniteBounded;
+// The sanitize-and-publish half of the shared quaternion pair; see
+// NumericValidation.h for why the ring's accept-or-drop half is not this one.
 using questcal::numeric::NormalizeQuaternion;
 
 inline bool ValidateAndSanitize(const protocol::SetDeviceTransform &input,
