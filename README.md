@@ -1,5 +1,10 @@
 # QuestCalibrator
 
+[![Latest release](https://img.shields.io/github/v/release/VividNightmareUnleashed/QuestCalibrator?label=stable&sort=semver&display_name=release)](https://github.com/VividNightmareUnleashed/QuestCalibrator/releases/latest)
+[![Latest prerelease](https://img.shields.io/github/v/release/VividNightmareUnleashed/QuestCalibrator?include_prereleases&label=prerelease&sort=semver&display_name=release&color=orange)](https://github.com/VividNightmareUnleashed/QuestCalibrator/releases)
+[![VirusTotal Scan](https://img.shields.io/badge/VirusTotal-1.2.0--rc.1%20scan-394EFF?logo=virustotal&logoColor=white)](https://www.virustotal.com/gui/file/087f523e45bc1412fc0894581f32f5d4b93c4fafdc1b9413ed4d1222df0ad619)
+[![Validation](https://github.com/VividNightmareUnleashed/QuestCalibrator/actions/workflows/validation.yml/badge.svg?branch=alpha)](https://github.com/VividNightmareUnleashed/QuestCalibrator/actions/workflows/validation.yml)
+
 Play in SteamVR with a Meta Quest headset and lighthouse trackers or controllers at
 the same time. QuestCalibrator lines the two tracking systems up into one playspace,
 so your full-body trackers sit where your body is, and it can keep them lined up
