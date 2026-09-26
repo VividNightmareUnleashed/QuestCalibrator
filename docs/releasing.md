@@ -5,37 +5,35 @@ tags must therefore use the unambiguous form
 `questcalibrator-vMAJOR.MINOR.PATCH` (for example,
 `questcalibrator-v1.0.1`). Do not retag or reuse an inherited version tag.
 
-This repository is private. Releases are published to the public repository
-[VividNightmareUnleashed/QuestCalibrator](https://github.com/VividNightmareUnleashed/QuestCalibrator),
-which holds only `public/README.md` (as its README), `LICENSE`,
-`THIRD-PARTY-NOTICES.txt`, the releases and the issue tracker. Installed copies
-look for updates there, so that repository must keep that exact name and stay
+Releases are published in this repository,
+[VividNightmareUnleashed/QuestCalibrator](https://github.com/VividNightmareUnleashed/QuestCalibrator).
+Installed copies look for updates there, so it must keep that exact name and stay
 public.
 
-Pushing a `questcalibrator-v*` tag runs `.github/workflows/release.yml` on a clean
-Windows runner. It checks out the tag and the VirtualQuest commit it pins, builds
-with the full solver suite (including the VirtualQuest scenarios and the formal-model
-links), replays the pose hub traces through their TLA+ model, runs the duplicate scan
-as an advisory gate (Clang-Tidy stays local, in the preflight below), checks the version
-against the tag, packages with `install\build-package.ps1`, scans with
-`install\virustotal-scan.ps1`, syncs the public repository's files, creates a
-**draft** release there with the zip, its `.sha256` and notes carrying the hash and
-the VirusTotal table, and then runs the install test on that draft. It refuses to run
-if the public repository already has a release for the tag. Its secrets:
+Pushing a `questcalibrator-v*` tag runs `.github/workflows/release.yml`. It stops at
+once in any other repository (a fork, or this one under another name). Otherwise, on
+a clean Windows runner, it checks out the tag and the VirtualQuest commit it pins,
+builds with the full solver suite (including the VirtualQuest scenarios and the
+formal-model links), replays the pose hub traces through their TLA+ model, runs the
+duplicate scan as an advisory gate (Clang-Tidy stays local, in the preflight below),
+checks the version against the tag, packages with `install\build-package.ps1`, scans
+with `install\virustotal-scan.ps1`, creates a **draft** release with the zip, its
+`.sha256` and notes carrying the hash and the VirusTotal table, and then runs the
+install test on that draft. It refuses to run if the tag already has a release. The
+release is written with the workflow's own token; its secrets are
 `VIRTUALQUEST_DEPLOY_KEY` (a read-only deploy key on VirtualQuest; required, so a
-release is never tested on less than a local build), `PUBLIC_RELEASE_TOKEN` (a
-fine-grained token for the public repository only, Contents read and write) and
-`VT_API_KEY` (without it the scan is skipped and the notes say so). A failed run can
-be repeated for an existing tag from the Actions tab (`workflow_dispatch`).
+release is never tested on less than a local build) and `VT_API_KEY` (without it the
+scan is skipped and the notes say so). A failed run can be repeated for an existing
+tag from the Actions tab (`workflow_dispatch`).
 
 `install\release.ps1` does the same locally, from the tagged commit with PowerShell 7,
-with your own `gh` login: the fallback when Actions is unavailable, or to save the
-Actions minutes. To keep the tag push from starting the workflow, put `[skip release]`
-in the message of the commit the tag points to (the version bump). It checks that the
-working tree is clean and that the tag is at HEAD and pushed; `-DryRun` stops before
-the public repository. Its VirusTotal key comes from `$env:VT_API_KEY` or the
-git-ignored `.env` at the repository root. Package output in `install/out/` and
-`install/test-out/` is never committed.
+with your own `gh` login: the fallback when Actions is unavailable. To keep the tag
+push from starting the workflow, put `[skip release]` in the message of the commit
+the tag points to (the version bump). It checks that the working tree is clean and
+that the tag is at HEAD and pushed; `-DryRun` stops before creating the release. Its
+VirusTotal key comes from `$env:VT_API_KEY` or the git-ignored `.env` at the
+repository root. Package output in `install/out/` and `install/test-out/` is never
+committed.
 
 ## Source preflight
 
@@ -98,9 +96,9 @@ git-ignored `.env` at the repository root. Package output in `install/out/` and
 
 ## Publish the GitHub Release
 
-- Open the draft the release workflow created in the public repository. Replace
-  the **Changes** section with the user-visible changes; it starts from the tag
-  message. Keep the SHA-256 and VirusTotal sections as generated.
+- Open the draft the release workflow created. Replace the **Changes** section
+  with the user-visible changes; it starts from the tag message. Keep the SHA-256
+  and VirusTotal sections as generated.
 - The draft carries only the package ZIP and its `.sha256`. Never add, replace or
   delete assets by hand; if the package must change, tag a new version.
 - Publish only when the install test passed. The release workflow runs it on the
@@ -123,7 +121,7 @@ git-ignored `.env` at the repository root. Package output in `install/out/` and
 
 ### Automatic-update contract
 
-The overlay's opt-in updater reads the GitHub Releases API of the public
+The overlay's opt-in updater reads the GitHub Releases API of the
 `VividNightmareUnleashed/QuestCalibrator` repository without a token.
 Keep these names exact or the release deliberately fails closed:
 
@@ -135,7 +133,7 @@ Keep these names exact or the release deliberately fails closed:
   the provenance record before publishing.
 
 Drafts, prereleases, inherited `v*` tags, packages without a SHA-256 digest, duplicate
-canonical assets, and download URLs outside the public repository are not eligible. The
+canonical assets, and download URLs outside this repository are not eligible. The
 updater checks and downloads only after the user opts in; applying the package remains
 an explicit action because Steam must be fully closed and Windows must approve the
 elevated installer.

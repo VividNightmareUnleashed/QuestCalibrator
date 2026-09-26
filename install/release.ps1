@@ -1,7 +1,7 @@
 #requires -Version 7
 # Builds, packages and scans a pushed questcalibrator-v* tag, then creates a
-# DRAFT release in the public releases repository with your own gh login.
-# Nothing reaches users until the draft is tested and published by hand.
+# DRAFT release for it with your own gh login. Nothing reaches users until the
+# draft is tested and published by hand.
 #
 #   .\install\release.ps1              # the tag at HEAD
 #   .\install\release.ps1 -DryRun      # build, package and scan only
@@ -11,7 +11,7 @@
 [CmdletBinding()]
 param(
     [string]$Tag = '',
-    # Stop before touching the public repository.
+    # Stop before creating the release.
     [switch]$DryRun,
     [switch]$SkipScan,
     # Build without running the solver tests; the notes say so.
@@ -24,7 +24,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$publicRepo = 'VividNightmareUnleashed/QuestCalibrator'
+# Installed copies look for updates only here.
+$releaseRepo = 'VividNightmareUnleashed/QuestCalibrator'
 
 function Invoke-Native {
     param([string]$What, [scriptblock]$Command)
@@ -56,9 +57,9 @@ try {
     }
 
     if (-not $DryRun) {
-        gh release view $Tag --repo $publicRepo --json tagName 2>$null | Out-Null
+        gh release view $Tag --repo $releaseRepo --json tagName 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) {
-            throw "$publicRepo already has a release for $Tag. Never replace a release; tag a new version."
+            throw "$releaseRepo already has a release for $Tag. Never replace a release; tag a new version."
         }
         $global:LASTEXITCODE = 0
     }
@@ -145,25 +146,12 @@ try {
         return
     }
 
-    # --- Public repository -----------------------------------------------------
-    $public = Join-Path ([IO.Path]::GetTempPath()) ("qc-public-" + [guid]::NewGuid())
-    Invoke-Native 'Cloning the public repository' { gh repo clone $publicRepo $public -- --quiet --depth 1 } | Out-Null
-    try {
-        Copy-Item public\README.md, LICENSE, THIRD-PARTY-NOTICES.txt -Destination $public -Force
-        git -C $public add README.md LICENSE THIRD-PARTY-NOTICES.txt
-        git -C $public diff --cached --quiet
-        if ($LASTEXITCODE -ne 0) {
-            Invoke-Native 'Committing the public files' { git -C $public commit --quiet -m "docs: update for $Tag" } | Out-Null
-            Invoke-Native 'Pushing the public files' { git -C $public push --quiet origin HEAD 2>&1 } | Out-Null
-        }
-        $global:LASTEXITCODE = 0
-    } finally {
-        Remove-Item -LiteralPath $public -Recurse -Force -ErrorAction SilentlyContinue
-    }
-
+    # --verify-tag: without it gh would make the tag itself, on the default
+    # branch, if the release repository did not have it.
     $arguments = @(
         'release', 'create', $Tag, $zip, "$zip.sha256",
-        '--repo', $publicRepo,
+        '--repo', $releaseRepo,
+        '--verify-tag',
         '--draft',
         '--title', "QuestCalibrator $version",
         '--notes-file', $notesPath

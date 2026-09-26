@@ -46,6 +46,6 @@ convention is still worth keeping.
 locks OpenVR driver DLLs, not just the VR processes.
 
 The scripts here are tracked; `out\` and `test-out\` are gitignored. Official
-packages are built locally by `release.ps1` and published as draft releases to
-the public repository (see `docs/releasing.md`). `virustotal-scan.ps1` scans a
-package on VirusTotal for the release notes.
+packages are built by the release workflow, or locally by `release.ps1`, and
+published as draft releases (see `docs/releasing.md`). `virustotal-scan.ps1`
+scans a package on VirusTotal for the release notes.

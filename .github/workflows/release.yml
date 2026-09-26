@@ -2,18 +2,20 @@ name: Release
 
 # Pushing a questcalibrator-v* tag builds it on a clean Windows machine with the
 # full test suite (VirtualQuest included) and the pose hub trace replay through
-# its TLA+ model, packages it, scans it on VirusTotal,
-# creates a DRAFT release in the public releases repository, and runs the
-# install test on that draft. Nothing reaches users until the draft is
-# published by hand.
+# its TLA+ model, packages it, scans it on VirusTotal, creates a DRAFT release
+# here, and runs the install test on that draft. Nothing reaches users until
+# the draft is published by hand.
+#
+# Installed copies look for updates only in VividNightmareUnleashed/QuestCalibrator,
+# so a run anywhere else (a fork, or this repository under another name) stops
+# before building.
 #
 # Secrets:
 #   VIRTUALQUEST_DEPLOY_KEY  read-only deploy key on VirtualQuest. Required: a
 #                            release is never tested on less than a local one.
-#   PUBLIC_RELEASE_TOKEN     fine-grained token for the public repository only,
-#                            with Contents: read and write.
 #   VT_API_KEY               VirusTotal API key. Without it the scan is skipped
 #                            and the release notes say so.
+# The release is written with the workflow's own token.
 on:
   push:
     tags: ['questcalibrator-v*']
@@ -31,23 +33,56 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  PUBLIC_REPO: VividNightmareUnleashed/QuestCalibrator
+  RELEASE_REPO: VividNightmareUnleashed/QuestCalibrator
   TAG: ${{ inputs.tag || github.ref_name }}
   TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
   TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 
-# Two jobs: build tests, packages and scans, and keeps the result with the run;
-# publish does everything that writes to the public repository, from that kept
-# package. A failed publish is repeated with "Re-run failed jobs" in a minute,
-# without building again.
+# Three jobs: check refuses what must not be built, in seconds; build tests,
+# packages and scans, and keeps the result with the run; publish creates the
+# draft from that kept package. A failed publish is repeated with "Re-run
+# failed jobs" in a minute, without building again.
 #
 # A tag on a commit whose message contains [skip release] starts nothing
-# (publish and the install test need build, so they skip too); cut that
-# release locally with install\release.ps1 instead. A run started by hand
-# always goes ahead.
+# (every later job needs check, so they skip too); cut that release locally
+# with install\release.ps1 instead. A run started by hand always goes ahead.
 jobs:
-  build:
+  check:
     if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Write only so that drafts are visible: a token that cannot write here
+    # sees no drafts, and would miss one this tag already has.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Refuse the wrong repository or an existing release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VQ_KEY_SET: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne $env:RELEASE_REPO) {
+            throw "Releases are made only in $env:RELEASE_REPO, where installed copies look for updates; this is $env:GITHUB_REPOSITORY."
+          }
+          if ($env:VQ_KEY_SET -ne 'true') {
+            throw 'The VIRTUALQUEST_DEPLOY_KEY secret is not set; a release needs the full test suite.'
+          }
+          # Only "release not found" means there is none; anything else (no
+          # access, a network error) must stop the run here rather than after
+          # the build.
+          $answer = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json tagName 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            throw "$env:GITHUB_REPOSITORY already has a release for $env:TAG. Never replace a release; tag a new version."
+          }
+          if ("$answer" -notmatch 'release not found') {
+            throw "Could not check $env:GITHUB_REPOSITORY for $env:TAG`: $answer"
+          }
+          $global:LASTEXITCODE = 0
+
+  build:
+    needs: check
     runs-on: windows-2022
     timeout-minutes: 90
     outputs:
@@ -61,29 +96,6 @@ jobs:
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
-
-      - name: Refuse to replace an existing release
-        timeout-minutes: 3
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-          VQ_KEY_SET: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
-        run: |
-          if (-not $env:GH_TOKEN) { throw 'The PUBLIC_RELEASE_TOKEN secret is not set.' }
-          if ($env:VQ_KEY_SET -ne 'true') {
-            throw 'The VIRTUALQUEST_DEPLOY_KEY secret is not set; a release needs the full test suite.'
-          }
-          # Only "release not found" means there is none; anything else (a bad
-          # token, no access, a network error) must stop the run here rather
-          # than after the build.
-          $answer = gh release view $env:TAG --repo $env:PUBLIC_REPO --json tagName 2>&1
-          if ($LASTEXITCODE -eq 0) {
-            throw "$env:PUBLIC_REPO already has a release for $env:TAG. Never replace a release; tag a new version."
-          }
-          if ("$answer" -notmatch 'release not found') {
-            throw "Could not check $env:PUBLIC_REPO for $env:TAG with PUBLIC_RELEASE_TOKEN: $answer"
-          }
-          $global:LASTEXITCODE = 0
 
       - name: Find the pinned VirtualQuest commit
         id: vq
@@ -234,89 +246,41 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     outputs:
       tag: ${{ env.TAG }}
 
     steps:
-      - name: Check out the tagged source
-        uses: actions/checkout@v4
-        with:
-          ref: refs/tags/${{ env.TAG }}
-          persist-credentials: false
-
       - name: Fetch the package
         uses: actions/download-artifact@v4
         with:
           name: package-${{ env.TAG }}
           path: package
 
-      - name: Sync the public repository's files
-        timeout-minutes: 5
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-        run: |
-          $public = Join-Path $env:RUNNER_TEMP 'public'
-          # gh authenticates the clone and, as git's credential helper, the
-          # push, so the token never goes into a URL or .git/config.
-          gh auth setup-git
-          gh repo clone $env:PUBLIC_REPO $public -- --quiet --depth 1
-          if ($LASTEXITCODE -ne 0) { throw "Cloning $env:PUBLIC_REPO failed." }
-          Copy-Item public/README.md, LICENSE, THIRD-PARTY-NOTICES.txt -Destination $public -Force
-          git -C $public add README.md LICENSE THIRD-PARTY-NOTICES.txt
-          git -C $public diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git -C $public -c user.name='github-actions[bot]' -c user.email='41898099+github-actions[bot]@users.noreply.github.com' `
-              commit --quiet -m "docs: update for $env:TAG"
-            git -C $public push --quiet origin HEAD
-            if ($LASTEXITCODE -ne 0) { throw 'Pushing to the public repository failed.' }
-          }
-          $global:LASTEXITCODE = 0
-
       - name: Create the draft release
         timeout-minutes: 10
         shell: pwsh
         env:
-          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $zip = (Get-Item package/*.zip).FullName
-          # The build job refused an existing release, so a draft here is this
+          # The check job refused an existing release, so a draft here is this
           # run's own, left by an attempt that failed partway: finish its
           # uploads instead of creating a second one.
-          $draft = gh release view $env:TAG --repo $env:PUBLIC_REPO --json isDraft --jq .isDraft 2>$null
+          $draft = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq .isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
-            if ($draft -ne 'true') { throw "$env:TAG is already published in $env:PUBLIC_REPO." }
-            gh release upload $env:TAG $zip "$zip.sha256" --repo $env:PUBLIC_REPO --clobber
+            if ($draft -ne 'true') { throw "$env:TAG is already published in $env:GITHUB_REPOSITORY." }
+            gh release upload $env:TAG $zip "$zip.sha256" --repo $env:GITHUB_REPOSITORY --clobber
             if ($LASTEXITCODE -ne 0) { throw 'Uploading to the existing draft failed.' }
             Write-Host "::notice::Finished the existing draft for $env:TAG."
             exit 0
           }
           $global:LASTEXITCODE = 0
 
-          # GitHub dates and orders published releases by the commit their tag
-          # points to. This repository changes only when its docs do, so
-          # releases published without a change between them would share a
-          # commit, tie, and sort in no particular order. Each release gets
-          # its own empty commit, made now, on top of main and reachable only
-          # from its tag. A tag left by an earlier attempt is kept.
-          gh api "repos/$env:PUBLIC_REPO/git/ref/tags/$env:TAG" --silent 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            $head = gh api "repos/$env:PUBLIC_REPO/commits/HEAD" | ConvertFrom-Json
-            $commit = @{
-              message = "release: QuestCalibrator ${{ needs.build.outputs.version }}"
-              tree    = $head.commit.tree.sha
-              parents = @($head.sha)
-            } | ConvertTo-Json
-            $sha = $commit | gh api "repos/$env:PUBLIC_REPO/git/commits" --input - --jq .sha
-            if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Creating the release commit for $env:TAG failed." }
-            gh api "repos/$env:PUBLIC_REPO/git/refs" -f ref="refs/tags/$env:TAG" -f sha=$sha --silent
-            if ($LASTEXITCODE -ne 0) { throw "Creating the tag $env:TAG failed." }
-          }
-          $global:LASTEXITCODE = 0
-
           $arguments = @(
             'release', 'create', $env:TAG, $zip, "$zip.sha256",
-            '--repo', $env:PUBLIC_REPO,
+            '--repo', $env:GITHUB_REPOSITORY,
             '--verify-tag',
             '--draft',
             '--title', 'QuestCalibrator ${{ needs.build.outputs.version }}',
@@ -329,8 +293,10 @@ jobs:
 
   install-test:
     needs: publish
+    # The install test downloads the draft, which only a token that can write
+    # here can see.
+    permissions:
+      contents: write
     uses: ./.github/workflows/install-test.yml
     with:
       tag: ${{ needs.publish.outputs.tag }}
-    secrets:
-      PUBLIC_RELEASE_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}

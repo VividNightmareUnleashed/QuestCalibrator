@@ -17,6 +17,9 @@ build QuestCalibrator yourself. Extract the package, close Steam completely, the
 the included `README-INSTALL.txt` (the recommended path is to run `Install.ps1` with
 PowerShell).
 
+Every release lists the SHA-256 of its zip and a VirusTotal report for each file inside
+it. Only download QuestCalibrator from this repository's releases.
+
 ## What changed vs. upstream
 
 Solver (new `CalibrationEngine`, covered by synthetic tests in `Tests/`):
@@ -271,16 +274,18 @@ Thresholds, solution/configuration, and test executable live in
 
 GitHub Actions runs the same gates (`.github/workflows`):
 
-- **Validation**, on pull requests that change more than documentation: the
-  Release build and the harness (blocking) and the duplicate scan (advisory).
-  Clang-Tidy runs locally only. With the `VIRTUALQUEST_DEPLOY_KEY` secret it also builds
-  the private submodule's scenarios and replays the pose hub traces through
-  their TLA+ model; without it the run warns and tests the public suite.
+- **Validation**, on pushes to `alpha` and `stable` and on pull requests into them
+  that change more than documentation: the Release build and the harness (blocking)
+  and the duplicate scan (advisory). Clang-Tidy runs locally only. With the
+  `VIRTUALQUEST_DEPLOY_KEY` secret it also builds the private submodule's scenarios,
+  replays the pose hub traces through their TLA+ model, and model-checks the driver's
+  input validation on Linux; without it (as on pull requests from forks) the run warns
+  and tests the public suite.
 - **Fuzz**, weekly and on demand: `tools/fuzz.ps1` for a minute per target,
   keeping the corpus between runs.
 - **Release**, on pushing a `questcalibrator-v*` tag: the full suite, the
-  pose hub trace replay, the package, the VirusTotal scan, a draft in the public releases repository and
-  the install test on that draft. Publishing stays a manual step
+  pose hub trace replay, the package, the VirusTotal scan, a draft release and the
+  install test on that draft. Publishing stays a manual step
   (`docs/releasing.md`).
 
 `compile_flags.txt` contains only target, define, and repository-relative include

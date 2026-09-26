@@ -1,17 +1,17 @@
 name: Validation
 
-# The local release gates on pull requests: the Release build and the solver
-# harness (blocking), then the duplicate scan (advisory, as locally: its
-# findings need a human's review, not an automatic veto). Clang-Tidy runs
-# locally only. Pushes don't trigger it, and neither do pull requests that
-# change only documentation, because minutes cost money in this private
-# repository; the release workflow runs every gate on the tagged commit anyway.
+# The local release gates on pushes to alpha and stable and on pull requests
+# into them: the Release build and the solver harness (blocking), then the
+# duplicate scan (advisory, as locally: its findings need a human's review,
+# not an automatic veto). Clang-Tidy runs locally only. Changes to
+# documentation alone don't trigger it; the release workflow runs every gate on
+# the tagged commit anyway.
 #
 # With the VIRTUALQUEST_DEPLOY_KEY secret (a read-only deploy key on the
 # private VirtualQuest repository) the harness also builds the simulated
 # headset's scenarios and the formal-model links, and the pose hub traces are
 # replayed through their TLA+ model. Without it the run says so and tests the
-# public suite only.
+# public suite only; pull requests from forks never get the secret.
 #
 # The input-validation job needs the same key. On Linux, since windows-2022
 # cannot run Linux containers, it runs VirtualQuest's bounded model checks of
@@ -22,15 +22,22 @@ name: Validation
 # else here catches a loosened bound in them, so the job fails on a skipped
 # check as well as a wrong outcome. The release workflow does not run it. The
 # image is cached by its Dockerfile's hash. A pull request only reads caches
-# saved on its own or its base branch, so a manual run on alpha lets new pull
-# requests skip the build.
+# saved on its own or its base branch, so the image a push to alpha saves lets
+# pull requests into alpha skip the build.
 on:
+  push:
+    branches: [alpha, stable]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'math.pdf'
+      - 'LICENSE'
+      - 'THIRD-PARTY-NOTICES.txt'
   pull_request:
     branches: [alpha, stable]
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'public/**'
       - 'math.pdf'
       - 'LICENSE'
       - 'THIRD-PARTY-NOTICES.txt'

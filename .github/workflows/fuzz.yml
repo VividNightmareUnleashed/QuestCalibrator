@@ -4,7 +4,7 @@ name: Fuzz
 # tools/fuzz.ps1) for a minute per target, once a week and on demand. The
 # corpus is kept between runs, so each run continues from the coverage the
 # last one reached. The harness already replays the same properties over
-# seeded mutations on every pull request; this is the longer search.
+# seeded mutations on every push and pull request; this is the longer search.
 on:
   schedule:
     - cron: '0 3 * * 0'

@@ -4,7 +4,7 @@ QuestCal.A61324AD/
 *.user
 __pycache__/
 # Package output. The packaging scripts in install/ are tracked; the ZIPs they
-# produce are published to the public releases repository, never committed.
+# produce are published as GitHub Releases, never committed.
 install/out/
 install/test-out/
 
