@@ -3,6 +3,8 @@
 [![Latest release](https://img.shields.io/github/v/release/VividNightmareUnleashed/QuestCalibrator?label=stable&sort=semver&display_name=release)](https://github.com/VividNightmareUnleashed/QuestCalibrator/releases/latest)
 [![Latest prerelease](https://img.shields.io/github/v/release/VividNightmareUnleashed/QuestCalibrator?include_prereleases&label=prerelease&sort=semver&display_name=release&color=orange)](https://github.com/VividNightmareUnleashed/QuestCalibrator/releases)
 [![VirusTotal Scan](https://img.shields.io/badge/VirusTotal-1.2.0--rc.1%20scan-394EFF?logo=virustotal&logoColor=white)](https://www.virustotal.com/gui/file/087f523e45bc1412fc0894581f32f5d4b93c4fafdc1b9413ed4d1222df0ad619)
+[![SteamVR](https://img.shields.io/badge/SteamVR-Windows%20x64-1b2838?logo=steam&logoColor=white)](https://store.steampowered.com/app/250820/SteamVR/)
+[![OpenVR](https://img.shields.io/badge/OpenVR-C%2B%2B17-00599C?logo=cplusplus&logoColor=white)](https://github.com/ValveSoftware/openvr)
 
 Play in SteamVR with a Meta Quest headset and lighthouse trackers or controllers at
 the same time. QuestCalibrator lines the two tracking systems up into one playspace,
