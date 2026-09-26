@@ -1,8 +1,6 @@
 #pragma once
 
-// Internal to the overlay UI: shared types, palette, widgets and the
-// screen builders, split across the Ui*.cpp files. Nothing here is an
-// API for the rest of the program; that is UserInterface.h.
+// Shared UI internals. The public interface is declared in UserInterface.h.
 
 #include "stdafx.h"
 #include "UserInterface.h"
@@ -10,10 +8,14 @@
 #include "CalibrationGuide.h"
 #include "Configuration.h"
 #include "ProfileValidation.h"
+#include "Updater.h"
+#include "UiLayout.h"
+#include "Localization.h"
 #include "../common/Protocol.h"
 #include "../common/Version.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +32,10 @@
 #include <shellapi.h>
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "shell32.lib")
+
+// Every widget below translates the text it is handed, so a call site passes
+// English and only direct ImGui and draw-list text needs Tr of its own.
+using questcal::i18n::Tr;
 
 struct VRDevice
 {
@@ -56,17 +62,15 @@ struct VRState
 // battery bar fill goes red.
 static const float kLowBattery = 0.15f;
 
+// Rolls a setting back when it cannot be saved. Profile-backed toggles use
+// SaveProfileFieldEdit instead, which persists a candidate record before
+// touching live state, so they need no rollback.
 template<typename T>
 static void SaveSettingOrRestore(T &value, const T &previous)
 {
-	if (!SaveSettings(CalCtx))
+	if (!SaveSettingsWithResult(CalCtx).settingsSaved)
 		value = previous;
 }
-
-// The profile-backed toggles do not have a counterpart here: they all go
-// through Configuration.cpp's SaveProfileFieldEdit, which persists a candidate
-// record before touching live state, so the UI expresses the edit and never a
-// rollback. Every such call site sits inside an `if (validProfile)` block.
 
 struct IdentifyPulseState
 {
@@ -103,6 +107,10 @@ namespace Pal
 	const ImVec4 VeryBad  (0.920f, 0.300f, 0.280f, 1.00f);
 	const ImVec4 Violet   (0.560f, 0.510f, 0.950f, 1.00f);
 	const ImVec4 White    (1.000f, 1.000f, 1.000f, 1.00f);
+	// The tab switch's ink, taken from the control it copies (the design
+	// reference's surface picker): warm greys, not this palette's cool ones.
+	const ImVec4 TabTextOn (0.941f, 0.937f, 0.925f, 1.00f);   // #f0efec
+	const ImVec4 TabTextOff(0.537f, 0.529f, 0.506f, 1.00f);   // #898781
 
 	inline ImU32 U32(const ImVec4 &c, float alphaMul = 1.0f)
 	{
@@ -111,8 +119,6 @@ namespace Pal
 		return ImGui::GetColorU32(v);
 	}
 }
-
-// Inline text that opens a URL in the default browser; underlined on hover.
 
 typedef void (*IconFn)(ImDrawList *, ImVec2, float, ImU32);
 
@@ -131,11 +137,11 @@ static const float kRowHeight = 52.0f;
 static const float kRowInsetX = 16.0f;
 static const float kRowControlY = 14.0f;
 
-// Remembers the height it opened with, so the end call cannot disagree with
-// the begin call and silently overlap the next row.
 ImVec2 BeginRowCard(float height);
 void EndRowCard(ImVec2 p, float height);
 
+// Remembers the height it opened with, so the end call cannot disagree with
+// the begin call and silently overlap the next row.
 struct RowCard
 {
 	explicit RowCard(float rowHeight) : pos(BeginRowCard(rowHeight)), height(rowHeight) {}
@@ -147,9 +153,8 @@ struct RowCard
 	float height;
 };
 
-// One-sentence explanation under a row's label. Permanent rather than a
-// tooltip: the only hover target a tooltip had was the 24 px checkbox, and
-// the explanation then covered the very controls it described.
+// The one-sentence explanation under a row's label: a permanent line rather
+// than a tooltip, which would cover the controls it describes.
 static const float kRowSubLineH = 22.0f;
 
 struct StatusRowData
@@ -164,12 +169,9 @@ struct StatusRowData
 // something" test (>= Rating_Poor) reading false for it with no special case.
 enum CalRating { Rating_Unknown = -1, Rating_Good = 0, Rating_Decent, Rating_Poor, Rating_VeryPoor };
 
-// One derived answer to "what is the continuous loop actually doing", built
-// from the same terms ContinuousTick gates its own shouldRun on. The status
-// text, the rating, the advanced row's colour, the mount advisory and both
-// recalibration nudges all read this instead of each re-deriving a slice of
-// it -- which is how the state meaning "not running at all" came to render as
-// "gathering" forever, and how the two screens came to nudge from two rules.
+// What the continuous loop is doing, derived from the same terms ContinuousTick
+// gates its own shouldRun on. Every status text, colour, rating and nudge reads
+// this rather than re-deriving a slice of it.
 enum class ContinuousStatus
 {
 	Off,         // the feature is switched off
@@ -183,14 +185,17 @@ enum class ContinuousStatus
 	Holding,
 };
 
-// Pure over context fields, so asking again is free and no cached mirror of it
-// can go stale.
-
 enum class GuideStage { Idle, GetSet, Countdown, Running, Done };
+
+enum class GuideDemo { Wrist, Mounted, HeadsetContact };
 
 struct GuideState
 {
+	GuideDemo demo = GuideDemo::Wrist;
 	GuideStage stage = GuideStage::Idle;
+	bool openRequested = false;
+	bool animate = true;
+	double animationTime = 0.0;
 	bool anchor = false;       // field-anchor run
 	bool mountRun = false;     // head-referenced run for the headset tracker
 	double countdownStart = 0.0;
@@ -200,15 +205,17 @@ struct GuideState
 
 static const float kCountdownSeconds = 3.0f;
 
-// How many trackers -uipreview-many fabricates. The only statement of the
-// count: enough to push a tracking system's device list past BuildDeviceList's
-// four-row scroll threshold, with room to fan out across battery levels.
+// Exceed the four-row scroll threshold and exercise several battery states.
 static const int kPreviewManyTrackerCount = 6;
+
+// The top-level tabs. Lighthouse and Smoothing are optional modules
+// (CalCtx.modules); a tab whose module is not installed stays greyed out.
+enum class MainTab { Calibration = 0, Lighthouse, Smoothing };
 
 // Shared state, each owned by one file.
 extern IdentifyPulseState g_identifyPulse;
-extern bool s_showSettings;
-extern double g_chapWarnOpenedAt;
+extern MainTab s_mainTab;
+extern bool s_showSettings;extern double g_chapWarnOpenedAt;
 extern GuideState s_guide;
 extern bool s_modalDetails;
 extern float s_bottomReserve;
@@ -229,21 +236,26 @@ void IconCopy(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconCrosshair(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconCheck(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconClock(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
+void IconDownload(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconInfo(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconPin(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconScale(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconGauge(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconField(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
+void IconGlobe(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col);
 bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH);
+bool LoadGuideTexture(GuideDemo demo, GLuint *outTex);
+const std::string &GuideModelCredits();
 const DeviceIconTex *GetDeviceIconTex(const std::string &path);
 bool FileExists(const std::string &path);
 std::string Prefer2x(const std::string &path);
 void DrawFocusRing(ImDrawList *dl, ImVec2 a, ImVec2 b, float rounding);
 bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, BtnKind kind, bool smallCaps = false);
+// The width a button needs for its label in the current language, and never
+// less than the English layout's width.
+float ButtonWidthFor(const char *english, bool withIcon, float minWidth);
 bool QCCheckbox(const char *id, bool *v);
-ImVec2 BeginRowCard(float height);
-void EndRowCard(ImVec2 p, float height);
 void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label);
 void RowSubLine(ImVec2 rowPos, const char *text);
 bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, const char *subline = nullptr);
@@ -251,6 +263,13 @@ bool EscapePressed();
 void ShowTip(const char *text, bool leftOfCursor = false);
 bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bool &value, const char *tooltip);
 int Segmented(const char *id, int value, const char *const items[], int count, float itemW, float h);
+// The tab switch (UiWidgets.cpp). disabledMask bit i greys item i out and
+// shows disabledTips[i] over it; the cell widths follow the labels.
+float SegmentedTabsWidth(const char *const items[], int count);
+float SegmentedTabsHeight();
+int SegmentedTabs(const char *id, int value, const char *const items[], int count,
+	unsigned disabledMask, const char *const disabledTips[]);
+void BuildLighthouseScreen(const VRState &state);
 void DrawStatusCard(const std::vector<StatusRowData> &rows);
 std::string FormatString(const char *fmt, ...);
 bool PoseChannelDown();
@@ -260,7 +279,6 @@ const char *ContinuousStatusLine(ContinuousStatus status);
 ImVec4 ContinuousStatusColor(ContinuousStatus status);
 CalRating ComputeCalibrationRating(ContinuousStatus continuous);
 const char *RatingLabel(CalRating r);
-CalRating SolveQualityRating(const questcal::EngineResult &result);
 ImVec4 RatingColor(CalRating r);
 const char *RecalibrationNudge(CalRating rating);
 std::optional<std::string> FormatUnixAge(double unixTime);
@@ -269,6 +287,7 @@ bool ProtectChaperone();
 void BuildStatusBand(const VRState &state);
 void BuildMainScreen(const VRState &state);
 void DeviceIcon(ImDrawList *dl, const VRDevice &dev, ImVec2 c, float s, ImU32 col);
+void RowDeviceIcon(ImDrawList *dl, const VRDevice &dev, ImVec2 c, ImU32 fallback);
 const std::string *FindDeviceName(const std::string &serial);
 std::string DeviceDisplayName(const VRDevice &dev);
 void CommitDeviceName(const VRDevice &dev, const char *text);
@@ -282,16 +301,13 @@ void IdentifyButton(ImVec2 size);
 void OpenGuide(bool anchor, bool mountRun);
 void StartMountSetup(const VRState &state);
 bool BeginGuidedRun();
-void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, bool mountRun);
-void DrawGuideHint(ImDrawList *dl, ImVec2 origin, ImVec2 size, CalibrationContext::GuideHint hint);
-std::string GuideStepLabel(bool anchor, bool mountRun, int step);
-const char *GuideHintCaption(CalibrationContext::GuideHint hint);
+void DrawGuideAnimation(ImDrawList *dl, ImVec2 origin, ImVec2 size, double t, GuideDemo demo);
 void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const questcal::GuideMetrics &m, bool mountRun);
 void BuildMenu(const VRState &state, bool runningInOverlay);
 void BuildSettingsScreen(const VRState &state);
 void SeedTransformEditorDraft();
 bool BuildProfileEditor();
-bool SaveProfileEditorDraft();
+void SaveProfileEditorDraft();
 std::string PreviewIconPath(const char *driverRelative);
 void UpdateIdentifyPulse(double now);
 void BuildHeader();

@@ -10,7 +10,7 @@
 //      two pose streams by cross-correlating angular-speed profiles, then
 //      interpolate the reference stream onto the (shifted) target timestamps.
 //   2. Velocity gating: samples taken during fast motion carry the largest
-//      residual timing error and are dropped (they can be re-enabled by config).
+//      residual timing error and are dropped.
 //   3. Rotation: paired delta-rotation axes -> weighted Kabsch with
 //      reflection handling, inverse-variance angle weighting (a small delta's
 //      axis is noise-amplified by 1/theta), IRLS/Huber reweighting, and a
@@ -50,15 +50,24 @@ struct AlignedSample
 	PoseSample target;
 };
 
+// Production runs these defaults (solveScale aside), and the solver relies on
+// them: positive angles, knees and steps, and minPairs >= 1.
 struct EngineConfig
 {
 	// --- time alignment ---
 	bool   estimateTimeOffset = true;
+	// Used when the estimate fails, instead of failing the solve: the latency
+	// is a nuisance parameter, and the residual gates below still judge the
+	// result. The overlay passes the profile's last measured offset (or zero).
+	// A weak correlation used to refuse the whole calibration: three of five
+	// attempts in the 2026-09-25 tester session, where the one success had a
+	// correlation of 0.75 and a peak 0.0017 above the next lag.
+	bool   useFallbackTimeOffset = false;
+	double fallbackTimeOffset = 0.0;   // seconds; positive = target stream lags reference
 	double timeOffsetRange = 0.06;     // seconds searched on each side of zero
-	// Coarse lag grid, refined parabolically. It also sets the correlator's
-	// resampling spacing, which is a whole division of this step so that every
-	// lag is an exact slot shift of one shared resampling (at or above 2 ms:
-	// step/2, as before; below it: the step itself).
+	// Coarse lag grid, refined parabolically. The correlator resamples at a
+	// whole division of it (step/2 at or above 2 ms, else the step itself), so
+	// every lag is an exact slot shift of one shared resampling.
 	double timeOffsetStep = 0.002;
 
 	// --- sample gating ---
@@ -81,30 +90,31 @@ struct EngineConfig
 	double huberTranslation = 0.03;    // m
 
 	// --- joint refinement ---
-	// Gauss-Newton polish over (R, t, mount offset, s) on the full pose-pair
-	// position residuals after the sequential pipeline: the eq. 8 solve treats
-	// the Kabsch rotation as exact, so its residual error otherwise leaks into
-	// the translation as a bias that grows with distance from the sampled
-	// cloud. 0 disables.
+	// Gauss-Newton polish over (R, t, mount transform, s) on the per-sample
+	// position and orientation residuals: the eq. 8 solve treats the Kabsch
+	// rotation as exact, so its error otherwise leaks into the translation as a
+	// bias that grows with distance from the sampled cloud. 0 disables.
 	int    refineIterations = 3;
 
 	// --- scale ---
 	bool   solveScale = false;
 	double scaleSearchRange = 0.15;    // bounded to [1-r, 1+r]
 	double minScaleCondition = 0.002;  // conditional scale information after eliminating translation
-	double maxScaleStdDev = 0.02;      // one-sigma uncertainty in the dimensionless scale
+	// One-sigma uncertainty in the dimensionless scale. A headset's metric
+	// scale is off by a percent or so, so a scale known no better than that
+	// is not worth applying over neutral 1.0: 0.005 is 1 cm at 2 m.
+	double maxScaleStdDev = 0.005;
+	// Stretches of the collection left out in turn to measure that uncertainty
+	// (see the jackknife in SolveAligned). 0 keeps the textbook figure alone.
+	size_t scaleJackknifeBlocks = 5;
 
 	// --- motion-amplitude gain diagnostic + scale guard ---
-	// The two position tracks' amplitude ratio, split into a gross-motion band
-	// and a fine-motion band by a moving average of gainSplitSeconds. A
-	// genuine metric scale difference is frequency-flat (both bands ~= s);
-	// streamed-pose smoothing is a low-pass, so its fingerprint is the fine
-	// band's gain sitting below the gross band's — and it drags the solved
-	// scale down with it (the least-squares scale reflects the motion the
-	// calibration wiggling actually contains). When that fingerprint is
-	// detected, the gross-band gain is used only if it is demonstrably clean
-	// (near unity). If both bands are attenuated, unity is the only defensible
-	// scale: the observed motion cannot identify a physical metric difference.
+	// The two position tracks' amplitude ratio, split into a gross-motion and
+	// a fine-motion band by a moving average of gainSplitSeconds. A genuine
+	// metric scale difference is frequency-flat (both bands ~= s); streamed-pose
+	// smoothing is a low-pass, so the fine band reads below the gross band and
+	// drags the solved scale down with it. Then the gross-band gain is used only
+	// if it is near unity; otherwise unity is the only defensible scale.
 	double gainSplitSeconds = 1.2;
 	double gainSmoothingMargin = 0.03; // fine below gross by this = smoothing detected
 	double maxCleanGrossDeviation = 0.03;
@@ -115,22 +125,17 @@ struct EngineConfig
 	double maxTranslationRms = 0.05;   // meters
 	double minAxisSpread = 0.010;      // second/first eigenvalue ratio of the axis cloud
 	// Observability of the translation itself (math.pdf eq. 8): each pair row
-	// constrains Fp only perpendicular to its relative-rotation axis, so a
-	// near-common axis leaves that direction (the vertical, under yaw-dominant
-	// motion) resting on noise. The axis-spread gate is a poor proxy — axis
-	// outer products ignore the rotation magnitudes that weight the rows, so
-	// a brief nod burst can pass it while every LARGE delta is still pure yaw
-	// — hence the translation normal matrix is gated on its own eigenvalue
-	// ratio. 0.008 ~= 11x noise amplification along the weak direction.
+	// constrains Fp only perpendicular to its relative-rotation axis, so
+	// yaw-dominant motion leaves the vertical resting on noise. The axis-spread
+	// gate ignores rotation magnitudes (a brief nod burst passes it while every
+	// large delta is pure yaw), so the translation normal matrix is gated on
+	// its own eigenvalue ratio. 0.008 ~= 11x noise amplification.
 	double minTransEigRatio = 0.008;   // smallest/largest eigenvalue of sum dQ^T dQ
 	size_t minPairs = 30;
 };
 
-// What the scale guard did (see EngineConfig::gainSplitSeconds). Three
-// mutually-exclusive outcomes, so a consumer reads one value instead of
-// reconstructing them from flags that can disagree. `NotApplied` also covers
-// "attempted, but the guarded re-solve failed" - that case is already
-// distinguished by `valid == false` plus the message.
+// What the scale guard did (see EngineConfig::gainSplitSeconds). `NotApplied`
+// also covers a guarded re-solve that failed (`valid == false`).
 enum class ScaleGuard
 {
 	NotApplied,
@@ -144,7 +149,6 @@ enum class ScaleGuard
 enum class EngineFailure
 {
 	None,
-	Config,                  // engine misconfigured; a bug, not a user error
 	NotEnoughSamples,
 	InvalidSamples,
 	NotEnoughRotation,       // too few usable pairs: the devices barely turned
@@ -168,7 +172,9 @@ struct EngineResult
 	double scale = 1.0;
 	double timeOffset = 0.0;                    // seconds; positive = target stream lags reference
 	bool timeOffsetValid = false;
-	double timeOffsetScore = 0.0;
+	bool timeOffsetFellBack = false;            // the estimate failed and the fallback was used
+	std::string timeOffsetFailure;              // why the estimate failed, when it did
+	double timeOffsetScore = 0.0;               // the best correlation, measured or not
 	double timeOffsetPeakMargin = 0.0;
 
 	// Quality metrics (populated even when invalid, when computable).
@@ -201,44 +207,41 @@ struct EngineResult
 class CalibrationEngine
 {
 public:
-	// Full pipeline over two raw streams (each sorted by time).
+	// Full pipeline over two raw streams (each sorted by time). The only entry
+	// point that validates its samples; the ones below expect finite poses in
+	// strictly increasing time order.
 	static EngineResult Solve(const std::vector<PoseSample> &refStream,
 	                          const std::vector<PoseSample> &targetStream,
 	                          const EngineConfig &config);
 
-	// Exposed for tests and diagnostics. validateInputs=false skips the
-	// stream-integrity scan ONLY; internal callers pass it after validating
-	// once. The config is revalidated on every entry point regardless of this
-	// flag - it is cheap, and a caller must never be able to skip the refusal
-	// that names a bad knob.
+	// failureOut, when given, names the condition that refused an estimate;
+	// scoreOut and peakMarginOut then still carry the best lag's figures where
+	// one was computed.
 	static bool EstimateTimeOffset(const std::vector<PoseSample> &refStream,
 	                               const std::vector<PoseSample> &targetStream,
 	                               const EngineConfig &config,
 	                               double &offsetOut,
 	                               double *scoreOut = nullptr,
 	                               double *peakMarginOut = nullptr,
-	                               bool validateInputs = true);
+	                               std::string *failureOut = nullptr);
 
 	static bool InterpolateAt(const std::vector<PoseSample> &stream, double t,
 	                          double maxGap, PoseSample &out);
 
 	// Solve over pre-aligned pairs (skips alignment; used internally and by tests).
 	static EngineResult SolveAligned(const std::vector<AlignedSample> &samples,
-	                                 const EngineConfig &config,
-	                                 bool validateInputs = true);
+	                                 const EngineConfig &config);
 };
 
 // Runtime application of the solved inter-system time offset.
 //
-// The engine's solved offset is positive when the *target* stream lags the
-// reference. At runtime the target devices' DriverPose_t::poseTimeOffset is
-// shifted by the returned value: a positive shift declares the pose "newer",
-// shortening vrserver's forward prediction — i.e. presenting the device
-// slightly in the past. With a laggy wireless reference (Quest HMD) and fresh
-// lighthouse targets, the solved offset is negative and the shift = -solved
-// delays the targets to match the reference timeline (consistency over
-// freshness; the relative wobble during motion is what users perceive, not
-// the absolute latency).
+// The solved offset is positive when the *target* stream lags the reference.
+// The target devices' DriverPose_t::poseTimeOffset is shifted by the returned
+// value: a positive shift declares the pose "newer", shortening vrserver's
+// forward prediction, i.e. presenting the device slightly in the past. With a
+// laggy wireless reference (Quest HMD) and fresh lighthouse targets the solved
+// offset is negative, and shift = -solved delays the targets to the reference
+// timeline: users perceive the relative wobble, not the absolute latency.
 //
 // The clamp is asymmetric: delaying (positive shift) only backdates along
 // already-measured motion, while advancing (negative shift) extends velocity

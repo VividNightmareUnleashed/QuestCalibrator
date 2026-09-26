@@ -6,9 +6,10 @@
 // Palette + theme
 // ---------------------------------------------------------------------------
 
+// Inline text that opens url in the default browser; underlined on hover.
 void LinkText(const char *label, const char *url)
 {
-	ImGui::TextColored(Pal::Dim, label);
+	ImGui::TextColored(Pal::Dim, "%s", Tr(label));
 	if (ImGui::IsItemHovered())
 	{
 		ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
@@ -72,7 +73,7 @@ void ApplyTheme()
 	c[ImGuiCol_TextSelectedBg]       = ImVec4(Pal::Accent.x, Pal::Accent.y, Pal::Accent.z, 0.35f);
 	// Dark enough that the coloured status rows behind a modal stop competing
 	// with it for attention.
-	c[ImGuiCol_ModalWindowDarkening] = ImVec4(0, 0, 0, 0.80f);
+	c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.80f);
 	c[ImGuiCol_NavHighlight]         = Pal::Accent;
 }
 
@@ -84,16 +85,10 @@ float LetterSpacedWidth(ImFont *font, const char *text, float spacing)
 {
 	float w = 0.0f;
 	for (const char *p = text; *p; ++p)
-	{
-		const ImFontGlyph *g = font->FindGlyph((ImWchar)(unsigned char)*p);
-		w += (g ? g->AdvanceX : font->FontSize * 0.5f) + spacing;
-	}
+		w += font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p)->AdvanceX + spacing;
 	return w > 0.0f ? w - spacing : 0.0f;
 }
 
-// Byte-wise on purpose: every label that comes through here is ASCII. The
-// unsigned cast keeps a stray high byte from turning into a huge code point
-// on MSVC's signed char; a real non-ASCII label would still need a decoder.
 void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, const char *text, float spacing)
 {
 	float x = pos.x;
@@ -101,19 +96,36 @@ void LetterSpacedTextAt(ImDrawList *dl, ImFont *font, ImVec2 pos, ImU32 col, con
 	for (const char *p = text; *p; ++p)
 	{
 		buf[0] = *p;
-		dl->AddText(font, font->FontSize, ImVec2(x, pos.y), col, buf);
-		const ImFontGlyph *g = font->FindGlyph((ImWchar)(unsigned char)*p);
-		x += (g ? g->AdvanceX : font->FontSize * 0.5f) + spacing;
+		dl->AddText(font, font->LegacySize, ImVec2(x, pos.y), col, buf);
+		x += font->GetFontBaked(font->LegacySize)->FindGlyph((ImWchar)(unsigned char)*p)->AdvanceX + spacing;
 	}
 }
 
-// Section label ("REFERENCE SPACE") as an inline widget.
-void SectionLabel(const char *text)
+// Letter spacing walks single bytes, so it is for ASCII only; translated
+// text is drawn as it is.
+static bool IsAscii(const char *text)
 {
+	for (const char *p = text; *p; ++p)
+		if (static_cast<unsigned char>(*p) >= 0x80)
+			return false;
+	return true;
+}
+
+// Section label ("REFERENCE SYSTEM") as an inline widget.
+void SectionLabel(const char *english)
+{
+	const char *text = Tr(english);
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	ImVec2 p = ImGui::GetCursorScreenPos();
+	if (!IsAscii(text))
+	{
+		dl->AddText(g_fontSmall, g_fontSmall->LegacySize, p, Pal::U32(Pal::Dim), text);
+		ImGui::Dummy(ImVec2(g_fontSmall->CalcTextSizeA(g_fontSmall->LegacySize, FLT_MAX, 0.0f, text).x,
+			g_fontSmall->LegacySize + 4.0f));
+		return;
+	}
 	LetterSpacedTextAt(dl, g_fontSmall, p, Pal::U32(Pal::Dim), text, 2.0f);
-	ImGui::Dummy(ImVec2(LetterSpacedWidth(g_fontSmall, text, 2.0f), g_fontSmall->FontSize + 4.0f));
+	ImGui::Dummy(ImVec2(LetterSpacedWidth(g_fontSmall, text, 2.0f), g_fontSmall->LegacySize + 4.0f));
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +143,7 @@ void IconHMD(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	ImVec2 a = ImVec2(c.x - s, c.y - s * 0.60f);
 	ImVec2 b = ImVec2(c.x + s, c.y + s * 0.44f);
 	dl->PathRect(a, b, s * 0.34f);
-	dl->PathStroke(col, true, 2.2f);
+	dl->PathStroke(col, 2.2f, ImDrawFlags_Closed);
 	dl->AddCircleFilled(ImVec2(c.x - s * 0.42f, c.y - s * 0.06f), s * 0.16f, col, 12);
 	dl->AddCircleFilled(ImVec2(c.x + s * 0.42f, c.y - s * 0.06f), s * 0.16f, col, 12);
 }
@@ -173,7 +185,7 @@ void IconPlay(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 void IconPencil(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	// Heavier body and a longer tip than the other glyphs: at row size a thin
-	// diagonal read as a stray stroke, not a pencil.
+	// diagonal reads as a stray stroke, not a pencil.
 	ImVec2 tip = ImVec2(c.x - s * 0.62f, c.y + s * 0.62f);
 	ImVec2 top = ImVec2(c.x + s * 0.50f, c.y - s * 0.50f);
 	dl->AddLine(ImVec2(tip.x + s * 0.30f, tip.y - s * 0.10f), top, col, 3.0f);
@@ -187,8 +199,8 @@ void IconTrash(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	dl->AddLine(ImVec2(c.x - s * 0.62f, c.y - s * 0.36f), ImVec2(c.x + s * 0.62f, c.y - s * 0.36f), col, 2.2f);
 	dl->AddLine(ImVec2(c.x - s * 0.20f, c.y - s * 0.60f), ImVec2(c.x + s * 0.20f, c.y - s * 0.60f), col, 2.2f);
-	dl->PathRect(ImVec2(c.x - s * 0.45f, c.y - s * 0.36f), ImVec2(c.x + s * 0.45f, c.y + s * 0.62f), s * 0.16f, ImDrawCornerFlags_Bot);
-	dl->PathStroke(col, true, 2.0f);
+	dl->PathRect(ImVec2(c.x - s * 0.45f, c.y - s * 0.36f), ImVec2(c.x + s * 0.45f, c.y + s * 0.62f), s * 0.16f, ImDrawFlags_RoundCornersBottom);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_Closed);
 	dl->AddLine(ImVec2(c.x - s * 0.15f, c.y - s * 0.12f), ImVec2(c.x - s * 0.15f, c.y + s * 0.36f), col, 1.8f);
 	dl->AddLine(ImVec2(c.x + s * 0.15f, c.y - s * 0.12f), ImVec2(c.x + s * 0.15f, c.y + s * 0.36f), col, 1.8f);
 }
@@ -196,9 +208,9 @@ void IconTrash(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 void IconCopy(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	dl->PathRect(ImVec2(c.x - s * 0.62f, c.y - s * 0.62f), ImVec2(c.x + s * 0.14f, c.y + s * 0.14f), s * 0.14f);
-	dl->PathStroke(col, true, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_Closed);
 	dl->PathRect(ImVec2(c.x - s * 0.14f, c.y - s * 0.14f), ImVec2(c.x + s * 0.62f, c.y + s * 0.62f), s * 0.14f);
-	dl->PathStroke(col, true, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_Closed);
 }
 
 void IconCrosshair(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -218,7 +230,7 @@ void IconCheck(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 		ImVec2(c.x - s * 0.15f, c.y + s * 0.55f),
 		ImVec2(c.x + s * 0.70f, c.y - s * 0.50f)
 	};
-	dl->AddPolyline(pts, 3, col, false, 2.4f);
+	dl->AddPolyline(pts, 3, col, 2.4f, ImDrawFlags_None);
 }
 
 void IconClock(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -226,6 +238,18 @@ void IconClock(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	dl->AddCircle(c, s * 0.85f, col, 20, 2.0f);
 	dl->AddLine(c, ImVec2(c.x, c.y - s * 0.52f), col, 2.0f);
 	dl->AddLine(c, ImVec2(c.x + s * 0.40f, c.y + s * 0.14f), col, 2.0f);
+}
+
+void IconDownload(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
+{
+	dl->AddLine(ImVec2(c.x, c.y - s * 0.72f),
+		ImVec2(c.x, c.y + s * 0.30f), col, 2.2f);
+	dl->AddLine(ImVec2(c.x - s * 0.42f, c.y - s * 0.02f),
+		ImVec2(c.x, c.y + s * 0.38f), col, 2.2f);
+	dl->AddLine(ImVec2(c.x + s * 0.42f, c.y - s * 0.02f),
+		ImVec2(c.x, c.y + s * 0.38f), col, 2.2f);
+	dl->AddLine(ImVec2(c.x - s * 0.66f, c.y + s * 0.68f),
+		ImVec2(c.x + s * 0.66f, c.y + s * 0.68f), col, 2.2f);
 }
 
 void IconInfo(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -250,15 +274,15 @@ void IconScale(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	dl->AddLine(ImVec2(c.x - s * 0.58f, c.y - s * 0.40f), ImVec2(c.x + s * 0.58f, c.y - s * 0.40f), col, 2.0f);
 	dl->AddLine(ImVec2(c.x - s * 0.30f, c.y + s * 0.46f), ImVec2(c.x + s * 0.30f, c.y + s * 0.46f), col, 2.0f);
 	dl->PathArcTo(ImVec2(c.x - s * 0.58f, c.y - s * 0.16f), s * 0.24f, 0.0f, IM_PI, 12);
-	dl->PathStroke(col, false, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_None);
 	dl->PathArcTo(ImVec2(c.x + s * 0.58f, c.y - s * 0.16f), s * 0.24f, 0.0f, IM_PI, 12);
-	dl->PathStroke(col, false, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_None);
 }
 
 void IconGauge(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 {
 	dl->PathArcTo(ImVec2(c.x, c.y + s * 0.25f), s * 0.72f, IM_PI, 2.0f * IM_PI, 20);
-	dl->PathStroke(col, false, 2.2f);
+	dl->PathStroke(col, 2.2f, ImDrawFlags_None);
 	dl->AddLine(ImVec2(c.x, c.y + s * 0.25f), ImVec2(c.x + s * 0.38f, c.y - s * 0.22f), col, 2.2f);
 	dl->AddCircleFilled(ImVec2(c.x, c.y + s * 0.25f), s * 0.12f, col, 8);
 }
@@ -269,7 +293,16 @@ void IconField(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 	dl->AddCircle(ImVec2(c.x, c.y - s * 0.30f), s * 0.34f, col, 16, 2.0f);
 	dl->AddLine(ImVec2(c.x, c.y + s * 0.04f), ImVec2(c.x, c.y + s * 0.44f), col, 2.0f);
 	dl->PathArcTo(ImVec2(c.x, c.y + s * 0.44f), s * 0.55f, IM_PI * 0.15f, IM_PI * 0.85f, 12);
-	dl->PathStroke(col, false, 2.0f);
+	dl->PathStroke(col, 2.0f, ImDrawFlags_None);
+}
+
+void IconGlobe(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
+{
+	// Outline, one meridian as an ellipse, and the equator.
+	const float r = s * 0.82f;
+	dl->AddCircle(c, r, col, 24, 2.0f);
+	dl->AddEllipse(c, ImVec2(r * 0.42f, r), col, 0.0f, 20, 2.0f);
+	dl->AddLine(ImVec2(c.x - r, c.y), ImVec2(c.x + r, c.y), col, 2.0f);
 }
 
 void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
@@ -289,9 +322,8 @@ void IconGear(ImDrawList *dl, ImVec2 c, float s, ImU32 col)
 // SteamVR device icon textures
 // ---------------------------------------------------------------------------
 
-// Owns one COM interface for the rest of its scope. Each acquisition below is
-// then one line plus one guard: a new step cannot land its Release in the
-// wrong place, because there is no unwinding ladder to place it in.
+// Owns one COM interface for the rest of its scope, so each acquisition below
+// is one line plus one guard.
 template<typename T>
 struct ComScoped
 {
@@ -307,28 +339,11 @@ struct ComScoped
 	T *ptr = nullptr;
 };
 
-bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
+static bool DecodeTexture(IWICImagingFactory *factory, IWICBitmapDecoder *decoder,
+                         GLuint *outTex, int *outW, int *outH, bool guide)
 {
-	// One apartment init per process. The original hand-rolled flag ignored the
-	// result and so does this: a failure surfaces as the CoCreateInstance below.
-	static const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-	(void)comInit;
-
-	ComScoped<IWICImagingFactory> factory;
-	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-		IID_PPV_ARGS(factory.Put()))))
-		return false;
-
-	wchar_t wpath[MAX_PATH];
-	MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH);
-
-	ComScoped<IWICBitmapDecoder> dec;
-	if (FAILED(factory->CreateDecoderFromFilename(wpath, nullptr, GENERIC_READ,
-		WICDecodeMetadataCacheOnDemand, dec.Put())))
-		return false;
-
 	ComScoped<IWICBitmapFrameDecode> frame;
-	if (FAILED(dec->GetFrame(0, frame.Put())))
+	if (FAILED(decoder->GetFrame(0, frame.Put())))
 		return false;
 
 	ComScoped<IWICFormatConverter> conv;
@@ -338,11 +353,16 @@ bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
 		WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
 		return false;
 
-	// Device icons are small art; the bound keeps a malformed or hostile file
-	// from allocating unbounded pixel memory on the render thread.
+	// Device icons come from driver folders and get a small allocation bound.
+	// An embedded guide must be one of the two atlas layouts UiGuide.cpp's UVs
+	// assume.
 	UINT w = 0, h = 0;
-	conv->GetSize(&w, &h);
-	if (w == 0 || h == 0 || w > 1024 || h > 1024)
+	if (FAILED(conv->GetSize(&w, &h)))
+		return false;
+	const bool validDimensions = guide
+		? ((w == 4608 && h == 5880) || (w == 5120 && h == 5760))
+		: (w > 0 && h > 0 && w <= 1024 && h <= 1024);
+	if (!validDimensions)
 		return false;
 
 	std::vector<unsigned char> pixels((size_t)w * h * 4);
@@ -351,14 +371,86 @@ bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
 
 	GLuint tex = 0;
 	glGenTextures(1, &tex);
+	if (!tex)
+		return false;
 	glBindTexture(GL_TEXTURE_2D, tex);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	GLint allocatedWidth = 0;
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &allocatedWidth);
+	if (allocatedWidth != static_cast<GLint>(w))
+	{
+		glDeleteTextures(1, &tex);
+		return false;
+	}
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	*outTex = tex;
 	*outW = (int)w;
 	*outH = (int)h;
 	return true;
+}
+
+bool LoadTextureFromFile(const char *path, GLuint *outTex, int *outW, int *outH)
+{
+	static const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	(void)comInit;
+	ComScoped<IWICImagingFactory> factory;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(factory.Put()))))
+		return false;
+	wchar_t wpath[MAX_PATH];
+	if (!MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH))
+		return false;
+	ComScoped<IWICBitmapDecoder> decoder;
+	if (FAILED(factory->CreateDecoderFromFilename(wpath, nullptr, GENERIC_READ,
+		WICDecodeMetadataCacheOnDemand, decoder.Put())))
+		return false;
+	return DecodeTexture(factory.Get(), decoder.Get(), outTex, outW, outH, false);
+}
+
+bool LoadGuideTexture(GuideDemo demo, GLuint *outTex)
+{
+	const char *name = demo == GuideDemo::Mounted ? "GUIDE_HEADSET"
+		: demo == GuideDemo::HeadsetContact ? "GUIDE_CONTACT" : "GUIDE_HANDHELD";
+	HRSRC resource = FindResourceA(nullptr, name, MAKEINTRESOURCEA(10));
+	if (!resource)
+		return false;
+	HGLOBAL loaded = LoadResource(nullptr, resource);
+	auto bytes = static_cast<BYTE *>(LockResource(loaded));
+	DWORD size = SizeofResource(nullptr, resource);
+	if (!bytes || size == 0)
+		return false;
+	static const HRESULT comInit = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	(void)comInit;
+	ComScoped<IWICImagingFactory> factory;
+	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(factory.Put()))))
+		return false;
+	ComScoped<IWICStream> stream;
+	if (FAILED(factory->CreateStream(stream.Put())) ||
+		FAILED(stream->InitializeFromMemory(bytes, size)))
+		return false;
+	ComScoped<IWICBitmapDecoder> decoder;
+	if (FAILED(factory->CreateDecoderFromStream(stream.Get(), nullptr,
+		WICDecodeMetadataCacheOnDemand, decoder.Put())))
+		return false;
+	int width = 0, height = 0;
+	return DecodeTexture(factory.Get(), decoder.Get(), outTex, &width, &height, true);
+}
+
+const std::string &GuideModelCredits()
+{
+	static const std::string credits = []() -> std::string {
+		HRSRC resource = FindResourceA(nullptr, "GUIDE_CREDITS", MAKEINTRESOURCEA(10));
+		if (resource)
+		{
+			const char *bytes = static_cast<const char *>(LockResource(LoadResource(nullptr, resource)));
+			if (bytes)
+				return std::string(bytes, SizeofResource(nullptr, resource));
+		}
+		return "Motion demo credits couldn't load. Reinstall QuestCalibrator to restore them.";
+	}();
+	return credits;
 }
 
 // Keyed by absolute path; loaded lazily on the render thread (GL context current).
@@ -405,18 +497,21 @@ std::string Prefer2x(const std::string &path)
 
 // Keyboard focus, drawn the same way on every hand-painted control: the
 // navigation highlight ImGui would draw on its own widgets never reaches an
-// InvisibleButton.
+// InvisibleButton. Only while the keyboard is driving: an item also holds
+// focus after a click, and at launch the first one holds it unasked.
 void DrawFocusRing(ImDrawList *dl, ImVec2 a, ImVec2 b, float rounding)
 {
-	if (ImGui::IsItemFocused())
+	if (ImGui::IsItemFocused() && ImGui::GetIO().NavVisible)
 		dl->AddRect(ImVec2(a.x - 2.0f, a.y - 2.0f), ImVec2(b.x + 2.0f, b.y + 2.0f),
-			Pal::U32(Pal::Accent), rounding + 2.0f, ImDrawCornerFlags_All, 2.0f);
+			Pal::U32(Pal::Accent), rounding + 2.0f, 2.0f, ImDrawFlags_RoundCornersAll);
 }
 
-bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, BtnKind kind, bool smallCaps)
+bool IconButton(const char *id, const char *english, IconFn icon, ImVec2 size, BtnKind kind, bool smallCaps)
 {
+	const char *label = Tr(english);
+	const bool spaced = smallCaps && IsAscii(label);
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	bool pressed = ImGui::InvisibleButton(id, size);
+	bool pressed = ImGui::InvisibleButton(id, size, ImGuiButtonFlags_EnableNav);
 	bool hov = ImGui::IsItemHovered();
 	bool act = ImGui::IsItemActive();
 	ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -453,10 +548,22 @@ bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, Btn
 		dl->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), Pal::U32(Pal::VeryBad), 10.0f);
 
 	ImFont *font = smallCaps ? g_fontSmall : g_fontBody;
-	float spacing = smallCaps ? 2.0f : 0.0f;
-	float textW = smallCaps ? LetterSpacedWidth(font, label, spacing) : ImGui::CalcTextSize(label).x;
+	float fontSize = font->LegacySize;
+	float spacing = spaced ? 2.0f : 0.0f;
+	float textW = spaced ? LetterSpacedWidth(font, label, spacing)
+		: font->CalcTextSizeA(fontSize, FLT_MAX, 0.0f, label).x;
 	float iconS = 9.0f;
 	float iconBlock = icon ? iconS * 2.0f + 10.0f : 0.0f;
+	// A translation longer than the button was laid out for shrinks to fit
+	// rather than spilling past the edge. Callers size buttons whose labels
+	// run long with ButtonWidthFor; this is the backstop.
+	const float room = size.x - 24.0f - iconBlock;
+	if (!spaced && textW > room)
+	{
+		const float scale = std::max(0.72f, room / textW);
+		fontSize *= scale;
+		textW *= scale;
+	}
 	float cx = p.x + (size.x - textW - iconBlock) * 0.5f;
 	float cy = p.y + size.y * 0.5f;
 	ImU32 tcol = Pal::U32(txt);
@@ -466,19 +573,25 @@ bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, Btn
 		icon(dl, ImVec2(cx + iconS, cy), iconS, tcol);
 		cx += iconBlock;
 	}
-	if (smallCaps)
-		LetterSpacedTextAt(dl, font, ImVec2(cx, cy - font->FontSize * 0.5f), tcol, label, spacing);
+	if (spaced)
+		LetterSpacedTextAt(dl, font, ImVec2(cx, cy - font->LegacySize * 0.5f), tcol, label, spacing);
 	else
-		dl->AddText(font, font->FontSize, ImVec2(cx, cy - font->FontSize * 0.5f), tcol, label);
+		dl->AddText(font, fontSize, ImVec2(cx, cy - fontSize * 0.5f), tcol, label);
 
 	return pressed;
+}
+
+float ButtonWidthFor(const char *english, bool withIcon, float minWidth)
+{
+	const float text = g_fontBody->CalcTextSizeA(g_fontBody->LegacySize, FLT_MAX, 0.0f, Tr(english)).x;
+	return std::max(minWidth, text + (withIcon ? 28.0f : 0.0f) + 36.0f);
 }
 
 bool QCCheckbox(const char *id, bool *v)
 {
 	const float sz = 24.0f;
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	bool pressed = ImGui::InvisibleButton(id, ImVec2(sz, sz));
+	bool pressed = ImGui::InvisibleButton(id, ImVec2(sz, sz), ImGuiButtonFlags_EnableNav);
 	if (pressed)
 		*v = !*v;
 	bool hov = ImGui::IsItemHovered();
@@ -493,12 +606,12 @@ bool QCCheckbox(const char *id, bool *v)
 			ImVec2(p.x + sz * 0.43f, p.y + sz * 0.72f),
 			ImVec2(p.x + sz * 0.78f, p.y + sz * 0.30f)
 		};
-		dl->AddPolyline(pts, 3, Pal::U32(Pal::White), false, 2.6f);
+		dl->AddPolyline(pts, 3, Pal::U32(Pal::White), 2.6f, ImDrawFlags_None);
 	}
 	else
 	{
 		dl->AddRectFilled(p, b, Pal::U32(Pal::Inset), 6.0f);
-		dl->AddRect(p, b, Pal::U32(hov ? Pal::BorderHov : Pal::GhostBorder), 6.0f, ImDrawCornerFlags_All, 1.2f);
+		dl->AddRect(p, b, Pal::U32(hov ? Pal::BorderHov : Pal::GhostBorder), 6.0f, 1.2f, ImDrawFlags_RoundCornersAll);
 	}
 	DrawFocusRing(dl, p, b, 6.0f);
 	return pressed;
@@ -508,7 +621,7 @@ bool QCCheckbox(const char *id, bool *v)
 ImVec2 BeginRowCard(float height)
 {
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	float w = ImGui::GetWindowContentRegionWidth();
+	float w = ImGui::GetContentRegionAvail().x;
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	dl->AddRectFilled(p, ImVec2(p.x + w, p.y + height), Pal::U32(Pal::Card), 12.0f);
 	dl->AddRect(p, ImVec2(p.x + w, p.y + height), Pal::U32(Pal::Border), 12.0f);
@@ -526,25 +639,19 @@ void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	ImVec2 iconC = ImVec2(rowPos.x + 66.0f, rowPos.y + 26.0f);
 	icon(dl, iconC, 9.0f, Pal::U32(Pal::Dim));
-	dl->AddText(g_fontBody, g_fontBody->FontSize,
-		ImVec2(rowPos.x + 92.0f, rowPos.y + 26.0f - g_fontBody->FontSize * 0.5f),
-		Pal::U32(Pal::Text), label);
+	dl->AddText(g_fontBody, g_fontBody->LegacySize,
+		ImVec2(rowPos.x + 92.0f, rowPos.y + 26.0f - g_fontBody->LegacySize * 0.5f),
+		Pal::U32(Pal::Text), Tr(label));
 }
-
-// Settings-row geometry, stated once: every row is this tall and puts its
-// control at this inset. Taller composite rows add their extra body to the
-// same base instead of restating it.
 
 void RowSubLine(ImVec2 rowPos, const char *text)
 {
-	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->FontSize,
-		ImVec2(rowPos.x + 92.0f, rowPos.y + kRowHeight - 6.0f), Pal::U32(Pal::Dim), text);
+	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
+		ImVec2(rowPos.x + 92.0f, rowPos.y + kRowHeight - 6.0f), Pal::U32(Pal::Dim), Tr(text));
 }
 
-// A plain settings toggle, whole: card, checkbox at the shared inset, icon +
-// label, optional sub-line. Returns whether the value changed this frame --
-// persisting it stays with the caller, since the settings and profile
-// save-or-restore paths are different templates.
+// A whole settings toggle row: card, checkbox, icon + label, optional
+// sub-line. Returns whether the value changed; persisting it is the caller's.
 bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, const char *subline)
 {
 	RowCard row(kRowHeight + (subline ? kRowSubLineH : 0.0f));
@@ -556,24 +663,21 @@ bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, cons
 	return changed;
 }
 
-// A tooltip that stays out of the way: above the cursor when the cursor is in
-// the lower half of the window, so it cannot cover the controls beneath it.
-// Escape as the keyboard form of a modal's Cancel / Keep / Close: every
-// modal has one, and a key that visibly does nothing reads as a hang.
+// Escape as the keyboard form of a modal's Cancel / Keep / Close.
 bool EscapePressed()
 {
-	return ImGui::IsKeyPressed(ImGui::GetKeyIndex(ImGuiKey_Escape), false);
+	return ImGui::IsKeyPressed(ImGuiKey_Escape, false);
 }
 
-void ShowTip(const char *text, bool leftOfCursor)
+void ShowTip(const char *english, bool leftOfCursor)
 {
+	const char *text = Tr(english);
 	// Nothing behind a modal may raise a tooltip: a rect-based hover test does
 	// not know the modal is there, and a tooltip window appearing takes focus
 	// from it.
-	if (ImGuiWindow *modal = ImGui::GetFrontMostPopupModal())
+	if (ImGuiWindow *modal = ImGui::GetTopMostPopupModal())
 	{
-		ImGuiWindow *current = ImGui::GetCurrentWindowRead();
-		if (!current || current->RootWindow != modal->RootWindow)
+		if (ImGui::GetCurrentWindowRead()->RootWindow != modal->RootWindow)
 			return;
 	}
 	ImGuiIO &io = ImGui::GetIO();
@@ -581,7 +685,7 @@ void ShowTip(const char *text, bool leftOfCursor)
 	for (const char *p = text; *p; ++p)
 		if (*p == '\n')
 			++lines;
-	float h = lines * g_fontBody->FontSize + 24.0f;
+	float h = lines * g_fontBody->LegacySize + 24.0f;
 	// Above the cursor in the lower half of the window, and never past the
 	// right edge: the window is fixed-size, so a tooltip raised near the
 	// edge would otherwise be cut mid-sentence.
@@ -612,12 +716,12 @@ bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bo
 	ImGui::SetCursorScreenPos(pos);
 	bool changed = QCCheckbox(id, &value);
 	bool hovered = ImGui::IsItemHovered();
-	ImGui::GetWindowDrawList()->AddText(g_fontBody, g_fontBody->FontSize,
-		ImVec2(pos.x + 36.0f, pos.y + 12.0f - g_fontBody->FontSize * 0.5f),
-		Pal::U32(Pal::Text), label);
+	ImGui::GetWindowDrawList()->AddText(g_fontBody, g_fontBody->LegacySize,
+		ImVec2(pos.x + 36.0f, pos.y + 12.0f - g_fontBody->LegacySize * 0.5f),
+		Pal::U32(Pal::Text), Tr(label));
 	ImGui::SetCursorScreenPos(ImVec2(pos.x + 30.0f, pos.y - 4.0f));
 	std::string labelId = std::string(id) + "_label";
-	if (ImGui::InvisibleButton(labelId.c_str(), ImVec2(width - 30.0f, 32.0f)))
+	if (ImGui::InvisibleButton(labelId.c_str(), ImVec2(width - 30.0f, 32.0f), ImGuiButtonFlags_EnableNav))
 	{
 		value = !value;
 		changed = true;
@@ -626,6 +730,137 @@ bool NestedToggle(const char *id, ImVec2 pos, float width, const char *label, bo
 	if (hovered && tooltip)
 		ShowTip(tooltip);
 	return changed;
+}
+
+// ---------------------------------------------------------------------------
+// Segmented tabs
+// ---------------------------------------------------------------------------
+
+// The top-level tab switch: a translucent track, a thumb that slides to the
+// chosen cell, and labels going from muted to primary. Every measure below is
+// the design reference's times kTabScale, so its 14 px text becomes the body
+// face and a cell is big enough for a laser pointer.
+static const float kTabScale = 1.5f;
+
+static float TabCellWidth(const char *label)
+{
+	const float px = 12.0f * kTabScale;
+	return g_fontBody->CalcTextSizeA(g_fontBody->LegacySize,
+		std::numeric_limits<float>::max(), 0.0f, Tr(label)).x + px * 2.0f;
+}
+
+float SegmentedTabsWidth(const char *const items[], int count)
+{
+	float w = 1.0f * kTabScale * 2.0f;
+	for (int i = 0; i < count; ++i)
+		w += TabCellWidth(items[i]);
+	return w;
+}
+
+float SegmentedTabsHeight()
+{
+	return 28.0f * kTabScale;
+}
+
+int SegmentedTabs(const char *id, int value, const char *const items[], int count,
+	unsigned disabledMask, const char *const disabledTips[])
+{
+	const float h = 28.0f * kTabScale;
+	const float pad = 1.0f * kTabScale;
+	const float px = 12.0f * kTabScale;
+	const float rTrack = 7.0f * kTabScale;
+	const float rThumb = 6.0f * kTabScale;
+	const float rCell = 5.0f * kTabScale;
+	const float ring = 1.0f * kTabScale;
+	if (count > 16)
+		count = 16;
+
+	ImGui::PushID(id);
+	ImDrawList *dl = ImGui::GetWindowDrawList();
+	const ImVec2 p = ImGui::GetCursorScreenPos();
+	float widths[16];
+	float total = pad * 2.0f;
+	for (int i = 0; i < count; ++i)
+	{
+		widths[i] = TabCellWidth(items[i]);
+		total += widths[i];
+	}
+	const ImVec2 b = ImVec2(p.x + total, p.y + h);
+
+	dl->AddRectFilled(p, b, Pal::U32(ImVec4(1, 1, 1, 0.05f)), rTrack);
+
+	// The thumb eases to the chosen cell; its position lives in the window's
+	// storage so the slide survives frames.
+	float targetX = pad;
+	for (int i = 0; i < value && i < count; ++i)
+		targetX += widths[i];
+	const float targetW = value >= 0 && value < count ? widths[value] : 0.0f;
+	ImGuiStorage *storage = ImGui::GetStateStorage();
+	const ImGuiID keyX = ImGui::GetID("thumb.x");
+	const ImGuiID keyW = ImGui::GetID("thumb.w");
+	float tx = storage->GetFloat(keyX, -1.0f);
+	float tw = storage->GetFloat(keyW, targetW);
+	if (tx < 0.0f)
+	{
+		tx = targetX;
+		tw = targetW;
+	}
+	else
+	{
+		// Exponential approach with a 45 ms time constant: within a pixel
+		// in about 160 ms, the ease-out the reference transitions with.
+		const float k = 1.0f - std::exp(-ImGui::GetIO().DeltaTime / 0.045f);
+		tx += (targetX - tx) * k;
+		tw += (targetW - tw) * k;
+	}
+	storage->SetFloat(keyX, tx);
+	storage->SetFloat(keyW, tw);
+	const ImVec2 t0 = ImVec2(p.x + tx, p.y + pad);
+	const ImVec2 t1 = ImVec2(p.x + tx + tw, b.y - pad);
+	// Shadow, fill, then a 1 px inset ring.
+	dl->AddRectFilled(ImVec2(t0.x, t0.y + ring), ImVec2(t1.x, t1.y + ring),
+		Pal::U32(ImVec4(0, 0, 0, 0.05f)), rThumb);
+	dl->AddRectFilled(t0, t1, Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb);
+	dl->AddRect(ImVec2(t0.x + ring * 0.5f, t0.y + ring * 0.5f),
+		ImVec2(t1.x - ring * 0.5f, t1.y - ring * 0.5f),
+		Pal::U32(ImVec4(1, 1, 1, 0.10f)), rThumb - ring * 0.5f, ImDrawFlags_RoundCornersAll, ring);
+
+	float x = p.x + pad;
+	for (int i = 0; i < count; ++i)
+	{
+		ImGui::PushID(i);
+		const ImVec2 c0 = ImVec2(x, p.y + pad);
+		const ImVec2 c1 = ImVec2(x + widths[i], b.y - pad);
+		const bool disabled = ((disabledMask >> i) & 1u) != 0;
+		bool hov = false;
+		ImGui::SetCursorScreenPos(c0);
+		if (!disabled)
+		{
+			if (ImGui::InvisibleButton("cell", ImVec2(widths[i], c1.y - c0.y), ImGuiButtonFlags_EnableNav))
+				value = i;
+			hov = ImGui::IsItemHovered();
+			DrawFocusRing(dl, c0, c1, rCell);
+		}
+		else
+		{
+			ImGui::Dummy(ImVec2(widths[i], c1.y - c0.y));
+			if (disabledTips[i] && ImGui::IsItemHovered())
+				ShowTip(disabledTips[i]);
+		}
+		ImVec4 col = (i == value || hov) ? Pal::TabTextOn : Pal::TabTextOff;
+		if (disabled)
+			col.w = 0.4f;
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(x + px, c0.y + (c1.y - c0.y - g_fontBody->LegacySize) * 0.5f),
+			Pal::U32(col), Tr(items[i]));
+		x += widths[i];
+		ImGui::PopID();
+	}
+
+	ImGui::SetCursorScreenPos(ImVec2(p.x, b.y));
+	ImGui::Dummy(ImVec2(total, 0.0f));
+	ImGui::PopID();
+	return value;
 }
 
 int Segmented(const char *id, int value, const char *const items[], int count, float itemW, float h)
@@ -644,13 +879,13 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 		ImVec2 ip = ImVec2(p.x + pad + i * itemW, p.y + pad);
 		ImVec2 isz = ImVec2(itemW, h - pad * 2.0f);
 		ImGui::SetCursorScreenPos(ip);
-		if (ImGui::InvisibleButton("seg", isz))
+		if (ImGui::InvisibleButton("seg", isz, ImGuiButtonFlags_EnableNav))
 			value = i;
 		bool hov = ImGui::IsItemHovered();
 
 		if (i == value)
 		{
-			// Fill plus an accent rail: the fill alone was a 1.3:1 state cue.
+			// Fill plus an accent rail: the fill alone is a 1.3:1 state cue.
 			dl->AddRectFilled(ip, ImVec2(ip.x + isz.x, ip.y + isz.y), Pal::U32(ImVec4(1, 1, 1, 0.18f)), 5.0f);
 			dl->AddRectFilled(ImVec2(ip.x + 8.0f, ip.y + isz.y - 3.0f), ImVec2(ip.x + isz.x - 8.0f, ip.y + isz.y - 1.0f),
 				Pal::U32(Pal::Accent), 1.0f);
@@ -659,10 +894,11 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 			dl->AddRectFilled(ip, ImVec2(ip.x + isz.x, ip.y + isz.y), Pal::U32(ImVec4(1, 1, 1, 0.04f)), 5.0f);
 		DrawFocusRing(dl, ip, ImVec2(ip.x + isz.x, ip.y + isz.y), 5.0f);
 
-		ImVec2 ts = ImGui::CalcTextSize(items[i]);
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
-			ImVec2(ip.x + (isz.x - ts.x) * 0.5f, ip.y + (isz.y - g_fontBody->FontSize) * 0.5f),
-			Pal::U32(i == value ? Pal::Text : Pal::Dim), items[i]);
+		const char *item = Tr(items[i]);
+		ImVec2 ts = ImGui::CalcTextSize(item);
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(ip.x + (isz.x - ts.x) * 0.5f, ip.y + (isz.y - g_fontBody->LegacySize) * 0.5f),
+			Pal::U32(i == value ? Pal::Text : Pal::Dim), item);
 		ImGui::PopID();
 	}
 
@@ -678,9 +914,6 @@ int Segmented(const char *id, int value, const char *const items[], int count, f
 
 void DrawStatusCard(const std::vector<StatusRowData> &rows)
 {
-	if (rows.empty())
-		return;
-
 	const float rowH = 34.0f, padY = 12.0f, padX = 16.0f;
 	float h = padY * 2.0f + rowH * (float)rows.size();
 	ImVec2 p = BeginRowCard(h);
@@ -694,9 +927,9 @@ void DrawStatusCard(const std::vector<StatusRowData> &rows)
 		ImVec4 bg = r.color; bg.w = 0.15f;
 		dl->AddCircleFilled(c, 13.0f, Pal::U32(bg), 20);
 		r.icon(dl, c, 8.5f, Pal::U32(r.color));
-		dl->AddText(g_fontBody, g_fontBody->FontSize,
-			ImVec2(c.x + 23.0f, cy - g_fontBody->FontSize * 0.5f),
-			Pal::U32(r.color), r.text.c_str());
+		dl->AddText(g_fontBody, g_fontBody->LegacySize,
+			ImVec2(c.x + 23.0f, cy - g_fontBody->LegacySize * 0.5f),
+			Pal::U32(r.color), Tr(r.text.c_str()));
 	}
 
 	EndRowCard(p, h);

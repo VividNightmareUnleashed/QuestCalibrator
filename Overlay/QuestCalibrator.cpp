@@ -1,12 +1,15 @@
-﻿#include "stdafx.h"
+#include "stdafx.h"
 #include "Calibration.h"
 #include "Configuration.h"
 #include "EmbeddedFiles.h"
+#include "Localization.h"
+#include "Updater.h"
 #include "UserInterface.h"
+#include "ImGuiVRInput.h"
 
 #include <imgui/imgui.h>
-#include <imgui/imgui_impl_glfw.h>
-#include <imgui/imgui_impl_opengl3.h>
+#include <imgui/backends/imgui_impl_glfw.h>
+#include <imgui/backends/imgui_impl_opengl3.h>
 #include <GL/gl3w.h>
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -18,11 +21,15 @@
 #endif
 #include <dwmapi.h>
 #pragma comment(lib, "dwmapi.lib")
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
 // WIN32_LEAN_AND_MEAN keeps shellapi.h out of windows.h; CommandLineToArgvW
 // needs it (shell32.lib is already linked by the project).
 #include <shellapi.h>
 #include <openvr.h>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -41,19 +48,23 @@ void GLFWErrorCallback(int error, const char* description)
 }
 
 static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved);
+static std::string Narrow(const std::wstring &wide);
 
 static GLFWwindow *glfwWindow = nullptr;
+static bool dashboardOwnsInput = false;
 static vr::VROverlayHandle_t overlayMainHandle = 0, overlayThumbnailHandle = 0;
 static bool imguiContextInitialized = false;
 static bool imguiGlfwInitialized = false;
 static bool imguiOpenGLInitialized = false;
 
-// The shell's half of the calibration layer's toast policy. The handle is read
-// at call time, not captured: TryCreateVROverlay runs before InitCalibrator on
-// the normal path but the overlay can also fail to create, and either way a
-// zero handle has always meant "log only". Installed by InitCalibrator's caller
-// below, which is why the calibration layer no longer declares an accessor for
-// a resource this file owns.
+void RequestApplicationExit()
+{
+	if (glfwWindow)
+		glfwSetWindowShouldClose(glfwWindow, GLFW_TRUE);
+}
+
+// The calibration layer's toast sink. The handle is read at call time; a zero
+// handle (no overlay) means log only.
 static void ShowVRToast(const char *message)
 {
 	if (overlayMainHandle && vr::VRNotifications())
@@ -61,28 +72,22 @@ static void ShowVRToast(const char *message)
 		vr::VRNotificationId notifId = 0;
 		vr::VRNotifications()->CreateNotification(
 			overlayMainHandle, 0, vr::EVRNotificationType_Transient,
-			message, vr::EVRNotificationStyle_Application, nullptr, &notifId);
+			questcal::i18n::Tr(std::string(message)).c_str(),
+			vr::EVRNotificationStyle_Application, nullptr, &notifId);
 	}
 }
 static GLuint fboHandle = 0, fboTextureHandle = 0;
 static int fboTextureWidth = 0, fboTextureHeight = 0;
 
-// Directory containing QuestCalibrator.exe. Everything we load or register by
-// path (manifest.vrmanifest, icon.png) sits next to the executable, so this must
-// NOT come from the process working directory - installers, Start Menu shortcuts
-// and SteamVR auto-launch all start us from somewhere else, and registering a
-// manifest path relative to the wrong directory fails silently.
-static std::string appDir;   // UTF-8
+// Directory containing QuestCalibrator.exe, in UTF-8 as the OpenVR APIs expect.
+// Everything loaded or registered by path sits next to the executable, never
+// the working directory: installers, shortcuts and SteamVR auto-launch start
+// us elsewhere, and a wrong manifest path fails silently.
+static std::string appDir;
 
-// False means the module path could not be resolved at all. There is no usable
-// fallback: substituting the working directory would register a manifest path
-// SteamVR cannot launch and load the overlay icon from the wrong place, both
-// silently, so callers must treat this as fatal.
+// False is fatal: there is no usable fallback directory.
 static bool ResolveAppDir()
 {
-	// The OpenVR APIs this feeds (manifest registration, SetOverlayFromFile)
-	// take UTF-8; the ANSI variants would hand SteamVR mojibake for any
-	// non-ASCII install path, silently breaking auto-launch and the icon.
 	std::vector<wchar_t> wide(MAX_PATH);
 	for (;;)
 	{
@@ -91,9 +96,7 @@ static bool ResolveAppDir()
 			return false;
 		if (len < wide.size())
 			break;
-		// Returning exactly the buffer size means truncation, not success: an
-		// install path longer than MAX_PATH must not silently become a
-		// different directory. Retry on the heap.
+		// A result the size of the buffer means truncation; retry larger.
 		if (wide.size() >= 32768)
 			return false;   // longer than any addressable NT path
 		wide.resize(wide.size() * 2);
@@ -104,35 +107,35 @@ static bool ResolveAppDir()
 		return false;
 	*lastSlash = L'\0';
 
-	int bytes = WideCharToMultiByte(CP_UTF8, 0, wide.data(), -1, nullptr, 0, nullptr, nullptr);
-	if (bytes <= 1)
-		return false;
-	std::string utf8(static_cast<size_t>(bytes), '\0');
-	if (WideCharToMultiByte(CP_UTF8, 0, wide.data(), -1, &utf8[0], bytes, nullptr, nullptr) == 0)
-		return false;
-	utf8.resize(static_cast<size_t>(bytes) - 1);   // drop the terminating NUL
-	appDir = std::move(utf8);
-	return true;
+	appDir = Narrow(wide.data());
+	return !appDir.empty();
 }
 
-// Everything we load or register by path sits next to the executable; composing
-// those joins in one place keeps a new one from picking a different directory.
 static std::string AppFile(const char *name)
 {
 	return appDir + "\\" + name;
 }
 
-// Release builds are a GUI binary with no console, so printf/cerr from the
-// -installmanifest style commands go nowhere. Report through a message box
-// instead, unless the caller passed -noui (the installer does, so a scripted
-// install never blocks on a modal window and reads the exit code instead).
+// Release builds are a GUI binary with no console, so the CLI commands report
+// through a message box, unless -noui is passed: the installer does, so a
+// scripted install never blocks on a modal window and reads the exit code.
 static bool g_cliNoUi = false;
 
-// -frames N: render exactly N frames and return. Paired with -uipreview (which
-// builds a complete fake VR state and needs no SteamVR) this makes the UI layer
-// runnable as a smoke test: a crash on any of those frames leaves wWinMain with
-// a non-empty fatal message and a non-zero exit code.
+// -frames N: render exactly N frames and return. With -uipreview (no SteamVR
+// needed) this is a UI smoke test: a crash leaves a non-zero exit code.
 static int g_frameLimit = 0;
+
+// -shot PATH: write the last frame's 1200x800 overlay texture to PATH as a PNG,
+// then return as -frames does (thirty frames by default, enough for the tab
+// thumb and hover fades to settle).
+static std::wstring g_shotPath;
+
+// -lang CODE: show the overlay in this language for the session, whatever the
+// saved setting says, so a preview can be shot in each language.
+// -i18n-missing PATH: on exit, write the English strings the current language
+// had no translation for, one per line; a translator's checklist.
+static std::string g_langOverride;
+static std::wstring g_missingPath;
 
 static void CliReport(const char *message, bool isError)
 {
@@ -159,17 +162,15 @@ struct ManifestInstallResult
 // self-repair. OpenVR rejects duplicate application keys, so replacement must
 // temporarily remove the old manifest; every failure after that restores it.
 //
-// Auto-launch is the user's setting once the app is registered: only the
-// installer (`forceAutoLaunch`) and a first-ever registration turn it on. A
-// moved install carries the previous choice across its re-registration, and a
-// registration that already points here is left exactly as SteamVR has it, so
-// a user who switched auto-launch off does not get it switched back on by
-// every launch.
+// Auto-launch is the user's setting once registered: only the installer
+// (`forceAutoLaunch`) and a first-ever registration turn it on, and a moved
+// install carries the previous choice across.
 static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 {
 	ManifestInstallResult result;
 	const std::string manifestPath = AppFile("manifest.vrmanifest");
-	if (GetFileAttributesA(manifestPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+	std::error_code fileError;
+	if (!std::filesystem::is_regular_file(std::filesystem::u8path(manifestPath), fileError))
 	{
 		result.message = "QuestCalibrator's application manifest is missing. The existing SteamVR registration was left unchanged.\n\n" + manifestPath;
 		return result;
@@ -188,7 +189,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 			MAX_PATH, &error);
 		if (error != vr::VRApplicationError_None)
 		{
-			result.message = "Failed to locate the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" +
+			result.message = "Couldn't find the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" +
 				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error));
 			return result;
 		}
@@ -221,7 +222,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	{
 		auto error = vr::VRApplications()->RemoveApplicationManifest(oldManifest.c_str());
 		if (error != vr::VRApplicationError_None)
-			return failed("Failed to remove the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
+			return failed("Couldn't remove the previously registered QuestCalibrator manifest. The old registration was left unchanged.\n\n" + oldManifest + "\n\n" +
 				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), false);
 	}
 
@@ -229,7 +230,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	{
 		auto error = vr::VRApplications()->AddApplicationManifest(manifestPath.c_str());
 		if (error != vr::VRApplicationError_None)
-			return failed("Failed to register the application manifest with SteamVR.\n\n" +
+			return failed("Couldn't register QuestCalibrator with SteamVR.\n\n" +
 				manifestPath + "\n\n" +
 				vr::VRApplications()->GetApplicationsErrorNameFromEnum(error), replacing);
 	}
@@ -247,7 +248,7 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 		{
 			if (adding)
 				vr::VRApplications()->RemoveApplicationManifest(manifestPath.c_str());
-			return failed("SteamVR could not set QuestCalibrator auto-launch.\n\n" +
+			return failed("SteamVR couldn't set QuestCalibrator to start automatically.\n\n" +
 				std::string(vr::VRApplications()->GetApplicationsErrorNameFromEnum(error)),
 				replacing);
 		}
@@ -257,6 +258,58 @@ static ManifestInstallResult EnsureManifestRegistration(bool forceAutoLaunch)
 	result.changed = adding || (settingAutoLaunch && wantAutoLaunch != oldAutoLaunch);
 	result.message = "QuestCalibrator registered with SteamVR.\n\n" + manifestPath;
 	return result;
+}
+
+// Japanese is drawn from a font Windows already has rather than a bundled
+// one: Yu Gothic ships with Windows 10 and 11, Meiryo and MS Gothic before it.
+// Read once and shared by every size.
+static const std::vector<char> &JapaneseFontData()
+{
+	static std::vector<char> data;
+	static bool searched = false;
+	if (searched)
+		return data;
+	searched = true;
+	wchar_t windows[MAX_PATH] = {};
+	const UINT len = GetWindowsDirectoryW(windows, MAX_PATH);
+	if (len == 0 || len >= MAX_PATH)
+		return data;
+	for (const wchar_t *name : { L"YuGothM.ttc", L"YuGothR.ttc", L"meiryo.ttc", L"msgothic.ttc" })
+	{
+		std::error_code ec;
+		const std::filesystem::path path = std::filesystem::path(windows) / L"Fonts" / name;
+		const auto size = std::filesystem::file_size(path, ec);
+		if (ec || size == 0 || size > 64u * 1024u * 1024u)
+			continue;
+		std::ifstream in(path, std::ios::binary);
+		data.resize(static_cast<size_t>(size));
+		if (in.read(data.data(), static_cast<std::streamsize>(size)))
+			break;
+		data.clear();
+	}
+	return data;
+}
+
+// One UI face at one size: DroidSans, with the Japanese font merged in as its
+// fallback so Japanese text (the UI's, or a tracker renamed in Japanese)
+// draws. ImGui 1.92 bakes glyphs on first use, so the merge costs nothing
+// until a Japanese glyph is drawn.
+static ImFont *AddUiFont(ImGuiIO &io, float size)
+{
+	ImFont *font = io.Fonts->AddFontFromMemoryCompressedTTF(
+		DroidSans_compressed_data, DroidSans_compressed_size, size);
+	const std::vector<char> &japanese = JapaneseFontData();
+	const bool merged = font && !japanese.empty();
+	if (merged)
+	{
+		ImFontConfig config;
+		config.MergeMode = true;
+		config.FontDataOwnedByAtlas = false;   // shared by all three sizes
+		io.Fonts->AddFontFromMemoryTTF(const_cast<char *>(japanese.data()),
+			static_cast<int>(japanese.size()), size, &config);
+	}
+	questcal::i18n::SetFontAvailable(questcal::i18n::Language::Japanese, merged);
+	return font;
 }
 
 void CreateGLFWWindow()
@@ -271,12 +324,12 @@ void CreateGLFWWindow()
 
 	glfwWindow = glfwCreateWindow(fboTextureWidth, fboTextureHeight, "QuestCalibrator", NULL, NULL);
 	if (!glfwWindow)
-		throw std::runtime_error("Failed to create window");
+		throw std::runtime_error("Couldn't create the window.");
 
 	glfwMakeContextCurrent(glfwWindow);
 	glfwSwapInterval(1);
 	if (gl3wInit() != 0)
-		throw std::runtime_error("Failed to initialize OpenGL functions");
+		throw std::runtime_error("Couldn't start OpenGL. Update your graphics driver.");
 
 	// Dark titlebar on Windows 10 20H1+ (attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE).
 	BOOL darkTitlebar = TRUE;
@@ -284,25 +337,28 @@ void CreateGLFWWindow()
 
 	if (!g_uiPreviewMode)
 		glfwIconifyWindow(glfwWindow);
+	else
+		glfwShowWindow(glfwWindow);
 
-	imguiContextInitialized = ImGui::CreateContext() != nullptr;
-	if (!imguiContextInitialized)
-		throw std::runtime_error("Failed to initialize ImGui");
+	ImGui::CreateContext();
+	imguiContextInitialized = true;
 	ImGuiIO &io = ImGui::GetIO();
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 	io.IniFilename = nullptr;
-	g_fontBody = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 21.0f);
-	g_fontSmall = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 14.0f);
-	g_fontTitle = io.Fonts->AddFontFromMemoryCompressedTTF(DroidSans_compressed_data, DroidSans_compressed_size, 27.0f);
+	g_fontBody = AddUiFont(io, 21.0f);
+	g_fontSmall = AddUiFont(io, 14.0f);
+	g_fontTitle = AddUiFont(io, 27.0f);
 	io.FontDefault = g_fontBody;
 
-	imguiGlfwInitialized = ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
-	if (!imguiGlfwInitialized)
-		throw std::runtime_error("Failed to initialize the ImGui GLFW backend");
+	ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
+	imguiGlfwInitialized = true;
+	glfwSetWindowFocusCallback(glfwWindow, [](GLFWwindow *, int focused) {
+		imgui_vr::DesktopFocusEvent(focused != 0, dashboardOwnsInput);
+	});
 	imguiOpenGLInitialized = ImGui_ImplOpenGL3_Init("#version 330");
 	if (!imguiOpenGLInitialized)
-		throw std::runtime_error("Failed to initialize the ImGui OpenGL backend");
+		throw std::runtime_error("Couldn't start the user interface (ImGui OpenGL backend).");
 
 	ApplyTheme();
 
@@ -349,6 +405,7 @@ void TryCreateVROverlay()
 	vr::VROverlay()->SetOverlayWidthInMeters(overlayMainHandle, 3.0f);
 	vr::VROverlay()->SetOverlayInputMethod(overlayMainHandle, vr::VROverlayInputMethod_Mouse);
 	vr::VROverlay()->SetOverlayFlag(overlayMainHandle, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
+	vr::VROverlay()->SetOverlayFlag(overlayMainHandle, vr::VROverlayFlags_NoBackside, true);
 
 	vr::VROverlay()->SetOverlayFromFile(overlayThumbnailHandle, AppFile("icon.png").c_str());
 }
@@ -414,6 +471,74 @@ void InitVR(bool &initialized)
 	ActivateMultipleDrivers();
 }
 
+// Writes the overlay texture to -shot's path as a PNG (via WIC). Read from the
+// FBO so it is the full 1200x800 whatever the window size. Alpha is dropped;
+// the compositor ignores it too.
+static bool SavePreviewShot(const std::wstring &path, std::string &error)
+{
+	const UINT w = static_cast<UINT>(fboTextureWidth), h = static_cast<UINT>(fboTextureHeight);
+	const UINT stride = w * 4;
+	std::vector<uint8_t> pixels(static_cast<size_t>(stride) * h);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, fboHandle);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_BGRA, GL_UNSIGNED_BYTE, pixels.data());
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	// GL hands rows bottom-up; PNG wants them top-down. The alpha the
+	// blending left behind is overwritten while the rows are swapped.
+	std::vector<uint8_t> row(stride);
+	for (UINT y = 0; y < h / 2; ++y)
+	{
+		uint8_t *a = pixels.data() + static_cast<size_t>(y) * stride;
+		uint8_t *b = pixels.data() + static_cast<size_t>(h - 1 - y) * stride;
+		memcpy(row.data(), a, stride);
+		memcpy(a, b, stride);
+		memcpy(b, row.data(), stride);
+	}
+	for (size_t i = 3; i < pixels.size(); i += 4)
+		pixels[i] = 0xFF;
+
+	struct Com
+	{
+		HRESULT hr;
+		Com() : hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
+		~Com() { if (SUCCEEDED(hr)) CoUninitialize(); }
+	} com;
+	IWICImagingFactory *factory = nullptr;
+	IWICStream *stream = nullptr;
+	IWICBitmapEncoder *encoder = nullptr;
+	IWICBitmapFrameEncode *frame = nullptr;
+	HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+		IID_PPV_ARGS(&factory));
+	if (SUCCEEDED(hr)) hr = factory->CreateStream(&stream);
+	if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+	if (SUCCEEDED(hr)) hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+	if (SUCCEEDED(hr)) hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+	if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, nullptr);
+	if (SUCCEEDED(hr)) hr = frame->Initialize(nullptr);
+	if (SUCCEEDED(hr)) hr = frame->SetSize(w, h);
+	// The encoder may answer with a format of its own choosing, and the
+	// buffer would then be read at the wrong width; only an exact match
+	// goes on.
+	WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+	if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&format);
+	if (SUCCEEDED(hr) && !IsEqualGUID(format, GUID_WICPixelFormat32bppBGRA)) hr = WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT;
+	if (SUCCEEDED(hr)) hr = frame->WritePixels(h, stride, static_cast<UINT>(pixels.size()), pixels.data());
+	if (SUCCEEDED(hr)) hr = frame->Commit();
+	if (SUCCEEDED(hr)) hr = encoder->Commit();
+	if (frame) frame->Release();
+	if (encoder) encoder->Release();
+	if (stream) stream->Release();
+	if (factory) factory->Release();
+	if (FAILED(hr))
+	{
+		char buf[128];
+		snprintf(buf, sizeof buf, "Couldn't write the screenshot (HRESULT 0x%08lX): ", static_cast<unsigned long>(hr));
+		error = buf + Narrow(path);
+		return false;
+	}
+	return true;
+}
+
 void RunLoop()
 {
 	int framesRendered = 0;
@@ -425,33 +550,39 @@ void RunLoop()
 		CalibrationTick(time);
 
 		bool dashboardVisible = false;
+		auto &io = ImGui::GetIO();
+		io.SetAppAcceptingEvents(true);
 		int width, height;
 		glfwGetFramebufferSize(glfwWindow, &width, &height);
 
 		if (overlayMainHandle && vr::VROverlay())
 		{
-			auto &io = ImGui::GetIO();
 			dashboardVisible = vr::VROverlay()->IsActiveDashboardOverlay(overlayMainHandle);
+			if (dashboardVisible != dashboardOwnsInput)
+				imgui_vr::ChangeInputSource(dashboardVisible,
+					glfwGetWindowAttrib(glfwWindow, GLFW_FOCUSED) != 0);
+			dashboardOwnsInput = dashboardVisible;
 
-			// Closing the VR keyboard takes two frames to settle, so the phase is
-			// named rather than encoded in flags whose combinations only a
-			// comment explained. Both waits are deliberate, and io.WantTextInput
-			// is read here BEFORE ImGui::NewFrame, so it always lags one frame
-			// behind the widget state - which is why clearing the active widget
-			// is not enough to stop an immediate reopen.
+			// Closing the VR keyboard takes two frames to settle: io.WantTextInput
+			// is read here before ImGui::NewFrame, so it lags the widget state by
+			// a frame, and clearing the active widget alone would reopen it.
 			enum class KeyboardPhase
 			{
 				Closed,
 				Open,
-				CommitText,         // Done pressed; give ImGui a frame to take SetActiveText
+				CommitText,         // Done pressed; let ImGui consume the queued edit
 				AwaitInputRelease,  // widget cleared; wait for io.WantTextInput to catch up
 			};
 			static KeyboardPhase keyboardPhase = KeyboardPhase::Closed;
+			static ImGuiID keyboardWidget = 0;
 
 			switch (keyboardPhase)
 			{
 			case KeyboardPhase::CommitText:
-				ImGui::ClearActiveID();
+				if (imgui_vr::HasPendingInput())
+					break;
+				if (ImGui::GetActiveID() == keyboardWidget)
+					ImGui::ClearActiveID();
 				keyboardPhase = KeyboardPhase::AwaitInputRelease;
 				break;
 			case KeyboardPhase::AwaitInputRelease:
@@ -464,19 +595,20 @@ void RunLoop()
 					keyboardPhase = KeyboardPhase::Closed;
 				break;
 			case KeyboardPhase::Closed:
-				if (io.WantTextInput)
+				if (dashboardVisible && io.WantTextInput)
 				{
-					char buf[0x400];
-					ImGui::GetActiveText(buf, sizeof buf);
-					buf[0x3ff] = 0;
+					const char *text = imgui_vr::ActiveText();
 					uint32_t unFlags = 0; // EKeyboardFlags
 
 					vr::EVROverlayError error = vr::VROverlay()->ShowKeyboardForOverlay(
 						overlayMainHandle, vr::k_EGamepadTextInputModeNormal, vr::k_EGamepadTextInputLineModeSingleLine,
-						unFlags, "QuestCalibrator Overlay", sizeof buf, buf, 0
+						unFlags, "QuestCalibrator Overlay", 0x400, text, 0
 					);
 					if (error == vr::VROverlayError_None)
+					{
 						keyboardPhase = KeyboardPhase::Open;
+						keyboardWidget = ImGui::GetActiveID();
+					}
 				}
 				break;
 			}
@@ -486,33 +618,27 @@ void RunLoop()
 			{
 				switch (vrEvent.eventType) {
 				case vr::VREvent_MouseMove:
-					io.MousePos.x = vrEvent.data.mouse.x;
-					io.MousePos.y = vrEvent.data.mouse.y;
+					io.AddMousePosEvent(vrEvent.data.mouse.x, vrEvent.data.mouse.y);
 					break;
 				case vr::VREvent_MouseButtonDown:
-					io.MouseDown[vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1] = true;
+					io.AddMouseButtonEvent(vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1, true);
 					break;
 				case vr::VREvent_MouseButtonUp:
-					io.MouseDown[vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1] = false;
+					io.AddMouseButtonEvent(vrEvent.data.mouse.button == vr::VRMouseButton_Left ? 0 : 1, false);
 					break;
 				case vr::VREvent_ScrollDiscrete:
-					io.MouseWheelH += vrEvent.data.scroll.xdelta * 360.0f * 8.0f;
-					io.MouseWheel += vrEvent.data.scroll.ydelta * 360.0f * 8.0f;
+					io.AddMouseWheelEvent(vrEvent.data.scroll.xdelta * 360.0f * 8.0f,
+						vrEvent.data.scroll.ydelta * 360.0f * 8.0f);
 					break;
 				case vr::VREvent_KeyboardDone: {
 					char buf[0x400] = {};
-					uint32_t bytes = vr::VROverlay()->GetKeyboardText(buf, sizeof buf);
-					if (bytes > 0)
-					{
-						buf[sizeof buf - 1] = 0;
-						// buf_size is the capacity: the decoder writes at most
-						// buf_size - 1 characters, so passing the string length
-						// drops the last one typed.
-						ImGui::SetActiveText(buf, static_cast<int>(sizeof buf));
-					}
-					// A Done for a keyboard we no longer consider open has no
-					// widget to clear; only settle.
-					keyboardPhase = keyboardPhase == KeyboardPhase::Open
+					vr::VROverlay()->GetKeyboardText(buf, sizeof buf);
+					buf[sizeof buf - 1] = 0;
+					// Empty text is a valid edit. A late Done must not replace
+					// a different widget's contents or clear its focus.
+					bool replaced = keyboardPhase == KeyboardPhase::Open &&
+						imgui_vr::ReplaceActiveText(buf, keyboardWidget);
+					keyboardPhase = replaced
 						? KeyboardPhase::CommitText
 						: KeyboardPhase::AwaitInputRelease;
 					break;
@@ -523,11 +649,16 @@ void RunLoop()
 			}
 		}
 
-		ImGui::GetIO().DisplaySize = ImVec2((float) fboTextureWidth, (float) fboTextureHeight);
-
-		ImGui_ImplGlfw_SetReadMouseFromGlfw(!dashboardVisible);
+		// The upstream backend still owns desktop input, timing and cursors.
+		// Suppress its events while the dashboard owns input, including when
+		// the desktop window is focused or minimized.
+		io.SetAppAcceptingEvents(!dashboardVisible);
 		ImGui_ImplOpenGL3_NewFrame();
 		ImGui_ImplGlfw_NewFrame();
+		io.SetAppAcceptingEvents(true);
+		io.DisplaySize = ImVec2((float) fboTextureWidth, (float) fboTextureHeight);
+		io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+		questcal::i18n::BeginFrame();
 		ImGui::NewFrame();
 
 		BuildMainWindow(dashboardVisible);
@@ -570,6 +701,9 @@ void RunLoop()
 		if (dashboardVisible && waitEventsTimeout > dashboardInterval)
 			waitEventsTimeout = dashboardInterval;
 
+		// Rendering and vsync already consumed part of this frame's budget.
+		waitEventsTimeout -= glfwGetTime() - time;
+
 		// A zero interval (calibration collection) must not busy-spin: sample
 		// ingestion happens on the PoseStreamHub thread and CalibrationTick
 		// self-gates to 50 Hz, so nothing needs more than a short wait — and
@@ -579,20 +713,31 @@ void RunLoop()
 			waitEventsTimeout = 0.005;
 
 		if (g_frameLimit > 0 && ++framesRendered >= g_frameLimit)
+		{
+			std::string error;
+			if (!g_shotPath.empty() && !SavePreviewShot(g_shotPath, error))
+				CliReport(error.c_str(), true);
 			return;
+		}
 
-		glfwWaitEventsTimeout(waitEventsTimeout);
+		// An animated visible window is already paced by SwapBuffers (vsync).
+		// A second timer wait can miss the next refresh and make 60 fps assets
+		// visibly stutter. Hidden/minimized windows still need the idle wait.
+		const bool displayPaced = CalCtx.wantedUpdateInterval <= 1.0 / 60.0 && width && height &&
+			glfwGetWindowAttrib(glfwWindow, GLFW_VISIBLE) && !glfwGetWindowAttrib(glfwWindow, GLFW_ICONIFIED);
+		io.SetAppAcceptingEvents(!dashboardVisible);
+		if (displayPaced)
+			glfwPollEvents();
+		else
+			glfwWaitEventsTimeout(waitEventsTimeout);
 	}
 }
 
-// Two instances would each open a pose-ring reader and split the driver's pose
-// stream disjointly between them - each seeing roughly half the samples, with
-// no loss marker to say so, and both feeding the runtime monitors. The OpenVR
-// dashboard key catches a duplicate too, but only once SteamVR is up and the
-// overlay interface exists; this answers "am I already running" on its own and
-// before anything is opened or rotated. Local\ is the session scope, which is
-// the scope that shares the ring. The handle is deliberately held for the
-// process lifetime and released by exit.
+// Two instances would each open a pose-ring reader and silently split the
+// driver's pose stream between them. The dashboard overlay key catches a
+// duplicate only once SteamVR is up; this answers before anything is opened or
+// rotated. Local\ is the session scope that shares the ring; the handle is
+// held until exit.
 static HANDLE g_singleInstanceMutex = nullptr;
 
 static bool ClaimSingleInstance()
@@ -630,7 +775,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	// log; skipped for UI preview so a dev preview never rotates a real
 	// session's log away.
 	if (!g_uiPreviewMode)
+	{
 		InitSessionLog();
+		questcal::update::AppUpdater.SetLogSink([](const std::string &message) {
+			AppendSessionLog("updater: " + message);
+		});
+	}
 
 	if (!glfwInit())
 	{
@@ -702,12 +852,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 				AppendSessionLog("SteamVR manifest self-repair failed: " + registration.message);
 			else if (registration.changed)
 				AppendSessionLog("SteamVR application manifest/auto-launch registration repaired");
-			// Take the single-instance guard (the dashboard overlay key) BEFORE
-			// anything opens the driver's pose ring. Two overlay readers on one
-			// ring split the sample stream between them with no loss marker, so
-			// a second instance that reached InitCalibrator first would silently
-			// decimate the running instance's stream - possibly mid-calibration
-			// - for as long as it took to reach its own first RunLoop iteration.
+			// Claim the dashboard overlay key before InitCalibrator opens the pose
+			// ring (see g_singleInstanceMutex).
 			TryCreateVROverlay();
 		}
 		CreateGLFWWindow();
@@ -721,7 +867,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 			InitCalibrator();
 			calibratorInitialized = true;
 			LoadProfile(CalCtx);
+			CalCtx.modules = questcal::ReadInstalledModules();
+			questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 		}
+		if (!g_langOverride.empty())
+			CalCtx.language = g_langOverride;
+		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(CalCtx.language));
 		RunLoop();
 	}
 	catch (const std::exception &e)
@@ -733,11 +884,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 		fatal = "QuestCalibrator stopped because of an unknown fatal error.";
 	}
 
-	// One shutdown pair for every path, and before the modal dialog below can
-	// block this process indefinitely: ShutdownCalibrator flushes debounced
-	// profile/settings updates before stopping the pose hub. The ownership
-	// flags inside the lambdas are what make a throw out of one of them
-	// recoverable - the completed half is already a no-op on the retry.
+	questcal::update::AppUpdater.Shutdown();
+	if (!g_missingPath.empty())
+		questcal::i18n::WriteMissing(g_missingPath);
+
+	// One shutdown pair for every path, before the modal dialog below can block:
+	// ShutdownCalibrator flushes debounced profile/settings writes. The
+	// ownership flags make the retry after a throw finish only what is left.
 	try
 	{
 		shutdownRuntime(fatal.empty());
@@ -745,8 +898,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
 	}
 	catch (...)
 	{
-		// Not dead code: the ownership flags cleared whatever already completed,
-		// so this retry finishes the rest rather than repeating it.
 		shutdownRuntime(false);
 		shutdownGraphics();
 		if (fatal.empty())
@@ -781,16 +932,14 @@ static void CliExit(const std::string &message, bool isError)
 
 static std::string InitErrorMessage(vr::EVRInitError vrErr)
 {
-	return std::string("Failed to initialize OpenVR: ")
+	return std::string("Couldn't start OpenVR: ")
 		+ vr::VR_GetVRInitErrorAsEnglishDescription(vrErr)
 		+ "\n\nSteamVR must be installed. If it has never been run on this PC,"
 		" start SteamVR once and try again.";
 }
 
-// Every command below reaches straight for the applications or settings
-// interface, which is only valid inside an initialised session. Sharing the
-// prologue means a new command cannot forget it. The preview flags must NOT
-// call this: their whole point is running without SteamVR.
+// The CLI commands need an initialised OpenVR session. The preview flags must
+// not call this: they run without SteamVR.
 static void InitVRUtilityOrExit()
 {
 	auto vrErr = vr::VRInitError_None;
@@ -815,10 +964,6 @@ static std::string Narrow(const std::wstring &wide)
 
 static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 {
-	// Tokenise instead of substring-matching: -noui must not be stripped out of
-	// the middle of a longer token, and an argument we do not recognise has to
-	// be reported rather than falling through to a full GUI launch with exit
-	// code 0 - which a scripted install cannot tell from success.
 	// CommandLineToArgvW applies program-name rules to the first token, so
 	// prepend a placeholder for it.
 	std::wstring full = L"QuestCalibrator.exe ";
@@ -832,9 +977,6 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		LocalFree(argv);
 	}
 
-	// -noui may accompany any command below. The installer passes it so a
-	// scripted install never blocks on a modal dialog and reads the exit code
-	// instead; without it (manual install) results are shown in a message box.
 	std::wstring cmd, unrecognised;
 	for (size_t i = 0; i < args.size(); ++i)
 	{
@@ -844,22 +986,26 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		else if (arg == L"-frames" && i + 1 < args.size() &&
 			_wtoi(args[i + 1].c_str()) > 0)
 			g_frameLimit = _wtoi(args[++i].c_str());
+		else if (arg == L"-shot" && i + 1 < args.size())
+			g_shotPath = args[++i];
+		else if (arg == L"-lang" && i + 1 < args.size())
+			g_langOverride = Narrow(args[++i]);
+		else if (arg == L"-i18n-missing" && i + 1 < args.size())
+			g_missingPath = args[++i];
 		else if (cmd.empty())
 			cmd = arg;
 		else if (unrecognised.empty())
 			unrecognised = arg;
 	}
 
-	// Everything registered or loaded by path hangs off the install directory,
-	// so failing to resolve it must fail loudly here rather than register a
-	// manifest SteamVR will later auto-launch from the wrong place.
 	if (!appDirResolved)
-		CliExit("QuestCalibrator could not determine its own install directory.", true);
+		CliExit("QuestCalibrator couldn't find its own install folder.", true);
 
-	// An extra argument alongside a valid command is as much a mistake as a
-	// mistyped command, and used to be ignored entirely.
 	if (!unrecognised.empty())
-		CliExit("Unrecognised command-line argument: " + Narrow(unrecognised), true);
+		CliExit("Unrecognized command-line argument: " + Narrow(unrecognised), true);
+
+	if (!g_shotPath.empty() && g_frameLimit == 0)
+		g_frameLimit = 30;
 
 	if (cmd == L"-uipreview")
 	{
@@ -870,12 +1016,30 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		g_uiPreviewMode = true;
 		g_uiPreviewMany = true;
 	}
+	else if (cmd == L"-uipreview-guide" || cmd == L"-uipreview-result")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = cmd == L"-uipreview-guide" ? PreviewScenario::Guide : PreviewScenario::Result;
+	}
 	else if (cmd == L"-uipreview-frozen" || cmd == L"-uipreview-failed" || cmd == L"-uipreview-empty")
 	{
 		g_uiPreviewMode = true;
 		g_uiPreviewMany = true;
 		g_uiPreviewScenario = cmd == L"-uipreview-frozen" ? PreviewScenario::Frozen
 			: cmd == L"-uipreview-failed" ? PreviewScenario::Failed : PreviewScenario::Empty;
+	}
+	else if (cmd == L"-uipreview-lighthouse")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = PreviewScenario::Lighthouse;
+	}
+	else if (cmd == L"-uipreview-settings")
+	{
+		g_uiPreviewMode = true;
+		g_uiPreviewMany = true;
+		g_uiPreviewScenario = PreviewScenario::Settings;
 	}
 	else if (cmd == L"-openvrpath")
 	{
@@ -906,7 +1070,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 			!std::memchr(runtimePath, '\0', runtimePathCapacity) ||
 			runtimePath[0] == '\0')
 		{
-			CliExit("Failed to read the OpenVR runtime path.", true);
+			CliExit("Couldn't read the OpenVR runtime path.", true);
 		}
 
 		// Machine-readable, so no trailing newline: callers capture this on
@@ -934,7 +1098,7 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 				manifestPath.c_str());
 			if (vrAppErr != vr::VRApplicationError_None)
 			{
-				CliExit("Failed to deregister QuestCalibrator from SteamVR.\n\n" +
+				CliExit("Couldn't unregister QuestCalibrator from SteamVR.\n\n" +
 					manifestPath + "\n\n" +
 					vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
 			}
@@ -952,15 +1116,14 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		}
 		catch (std::runtime_error &e)
 		{
-			CliExit(std::string("Failed to enable SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
+			CliExit(std::string("Couldn't turn on SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
 		}
 		CliExit("SteamVR multiple-driver support enabled.", false);
 	}
 	else if (!cmd.empty())
 	{
-		// A mistyped command used to launch the full GUI and exit 0, which a
-		// scripted install (Start-Process -Wait) cannot tell from success: it
-		// blocks until a human closes a window that is iconified at creation.
-		CliExit("Unrecognised command-line argument: " + Narrow(cmd), true);
+		// Never fall through to a GUI launch: a scripted install
+		// (Start-Process -Wait) could not tell its exit code 0 from success.
+		CliExit("Unrecognized command-line argument: " + Narrow(cmd), true);
 	}
 }

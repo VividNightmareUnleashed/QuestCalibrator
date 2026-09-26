@@ -9,12 +9,10 @@ struct ImFont;
 extern bool g_uiPreviewMode;
 extern bool g_uiPreviewMany;
 
-// The states the preview cannot reach through the interface itself, so a
-// review can see them without hardware: -uipreview-frozen (continuous
-// calibration paused with the drift buttons in the band), -uipreview-failed
-// (a guided run that ends in a refused solve), -uipreview-empty (first launch,
-// nothing calibrated). Each implies -uipreview-many.
-enum class PreviewScenario { Healthy, Frozen, Failed, Empty };
+// Preview scenarios cover frozen alignment, a failed solve, an empty profile,
+// guide setup, a completed result, and the Lighthouse tab. Each implies
+// -uipreview-many.
+enum class PreviewScenario { Healthy, Frozen, Failed, Empty, Guide, Result, Lighthouse, Settings };
 extern PreviewScenario g_uiPreviewScenario;
 
 // Fonts loaded by QuestCalibrator.cpp at window creation.
@@ -25,3 +23,4 @@ extern ImFont *g_fontTitle;
 void ApplyTheme();
 void SetupPreviewState();
 void BuildMainWindow(bool runningInOverlay);
+void RequestApplicationExit();

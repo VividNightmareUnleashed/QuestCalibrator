@@ -1,18 +1,10 @@
 #pragma once
 
 // The Config record's JSON codec: envelope, profile fields, and the legacy
-// global settings that Config-only releases embedded alongside them.
-//
-// Split out of Configuration.cpp so the write -> read identity is reachable
-// from the test harness. A field the writer emits and the parser no longer
-// reads (or the reverse) is silent per-restart data loss - the mount extrinsic
-// or the field anchors quietly reverting on every launch - and nothing above
-// this line can detect it.
-//
-// Deliberately free of CalibrationContext and of the registry: this header is
-// included by Configuration.cpp and by the harness, nothing else. The chaperone
-// snapshot is NOT here, because its record needs the OpenVR geometry types and
-// ChaperoneMath.h, which already includes ProfileValidation.h.
+// global settings that Config-only releases embedded alongside them. Free of
+// CalibrationContext and the registry so the harness can pin the write -> read
+// identity. The chaperone snapshot needs the OpenVR geometry types and is
+// parsed in Configuration.cpp.
 
 #include "ProfileValidation.h"
 
@@ -33,14 +25,12 @@ namespace questcal
 // picojson's get<T>() is guarded only by assert() (compiled out in Release), so
 // every read of untrusted profile JSON must type-check first to reach the
 // intended runtime_error path instead of reading the wrong union member.
+// Parsed numbers are always finite: picojson's parser throws on anything else.
 inline double GetDouble(const picojson::value &v)
 {
 	if (!v.is<double>())
 		throw std::runtime_error("expected number");
-	double value = v.get<double>();
-	if (!std::isfinite(value))
-		throw std::runtime_error("expected finite number");
-	return value;
+	return v.get<double>();
 }
 
 template<typename T>
@@ -65,11 +55,9 @@ inline picojson::array FloatArray(const float *buf, size_t numFloats)
 	return arr;
 }
 
+// `obj` must already be type-checked as an array.
 inline void LoadFloatArray(const picojson::value &obj, float *buf, size_t numFloats)
 {
-	if (!obj.is<picojson::array>())
-		throw std::runtime_error("expected array");
-
 	auto &arr = obj.get<picojson::array>();
 	if (arr.size() != numFloats)
 		throw std::runtime_error("wrong buffer size");
@@ -99,16 +87,10 @@ inline PersistedRevision ReadPersistenceRevision(const picojson::object &obj)
 	return revision;
 }
 
-// picojson parses by recursive descent with no depth limit, and the registry
-// admits values far larger than any real record. A stack overflow on Windows
-// is an SEH exception, so neither the runtime_error catch around the parse nor
-// wWinMain's catch (...) can see it: a deeply nested value crashes at startup
-// with no window, no dialog and no session log, and the only recovery is
-// deleting the registry value by hand. Reject that shape before parsing so it
-// lands in Unreadable like any other malformed record. Both persisted schemas
-// nest at most three levels; this bound is far above them and far below what
-// exhausts the stack. Nesting inside strings does not count, so a value whose
-// text merely contains brackets still round-trips.
+// picojson recurses with no depth limit, and a stack overflow is an SEH
+// exception no catch sees: a deeply nested registry value would crash at
+// startup with no log. Reject that shape so it lands in Unreadable. Both
+// schemas nest at most three levels; brackets inside strings do not count.
 inline void RejectExcessiveJsonNesting(const std::string &text)
 {
 	constexpr int maxDepth = 16;
@@ -141,9 +123,8 @@ inline void RejectExcessiveJsonNesting(const std::string &text)
 }
 
 // Global preferences that Config-only releases stored inside the profile
-// record. They are settings, not profile state, so the codec only reports what
-// it found and Configuration.cpp decides what to do with it - it is the one
-// place that knows whether a separate Settings record already exists.
+// record. The codec only reports what it found; Configuration.cpp decides what
+// to do with it.
 struct LegacyProfileSettings
 {
 	int settingsVersion = 1;
@@ -166,13 +147,28 @@ struct ProfileParseResult
 	bool suspiciousLegacyScale = false;
 };
 
+// picojson::parse reports malformed text as an error string, but a number past
+// a double's range (1e999) throws std::overflow_error with an empty message.
+// Both records parse through here so that value gets a reason like any other.
+inline std::string ParseRecordJson(picojson::value &v, std::istream &stream)
+{
+	try
+	{
+		return picojson::parse(v, stream);
+	}
+	catch (const std::overflow_error &)
+	{
+		return "a number is out of range";
+	}
+}
+
 // The Config envelope: a one-element array of profile objects. Returned by
 // value so the caller can keep reading the same object (the chaperone snapshot
 // is parsed on top of it by Configuration.cpp).
 inline picojson::value ParseProfileEnvelope(std::istream &stream)
 {
 	picojson::value v;
-	std::string err = picojson::parse(v, stream);
+	std::string err = ParseRecordJson(v, stream);
 	if (!err.empty())
 		throw std::runtime_error(err);
 
@@ -224,9 +220,7 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 		GetDouble(transArr[2]));
 
 	double scale = HasTypedValue<double>(obj, "scale") ? GetDouble(obj.at("scale")) : 1.0;
-	// Checked here as well as in ValidateProfileRecord below: normalized() on a
-	// degenerate quaternion produces NaNs, so the guard has to precede the
-	// normalize rather than only judge the finished record.
+	// Before normalizing: normalized() of a degenerate quaternion is NaN.
 	if (!IsValidCalibrationTransform(rotation, translationMeters, scale))
 		throw std::runtime_error("invalid calibration transform");
 	profile.rotation = rotation.normalized();
@@ -309,13 +303,10 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 		legacy.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
 	}
 
-	// One-time migration (settings_version < 2): scale solving used to default
-	// on, but streamed reference poses are motion-smoothed and the solved
-	// scale absorbs the attenuation (several percent, varying with motion
-	// speed) — so it is opt-in now, including for profiles saved before the
-	// change. The already-applied scale is deliberately kept: it was solved
-	// jointly with the translation, and clearing it without re-solving would
-	// visibly misalign the space. The next recalibration replaces it.
+	// One-time migration (settings_version < 2) turns scale solving off:
+	// streamed reference poses are motion-smoothed and the solved scale absorbs
+	// the attenuation. The applied scale is kept; it was solved jointly with the
+	// translation, and clearing it without re-solving would misalign the space.
 	double settingsVersionValue = HasTypedValue<double>(obj, "settings_version")
 		? GetDouble(obj.at("settings_version")) : 1.0;
 	if (settingsVersionValue < 1.0 || settingsVersionValue > 100.0 ||
@@ -370,11 +361,14 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 
 	if (HasTypedValue<bool>(obj, "hide_mounted_tracker"))
 		profile.hideMountedTracker = obj.at("hide_mounted_tracker").get<bool>();
-	// A name rather than a number, so a hand-edited profile reads, and an
-	// unknown one falls back to the default loop instead of an out-of-range
-	// enum.
+	// A name rather than a flag, so a hand-edited profile reads and an unknown
+	// value is the default. "no_pause" is the Legacy method; "legacy" is what
+	// the old Legacy solver saved, and players picked it to stop the pausing.
 	if (HasTypedValue<std::string>(obj, "continuous_mode"))
-		profile.continuousMode = obj.at("continuous_mode").get<std::string>() == "legacy" ? 1 : 0;
+	{
+		const std::string mode = obj.at("continuous_mode").get<std::string>();
+		profile.continuousNoPause = mode == "no_pause" || mode == "legacy";
+	}
 
 	// Presence makes the mount extrinsic part of the profile contract. Reject
 	// malformed data instead of normalizing a degenerate quaternion and
@@ -416,8 +410,7 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 	if (HasTypedValue<picojson::array>(obj, "field_anchors"))
 	{
 		const auto &fieldAnchors = obj.at("field_anchors").get<picojson::array>();
-		// Before the reserve, not only in ValidateProfileRecord: an absurd
-		// count would otherwise allocate for it before being rejected.
+		// Before the reserve, so an absurd count cannot allocate.
 		if (fieldAnchors.size() > maxAnchors)
 			throw std::runtime_error("too many field anchors");
 		profile.fieldAnchors.reserve(fieldAnchors.size());
@@ -462,9 +455,9 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 
 	profile.valid = true;
 
-	// The record the parser produces must be one the writer would accept.
-	// Anything else is a profile that loads and then silently refuses every
-	// later save, or one the user will find gone at the next launch.
+	// The record the parser produces must be one the writer accepts, exactly:
+	// the inline checks judged anchors against the unnormalized rotation, and
+	// absent timing fields keep the caller's values.
 	std::string why;
 	if (!ValidateProfileRecord(profile, maxAnchors, why))
 		throw std::runtime_error(why);
@@ -533,7 +526,7 @@ inline void WriteProfile(const ProfileRecord &record,
 	profile["continuous_latency_reestimation"].set<bool>(record.continuousLatencyReestimation);
 	profile["continuous_require_trigger"].set<bool>(record.continuousRequireTrigger);
 	profile["hide_mounted_tracker"].set<bool>(record.hideMountedTracker);
-	profile["continuous_mode"].set<std::string>(record.continuousMode == 1 ? "legacy" : "questcalibrator");
+	profile["continuous_mode"].set<std::string>(record.continuousNoPause ? "no_pause" : "questcalibrator");
 
 	if (record.mountExtrinsic.valid)
 	{

@@ -9,6 +9,7 @@
 #include "PoseStreamHub.h"
 #include "ProfileValidation.h"
 #include "RingPoseMath.h"
+#include "UniverseVerdict.h"
 #include "../common/PoseChannel.h"
 
 #include <algorithm>
@@ -21,11 +22,12 @@
 namespace
 {
 
+// A valid snapshot always has a complete owner: capture requires one, loading
+// disarms an incomplete one, and DisarmChaperone clears it with `valid`.
 enum class ChaperoneOwnerStatus
 {
 	Match,
 	Mismatch,
-	Unowned,
 	Unavailable,
 };
 
@@ -73,8 +75,7 @@ struct SpaceState
 	std::unique_ptr<JumpDetector> jumps;
 
 	HmdUniverseObservation hmd;
-	double mismatchSince = -1e9;
-	double compensatedJumpAwaitingEndpoint = -1e9;
+	questcal::UniverseVerdict verdict;
 
 	double lastOwnerCheck = -1e9;
 	std::string checkedTrackingSystem;
@@ -83,13 +84,12 @@ struct SpaceState
 	double lastSetupFailure = -1e9;
 	double lastReadFailure = -1e9;
 
-	bool VerdictPending() const noexcept { return mismatchSince >= 0.0; }
-	void ClearVerdict() noexcept { mismatchSince = -1e9; }
+	bool VerdictPending() const noexcept { return verdict.Pending(); }
+	void ClearVerdict() noexcept { verdict.Clear(); }
 	void ResetContinuity() noexcept
 	{
 		hmd.Reset();
-		mismatchSince = -1e9;
-		compensatedJumpAwaitingEndpoint = -1e9;
+		verdict.Clear();
 	}
 };
 
@@ -97,6 +97,9 @@ struct HmdWorldTransition
 {
 	bool worldChanged = false;
 	bool localPoseContinuous = false;
+	// The composed (world) pose stayed on its trajectory across the change:
+	// the driver re-expressed the local pose, and the world did not move.
+	bool composedPoseContinuous = false;
 	Eigen::Quaterniond previousRotation{ 1, 0, 0, 0 };
 	Eigen::Vector3d previousTranslation{ 0, 0, 0 };
 	Eigen::Quaterniond currentRotation{ 1, 0, 0, 0 };
@@ -104,8 +107,21 @@ struct HmdWorldTransition
 };
 
 SpaceState Space;
-constexpr double UniverseVerdictGraceSeconds = 0.5;
 constexpr float ChaperoneCompareTolerance = 0.002f;
+
+// The same sample expressed in the raw universe: continuity of this is what
+// tells a moved world from a re-expressed local pose.
+ringpose::DriverLocalPoseSample ComposeWithWorldFromDriver(
+	const ringpose::DriverLocalPoseSample &local, const Eigen::Quaterniond &rotation,
+	const Eigen::Vector3d &translation)
+{
+	ringpose::DriverLocalPoseSample world = local;
+	world.rotation = rotation * local.rotation;
+	world.position = rotation * local.position + translation;
+	world.velocity = rotation * local.velocity;
+	world.angularVelocity = rotation * local.angularVelocity;
+	return world;
+}
 
 bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 	HmdWorldTransition &transition)
@@ -140,6 +156,15 @@ bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 		transition.currentTranslation = parts.wfdTrans;
 		transition.localPoseContinuous = Space.hmd.IsUsable() &&
 			ringpose::IsDriverLocalPoseContinuous(Space.hmd.localPose, localPose);
+		transition.composedPoseContinuous = Space.hmd.IsUsable() &&
+			ringpose::IsDriverLocalPoseContinuous(
+				ComposeWithWorldFromDriver(Space.hmd.localPose, Space.hmd.rotation,
+					Space.hmd.translation),
+				ComposeWithWorldFromDriver(localPose, parts.wfdRot, parts.wfdTrans));
+		Space.verdict.NoteTransition(sampleTime,
+			{ transition.previousRotation, transition.previousTranslation },
+			{ transition.currentRotation, transition.currentTranslation },
+			transition.composedPoseContinuous);
 	}
 
 	Space.hmd.Accept(parts.wfdRot, parts.wfdTrans, sampleTime,
@@ -150,8 +175,7 @@ bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 bool HasFreshHmdWorldFromDriver()
 {
 	LARGE_INTEGER qpcNow;
-	if (!QueryPerformanceCounter(&qpcNow))
-		return false;
+	QueryPerformanceCounter(&qpcNow);
 	const double sampleClockNow =
 		static_cast<double>(qpcNow.QuadPart) * Space.qpcToSeconds;
 	return Space.poseHub->RingOpen() && Space.hmd.IsUsable() &&
@@ -210,9 +234,6 @@ bool LiveGeometryMatches(vr::IVRChaperoneSetup *setup,
 ChaperoneOwnerStatus CurrentChaperoneOwner(
 	const CalibrationContext::Chaperone &snapshot)
 {
-	if (snapshot.ownerTrackingSystem.empty() || snapshot.ownerHmdSerial.empty())
-		return ChaperoneOwnerStatus::Unowned;
-
 	std::string trackingSystem;
 	std::string serial;
 	if (!questcal::ReadCurrentHmdIdentity(trackingSystem, serial))
@@ -230,6 +251,10 @@ void DisarmChaperoneAndPersist(CalibrationContext &ctx, double now,
 	ctx.ReportError(reason, CalibrationContext::ErrorSource::Chaperone);
 	SaveSettings(ctx);
 }
+
+constexpr const char *ForeignHeadsetChaperone =
+	"The protected chaperone was saved for a different headset, so it was switched off. "
+	"Press Protect chaperone again on the main screen.\n";
 
 void ProfileUniverseTick(CalibrationContext &ctx, double now);
 void DrainJumpObservations(CalibrationContext &ctx);
@@ -371,28 +396,12 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 
 	if (ctx.chaperone.valid && Space.owner == ChaperoneOwnerStatus::Mismatch)
 	{
-		DisarmChaperoneAndPersist(ctx, now,
-			"The protected chaperone was saved for a different headset, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
-		return;
-	}
-	if (ctx.chaperone.valid && Space.owner == ChaperoneOwnerStatus::Unowned)
-	{
-		DisarmChaperoneAndPersist(ctx, now,
-			"The protected chaperone is missing information about the room it was saved in, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
+		DisarmChaperoneAndPersist(ctx, now, ForeignHeadsetChaperone);
 		return;
 	}
 	if (!ctx.chaperone.valid || Space.owner != ChaperoneOwnerStatus::Match ||
 		!HasFreshHmdWorldFromDriver())
 		return;
-	if (!ctx.chaperone.worldFromDriverValid)
-	{
-		DisarmChaperoneAndPersist(ctx, now,
-			"The protected chaperone is missing information about the room it was saved in, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
-		return;
-	}
 
 	if (!WorldFromDriverChanged(
 		ctx.chaperone.worldFromDriverRotation,
@@ -417,7 +426,7 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 		{
 			ctx.persistence.MarkSettings(now);
 			ctx.ReportError(
-				"The headset re-centred, so the protected chaperone no longer lines up and was turned off. "
+				"The headset re-centered, so the protected chaperone no longer lines up and was turned off. "
 				"Protect it again from the main screen.\n",
 				CalibrationContext::ErrorSource::Chaperone);
 			SaveSettings(ctx);
@@ -435,6 +444,18 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 			ctx.chaperone.worldFromDriverTranslation,
 			transition.previousRotation, transition.previousTranslation))
 			continue;
+		if (transition.composedPoseContinuous)
+		{
+			// The driver re-expressed the local pose: the room did not move,
+			// so the standing center stays and only the baseline follows.
+			ctx.chaperone.worldFromDriverRotation =
+				transition.currentRotation.normalized();
+			ctx.chaperone.worldFromDriverTranslation = transition.currentTranslation;
+			ctx.chaperone.worldFromDriverValid = true;
+			ctx.chaperone.baselineVerifiedThisSession = true;
+			reanchored = true;
+			continue;
+		}
 		if (!transition.localPoseContinuous)
 		{
 			continuityLost = true;
@@ -469,7 +490,7 @@ void CalibrationSpaceTick(CalibrationContext &ctx, double now)
 		Space.hmd.rotation, Space.hmd.translation))
 	{
 		DisarmChaperoneAndPersist(ctx, now,
-			"The headset re-centred while QuestCalibrator couldn't follow it, so the protected chaperone was switched off. "
+			"The headset re-centered while QuestCalibrator couldn't follow it, so the protected chaperone was switched off. "
 			"Press Protect chaperone again on the main screen.\n");
 		return;
 	}
@@ -498,6 +519,11 @@ void ObserveUniversePose(const protocol::DevicePoseSample &sample)
 	Space.jumps->Push(sample);
 }
 
+void NoteUniverseStreamHole()
+{
+	Space.jumps->NoteStreamHole();
+}
+
 void ResetUniverseObservations(CalibrationContext &ctx)
 {
 	DrainJumpObservations(ctx);
@@ -507,6 +533,12 @@ void ResetUniverseObservations(CalibrationContext &ctx)
 bool FinishUniverseObservations(CalibrationContext &ctx, double now)
 {
 	DrainJumpObservations(ctx);
+	// A tracking aligner has kept the calibration on the
+	// lighthouse, drift included, so a drift catch-up is a frame change to it.
+	// The state is the last continuous tick's; the next evaluations use it.
+	Space.jumps->SetDriftFollowed(
+		ctx.continuousState == ContinuousAlignment::State::Tracking);
+	Space.jumps->SetDetailed(ctx.detailedLogging);
 	JumpDetector::UniverseDelta delta;
 	bool jumped = false;
 	while (Space.jumps->PollDelta(delta))
@@ -545,7 +577,7 @@ void RebindCalibrationUniverse(CalibrationContext &ctx,
 
 bool ApplyCalibrationDelta(CalibrationContext &ctx,
 	const Eigen::Quaterniond &rotation, const Eigen::Vector3d &translation,
-	bool snap, double now)
+	bool snap, double now, bool moveChaperone)
 {
 	if (!IsValidRotation(rotation) ||
 		!IsBoundedVector(translation, protocol::limits::MaxAbsTranslationMeters))
@@ -573,7 +605,7 @@ bool ApplyCalibrationDelta(CalibrationContext &ctx,
 	}
 
 	vr::HmdMatrix34_t newStandingCenter{};
-	if (snap && ctx.chaperone.valid)
+	if (moveChaperone && ctx.chaperone.valid)
 	{
 		newStandingCenter = DeltaTimesPose(
 			rotation, translation, ctx.chaperone.standingCenter);
@@ -596,7 +628,7 @@ bool ApplyCalibrationDelta(CalibrationContext &ctx,
 		if (!ctx.fieldAnchors.empty())
 			ctx.fieldGeneration++;
 		ctx.persistence.AdvanceRevision();
-		if (ctx.chaperone.valid)
+		if (moveChaperone && ctx.chaperone.valid)
 			ctx.chaperone.standingCenter = newStandingCenter;
 		ctx.persistence.MarkSettings(now);
 	}
@@ -616,43 +648,43 @@ bool ApplyCalibrationDelta(CalibrationContext &ctx,
 namespace
 {
 
-bool AdoptObservedUniverseAfterJump(CalibrationContext &ctx, double now)
+// The verdict found the profile's WFD change followed: take it on.
+void AdoptProfileUniverse(CalibrationContext &ctx, const questcal::WorldFromDriver &adopted,
+	double now)
 {
-	if (Space.hmd.sampleTime < Space.compensatedJumpAwaitingEndpoint ||
-		Space.hmd.sampleTime - Space.compensatedJumpAwaitingEndpoint >
-			UniverseVerdictGraceSeconds)
-		return false;
-	Space.compensatedJumpAwaitingEndpoint = -1e9;
-
-	ctx.profileWorldFromDriverRotation = Space.hmd.rotation;
-	ctx.profileWorldFromDriverTranslation = Space.hmd.translation;
+	ctx.profileWorldFromDriverRotation = adopted.rotation;
+	ctx.profileWorldFromDriverTranslation = adopted.translation;
 	ctx.profileUniverseValid = true;
 	ctx.persistence.MarkProfile(now);
 	if (ctx.chaperone.valid)
 	{
-		ctx.chaperone.worldFromDriverRotation = Space.hmd.rotation;
-		ctx.chaperone.worldFromDriverTranslation = Space.hmd.translation;
+		ctx.chaperone.worldFromDriverRotation = adopted.rotation;
+		ctx.chaperone.worldFromDriverTranslation = adopted.translation;
 		ctx.chaperone.worldFromDriverValid = true;
 		ctx.chaperone.baselineVerifiedThisSession = true;
 		ctx.persistence.MarkSettings(now);
 	}
-	return true;
 }
 
 bool ApplyUniverseDelta(CalibrationContext &ctx,
 	const JumpDetector::UniverseDelta &delta, double now)
 {
 	if (!questcal::ApplyCalibrationDelta(
-		ctx, delta.rotation, delta.translation, true, now))
+		ctx, delta.rotation, delta.translation, true, now, /*moveChaperone=*/true))
 	{
 		ctx.ReportError(
-			"A headset re-centre was too large to compensate safely. Recalibrate before continuing.\n");
+			"A headset re-center was too large to compensate safely. Recalibrate before continuing.\n");
 		return false;
 	}
 
 	if (delta.exact)
 	{
-		if (ctx.profileUniverseValid)
+		const questcal::WorldFromDriver profile{
+			ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation };
+		const questcal::WorldFromDriver previous{
+			delta.previousWorldFromDriverRotation, delta.previousWorldFromDriverTranslation };
+		if (ctx.profileUniverseValid &&
+			questcal::UniverseVerdict::ExactDeltaRebasesProfile(profile, previous))
 		{
 			ctx.profileWorldFromDriverRotation =
 				delta.worldFromDriverRotation.normalized();
@@ -669,19 +701,33 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 			ctx.chaperone.baselineVerifiedThisSession = true;
 		}
 	}
-	else
-	{
-		Space.compensatedJumpAwaitingEndpoint = delta.time;
-	}
+	// Both paths: the verdict follows the WFD transition at this sample, also
+	// when an exact rebase could not move a profile that was still behind it.
+	Space.verdict.NoteCompensation(delta.time);
 
 	ctx.jumpsCompensated++;
 	const double yawDegrees = 2.0 *
 		std::atan2(delta.rotation.y(), delta.rotation.w()) * 180.0 / EIGEN_PI;
+	// A jump seconds after the reference stream came back is the headset's
+	// wake sequence as often as a moved universe (see recentResumeSeconds),
+	// so the log line carries the age for whoever reads it later.
+	char resumeNote[96] = "";
+	if (delta.secondsSinceStreamResume >= 0.0 &&
+		delta.secondsSinceStreamResume <= JumpDetector::Config().recentResumeSeconds)
+		snprintf(resumeNote, sizeof resumeNote, ", %.1f s after the reference stream resumed",
+			delta.secondsSinceStreamResume);
+	// A controller that followed the headset's step seconds later confirmed a
+	// held candidate (a Quest Pro map switch); the compensation is applied
+	// that late, and the log says so.
+	char lagNote[64] = "";
+	if (delta.confirmationLagSeconds > 0.0)
+		snprintf(lagNote, sizeof lagNote, ", confirmed %.1f s later",
+			delta.confirmationLagSeconds);
 	char message[256];
 	snprintf(message, sizeof message,
-		"Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)\n",
+		"Universe jump compensated (%s): yaw %+.2f deg, shift %.3f m, %d device(s)%s%s\n",
 		delta.exact ? "exact" : "estimated", yawDegrees,
-		delta.translation.norm(), delta.devicesAgreeing);
+		delta.translation.norm(), delta.devicesAgreeing, resumeNote, lagNote);
 	ctx.Log(message);
 	return true;
 }
@@ -736,27 +782,18 @@ void ProfileUniverseTick(CalibrationContext &ctx, double now)
 			return;
 	}
 
-	if (!questcal::WorldFromDriverChanged(
-		ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation,
-		Space.hmd.rotation, Space.hmd.translation))
+	const questcal::UniverseVerdict::Decision decision = Space.verdict.Evaluate(now,
+		{ ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation },
+		{ Space.hmd.rotation, Space.hmd.translation },
+		[](double time) { return Space.jumps->HasLiveHeadsetCandidate(time); });
+	if (decision.adopt)
+		AdoptProfileUniverse(ctx, decision.adopted, now);
+	if (!decision.latch)
 	{
-		Space.ClearVerdict();
+		if (Space.VerdictPending())
+			ctx.chaperone.baselineVerifiedThisSession = false;
 		return;
 	}
-	if (AdoptObservedUniverseAfterJump(ctx, now))
-	{
-		Space.ClearVerdict();
-		return;
-	}
-
-	if (!Space.VerdictPending())
-		Space.mismatchSince = now;
-	if (now - Space.mismatchSince < UniverseVerdictGraceSeconds)
-	{
-		ctx.chaperone.baselineVerifiedThisSession = false;
-		return;
-	}
-	Space.ClearVerdict();
 
 	ctx.profileUniverseUnsafe = true;
 	ctx.enabled = false;
@@ -767,9 +804,9 @@ void ProfileUniverseTick(CalibrationContext &ctx, double now)
 	if (autoApplyChanged)
 		ctx.persistence.MarkSettings(now);
 	ctx.ReportError(autoApplyChanged
-		? "The headset re-centred while QuestCalibrator couldn't follow it. "
+		? "The headset re-centered while QuestCalibrator couldn't follow it. "
 			"The calibration and the protected chaperone are off until you recalibrate.\n"
-		: "The headset re-centred while QuestCalibrator couldn't follow it. "
+		: "The headset re-centered while QuestCalibrator couldn't follow it. "
 			"The calibration is off until you recalibrate.\n",
 		CalibrationContext::ErrorSource::Chaperone);
 	questcal::SynchronizeCalibrationDriver(ctx);
@@ -781,6 +818,8 @@ void DrainJumpObservations(CalibrationContext &ctx)
 	std::string note;
 	while (Space.jumps->PollNote(note))
 		ctx.Log(note + "\n");
+	while (Space.jumps->PollDetail(note))
+		ctx.Diag(note);
 
 	JumpDetector::GapEvent gap;
 	while (Space.jumps->PollGap(gap))
@@ -815,12 +854,12 @@ bool LoadChaperoneBounds()
 {
 	if (CalCtx.profileUniverseUnsafe)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:run a new base calibration first because the previous profile lost raw-universe continuity\n");
+			"Couldn't protect the chaperone. The headset re-centered since the last calibration. Recalibrate first.\n");
 
 	auto setup = vr::VRChaperoneSetup();
 	if (!setup)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:OpenVR chaperone setup is unavailable\n");
+			"Couldn't protect the chaperone because SteamVR's chaperone isn't available. Restart SteamVR and try again.\n");
 
 	setup->RevertWorkingCopy();
 	CalibrationContext::Chaperone snapshot;
@@ -828,20 +867,19 @@ bool LoadChaperoneBounds()
 	if (!questcal::ReadCurrentHmdIdentity(
 		snapshot.ownerTrackingSystem, snapshot.ownerHmdSerial))
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the current headset/runtime identity is unavailable\n");
+			"Couldn't protect the chaperone because the headset isn't showing up in SteamVR. Try again once it's connected.\n");
 	if (CalCtx.validProfile &&
 		snapshot.ownerTrackingSystem != CalCtx.referenceTrackingSystem)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the active profile uses a different reference "
-			"tracking system than the headset which owns this play area\n");
+			"Couldn't protect the chaperone. The calibration was made with a different headset system. Recalibrate first.\n");
 	if (!CopyCurrentHmdWorldFromDriver(snapshot))
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:no fresh validated HMD raw-universe pose is available yet\n");
+			"Couldn't protect the chaperone because the headset isn't tracking yet. Put it on and try again.\n");
 
 	uint32_t quadCount = 0;
 	if (!setup->GetLiveCollisionBoundsInfo(nullptr, &quadCount) || quadCount > 16384)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:failed to read the live wall count\n");
+			"Couldn't read the chaperone walls from SteamVR. Try again.\n");
 
 	snapshot.geometry.resize(quadCount);
 	uint32_t returnedCount = quadCount;
@@ -850,7 +888,7 @@ bool LoadChaperoneBounds()
 	if (!setup->GetLiveCollisionBoundsInfo(walls, &returnedCount) ||
 		returnedCount != quadCount)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the live walls changed while they were being captured\n");
+			"The chaperone changed while it was being saved. Try again.\n");
 
 	if (!setup->GetWorkingStandingZeroPoseToRawTrackingPose(
 			&snapshot.standingCenter) ||
@@ -859,15 +897,14 @@ bool LoadChaperoneBounds()
 		!questcal::IsPlausibleChaperone(
 			snapshot.geometry, snapshot.standingCenter, snapshot.playSpaceSize))
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:play-area data is missing or invalid\n");
+			"Couldn't protect the chaperone because SteamVR has no usable play area. Set up your room in SteamVR, then try again.\n");
 
 	const std::time_t copyTime = std::time(nullptr);
 	const double copyUnixTime = static_cast<double>(copyTime);
-	if (copyTime == static_cast<std::time_t>(-1) ||
-		!std::isfinite(copyUnixTime) || copyUnixTime < 0.0 ||
+	if (copyTime == static_cast<std::time_t>(-1) || copyUnixTime < 0.0 ||
 		copyUnixTime > protocol::limits::MaxPlausibleUnixTimeSeconds)
 		return FailClosedChaperoneCapture(
-			"Couldn't protect the chaperone:the capture time is unavailable or invalid\n");
+			"Couldn't protect the chaperone because the PC clock looks wrong. Check the date and time, then try again.\n");
 
 	snapshot.copyUnixTime = copyUnixTime;
 	snapshot.valid = true;
@@ -880,7 +917,7 @@ bool LoadChaperoneBounds()
 		{
 			CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
 			CalCtx.ReportError(
-				"Couldn't protect the chaperone: the previous snapshot couldn't be turned off first, "
+				"Couldn't protect the chaperone because the previous one couldn't be switched off first, "
 				"so nothing was changed.\n",
 				CalibrationContext::ErrorSource::Chaperone);
 			return false;
@@ -921,7 +958,7 @@ bool ApplyChaperoneBounds(bool logSuccess)
 		CalCtx.chaperone.playSpaceSize))
 	{
 		CalCtx.ReportError(
-			"Couldn't restore the chaperone: the protected snapshot is damaged. Protect it again.\n",
+			"Couldn't restore the chaperone: the protected chaperone is damaged. Protect it again.\n",
 			CalibrationContext::ErrorSource::Chaperone);
 		return false;
 	}
@@ -936,16 +973,7 @@ bool ApplyChaperoneBounds(bool logSuccess)
 	}
 	if (owner == ChaperoneOwnerStatus::Mismatch)
 	{
-		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick,
-			"The protected chaperone was saved for a different headset, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
-		return false;
-	}
-	if (owner == ChaperoneOwnerStatus::Unowned)
-	{
-		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick,
-			"The protected chaperone is missing information about the room it was saved in, so it was switched off. "
-			"Press Protect chaperone again on the main screen.\n");
+		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick, ForeignHeadsetChaperone);
 		return false;
 	}
 	if (!ChaperoneBaselineIsCurrent(CalCtx.chaperone))

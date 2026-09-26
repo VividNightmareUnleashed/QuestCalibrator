@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -18,6 +18,9 @@
     </Filter>
     <Filter Include="Source Files\GL">
       <UniqueIdentifier>{d156ae5c-9fe6-41f0-a34e-333dc7a6b2f8}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Yoga">
+      <UniqueIdentifier>{7b3e2f61-4c9d-4a05-9e1b-2f6d8c0a5e42}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
@@ -45,7 +48,16 @@
     <ClInclude Include="Diagnostics.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="LegacyContinuous.h">
+    <ClInclude Include="Localization.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LocalizationTables.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UpdatePolicy.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Updater.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="CalibrationRun.h">
@@ -55,6 +67,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="EmbeddedFiles.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="UiLayout.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="UserInterface.h">
@@ -87,6 +102,21 @@
     <ClInclude Include="DriftMonitor.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="LighthouseLog.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LighthouseVisibility.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Modules.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TrackingStreamDigest.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="LighthouseFrameWatch.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="DriverSession.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -108,6 +138,9 @@
     <ClInclude Include="PoseStreamHub.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="ProfileScalarValidation.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ProfileValidation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -115,6 +148,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="RingPoseMath.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="RingSampleGate.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
@@ -134,16 +170,25 @@
     <ClCompile Include="Diagnostics.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="LegacyContinuous.cpp">
+    <ClCompile Include="Localization.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LocalizationJa.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LocalizationIt.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Updater.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="..\lib\imgui\imgui.cpp">
       <Filter>Source Files\ImGui</Filter>
     </ClCompile>
-    <ClCompile Include="..\lib\imgui\imgui_impl_glfw.cpp">
+    <ClCompile Include="..\lib\imgui\backends\imgui_impl_glfw.cpp">
       <Filter>Source Files\ImGui</Filter>
     </ClCompile>
-    <ClCompile Include="..\lib\imgui\imgui_impl_opengl3.cpp">
+    <ClCompile Include="..\lib\imgui\backends\imgui_impl_opengl3.cpp">
       <Filter>Source Files\ImGui</Filter>
     </ClCompile>
     <ClCompile Include="..\lib\gl3w\src\gl3w.c">
@@ -153,6 +198,9 @@
       <Filter>Source Files\ImGui</Filter>
     </ClCompile>
     <ClCompile Include="EmbeddedFiles.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Modules.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="UserInterface.cpp">
@@ -166,6 +214,69 @@
     </ClCompile>
     <ClCompile Include="UiDevices.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UiLayout.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="UiLighthouse.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGConfig.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGEnums.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNode.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeLayout.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeStyle.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGPixelGrid.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGValue.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\AbsoluteLayout.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Baseline.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Cache.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\CalculateLayout.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\FlexLine.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\PixelGrid.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\config\Config.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\AssertFatal.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\Log.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\event\event.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\LayoutResults.cpp">
+      <Filter>Source Files\Yoga</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\Node.cpp">
+      <Filter>Source Files\Yoga</Filter>
     </ClCompile>
     <ClCompile Include="UiGuide.cpp">
       <Filter>Source Files</Filter>
@@ -194,13 +305,16 @@
     <ClCompile Include="DriftMonitor.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="LighthouseLog.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="LighthouseVisibility.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="JumpDetector.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="PoseStreamHub.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="glfw_static_crt_shim.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -213,5 +327,80 @@
     <ResourceCompile Include="QuestCalibrator.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\lib\glfw\src\context.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\init.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\input.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\monitor.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\platform.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\vulkan.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\window.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\egl_context.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\osmesa_context.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_init.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_monitor.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_window.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_joystick.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_module.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_time.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_thread.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_init.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_joystick.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_monitor.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_window.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\wgl_context.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_widgets.cpp">
+      <Filter>Source Files\ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_tables.cpp">
+      <Filter>Source Files\ImGui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_demo.cpp">
+      <Filter>Source Files\ImGui</Filter>
+    </ClCompile>
+    <ClInclude Include="ImGuiVRInput.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
 </Project>

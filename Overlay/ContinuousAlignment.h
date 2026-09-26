@@ -17,13 +17,18 @@
 // through the field calibration expected at that observation's own target-raw
 // position, so movement across anchor gradients never reads as drift. Small deviations are
 // emitted as yaw+translation corrections for the caller to auto-apply (the
-// driver slews them); large or tilted sustained deviations mean a bumped
-// mount or a tracking fault and freeze auto-apply instead. Noisy windows only
-// hold corrections until tracking settles — unless the scatter is structured
-// (constant between neighboring observations yet large across the window),
-// which is the slipped-mount signature and freezes. Tilt is never applied:
-// both runtimes are gravity-aligned, so a growing tilt deviation is mount
-// creep or noise, not universe drift.
+// driver slews them); large sustained deviations at the head freeze auto-apply
+// instead. Noisy or tilted windows only hold corrections until tracking
+// settles; neither freezes. A freeze or tilt hold whose estimate then stays
+// put, with no restart of the tracker's own tracking to explain it, is the
+// universes having moved apart, and the estimate is re-anchored as the
+// calibration (Config: re-anchor). Follow mode (the Legacy method) never
+// freezes: such a deviation becomes the calibration at the next evaluation,
+// as OpenVR-SpaceCalibrator's continuous mode does. Corrections never apply tilt: both
+// runtimes are gravity-aligned, so a small tilt deviation is tracker
+// orientation bias or noise, not universe drift. The yaw-only correction pivots at the
+// head, so the position there is still corrected in full: dropping the tilt
+// about any other point leaves tilt x lever arm at the head uncorrected.
 //
 // Pure Eigen + CalibrationEngine reuse; no OpenVR or UI dependencies, so the
 // synthetic test harness compiles exactly the code the overlay ships. All side
@@ -32,6 +37,8 @@
 
 #include "CalibrationEngine.h"
 
+#include <array>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <optional>
@@ -67,8 +74,8 @@ public:
 		size_t minObsForEstimate = 40;
 
 		// --- discontinuity guard: an obs-to-obs step this large this fast is a
-		// universe jump (JumpDetector's business) — drop the window, never
-		// "correct" it. Confirmation must come from an observation at least
+		// possible universe jump (JumpDetector's business). Verify an adjacent
+		// raw-pose step before dropping the window. Confirmation comes at least
 		// jumpConfirmSpacing later: a glitched reference sample corrupts every
 		// observation interpolated across it with correlated errors, and only
 		// temporal separation makes the confirming observation independent ---
@@ -78,23 +85,13 @@ public:
 		double jumpConfirmSpacing = 0.1;   // s
 
 		// --- estimate sanity: window scatter (after trimming) above these
-		// means the pair itself is untrustworthy — hold, don't correct. What
-		// happens next depends on the scatter's structure. A slipped mount's
-		// error rotates with the head: large across the window, but nearly
-		// constant between consecutive observations — so window scatter far
-		// above the short-term (consecutive-obs) noise estimate is a mount
-		// fault and freezes, on a longer confirm than a stable deviation.
-		// Unstructured scatter — window RMS explained by per-sample noise —
-		// is degraded tracking (grazing lighthouse geometry while lying down,
-		// partial occlusion) and only holds corrections until it settles;
-		// freezing on it spammed "check the mount" at users whose mount was
-		// fine every time they lay down ---
+		// means the pair is untrustworthy right now — hold, don't correct, and
+		// resume once it settles. Scatter never freezes: headset trackers are
+		// glued or bolted on, and what scatters in practice is lighthouse
+		// tracking (grazing geometry while lying down, partial occlusion) ---
 		double maxScatterRotDeg = 0.8;
 		double maxScatterPosM = 0.02;
-		double scatterFreezeConfirmSeconds = 8.0;   // structured scatter -> freeze
-		double scatterNotifySeconds = 10.0;         // unstructured -> one info event
-		double structuredScatterFactor = 1.6;       // window RMS vs noise estimate
-		int    scatterVoteWindow = 8;               // sliding votes (evaluateInterval apart) behind the majority
+		double scatterNotifySeconds = 10.0;         // sustained scatter -> one info event
 
 		// --- apply policy ---
 		double evaluateInterval = 2.0;     // s between decisions
@@ -103,12 +100,56 @@ public:
 		double maxStepYawDeg = 0.5;        // per-correction clamp
 		double maxStepPosM = 0.01;
 		double freezeYawDeg = 2.0;         // at/above (sustained): freeze + event
-		double freezeTiltDeg = 1.5;        // tilt alone also freezes (mount slip)
 		double freezePosM = 0.05;
+		// Tilt at/above this holds: nothing is corrected from a window whose
+		// orientation disagrees this much, but it never freezes or warns. Tilt
+		// is never applied, and on a glued mount it moves with the tracker's
+		// lighthouse solution (live 2026-09-25: 0.84 deg median while tracking,
+		// 1.86 deg at most; five freezes on tilt alone at 1.7 to 2.4 deg, with
+		// 2.7 cm or less at the head). A real universe move comes with yaw and
+		// position at the head, which freeze on their own; a tilt that stays
+		// put re-anchors (below).
+		double holdTiltDeg = 1.5;
 		double freezeConfirmSeconds = 6.0;
 		double resumeFactor = 0.5;         // unfreeze below freeze*factor ...
 		double resumeConfirmSeconds = 5.0; // ... sustained this long
+		// ... or anywhere inside the freeze band, sustained this long. Tracking
+		// corrects any deviation inside the band without freezing, so a freeze
+		// whose cause went away must not demand more than that: without this,
+		// drift that accrued while frozen (nothing corrects it then) could sit
+		// between the two thresholds and hold the freeze for the whole session.
+		double resumeInBandSeconds = 30.0;
+		// A freeze confirmed this soon after the target's own tracking restarted
+		// (NoteTargetResolved) is reported as that, not as universe drift, and
+		// is not re-anchored. A restarted solution can go bad well after the
+		// restart, with every station back in it: live 2026-09-25 01:25, the
+		// headset tracker restarted, had all four stations 8 s later, and read
+		// 6 deg of tilt 71 s after the restart until SteamVR reset it as out of
+		// bounds. It restarted about every 90 s while the player lay down.
+		double resolveAttributionSeconds = 120.0;
+
+		// --- re-anchor: a freeze or a tilt hold whose estimate holds still for
+		// reanchorConfirmSeconds, from a settled target that did not restart
+		// within resolveAttributionSeconds before the episode began (or since),
+		// is the universes having moved apart, and the estimate becomes the
+		// calibration. A glued mount does not move; a tracker whose own
+		// lighthouse solution went bad does, and that restart is in the log, so
+		// nothing re-anchors while the caller cannot see the target's restarts
+		// (SetTargetRestartsVisible). Live 2026-09-24: the lighthouse side moved
+		// 62 deg / 78.6 deg of tilt with no restart of the headset tracker, rigid
+		// for an hour, and the body trackers stayed 5 m off until a recalibration
+		// nobody ran. The tilt is applied too when it is at least holdTiltDeg;
+		// below that the re-anchor turns about the head like a correction,
+		// uncapped ---
+		double reanchorConfirmSeconds = 30.0;
+		double reanchorSteadyDeg = 1.0;    // yaw or tilt the estimate may wander by during the confirm
+		double reanchorSteadyPosM = 0.05;  // at the head
+		// A re-anchor is undone when a later stuck episode's readings fit the
+		// calibration it replaced inside the resume band for
+		// resumeConfirmSeconds, restart or not: a fault of the target that no
+		// restart explained was followed, and has cleared.
 		double coastGapSeconds = 2.0;      // no fresh obs -> coasting
+		double maxStreamGapSeconds = 0.2; // never estimate across a tracking hiatus
 
 		// --- extrinsic derivation (rigidity gate) ---
 		size_t extrinsicMinPairs = 100;
@@ -129,8 +170,8 @@ public:
 		Inactive,   // no valid extrinsic or not enough observations yet
 		Tracking,   // fresh estimate available, corrections flowing
 		Coasting,   // tracker occluded/off; calibration holds, resumes cleanly
-		Frozen,     // sustained large deviation; nothing applied until resolved
-		Holding,    // observations too noisy to act on; resumes when they settle
+		Frozen,     // sustained large deviation; nothing applied until it resolves or re-anchors
+		Holding,    // observations too noisy or tilted, or the target's tracking unsettled; resumes when they settle
 	};
 
 	// Left delta over the current calibration: newCal = D o oldCal. Rotation is
@@ -154,27 +195,27 @@ public:
 
 	struct Event
 	{
-		// The two freeze causes are separate enumerators rather than one type
-		// discriminated by deviation.valid: they are different messages with
-		// different evidence, and a consumer that handles the name without
-		// testing a nested flag used to print an all-zero deviation for the
-		// mount-fault case — exactly when the user most needs to be told the
-		// mount looks wrong.
 		enum Type
 		{
 			FrozenLargeDeviation,   // sustained deviation vs the calibration
-			FrozenMountScatter,     // sustained STRUCTURED scatter: the slipped-mount signature
 			Resumed,
 			TrackerLost,
 			TrackerRecovered,
-			ObservationsUnstable,   // sustained unstructured scatter; informational
+			ObservationsUnstable,   // sustained scatter; informational
+			Reanchored,             // the estimate became the calibration (PollReanchor); in follow mode, each follow
+			ReanchorUndone,         // the calibration before it fits again and is back (PollReanchor)
 		} type = FrozenLargeDeviation;
 		// Each event carries its own evidence, so one message never needs a
 		// second data source: the deviation for FrozenLargeDeviation, the
-		// window scatter for the two scatter-path events.
+		// window scatter for ObservationsUnstable.
 		Deviation deviation;
 		double scatterRotDeg = 0.0;
 		double scatterPosM = 0.0;
+		// FrozenLargeDeviation: confirmed within resolveAttributionSeconds of a
+		// NoteTargetResolved, so the target's tracking restart is the likely
+		// cause and the next restart the likely cure. Reanchored: follow mode
+		// followed a deviation that came that soon after a restart.
+		bool afterTargetResolve = false;
 	};
 
 	using ExpectedCalibrationAt = std::function<void(
@@ -182,7 +223,30 @@ public:
 		Eigen::Quaterniond &rotationOut,
 		Eigen::Vector3d &translationOut)>;
 
+	enum class ResetReason { Requested, StreamGap, UniverseJump, Suspended, TargetResolved, Count };
+
+	// Counters last for this engine's lifetime, including across Reset(). Window
+	// sizes and timestamps in GetDiagnostics() describe the current window only.
+	struct Diagnostics
+	{
+		uint64_t referenceOutOfOrder = 0, targetOutOfOrder = 0;
+		// The part of each out-of-order count that repeated the previous
+		// timestamp exactly, as opposed to stepping back past it.
+		uint64_t referenceSameTime = 0, targetSameTime = 0;
+		uint64_t referenceSpeedRejected = 0, targetSpeedRejected = 0;
+		uint64_t referenceTooOld = 0, interpolationRejected = 0;
+		uint64_t referenceWaitUpdates = 0;
+		uint64_t jumpGuardRejected = 0, jumpGuardResets = 0;
+		uint64_t observationsFormed = 0, observationsKept = 0;
+		std::array<uint64_t, static_cast<size_t>(ResetReason::Count)> resets{};
+		size_t referenceSamples = 0, targetSamples = 0, pendingTargets = 0;
+		size_t observations = 0, requiredObservations = 0;
+		double lastObservationTime = 0.0;
+	};
+	Diagnostics GetDiagnostics() const;
+
 	void SetConfig(const Config &c) { config = c; }
+	const Config &GetConfig() const { return config; }
 	void SetExtrinsic(const MountExtrinsic &e) { extrinsic = e; }
 	const MountExtrinsic &Extrinsic() const { return extrinsic; }
 	void SetLatencyReestimation(bool on) { config.latencyReestimation = on; }
@@ -204,6 +268,15 @@ public:
 	            const ExpectedCalibrationAt &expectedAt = ExpectedCalibrationAt());
 
 	bool PollCorrection(Correction &out);
+	// A re-anchor, or the way back from one: the whole delta to the measured
+	// estimate or to the calibration before it, to be applied at once (snapped,
+	// not slewed) and without the per-correction confirmation, since the
+	// calibration it replaces is already wrong by more than a freeze.
+	bool PollReanchor(Correction &out);
+	// The most recent decision still permits a correction. Unlike the one-shot
+	// output, this remains true between evaluations and revokes queued approval
+	// immediately when a later decision settles or starts confirming a fault.
+	bool CorrectionEligible() const { return correctionEligible; }
 	bool PollEvent(Event &out);
 
 	// Freshly measured inter-system latency (seconds, positive = target lags
@@ -219,15 +292,39 @@ public:
 
 	// Drop all windows and pending output (ring gap, accepted universe jump,
 	// suspension). Keeps the extrinsic; a persisting deviation re-freezes
-	// within freezeConfirmSeconds of resuming.
-	void Reset();
+	// after fresh evidence. StreamGap preserves Frozen and Coasting states.
+	void Reset(ResetReason reason = ResetReason::Requested);
+
+	// The target's own tracking restarted at `time` (a lighthouse device began
+	// a new solution, or regained or lost a base station): its pose before and
+	// after can differ by centimeters, so no window may straddle the restart.
+	// A Reset that keeps Frozen and Coasting like a stream gap, plus the time
+	// for the freeze attribution.
+	void NoteTargetResolved(double time);
+
+	// True while the target's tracking says its pose is not settled (fewer
+	// than two base stations in view, or moments after a restart). No verdict
+	// is drawn from such a pose: no correction, no freeze, no resume; the
+	// state shows Holding unless it is already Frozen. Follow mode ignores it.
+	void SetTargetSettling(bool settling) { targetSettling = settling; }
+
+	// The caller would see a restart of the target's tracking (SteamVR's log
+	// is being read and names the target). Without that no freeze can be told
+	// from the target's own fault, so none re-anchors. Off until set.
+	void SetTargetRestartsVisible(bool visible) { restartsVisible = visible; }
+
+	// Follow mode, the Legacy method: never freeze. A deviation past the
+	// freeze thresholds or a tilt past the hold becomes the calibration at the
+	// next evaluation (PollReanchor), restart or not, settled or not. A bad
+	// lighthouse fix of the headset tracker then moves the body trackers until
+	// it clears. Switching either way starts the episode bookkeeping over.
+	void SetFollowMode(bool follow);
 
 	// Derive the mount extrinsic from a manual calibration's sample buffers
-	// and its solved result. The per-pair spread doubles as the rigidity gate:
-	// a tracker that was not rigid on the HMD fails it and `out` is left
-	// untouched (the caller keeps any previous extrinsic). The speed/interp
-	// gates and the rigidity thresholds are fixed policy — whether continuous
-	// calibration arms at all is not a caller knob — so this takes no config.
+	// and its solved (valid) result. The per-pair spread doubles as the
+	// rigidity gate: a tracker that was not rigid on the HMD fails it and `out`
+	// is left untouched (the caller keeps any previous extrinsic). The gates
+	// are fixed policy, so this takes no config.
 	static bool DeriveMountExtrinsic(const std::vector<PoseSample> &refStream,
 	                                 const std::vector<PoseSample> &targetStream,
 	                                 const EngineResult &calibration,
@@ -242,19 +339,14 @@ private:
 		Eigen::Vector3d targetRawPos{ 0, 0, 0 };
 	};
 
-	// One window's worth of estimate: the robust average plus the scatter and
-	// noise figures derived in the same pass. Returned as a unit so "are the
-	// published figures stale?" has one answer in one place — Decide copies
-	// them to the members only on success, and a refused estimate publishes
-	// nothing at all.
+	// One window's estimate: the robust average plus its scatter. Decide
+	// publishes it to the members only on success.
 	struct WindowEstimate
 	{
 		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
 		Eigen::Vector3d trans{ 0, 0, 0 };
 		double scatterRotDeg = 0.0;
 		double scatterPosM = 0.0;
-		double noiseRotDeg = 0.0;
-		double noisePosM = 0.0;
 	};
 
 	void FormObservations(double calScale, double calTimeOffset);
@@ -267,19 +359,39 @@ private:
 	void Decide(double now, const Eigen::Quaterniond &calRotation,
 	            const Eigen::Vector3d &calTranslationMeters,
 	            const ExpectedCalibrationAt &expectedAt);
+	// The estimate's deviation from the calibration at the head, and the yaw
+	// angle and head displacement a correction toward it would apply.
+	Deviation MeasureDeviation(const WindowEstimate &est,
+	                           const Eigen::Quaterniond &calRotation,
+	                           const Eigen::Vector3d &calTranslationMeters,
+	                           double &yawAngleOut, Eigen::Vector3d &headStepOut,
+	                           Eigen::Vector3d &headPosOut) const;
+	// A stuck episode (Frozen, or held on tilt) that may re-anchor.
+	void TryReanchor(double now, const WindowEstimate &est,
+	                 const Eigen::Quaterniond &calRotation,
+	                 const Eigen::Vector3d &calTranslationMeters,
+	                 double yawAngle, const Eigen::Vector3d &headStep,
+	                 const Eigen::Vector3d &headPos);
+	// The whole delta from the calibration onto the estimate, as a re-anchor
+	// or a follow applies it.
+	Correction DeltaToEstimate(const WindowEstimate &est,
+	                           const Eigen::Quaterniond &calRotation,
+	                           const Eigen::Vector3d &calTranslationMeters,
+	                           double yawAngle, const Eigen::Vector3d &headStep,
+	                           const Eigen::Vector3d &headPos) const;
 	void EnterState(State s);
 	void ClearConfirmMarks();
 
 	Config config;
+	Diagnostics diagnostics;
 	MountExtrinsic extrinsic;
 	State state = State::Inactive;
 
 	std::vector<PoseSample> refWindow;
 	std::vector<PoseSample> targetWindow;
-	// Expired-prefix cursors. A tick retires a handful of samples out of
-	// thousands, so erasing from the front relocated the whole retained window
-	// every tick; consumers work off the live range [head, size) and the dead
-	// prefix is compacted away only when it is worth one move.
+	// Expired-prefix cursors: a tick retires a handful of samples out of
+	// thousands, so consumers work off the live range [head, size) and the
+	// dead prefix is compacted away only when it is worth one move.
 	size_t refHead = 0;
 	size_t targetHead = 0;
 	std::deque<Observation> observations;
@@ -291,44 +403,52 @@ private:
 	Deviation deviation;
 	double scatterRotRmsDeg = 0.0;
 	double scatterPosRmsM = 0.0;
-	// Short-term noise estimate (robust sigma from deltas between observations
-	// ~2 x the thinning spacing apart): the unstructured part of the window
-	// scatter. Published by Decide from the estimate that produced it.
-	double noiseRotDeg = 0.0;
-	double noisePosM = 0.0;
 
 	double freezeExceededSince = -1.0;
 	double resumeBelowSince = -1.0;
+	double resumeInBandSince = -1.0;
 
-	// Scatter episode bookkeeping: one timer, plus a SLIDING window of
-	// structured/noise classification votes so a flickering classification
-	// converges to its majority — sliding rather than whole-episode counters
-	// so a slip that starts deep into a long degraded-tracking episode still
-	// freezes within ~scatterVoteWindow evaluations instead of having to
-	// outvote the entire episode's history.
-	double scatterSince = -1.0;          // gates the freeze; cleared on a gap
-	// How long the degraded episode has really been running. Unlike
-	// scatterSince this survives a coast, because the episode does: the
-	// notification it drives is an observation about tracking quality, not an
-	// action taken on the calibration, and the degraded tracking it reports is
-	// exactly what produces the gaps that reset scatterSince. Only the settle
-	// path and Reset clear it.
+	bool targetSettling = false;
+	double lastTargetResolveTime = -1e9;
+	bool restartsVisible = false;
+	bool followMode = false;
+
+	// The stuck episode: when the freeze confirmed, or when the tilt hold
+	// began. It survives what Frozen survives (a gap, a target restart) and is
+	// what a restart is attributed against. reanchorSince starts the steady
+	// run a re-anchor needs, measured against reanchorRef.
+	double episodeSince = -1.0;
+	double reanchorSince = -1.0;
+	WindowEstimate reanchorRef;
+
+	// The calibration the last re-anchor replaced, and the run of readings
+	// that fit it again. A re-anchor can follow a fault of the target that no
+	// restart explains (live 2026-09-25 01:25: a solution of the headset
+	// tracker, all four stations in it, read 6 deg of tilt 71 s after it started, and the
+	// next restart cleared it); the calibration comes back when the readings
+	// return to it. Kept through what Frozen survives; any other reset
+	// (a recalibration suspends the loop) drops it.
+	struct Replaced
+	{
+		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
+		Eigen::Vector3d trans{ 0, 0, 0 };
+	};
+	std::optional<Replaced> replaced;
+	double undoSince = -1.0;
+
+	// How long the degraded episode has been running. It survives a coast:
+	// the degraded tracking it reports is exactly what produces the gaps.
+	// Only the settle path and Reset clear it.
 	double scatterEpisodeSince = -1.0;
-	std::deque<char> scatterStructuredVotes;
 	bool unstableNotified = false;
-
-	// The three one-shot handoffs this class produces, each an optional rather
-	// than a has-X flag beside its payload. Same polled-out convention the
-	// monitors share — the flag is just folded into the value, so an empty
-	// slot cannot hold a stale payload for a reader that forgot to test it,
-	// Reset clears each in one assignment, and a new pending output adds one
-	// member instead of two plus a reset line.
 
 	// Jump-guard candidate: a discontinuous observation awaiting confirmation
 	// by a second one before the window is dropped (vs a one-off glitch).
 	std::optional<Observation> pendingObs;
 
 	std::optional<Correction> pendingCorrection;
+	std::optional<Correction> pendingReanchor;
+	bool correctionEligible = false;
 	std::deque<Event> events;
 
 	double lastLatencyEstimateTime = 0.0;

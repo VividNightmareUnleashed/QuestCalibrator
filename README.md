@@ -160,7 +160,7 @@ but redistributing it needs permission first and selling it isn't allowed. See
 
 The parts inherited from OpenVR-SpaceCalibrator, Copyright (c) 2020 Justin Li
 (pushrax), stay under their original MIT License, included in `LICENSE`.
-[THIRD-PARTY-NOTICES.txt](https://github.com/VividNightmareUnleashed/QuestCalibrator/blob/alpha/THIRD-PARTY-NOTICES.txt) has it with every other
+[THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) has it with every other
 third-party notice. Some calibration ideas (outlier rejection, axis-variance conditioning,
 sampling raw driver poses) were inspired by the
 [hyblocker fork](https://github.com/hyblocker/OpenVR-SpaceCalibrator) and written from

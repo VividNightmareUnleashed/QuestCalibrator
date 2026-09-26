@@ -40,6 +40,20 @@ VRState PreviewVRState()
 	hmd.tracking = true;
 	state.devices.push_back(hmd);
 
+	VRDevice touchPro;
+	touchPro.id = 3 + kPreviewManyTrackerCount;
+	touchPro.deviceClass = vr::TrackedDeviceClass_Controller;
+	touchPro.model = "Touch Pro Right";
+	touchPro.serial = "PREVIEW-TOUCH-PRO-RIGHT";
+	touchPro.trackingSystem = "oculus";
+	touchPro.controllerRole = vr::TrackedControllerRole_RightHand;
+	// The Oculus driver ships no Quest controller art; its Touch icons are
+	// the Rift S set.
+	touchPro.iconPath = PreviewIconPath("oculus\\resources\\icons\\rifts_right_controller_ready_2x.png");
+	touchPro.battery = 0.75f;
+	touchPro.tracking = true;
+	state.devices.push_back(touchPro);
+
 	VRDevice right;
 	right.id = 1;
 	right.deviceClass = vr::TrackedDeviceClass_Controller;
@@ -161,8 +175,74 @@ void SetupPreviewState()
 	CalCtx.autoCorrectionsApplied = 14;
 	CalCtx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr)) - 42.0;
 
+	// Base station visibility as the lighthouse log would have reported it:
+	// every device learned four stations, the left controller is down to
+	// one (the red figure), one tracker lost one, and two stations carry
+	// most of the drops so the line under the panes has an order.
+	{
+		using K = lighthouselog::Event::Kind;
+		static const std::map<int, uint32_t> ids = {
+			{ 5, 0xD3D4E73Bu }, { 8, 0x170EE067u }, { 9, 0xF210FBA6u }, { 16, 0x04D47FB4u } };
+		auto line = [](K kind, const std::string &serial, int channel, std::vector<int> visible)
+		{
+			lighthouselog::Event e;
+			e.kind = kind;
+			e.serial = serial;
+			e.channel = channel;
+			e.stationId = ids.at(channel);
+			e.visibleKnown = true;
+			e.visibleChannels = std::move(visible);
+			for (int c : e.visibleChannels)
+				e.visibleIds.push_back(ids.at(c));
+			e.historical = true;
+			return e;
+		};
+		auto &vis = CalCtx.lighthouse;
+		std::vector<std::string> serials = { "LHR-A3C36EA5", "LHR-841C98C3" };
+		for (int i = 0; i < kPreviewManyTrackerCount; ++i)
+			serials.push_back(FormatString("LHR-77E5A2%02X", 0x11 + i));
+		for (const auto &s : serials)
+		{
+			vis.Apply(line(K::StationAdded, s, 5, { 5 }), 0.0);
+			vis.Apply(line(K::StationAdded, s, 8, { 5, 8 }), 0.0);
+			vis.Apply(line(K::StationAdded, s, 9, { 5, 8, 9 }), 0.0);
+			vis.Apply(line(K::StationAdded, s, 16, { 5, 8, 9, 16 }), 0.0);
+		}
+		for (int n = 0; n < 7; ++n)
+		{
+			vis.Apply(line(K::StationDropped, "LHR-77E5A211", 16, { 5, 8, 9 }), 0.0);
+			vis.Apply(line(K::StationAdded, "LHR-77E5A211", 16, { 5, 8, 9, 16 }), 0.0);
+		}
+		for (int n = 0; n < 3; ++n)
+		{
+			vis.Apply(line(K::StationDropped, "LHR-A3C36EA5", 5, { 8, 9, 16 }), 0.0);
+			vis.Apply(line(K::StationAdded, "LHR-A3C36EA5", 5, { 5, 8, 9, 16 }), 0.0);
+		}
+		vis.Apply(line(K::StationDropped, "LHR-77E5A212", 16, { 5, 8, 9 }), 0.0);
+		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 16, { 5, 8, 9 }), 0.0);
+		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 8, { 5, 9 }), 0.0);
+		vis.Apply(line(K::StationDropped, "LHR-841C98C3", 5, { 9 }), 0.0);
+		CalCtx.lighthouseLogAvailable = true;
+		CalCtx.lighthouseLogPath = lighthouselog::DefaultLogPath();
+	}
+
 	switch (g_uiPreviewScenario)
 	{
+	case PreviewScenario::Guide:
+	case PreviewScenario::Result:
+		CalCtx.referenceID = 3 + kPreviewManyTrackerCount;
+		CalCtx.targetID = 3;
+		CalCtx.pendingReferenceTrackingSystem = "oculus";
+		CalCtx.pendingTargetTrackingSystem = "lighthouse";
+		OpenGuide(false, false);
+		if (g_uiPreviewScenario == PreviewScenario::Result)
+		{
+			CalCtx.lastRunHint = CalibrationContext::GuideHint::Success;
+			CalCtx.Outcome("Calibration complete", "Check that the tracker positions line up in VR.",
+				"", "Rotation RMS 2.53 degrees; position RMS 1.0 cm", CalibrationContext::Tone::Good);
+			s_guide.stage = GuideStage::Done;
+		}
+		break;
 	case PreviewScenario::Frozen:
 		// The loop measured a deviation too large to correct and stopped:
 		// the band shows its two actions and the activity card the event.
@@ -187,6 +267,13 @@ void SetupPreviewState()
 		CalCtx.continuousState = questcal::ContinuousAlignment::State::Inactive;
 		CalCtx.continuousDeviation.valid = false;
 		CalCtx.autoCorrectionsApplied = 0;
+		break;
+	case PreviewScenario::Lighthouse:
+		CalCtx.modules.lighthouse = questcal::ModuleStatus::Installed;
+		s_mainTab = MainTab::Lighthouse;
+		break;
+	case PreviewScenario::Settings:
+		s_showSettings = true;
 		break;
 	case PreviewScenario::Failed:
 	case PreviewScenario::Healthy:

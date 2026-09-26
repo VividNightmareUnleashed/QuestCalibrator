@@ -57,14 +57,13 @@
       <PreprocessorDefinitions>_SCL_SECURE_NO_WARNINGS;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;_DEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>..\lib\gl3w\include;..\lib\glfw\include;..\lib\openvr;..\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\lib\imgui;..\lib\gl3w\include;..\lib\glfw\include;..\lib\openvr;..\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <IgnoreSpecificDefaultLibraries>msvcrt.lib</IgnoreSpecificDefaultLibraries>
-      <AdditionalLibraryDirectories>..\lib\glfw\lib-vc2015;..\lib\openvr\lib\win64</AdditionalLibraryDirectories>
-      <AdditionalDependencies>opengl32.lib;glfw3.lib;openvr_api.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\lib\openvr\lib\win64</AdditionalLibraryDirectories>
+      <AdditionalDependencies>opengl32.lib;openvr_api.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -79,16 +78,16 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <PreprocessorDefinitions>_SCL_SECURE_NO_WARNINGS;_SILENCE_CXX17_NEGATORS_DEPRECATION_WARNING;_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING;NDEBUG;_WINDOWS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>..\lib\gl3w\include;..\lib\glfw\include;..\lib\openvr;..\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>..\lib\imgui;..\lib\gl3w\include;..\lib\glfw\include;..\lib\openvr;..\lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <IgnoreSpecificDefaultLibraries>msvcrt.lib</IgnoreSpecificDefaultLibraries>
-      <AdditionalLibraryDirectories>..\lib\glfw\lib-vc2015;..\lib\openvr\lib\win64</AdditionalLibraryDirectories>
-      <AdditionalDependencies>opengl32.lib;glfw3.lib;openvr_api.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalLibraryDirectories>..\lib\openvr\lib\win64</AdditionalLibraryDirectories>
+      <AdditionalDependencies>opengl32.lib;openvr_api.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -102,17 +101,28 @@
     <ClInclude Include="CalibrationEngine.h" />
     <ClInclude Include="CalibrationGuide.h" />
     <ClInclude Include="UiInternal.h" />
+    <ClInclude Include="ImGuiVRInput.h" />
     <ClInclude Include="Diagnostics.h" />
-    <ClInclude Include="LegacyContinuous.h" />
+    <ClInclude Include="Localization.h" />
+    <ClInclude Include="LocalizationTables.h" />
+    <ClInclude Include="UpdatePolicy.h" />
+    <ClInclude Include="Updater.h" />
     <ClInclude Include="CalibrationRun.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
     <ClInclude Include="PersistenceState.h" />
+    <ClInclude Include="ProfileScalarValidation.h" />
     <ClInclude Include="ProfileValidation.h" />
     <ClInclude Include="RingPoseMath.h" />
+    <ClInclude Include="RingSampleGate.h" />
     <ClInclude Include="ContinuousAlignment.h" />
     <ClInclude Include="ContinuousCorrectionGate.h" />
     <ClInclude Include="DriftMonitor.h" />
+    <ClInclude Include="LighthouseLog.h" />
+    <ClInclude Include="LighthouseVisibility.h" />
+    <ClInclude Include="Modules.h" />
+    <ClInclude Include="TrackingStreamDigest.h" />
+    <ClInclude Include="LighthouseFrameWatch.h" />
     <ClInclude Include="DriverSession.h" />
     <ClInclude Include="DriverSyncPolicy.h" />
     <ClInclude Include="DriverSyncTracker.h" />
@@ -124,6 +134,7 @@
     <ClInclude Include="PoseStreamHub.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />
+    <ClInclude Include="UiLayout.h" />
     <ClInclude Include="UserInterface.h" />
   </ItemGroup>
   <ItemGroup>
@@ -139,23 +150,240 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\lib\imgui\imgui_impl_glfw.cpp">
+    <ClCompile Include="..\lib\imgui\backends\imgui_impl_glfw.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="..\lib\imgui\imgui_impl_opengl3.cpp">
+    <ClCompile Include="..\lib\imgui\backends\imgui_impl_opengl3.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="glfw_static_crt_shim.cpp">
+    <ClCompile Include="..\lib\glfw\src\context.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</ExcludedFromBuild>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_context.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\init.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_init.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\input.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_input.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\monitor.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_monitor.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\platform.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_platform.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\vulkan.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_vulkan.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\window.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_window.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\egl_context.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_egl_context.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\osmesa_context.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_osmesa_context.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_init.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_null_init.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_monitor.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_null_monitor.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_window.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_null_window.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\null_joystick.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_null_joystick.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_module.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_win32_module.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_time.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_win32_time.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_thread.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_win32_thread.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_init.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_win32_init.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_joystick.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_win32_joystick.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_monitor.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_win32_monitor.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\win32_window.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_win32_window.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\glfw\src\wgl_context.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <PreprocessorDefinitions>_GLFW_WIN32;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ObjectFileName>$(IntDir)glfw_wgl_context.obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_widgets.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_tables.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\lib\imgui\imgui_demo.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <!-- Yoga is written to C++20; the overlay itself stays on 17. -->
+    <ClCompile Include="..\lib\yoga\YGConfig.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGEnums.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNode.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGNodeStyle.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGPixelGrid.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\YGValue.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\AbsoluteLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Baseline.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\Cache.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\CalculateLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\FlexLine.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\algorithm\PixelGrid.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\config\Config.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\AssertFatal.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\debug\Log.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\event\event.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\LayoutResults.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+    <ClCompile Include="..\lib\yoga\node\Node.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="Calibration.cpp" />
     <ClCompile Include="CalibrationDriver.cpp" />
     <ClCompile Include="CalibrationSpace.cpp" />
     <ClCompile Include="Diagnostics.cpp" />
-    <ClCompile Include="LegacyContinuous.cpp" />
+    <ClCompile Include="Localization.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="LocalizationJa.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="LocalizationIt.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <ClCompile Include="Updater.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -164,6 +392,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="DriftMonitor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="LighthouseLog.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="LighthouseVisibility.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="EmbeddedFiles.cpp">
@@ -180,10 +414,13 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="Modules.cpp" />
     <ClCompile Include="UserInterface.cpp" />
     <ClCompile Include="UiWidgets.cpp" />
     <ClCompile Include="UiMainScreen.cpp" />
     <ClCompile Include="UiDevices.cpp" />
+    <ClCompile Include="UiLayout.cpp" />
+    <ClCompile Include="UiLighthouse.cpp" />
     <ClCompile Include="UiGuide.cpp" />
     <ClCompile Include="UiSettings.cpp" />
     <ClCompile Include="UiPreview.cpp" />
@@ -193,8 +430,18 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="QuestCalibrator.rc" />
+    <ResourceCompile Include="Guidance.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="..\tools\clang-tidy-first-party.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
+  <Target Name="CopyRuntimeFiles" AfterTargets="Build">
+    <ItemGroup>
+      <QuestCalRuntimeFile Include="$(ProjectDir)..\lib\openvr\lib\win64\openvr_api.dll" />
+      <QuestCalRuntimeFile Include="$(ProjectDir)manifest.vrmanifest" />
+      <QuestCalRuntimeFile Include="$(ProjectDir)icon.png" />
+    </ItemGroup>
+    <Copy SourceFiles="@(QuestCalRuntimeFile)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

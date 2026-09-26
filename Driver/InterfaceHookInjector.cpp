@@ -1,6 +1,7 @@
 #include "Logging.h"
 #include "Hooking.h"
 #include "InterfaceHookInjector.h"
+#include "OpenVRHookLayout.h"
 #include "ServerTrackedDeviceProvider.h"
 
 #include <atomic>
@@ -8,6 +9,10 @@
 #include <mutex>
 #include <tlhelp32.h>
 #include <vector>
+
+#ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
+void (*TryInstallAfterAcceptCheckForTest)() = nullptr;
+#endif
 
 namespace
 {
@@ -53,10 +58,8 @@ struct ModuleRange
 	}
 };
 
-// Resolved before the first target can be enabled and retained for the entire
-// hook lifetime. Teardown cannot safely discover this information on demand:
-// returning after a lookup failure would let the DLL unload while a disabled
-// hook's already-entered detour frame can still return into this module.
+// Resolved before the first target can be enabled and kept for the whole hook
+// lifetime, so teardown never has to look it up (and fail) on demand.
 ModuleRange DriverModuleRange;
 
 bool GetThisModuleRange(ModuleRange &range)
@@ -64,16 +67,13 @@ bool GetThisModuleRange(ModuleRange &range)
 	HMODULE module = nullptr;
 	if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 		GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-		reinterpret_cast<LPCSTR>(&GetThisModuleRange), &module) || !module)
+		reinterpret_cast<LPCSTR>(&GetThisModuleRange), &module))
 		return false;
 
+	// Our own loaded image: the loader has already validated these headers.
 	auto base = reinterpret_cast<uintptr_t>(module);
 	auto dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
-	if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-		return false;
 	auto nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
-	if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.SizeOfImage == 0)
-		return false;
 	range = { base, base + nt->OptionalHeader.SizeOfImage };
 	return true;
 }
@@ -246,12 +246,9 @@ private:
 	std::vector<HANDLE> threads;
 };
 
-// Quiescence can be unreachable rather than merely slow: a third-party thread
-// parked in hand-written or generated code without unwind data fails the stack
-// walk on every attempt, and nothing bounds how long it stays there. Retrying
-// forever suspends every thread in vrserver once a millisecond for as long as
-// that lasts, and hangs both SteamVR shutdown and (through Init's failure paths)
-// SteamVR startup.
+// Quiescence can be unreachable: a thread parked in code without unwind data
+// fails the stack walk every time. Retrying forever would hang SteamVR shutdown
+// and, through Init's failure paths, startup.
 constexpr ULONGLONG QuiescenceWaitMs = 5000;
 
 // Keeping this module resident is the safe way to stop waiting. Every hook is
@@ -286,34 +283,26 @@ Hook<void*(*)(vr::IVRDriverContext *, const char *, vr::EVRInitError *)>
 	GetGenericInterfaceHook("IVRDriverContext::GetGenericInterface");
 
 using PoseUpdateHook =
-	Hook<void(*)(vr::IVRServerDriverHost *, uint32_t, const vr::DriverPose_t &, uint32_t)>;
+	Hook<void(*)(void *, uint32_t, const vr::DriverPose_t &, uint32_t)>;
 using PoseUpdateDetour =
-	void (*)(vr::IVRServerDriverHost *, uint32_t, const vr::DriverPose_t &, uint32_t);
+	void (*)(void *, uint32_t, const vr::DriverPose_t &, uint32_t);
 
 PoseUpdateHook TrackedDevicePoseUpdatedHook005("IVRServerDriverHost005::TrackedDevicePoseUpdated");
 PoseUpdateHook TrackedDevicePoseUpdatedHook006("IVRServerDriverHost006::TrackedDevicePoseUpdated");
 
-// The one forwarding body every supported interface version shares. Keeping it
-// here rather than once per detour is what stops the versions from silently
-// diverging when the argument handling, the null-driver fallback or the guard
-// changes. The detours themselves must stay distinct functions: each is the
-// address MinHook patches in for its own target.
-void ForwardPoseUpdate(PoseUpdateHook &hook, vr::IVRServerDriverHost *_this,
+// The forwarding body every interface version shares. The detours stay
+// distinct functions because each is the address MinHook patches in.
+void ForwardPoseUpdate(PoseUpdateHook &hook, void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
+	// Null only if a thread enters the detour after its hook was removed
+	// (MinHook moves threads off the relay on disable only on a best-effort basis).
 	auto original = hook.originalFunc.load(std::memory_order_acquire);
 
-	// unPoseStructSize is the caller's declaration of the layout behind
-	// `newPose`, and it is the only signal that layout carries. Our copy below
-	// is sized by the vendored vr::DriverPose_t: if a SteamVR build ever passes
-	// a larger struct, forwarding that size over a smaller stack object makes
-	// vrserver read past it, and the trailing bytes become pose fields. When the
-	// size does not match, touch nothing - forward the caller's own object with
-	// the caller's own size, and skip both the ring publish and the transform,
-	// since the provider reads rotation/position/velocity from a layout we
-	// cannot interpret. A layout change then degrades to "calibration not
-	// applied", never to a corrupt or disappearing device. No logging here: this
-	// is a pose thread, and stdio must not run on one.
+	// Our copy is sized by the vendored DriverPose_t, so a caller passing a
+	// different layout gets its own object forwarded untouched: no ring publish,
+	// no transform. A layout change then degrades to "calibration not applied",
+	// never to a corrupt device. No logging: stdio must not run on a pose thread.
 	if (unPoseStructSize != sizeof(vr::DriverPose_t))
 	{
 		if (original)
@@ -321,16 +310,14 @@ void ForwardPoseUpdate(PoseUpdateHook &hook, vr::IVRServerDriverHost *_this,
 		return;
 	}
 
-	ServerTrackedDeviceProvider *driver = Driver.load(std::memory_order_acquire);
 	auto pose = newPose;
-	if (!driver || driver->HandleDevicePoseUpdated(unWhichDevice, pose))
-	{
-		if (original)
-			original(_this, unWhichDevice, pose, unPoseStructSize);
-	}
+	if (ServerTrackedDeviceProvider *driver = Driver.load(std::memory_order_acquire))
+		driver->HandleDevicePoseUpdated(unWhichDevice, pose);
+	if (original)
+		original(_this, unWhichDevice, pose, unPoseStructSize);
 }
 
-void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this,
+void DetourTrackedDevicePoseUpdated005(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	CallbackGuard callback;
@@ -338,7 +325,7 @@ void DetourTrackedDevicePoseUpdated005(vr::IVRServerDriverHost *_this,
 		unPoseStructSize);
 }
 
-void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this,
+void DetourTrackedDevicePoseUpdated006(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
 	CallbackGuard callback;
@@ -346,16 +333,7 @@ void DetourTrackedDevicePoseUpdated006(vr::IVRServerDriverHost *_this,
 		unPoseStructSize);
 }
 
-// TrackedDevicePoseUpdated is the second virtual in the vendored
-// IVRServerDriverHost_005 declaration, which is the only layout this repository
-// can check. The 006 layout is not declared anywhere here, so the same index is
-// an assumption for that branch; if a future revision reorders it, the detour is
-// entered with mismatched arguments inside vrserver. Declaring 006 is what would
-// settle it.
-constexpr int PoseUpdateVTableIndex = 1;
-
-// Adding a version means one row here rather than an edit at the install site,
-// both teardown paths and the accessor.
+// Supporting another interface version is one row here.
 struct PoseHookBinding
 {
 	const char *interfaceVersion;
@@ -412,14 +390,19 @@ void TryInstallPoseHook(const char *interfaceVersion, void *originalInterface)
 		return;
 	}
 
+	// Under the mutex, accepting implies MinHook is initialized.
 	std::lock_guard<std::mutex> lock(HookSetupMutex);
-	if (!MinHookInitialized || !AcceptingHookRequests.load(std::memory_order_acquire))
+	if (!AcceptingHookRequests.load(std::memory_order_acquire))
 		return;
+#ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
+	if (TryInstallAfterAcceptCheckForTest)
+		TryInstallAfterAcceptCheckForTest();
+#endif
 
 	if (binding->ready->load(std::memory_order_relaxed))
 		return;
 	if (binding->hook->CreateHookInObjectVTable(
-		originalInterface, PoseUpdateVTableIndex, binding->detour))
+		originalInterface, openvr_hook::PoseUpdateSlot, binding->detour))
 	{
 		binding->ready->store(true, std::memory_order_release);
 	}
@@ -451,7 +434,7 @@ void *DetourGetGenericInterface(vr::IVRDriverContext *_this,
 
 bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDriverContext)
 {
-	if (!driver || !pDriverContext)
+	if (!pDriverContext)
 	{
 		LOG("InjectHooks: invalid driver context");
 		return false;
@@ -466,7 +449,7 @@ bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 	if (!DriverModuleRange.IsValid())
 	{
 		ModuleRange resolved;
-		if (!GetThisModuleRange(resolved) || !resolved.IsValid())
+		if (!GetThisModuleRange(resolved))
 		{
 			LOG("InjectHooks: could not resolve the driver module range");
 			return false;
@@ -484,7 +467,7 @@ bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 	Driver.store(driver, std::memory_order_release);
 
 	if (!GetGenericInterfaceHook.CreateHookInObjectVTable(
-		pDriverContext, 0, &DetourGetGenericInterface))
+		pDriverContext, openvr_hook::GetGenericInterfaceSlot, &DetourGetGenericInterface))
 	{
 		Driver.store(nullptr, std::memory_order_release);
 		MH_Uninitialize();
@@ -517,8 +500,6 @@ bool DisableHooks()
 	// mutex. A detour already waiting for the mutex rechecks this flag.
 	AcceptingHookRequests.store(false, std::memory_order_release);
 	Driver.store(nullptr, std::memory_order_release);
-	for (const PoseHookBinding &binding : PoseHookBindings)
-		binding.ready->store(false, std::memory_order_release);
 
 	// Hook removal is only safe after every target is confirmed disabled. If
 	// both the individual and MinHook-wide disable paths fail, keep the benign
@@ -530,6 +511,13 @@ bool DisableHooks()
 	{
 		{
 			std::lock_guard<std::mutex> lock(HookSetupMutex);
+			// Under the mutex, not before it: a detour that passed its accept
+			// check before the store above sets its ready flag while holding
+			// the mutex. Cleared earlier, that flag outlives the hook it names,
+			// and the next Init in this process skips installing the hook while
+			// IsPoseUpdateHookInstalled still reports it.
+			for (const PoseHookBinding &binding : PoseHookBindings)
+				binding.ready->store(false, std::memory_order_release);
 			if (!MinHookInitialized)
 				return true;
 
@@ -545,7 +533,7 @@ bool DisableHooks()
 			}
 			if (disabled)
 			{
-				module = DriverModuleRange;
+				module = DriverModuleRange;   // valid: InjectHooks resolves it before MH_Initialize
 				break;
 			}
 		}
@@ -561,13 +549,6 @@ bool DisableHooks()
 		// leave the module.
 		Sleep(100);
 	}
-
-	// InjectHooks establishes this invariant before enabling even the context
-	// detour. If memory corruption ever violates it, no stack can be inspected,
-	// so the module has to stay loaded instead.
-	if (!module.IsValid())
-		return AbandonTeardown("Cached driver module range is unavailable, so detour "
-			"stacks cannot be inspected");
 
 	ULONGLONG quiescenceDeadline = GetTickCount64() + QuiescenceWaitMs;
 	ULONGLONG lastWaitLog = GetTickCount64();

@@ -1,0 +1,32 @@
+<Project>
+  <!--
+    Clang-Tidy analyses first-party code only. The vendored sources under lib\
+    are compiled into the projects as ordinary ClCompile items, so Clang-Tidy
+    analysed them too: most of the analysis time and every one of its findings,
+    which validate-cpp.ps1 then had to filter out. They are set aside just
+    before Clang-Tidy collects its compile commands and put back as soon as it
+    has run, so compilation and linking see the full item list.
+  -->
+  <PropertyGroup>
+    <_FirstPartyVendoredRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\lib\').ToLowerInvariant())</_FirstPartyVendoredRoot>
+  </PropertyGroup>
+
+  <Target Name="SetVendoredSourcesAsideForClangTidy"
+          BeforeTargets="GetCompileCommands"
+          Condition="'$(EnableClangTidyCodeAnalysis)' == 'true'">
+    <ItemGroup>
+      <_VendoredClCompile Include="@(ClCompile)"
+                          Condition="$([System.String]::Copy('%(ClCompile.FullPath)').ToLowerInvariant().StartsWith('$(_FirstPartyVendoredRoot)'))" />
+      <ClCompile Remove="@(_VendoredClCompile)" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="RestoreVendoredSourcesAfterClangTidy"
+          AfterTargets="ClangTidy"
+          Condition="'@(_VendoredClCompile)' != ''">
+    <ItemGroup>
+      <ClCompile Include="@(_VendoredClCompile)" />
+      <_VendoredClCompile Remove="@(_VendoredClCompile)" />
+    </ItemGroup>
+  </Target>
+</Project>

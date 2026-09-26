@@ -9,19 +9,9 @@
 namespace
 {
 
-// ResponseInvalid is the only rejection the wire can carry, so one response type
-// covers both "the gate refused this connection" (never handshaken, or a version
-// mismatch) and "your values were rejected" - and the overlay, seeing one type,
-// drives the same recovery for both: mark unsynchronized, disable the profile,
-// neutralize. A persistently unacceptable value therefore looks exactly like a
-// broken handshake from the other process.
-//
-// The reason code that actually separates them belongs on protocol::Response and
-// has to wait for the next protocol bump (the handshake enforces exact version
-// equality, so it costs a driver reinstall). Until then these two log lines are
-// the half of the diagnosis this side owns: which of the two causes fired is now
-// a fact in the driver log rather than something an operator has to infer from
-// the overlay's generic banner.
+// ResponseInvalid is the only rejection the wire carries, so a gate refusal and
+// a value rejection look the same to the overlay; the driver log is where the
+// two causes are told apart.
 protocol::ResponseType SetterResult(bool accepted, const char *operation)
 {
 	if (accepted)
@@ -39,11 +29,9 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 {
 	if (!questcal::ipc::PrepareRequest(request, connection, response))
 	{
-		if (response.type == protocol::ResponseHandshake && sink.poseHookMask)
+		if (response.type == protocol::ResponseHandshake)
 			response.poseHookMask = sink.poseHookMask();
-		// The other cause of ResponseInvalid. Handshake and unknown request
-		// types are handled below/inside the gate, so only a mutation refused
-		// for the connection's own state is worth a line here.
+		// Only a mutation refused for the connection's own state is worth a line.
 		if (request.type == protocol::RequestSetDeviceTransform ||
 			request.type == protocol::RequestSetRuntimeState)
 			LOG("IPC mutation %d refused by the protocol gate: this connection has "
@@ -52,23 +40,13 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 		return;
 	}
 
-	switch (request.type)
-	{
-	case protocol::RequestSetDeviceTransform:
+	// PrepareRequest passes only the two mutation types.
+	if (request.type == protocol::RequestSetDeviceTransform)
 		response.type = SetterResult(
 			sink.setDeviceTransform(request.setDeviceTransform), "SetDeviceTransform");
-		break;
-
-	case protocol::RequestSetRuntimeState:
+	else
 		response.type = SetterResult(
 			sink.setRuntimeState(request.setRuntimeState), "SetRuntimeState");
-		break;
-
-	default:
-		LOG("Invalid IPC request: %d", request.type);
-		response.type = protocol::ResponseInvalid;
-		break;
-	}
 }
 
 IPCServer::~IPCServer()
@@ -78,18 +56,7 @@ IPCServer::~IPCServer()
 
 bool IPCServer::Run(RequestSink newSink)
 {
-	if (mainThread.joinable())
-		return !stop.load(std::memory_order_acquire);
-
-	// Checked once here rather than per request: an empty std::function called
-	// from a completion APC would throw out of the APC and terminate vrserver.
-	if (!newSink.setDeviceTransform || !newSink.setRuntimeState ||
-		!newSink.poseHookMask)
-	{
-		LOG("IPC server refused to start without a complete request sink");
-		return false;
-	}
-
+	// Only Init calls this, after Stop() has joined any previous server thread.
 	stop.store(false, std::memory_order_release);
 	connectOverlap = {};
 	listenerPipe = INVALID_HANDLE_VALUE;
@@ -97,28 +64,16 @@ bool IPCServer::Run(RequestSink newSink)
 	// Established before the first listener can accept anything.
 	sink = std::move(newSink);
 
-	// One teardown for the three resources Run acquires, released in the reverse
-	// of the order they are taken. CloseListenerInstance is a no-op on
-	// INVALID_HANDLE_VALUE and CloseHandle is guarded, so the paths that fail
-	// before the listener (or before the events) exist use it unchanged. Run's
-	// contract: false means no server thread owns the IPC resources, both event
-	// handles are closed and nulled, and Stop() is still safe to call.
-	auto fail = [&]() -> bool
+	// No thread is running yet, so Stop() just releases whatever was acquired.
+	auto fail = [this]
 	{
-		CloseListenerInstance(&connectOverlap, listenerPipe, listenerConnectPending);
-		if (connectEvent)
-			CloseHandle(connectEvent);
-		if (stopEvent)
-			CloseHandle(stopEvent);
-		connectEvent = nullptr;
-		stopEvent = nullptr;
+		Stop();
 		return false;
 	};
 
 	// Created here rather than in RunThread so Stop() always has valid handles,
-	// however early it runs. The connect event is reset before every accept;
-	// the stop event is a separate signal so shutdown cannot masquerade as a
-	// successfully connected client.
+	// however early it runs. The stop event is separate from the connect event
+	// so shutdown cannot masquerade as a connected client.
 	connectEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 	stopEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
 	if (!connectEvent || !stopEvent)
@@ -130,7 +85,7 @@ bool IPCServer::Run(RequestSink newSink)
 
 	// Establish the first listener synchronously. Init must not report success
 	// for a driver instance that can never accept control requests.
-	if (!CreateAndConnectInstance(&connectOverlap, listenerPipe, listenerConnectPending))
+	if (!CreateAndConnectInstance(pipeName, &connectOverlap, listenerPipe, listenerConnectPending))
 		return fail();
 
 	try
@@ -142,11 +97,6 @@ bool IPCServer::Run(RequestSink newSink)
 		LOG("Could not start IPC server thread: %s", e.what());
 		return fail();
 	}
-	catch (...)
-	{
-		LOG("Could not start IPC server thread: unknown exception");
-		return fail();
-	}
 	return true;
 }
 
@@ -156,8 +106,7 @@ void IPCServer::Stop()
 	stop.store(true, std::memory_order_release);
 	if (mainThread.joinable())
 	{
-		if (stopEvent)
-			SetEvent(stopEvent);
+		SetEvent(stopEvent);   // both events exist while the thread does
 		mainThread.join();
 	}
 	CloseListenerInstance(&connectOverlap, listenerPipe, listenerConnectPending);
@@ -180,7 +129,7 @@ IPCServer::PipeInstance *IPCServer::CreatePipeInstance(HANDLE pipe)
 	}
 	pipeInst->pipe = pipe;
 	pipeInst->server = this;
-	pipeInst->lastActivityMs = GetTickCount64();
+	pipeInst->lastActivityMs = Now();
 	try
 	{
 		pipes.insert(pipeInst);
@@ -202,13 +151,21 @@ void IPCServer::ClosePipeInstance(PipeInstance *pipeInst)
 	delete pipeInst;
 }
 
+ULONGLONG IPCServer::Now() const
+{
+#ifdef QUESTCAL_IPC_SERVER_TEST_SEAM
+	if (clockForTest)
+		return clockForTest();
+#endif
+	return GetTickCount64();
+}
+
 // A peer that connects and never writes leaves its read pending forever, so
-// nothing else reclaims these. Cancel the pending IO first: the completion
-// routine runs against the instance, and freeing it underneath the kernel
-// would corrupt the callback that casts the OVERLAPPED straight back to it.
+// nothing else reclaims these. Only cancel here: the completion routine owns
+// the instance and closes it once the cancelled IO completes.
 void IPCServer::CloseIdleConnections()
 {
-	const ULONGLONG now = GetTickCount64();
+	const ULONGLONG now = Now();
 	for (PipeInstance *pipeInst : pipes)
 	{
 		if (pipeInst->closing ||
@@ -227,7 +184,7 @@ void IPCServer::CloseIdleConnections()
 
 DWORD IPCServer::NextIdleTimeoutMs() const
 {
-	const ULONGLONG now = GetTickCount64();
+	const ULONGLONG now = Now();
 	ULONGLONG nearest = MAXDWORD;
 	for (const PipeInstance *pipeInst : pipes)
 	{
@@ -261,7 +218,7 @@ void IPCServer::RunThread(IPCServer *_this)
 			ULONGLONG now = GetTickCount64();
 			if (now >= nextListenerAttempt)
 			{
-				if (CreateAndConnectInstance(&_this->connectOverlap,
+				if (CreateAndConnectInstance(_this->pipeName, &_this->connectOverlap,
 					_this->listenerPipe, _this->listenerConnectPending))
 				{
 					listenerRetryDelay = InitialListenerRetryMs;
@@ -291,7 +248,7 @@ void IPCServer::RunThread(IPCServer *_this)
 		{
 			break;
 		}
-		else if (handleCount == 2 && wait == WAIT_OBJECT_0 + 1)
+		else if (wait == WAIT_OBJECT_0 + 1)
 		{
 			if (_this->listenerConnectPending)
 			{
@@ -324,12 +281,17 @@ void IPCServer::RunThread(IPCServer *_this)
 			_this->listenerConnectPending = false;
 
 			// Reap first, so a stale connection can never be what refuses the
-			// real client.
+			// real client. A reaped instance stays in `pipes` until its cancelled
+			// IO completes at the next alertable wait, so only the connections
+			// not already closing count toward the cap.
 			_this->CloseIdleConnections();
 
 			PipeInstance *pipeInst = nullptr;
-			if (_this->pipes.size() >= MaxConcurrentConnections)
-				LOG("Refusing IPC connection: %zu already open", _this->pipes.size());
+			const size_t open = static_cast<size_t>(std::count_if(
+				_this->pipes.begin(), _this->pipes.end(),
+				[](const PipeInstance *p) { return !p->closing; }));
+			if (open >= MaxConcurrentConnections)
+				LOG("Refusing IPC connection: %zu already open", open);
 			else
 				pipeInst = _this->CreatePipeInstance(connectedPipe);
 
@@ -371,13 +333,7 @@ void IPCServer::RunThread(IPCServer *_this)
 		CancelIoEx(pipeInst->pipe, &pipeInst->overlap);
 
 	while (!_this->pipes.empty())
-	{
-		DWORD wait = SleepEx(INFINITE, TRUE);
-		if (wait != WAIT_IO_COMPLETION)
-		{
-			LOG("Alertable IPC drain failed in RunThread. Error: %d", GetLastError());
-		}
-	}
+		SleepEx(INFINITE, TRUE);   // returns only after running completion routines
 }
 
 void IPCServer::CloseListenerInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending)
@@ -400,7 +356,8 @@ void IPCServer::CloseListenerInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &
 	pending = false;
 }
 
-bool IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, bool &pending)
+bool IPCServer::CreateAndConnectInstance(const char *name, LPOVERLAPPED overlap, HANDLE &pipe,
+	bool &pending)
 {
 	pending = false;
 	ResetEvent(overlap->hEvent);
@@ -409,8 +366,8 @@ bool IPCServer::CreateAndConnectInstance(LPOVERLAPPED overlap, HANDLE &pipe, boo
 	overlap->Offset = 0;
 	overlap->OffsetHigh = 0;
 
-	pipe = CreateNamedPipe(
-		TEXT(QUESTCALIBRATOR_PIPE_NAME),
+	pipe = CreateNamedPipeA(
+		name,
 		PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
 		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
 		PIPE_UNLIMITED_INSTANCES,
@@ -456,11 +413,9 @@ IPCServer::PipeInstance *IPCServer::ActivePipeInstanceOrClose(LPOVERLAPPED overl
 	if (!pipeInst->closing &&
 		!pipeInst->server->stop.load(std::memory_order_acquire))
 	{
-		// Both completion callbacks funnel through here, so this is the one
-		// place that sees every completed IO on a connection - stamping it here
-		// rather than at each callback keeps the idle deadline honest whatever
-		// the peer is doing.
-		pipeInst->lastActivityMs = GetTickCount64();
+		// Both completion callbacks funnel through here, so every completed IO
+		// counts as activity.
+		pipeInst->lastActivityMs = pipeInst->server->Now();
 		return pipeInst;
 	}
 
@@ -474,12 +429,9 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 	if (!pipeInst)
 		return;
 
-	// A short or oversized message would leave stale bytes from the previous
-	// request in the buffer; only exactly-sized messages are dispatched. This is
-	// a trust-boundary rejection, not a transport failure, so it gets its own
-	// line: folding it into the error path below logged it as an I/O error with
-	// error code 0, which an operator cannot tell from a broken pipe. This
-	// connection still closes; every other connection is untouched.
+	// Only exactly-sized messages are dispatched: a short one would leave stale
+	// bytes from the previous request in the buffer. Logged apart from I/O
+	// errors, and only this connection closes.
 	if (err == 0 && bytesRead != sizeof(protocol::Request))
 	{
 		LOG("IPC client disconnecting: malformed request rejected (bytesRead: %u, expected: %u)",

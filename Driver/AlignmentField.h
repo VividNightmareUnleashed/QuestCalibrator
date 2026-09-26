@@ -9,7 +9,9 @@
 // absolute calibration solved at that anchor's spot. The driver blends the
 // deltas with unnormalized Gaussian RBF weights over the device's own
 // base-calibrated position (horizontal XZ distance) plus a constant identity
-// floor, then applies world = delta_blend(base(raw)).
+// floor, then applies world = delta_blend(base(raw)). The blended translation
+// maps that query to the weighted mean of its transformed positions, keeping
+// the result invariant to a change of playspace origin.
 //
 // Pure protocol types + hand-rolled double math, no vrserver dependencies:
 // SolverTests compiles this file standalone and checks it against an Eigen
@@ -37,22 +39,20 @@ namespace alignfield
 	// share the slew implementation but move at very different scales.
 	struct SlewLimits
 	{
-		double maxTranslationPerSec;
+		double maxTranslationPerSec; // displacement at the evaluated point, m/s
 		double maxRotationPerSec;
 		double maxGapSeconds;
 	};
 
 	constexpr SlewLimits FieldSlewLimits{ MaxTranslationSlewPerSec, MaxRotationSlewPerSec, MaxSlewGapSeconds };
 
-	// Base-calibration slew (continuous calibration, protocol v5). Continuous
-	// corrections arrive as <= ~1 cm / 0.5 deg steps every couple of seconds;
-	// these limits complete a worst-case step in ~1-2 s while staying below
-	// perception. Intentional discontinuities (recalibration, universe jump)
-	// bump SetDeviceTransform::generation and snap instead.
+	// Base-calibration slew. Continuous corrections arrive as <= ~1 cm / 0.5 deg
+	// steps every couple of seconds; these limits complete a worst-case step in
+	// ~1-2 s while staying below perception.
 	constexpr SlewLimits BaseSlewLimits{ 0.01, 0.00873 /* 0.5 deg/s */, MaxSlewGapSeconds };
 
-	// Per-device smoothing state. Owned by that device's pose thread (each
-	// OpenVR id updates on a single device-driver thread), so no locking.
+	// Per-device smoothing state. Not synchronized: the provider serializes each
+	// device's callbacks with that device's pose mutex.
 	struct EvalState
 	{
 		bool hasCurrent = false;
@@ -62,15 +62,14 @@ namespace alignfield
 		double trans[3] = { 0.0, 0.0, 0.0 };
 	};
 
-	// Raw blended delta at a base-calibrated position (no smoothing). Always
-	// yields a normalized quaternion; with zero anchors it is the identity.
+	// Raw blended delta at a base-calibrated position (no smoothing). `field`
+	// must have passed ValidateAndSanitize (sigma and anchorCount are trusted).
+	// Always yields a normalized quaternion; with zero anchors it is the identity.
 	void BlendAt(const protocol::SetAlignmentField &field, const double (&basePos)[3],
 	             vr::HmdQuaternion_t &rotOut, double (&transOut)[3]);
 
 	// Blend + slew: advances `state` toward the blended delta, rate-limited by
-	// the time since the previous call. Snaps when the field generation
-	// changed - a recalibration or universe-jump compensation is an
-	// intentional discontinuity that must not be smeared over time.
+	// the time since the previous call (see SlewToward for when it snaps).
 	void Evaluate(const protocol::SetAlignmentField &field, const double (&basePos)[3],
 	              double nowSeconds, EvalState &state);
 
@@ -82,4 +81,11 @@ namespace alignfield
 	void SlewToward(const vr::HmdQuaternion_t &targetRot, const double (&targetTrans)[3],
 	                double nowSeconds, const SlewLimits &limits, uint32_t generation,
 	                EvalState &state);
+
+	// Couple rotation and translation at this finite input-space point. A yaw
+	// about the device must not temporarily translate it while slewing. The
+	// origin-based overload above is for callers without a query position.
+	void SlewTowardAt(const vr::HmdQuaternion_t &targetRot, const double (&targetTrans)[3],
+	                  const double (&position)[3], double nowSeconds,
+	                  const SlewLimits &limits, uint32_t generation, EvalState &state);
 }

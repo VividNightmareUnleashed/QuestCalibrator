@@ -1,0 +1,54 @@
+name: Fuzz
+
+# The coverage-guided fuzzers in Tests/Fuzz (libFuzzer and AddressSanitizer,
+# tools/fuzz.ps1) for a minute per target, once a week and on demand. The
+# corpus is kept between runs, so each run continues from the coverage the
+# last one reached. The harness already replays the same properties over
+# seeded mutations on every push and pull request; this is the longer search.
+on:
+  schedule:
+    - cron: '0 3 * * 0'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        required: false
+        default: '60'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Restore the corpus
+        uses: actions/cache@v4
+        with:
+          path: x64/fuzz/*/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Fuzz every target
+        shell: pwsh
+        run: |
+          $seconds = if ('${{ inputs.seconds }}') { [int]'${{ inputs.seconds }}' } else { 60 }
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\fuzz.ps1 -Seconds $seconds
+          if ($LASTEXITCODE -ne 0) { throw 'A fuzz target failed; its input and log are attached to this run.' }
+
+      - name: Keep the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: |
+            x64/fuzz/*/crash-*
+            x64/fuzz/*/last-run.txt
+          retention-days: 30
