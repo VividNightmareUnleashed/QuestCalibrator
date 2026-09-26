@@ -61,6 +61,11 @@ keeps the two systems lined up the whole time you play, with no recalibrating. Y
 can hide that tracker from games so full-body setups don't mistake it for a body
 tracker.
 
+> **Continuous calibration is experimental.** I can't test it myself and rely on
+> feedback from people who use it. If you do, the best way to help is to
+> [open an issue](https://github.com/VividNightmareUnleashed/QuestCalibrator/issues)
+> saying how it went, with the log files described below.
+
 ![Settings, with continuous calibration turned on](docs/images/settings.png)
 
 Continuous calibration has two methods:
