@@ -1,4 +1,4 @@
-# QuestCalibrator
+# <img src="Overlay/icon.png" alt="" width="40" align="top"> QuestCalibrator
 
 [![Latest release](https://img.shields.io/github/v/release/VividNightmareUnleashed/QuestCalibrator?label=stable&sort=semver&display_name=release)](https://github.com/VividNightmareUnleashed/QuestCalibrator/releases/latest)
 [![Latest prerelease](https://img.shields.io/github/v/release/VividNightmareUnleashed/QuestCalibrator?include_prereleases&label=prerelease&sort=semver&display_name=release&color=orange)](https://github.com/VividNightmareUnleashed/QuestCalibrator/releases)
