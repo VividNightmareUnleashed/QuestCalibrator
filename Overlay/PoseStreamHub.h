@@ -3,6 +3,7 @@
 #include "../common/PoseChannel.h"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
 #include <functional>
@@ -17,9 +18,9 @@
 // the buffered history.
 //
 // The shmem queue itself only holds a few seconds of slack before producers
-// safely discard old poses, and the UI thread (which used to own the reader)
-// can stall longer than that on a minimized window, blocking IPC, or a
-// registry save. The hub's job is to keep it drained on a guaranteed cadence,
+// safely discard old poses, and the UI thread can stall longer than that on a
+// minimized window, blocking IPC, or a registry save. The hub's job is to keep
+// it drained on a guaranteed cadence,
 // propagate source-drop counts to every consumer, and hold a longer window
 // locally so consumers do not bridge observation gaps across a UI stall.
 class PoseStreamHub
@@ -28,17 +29,36 @@ public:
 	// Power of two. At a typical aggregate pose rate (a few hundred Hz per
 	// device, a handful of devices) this is tens of seconds of history.
 	static const uint64_t HistoryCapacity = 1 << 15;
+	// Entries a drain copies per hold of the producer mutex.
+	static const uint64_t CopyChunk = 512;
 
 	~PoseStreamHub();
 
+	// Once per hub; there is no restart after Stop.
 	void Start(const char *shmemName);
 	void Stop();
 
 	// Whether the underlying shmem ring is currently open (driver present).
 	bool RingOpen() const { return ringOpen.load(std::memory_order_acquire); }
 
-	// A consumer id is a private cursor. Samples buffered before the consumer
-	// was created are not delivered to it.
+	struct Diagnostics
+	{
+		struct Device
+		{
+			uint64_t received = 0;
+			uint64_t streamBoundary = 0;
+			protocol::DevicePoseSample latest;
+		};
+		std::array<Device, vr::k_unMaxTrackedDeviceCount> devices{};
+		uint64_t streamBoundaries = 0, gapMarkers = 0, reportedLoss = 0;
+		bool open = false;
+	};
+	// Copies a bounded snapshot without consuming any reader's backlog.
+	Diagnostics ReadDiagnostics();
+
+	// A consumer id is a private cursor; the calls below take only ids this
+	// returned. Samples buffered before the consumer was created are not
+	// delivered to it.
 	int CreateConsumer();
 
 	// Fills `out` (cleared first) with every sample since this consumer's
@@ -52,7 +72,40 @@ public:
 	// reports it as a single-count gap, not as the number of samples dropped.
 	// Consumers must treat a non-zero return as "there is a hole here", not as
 	// a loss rate.
-	uint64_t Drain(int consumer, std::vector<protocol::DevicePoseSample> &out);
+	//
+	// `hole`, when given, describes the whole hole in front of out.front(), or
+	// for an empty `out` the one still open after the last sample returned:
+	// a hole can reach a consumer over several drains (a terminal gap, then
+	// more loss before the next sample), and each drain's count is only its
+	// share. sessionBoundary says whether a boundary is in it, read under the
+	// same lock as the batch.
+	struct Hole
+	{
+		uint64_t size = 0;
+		bool sessionBoundary = false;
+	};
+	uint64_t Drain(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole *hole = nullptr);
+
+	// Drain repeatedly until this consumer reaches the head, concatenating the
+	// segments on either side of every gap into `out` (cleared first). For
+	// consumers that order by sample time rather than stream position and only
+	// need to know how much went missing. A single Drain stops at the first gap,
+	// so a backlog with a gap in it would otherwise hand back only its older
+	// prefix.
+	struct DrainSummary
+	{
+		uint64_t loss = 0;          // sum of every gap crossed
+		uint64_t largestGap = 0;    // largest whole Hole::size, across calls
+		                            // when a hole spans them
+		uint64_t gaps = 0;
+	};
+	DrainSummary DrainThroughGaps(int consumer, std::vector<protocol::DevicePoseSample> &out);
+
+	// Session boundaries published so far (writer death or a new driver
+	// session). A drain's own verdict is Hole::sessionBoundary; this count is for
+	// spans a cursor does not cover, such as a calibration run from before its
+	// preflight drain. In the drain count a boundary looks like a one-sample gap.
+	uint64_t StreamBoundaries();
 
 	// Skip this consumer to now, discarding its backlog.
 	void DiscardBacklog(int consumer);
@@ -60,7 +113,11 @@ public:
 #ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
 	void AppendSampleForTest(const protocol::DevicePoseSample &sample);
 	void AppendGapForTest(uint64_t count);
+	void AppendSessionBoundaryForTest();
 	void SetDrainChunkHookForTest(std::function<void()> hook);
+	// Shrinks the history and the copy chunk so a short run reaches overflow
+	// and chunk boundaries. Before the first append or Start only.
+	void SetGeometryForTest(uint64_t historyCapacity, uint64_t copyChunk);
 	uint64_t ResetDeferralsForTest() const
 	{
 		return resetDeferralsForTest.load(std::memory_order_acquire);
@@ -80,17 +137,22 @@ private:
 		uint64_t historyPosition = 0;
 		uint64_t samplePosition = 0;
 		uint64_t sourceDropPosition = 0;
+		// The hole open since the last sample copied: every loss accounted
+		// grows it, a boundary marks it, the next sample closes it.
+		uint64_t holeSize = 0;
+		bool holeHasBoundary = false;
 	};
 
 	void AccountForHistoryOverflowLocked(int consumer, uint64_t &dropped);
+	// Drain's body, appending to `out` instead of replacing it.
+	uint64_t DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole &hole);
 	void AppendSampleLocked(const protocol::DevicePoseSample &sample);
-	void AppendGapLocked(uint64_t count);
+	void AppendGapLocked(uint64_t count);   // count > 0: the ring reader never reports an empty gap
 	// Publishes an observation hole: discards every consumer's backlog (it may
 	// predate a universe rebase) and marks the position so the next drain
 	// reports a gap rather than bridging it.
 	void AppendSessionBoundaryLocked();
-	// Thread entry: catches, so an allocation failure stops the drain instead of
-	// terminating the process without unwinding.
+	// Thread entry: an exception stops the drain, not the process.
 	void DrainLoop(const std::string &shmemName);
 	void DrainRing(const std::string &shmemName);
 
@@ -99,7 +161,10 @@ private:
 	std::atomic<bool> ringOpen{ false };
 
 	std::mutex mutex;                                   // guards all fields below
-	std::vector<HistoryEntry> history;                  // ring, HistoryCapacity entries
+	Diagnostics diagnostics;
+	std::vector<HistoryEntry> history;                  // ring, `capacity` entries
+	uint64_t capacity = HistoryCapacity;                // fixed but for SetGeometryForTest
+	uint64_t copyChunk = CopyChunk;
 	uint64_t head = 0;                                  // absolute index of next write
 	uint64_t sampleCount = 0;                           // actual samples, excluding gap markers
 	uint64_t sourceDropCount = 0;                       // cumulative source-gap sequence

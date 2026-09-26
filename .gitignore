@@ -2,6 +2,11 @@
 x64/
 QuestCal.A61324AD/
 *.user
-# Local-only packaging: official ZIPs are attached to GitHub Releases, while
-# packaging sources and build output stay out of the repository.
-install/
+__pycache__/
+# Package output. The packaging scripts in install/ are tracked; the ZIPs they
+# produce are published as GitHub Releases, never committed.
+install/out/
+install/test-out/
+
+# Local secrets (VirusTotal key for install/release.ps1)
+.env

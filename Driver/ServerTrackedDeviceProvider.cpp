@@ -16,11 +16,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	// Pose callbacks can begin on other driver threads as soon as the global
 	// host detour is enabled. Initialize every callback-visible member first.
 	LARGE_INTEGER freq;
-	if (!QueryPerformanceFrequency(&freq) || freq.QuadPart <= 0)
-	{
-		LOG("QueryPerformanceFrequency failed (error %u)", GetLastError());
-		return vr::VRInitError_Driver_Failed;
-	}
+	QueryPerformanceFrequency(&freq);   // never fails on XP or later
 	qpcToSeconds = 1.0 / static_cast<double>(freq.QuadPart);
 
 	bool poseRingCreated = poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME);
@@ -34,13 +30,11 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	}
 
 	// Install the context detour before OpenVR initializes its cached interfaces.
-	// InitServerDriverContext requests IVRServerDriverHost_005 through the detour,
-	// which is why the check below can succeed on our own context init alone: it
-	// proves a pose hook was created on some host object, not that the device
-	// drivers in this vrserver are routed through it. A driver that resolved
-	// IVRServerDriverHost_006 before this detour existed keeps forwarding poses
-	// untouched; only the `01questcalibrator` manifest name orders this driver
-	// first, and nothing in code enforces that.
+	// InitServerDriverContext requests IVRServerDriverHost_006 through the
+	// detour, so the check below proves a pose hook exists, not that every
+	// device driver is routed through it: a driver that resolved its host
+	// interface before this detour existed forwards poses untouched. Only the
+	// `01questcalibrator` manifest name orders this driver first.
 	if (!InjectHooks(this, pDriverContext))
 		return FailInit(vr::VRInitError_Driver_Failed);
 
@@ -54,10 +48,6 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 		return FailInit(vr::VRInitError_Driver_Failed);
 	}
 
-	// The transport is handed the two mutations it may perform rather than a
-	// pointer to this class, so the pipe layer names no driver type. The sink
-	// outlives the server thread: `server` is declared last, so Stop() (which
-	// joins that thread) always runs before any member it touches is destroyed.
 	IPCServer::RequestSink sink;
 	sink.setDeviceTransform = [this](const protocol::SetDeviceTransform &transform)
 	{
@@ -80,29 +70,24 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 void ServerTrackedDeviceProvider::Teardown()
 {
 	server.Stop();
-	// Hooks may already have been live when Init failed: InjectHooks also
-	// refuses when a previous Init left everything running. Quiesce the detours
-	// before the ring goes away, or a pose thread still inside
-	// HandleDevicePoseUpdated publishes into a view Close() has unmapped.
+	// Hooks may be live even when Init failed (InjectHooks refuses while a
+	// previous Init's hooks remain). Quiesce the detours before the ring goes
+	// away, or a pose thread still publishing would write into an unmapped view.
 	bool quiesced = DisableHooks();
 	poseRingReady.store(false, std::memory_order_release);
 	if (quiesced)
 		poseRing.Close();
 	else
 	{
-		// Teardown gave up proving quiescence and kept the module resident, so a
-		// pose thread may still reach the ring. Leaking the mapping is the safe
-		// half of that trade: an owner that never runs Close is exactly the crash
-		// case the next writer's PID + creation-time liveness proof covers.
+		// A pose thread may still reach the ring, so leak the mapping; the next
+		// writer's PID + creation-time liveness proof covers an owner that never
+		// closes.
 		LOG("Hook quiescence could not be proven; the pose ring mapping is retained");
 	}
 }
 
 vr::EVRInitError ServerTrackedDeviceProvider::FailInit(vr::EVRInitError error)
 {
-	// Every Init failure unwinds through here, including the one where hooks from
-	// an earlier Init are still installed; returning with live detours would let
-	// SteamVR unload this DLL under an entered detour frame.
 	Teardown();
 	vr::CleanupDriverContext();
 	return error;
@@ -123,17 +108,14 @@ void ServerTrackedDeviceProvider::RunFrame()
 	uint64_t now = GetTickCount64();
 	if (now - lastPoseRingCreateAttemptMs < PoseRingRetryIntervalMs)
 		return;
-	// This is vrserver's driver frame loop, so the attempt gets a zero wait
-	// budget: a peer holding the reset mutex or a live reader would otherwise
-	// stall every other driver's RunFrame for seconds at a time. An abandoned
-	// mutex is still acquired immediately, so crash recovery is unaffected.
+	// Zero wait budget: this is vrserver's driver frame loop, shared with every
+	// other driver.
 	if (poseRing.Create(QUESTCALIBRATOR_SHMEM_NAME, 0))
 	{
 		poseRingReady.store(true, std::memory_order_release);
 		LOG("Pose ring shared memory became available after retry");
 	}
-	// Stamp after the attempt. Stamping before it lets a slow failure consume its
-	// own throttle interval, so the retries run back to back.
+	// Stamped after the attempt so a slow failure does not eat its own interval.
 	lastPoseRingCreateAttemptMs = GetTickCount64();
 }
 
@@ -149,11 +131,9 @@ bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDevic
 	auto &slot = transforms[sanitized.openVRID];
 	// The IPC thread is the single writer. Odd means a coherent generation is
 	// in flight; payload stores are atomic so a failed reader attempt is safe.
-	// The sanitized wire struct is stored directly: there is no intermediate
-	// copy of the payload left to keep field-by-field in sync with the protocol.
-	slot.sequence.fetch_add(1, std::memory_order_acq_rel);
+	runtimeSequence.fetch_add(1, std::memory_order_acq_rel);
 	slot.Store(sanitized);
-	slot.sequence.fetch_add(1, std::memory_order_release);
+	runtimeSequence.fetch_add(1, std::memory_order_release);
 	return true;
 }
 
@@ -169,6 +149,7 @@ bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeS
 		return false;
 	}
 
+	runtimeSequence.fetch_add(1, std::memory_order_acq_rel);
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
 		protocol::SetDeviceTransform transform = sanitized.transform;
@@ -176,74 +157,55 @@ bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeS
 		transform.enabled = (sanitized.enabledMask >> id) & 1;
 		transform.hidden = (sanitized.hiddenMask >> id) & 1;
 		auto &slot = transforms[id];
-		slot.sequence.fetch_add(1, std::memory_order_acq_rel);
 		slot.Store(transform);
-		slot.sequence.fetch_add(1, std::memory_order_release);
 	}
 
-	alignmentField.sequence.fetch_add(1, std::memory_order_acq_rel);
-	alignmentField.field.Store(sanitized.field);
-	alignmentField.sequence.fetch_add(1, std::memory_order_release);
+	alignmentField.Store(sanitized.field);
+	runtimeSequence.fetch_add(1, std::memory_order_release);
 	return true;
 }
 
-bool ServerTrackedDeviceProvider::ReadAlignmentField(protocol::SetAlignmentField &out)
-{
-	for (int attempt = 0; attempt < 8; ++attempt)
-	{
-		uint32_t before = alignmentField.sequence.load(std::memory_order_acquire);
-		if (before & 1)
-			continue;
-
-		out = alignmentField.field.Load();
-
-		uint32_t after = alignmentField.sequence.load(std::memory_order_acquire);
-		if (before == after)
-			return true;
-	}
-	return false;
-}
-
-bool ServerTrackedDeviceProvider::ReadDeviceTransform(uint32_t openVRID, DeviceTransform &out)
+void ServerTrackedDeviceProvider::ReadRuntimeState(uint32_t openVRID,
+	DeviceTransform &out, protocol::SetAlignmentField &field)
 {
 	auto &slot = transforms[openVRID];
 
 	for (int attempt = 0; attempt < 8; ++attempt)
 	{
-		uint32_t before = slot.sequence.load(std::memory_order_acquire);
+		uint32_t before = runtimeSequence.load(std::memory_order_acquire);
 		if (before & 1)
 			continue;
 
 		out = slot.Load();
+		field = alignmentField.Load();
 
-		uint32_t after = slot.sequence.load(std::memory_order_acquire);
+		uint32_t after = runtimeSequence.load(std::memory_order_acquire);
 		if (before == after)
 		{
 			lastGood[openVRID] = out;
-			return true;
+			lastGoodField[openVRID] = field;
+			return;
 		}
 	}
 
 	// A writer kept racing us; use the last consistent snapshot rather than
 	// stalling vrserver's pose thread.
 	out = lastGood[openVRID];
-	return false;
+	field = lastGoodField[openVRID];
 }
 
-bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose)
+void ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose)
 {
 	if (openVRID >= vr::k_unMaxTrackedDeviceCount)
-		return true;
+		return;
 	std::lock_guard<std::mutex> poseLock(poseMutexes[openVRID]);
 
-	// Publish the raw driver-space pose (pre-transform) for the solver, stamped
-	// at capture. This is the overlay's time base for cross-system alignment.
+	// Publish the raw driver-space pose for the solver, stamped at capture.
 	//
 	// INVARIANT: this publish must stay ABOVE every pose mutation below,
-	// including the poseTimeOffset shift. If the ring ever records post-rewrite
-	// values, the next solve sees pre-shifted timelines, finds ~zero residual
-	// offset, and the full-replace transform silently erases the latency
-	// correction on every recalibration.
+	// including the poseTimeOffset shift. If the ring recorded rewritten poses,
+	// the next solve would find ~zero residual offset and the full-replace
+	// transform would erase the latency correction on every recalibration.
 	LARGE_INTEGER now;
 	QueryPerformanceCounter(&now);
 
@@ -269,26 +231,40 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	}
 
 	DeviceTransform tf;
-	ReadDeviceTransform(openVRID, tf);
+	protocol::SetAlignmentField field;
+	ReadRuntimeState(openVRID, tf, field);
 
 	double nowSeconds = static_cast<double>(now.QuadPart) * qpcToSeconds;
+#ifdef QUESTCAL_DRIVER_PROVIDER_TEST_SEAM
+	if (poseTimeForTest >= 0.0)
+		nowSeconds = poseTimeForTest;
+#endif
 
 	if (tf.control.enabled)
 	{
-		// Meaningful only inside this branch; outside it the payload holds the
-		// protocol's neutral defaults (see TransformSlot::Load).
 		const protocol::SetDeviceTransform &cal = tf.calibration;
+		vr::HmdVector3d_t scaledPosition = questcal::driverpose::Scale(pose.vecPosition, cal.scale);
+		vr::HmdVector3d_t rotatedPosition = questcal::driverpose::RotateVector(
+			pose.qWorldFromDriverRotation, scaledPosition.v);
+		vr::HmdVector3d_t scaledOrigin = questcal::driverpose::Scale(
+			pose.vecWorldFromDriverTranslation, cal.scale);
+		vr::HmdVector3d_t rawWorld = questcal::driverpose::Add(rotatedPosition.v, scaledOrigin.v);
+		bool usablePosition = pose.poseIsValid && pose.deviceIsConnected &&
+			questcal::numeric::IsBoundedVector3(rawWorld.v,
+				cal.scale * protocol::limits::MaxAbsPosePositionMeters);
 
-		// Base-calibration slew (protocol v5): continuous-calibration
-		// corrections arrive with an unchanged generation and are rate-limited
-		// here so the world never visibly steps; intentional discontinuities
-		// (recalibration, universe jump, profile edit) bump the generation and
-		// snap. A seqlock read that fell back to lastGood may briefly carry an
-		// older generation; the later consistent read then snaps to the value
-		// it was already slewing toward, which is benign.
+		// Base-calibration slew or snap, by generation (see Protocol.h). A read
+		// that fell back to lastGood may briefly carry an older generation; the
+		// next consistent read then snaps to where it was slewing, which is benign.
 		auto &bs = baseState[openVRID];
-		alignfield::SlewToward(cal.rotation, cal.translation.v, nowSeconds,
-			alignfield::BaseSlewLimits, tf.control.generation, bs);
+		if (usablePosition)
+			alignfield::SlewTowardAt(cal.rotation, cal.translation.v, rawWorld.v, nowSeconds,
+				alignfield::BaseSlewLimits, tf.control.generation, bs);
+		else if (!bs.hasCurrent)
+			alignfield::SlewToward(cal.rotation, cal.translation.v, nowSeconds,
+				alignfield::BaseSlewLimits, tf.control.generation, bs);
+		// Invalid positions must not enter persistent smoothing state. Hold the
+		// previous transform and clock; recovery after a long gap snaps normally.
 		vr::HmdQuaternion_t baseRot = bs.rot;
 		vr::HmdVector3d_t baseTrans{ { bs.trans[0], bs.trans[1], bs.trans[2] } };
 
@@ -301,38 +277,21 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		vr::HmdVector3d_t calTrans = baseTrans;
 
 		auto &fs = fieldState[openVRID];
-		protocol::SetAlignmentField field;
-		if (ReadAlignmentField(field))
+		if (!field.enabled || field.anchorCount == 0)
 		{
-			if (!field.enabled || field.anchorCount == 0)
-			{
-				fs.hasCurrent = false;   // re-enabling later snaps
-			}
-			else if (pose.poseIsValid)
-			{
-				// The device's own base-calibrated world position, named step by
-				// step. Same operations in the same order as the component
-				// expressions this replaces - see PoseTransform.h, which performs
-				// the identical scaled-worldFromDriver and rotate-then-add.
-				vr::HmdVector3d_t scaledPosition =
-					questcal::driverpose::Scale(pose.vecPosition, cal.scale);
-				vr::HmdVector3d_t rotatedPosition = questcal::driverpose::RotateVector(
-					pose.qWorldFromDriverRotation, scaledPosition.v);
-				vr::HmdVector3d_t scaledOrigin = questcal::driverpose::Scale(
-					pose.vecWorldFromDriverTranslation, cal.scale);
-				vr::HmdVector3d_t rawWorld =
-					questcal::driverpose::Add(rotatedPosition.v, scaledOrigin.v);
-				vr::HmdVector3d_t rotatedRawWorld =
-					questcal::driverpose::RotateVector(baseRot, rawWorld.v);
-				vr::HmdVector3d_t basePos =
-					questcal::driverpose::Add(rotatedRawWorld.v, baseTrans.v);
-
-				alignfield::Evaluate(field, basePos.v, nowSeconds, fs);
-			}
-			// Invalid pose: keep the previous delta without advancing the
-			// slew clock; Evaluate's gap check snaps after a long loss.
+			fs.hasCurrent = false;   // re-enabling later snaps
 		}
-		// A racing field write keeps the previous delta for this frame.
+		else if (usablePosition)
+		{
+			vr::HmdVector3d_t rotatedRawWorld =
+				questcal::driverpose::RotateVector(baseRot, rawWorld.v);
+			vr::HmdVector3d_t basePos =
+				questcal::driverpose::Add(rotatedRawWorld.v, baseTrans.v);
+
+			alignfield::Evaluate(field, basePos.v, nowSeconds, fs);
+		}
+		// Invalid pose: keep the previous delta without advancing the
+		// slew clock; Evaluate's gap check snaps after a long loss.
 
 		if (fs.hasCurrent)
 		{
@@ -351,16 +310,12 @@ bool ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	{
 		// Re-enabling later must snap, not slew from a stale state.
 		baseState[openVRID].hasCurrent = false;
+		fieldState[openVRID].hasCurrent = false;
 	}
 
 	// Hide the HMD-mounted continuous-calibration tracker from applications:
-	// the device keeps reporting a valid, tracking pose (invalid poses would
-	// make SteamVR flag the device as lost) but lives far above the play area,
-	// out of reach of proximity-based tracker auto-assignment in games. The
-	// raw pose was already published to the ring above, so the overlay's
-	// solver always sees the true pose.
+	// it keeps a valid pose (an invalid one would make SteamVR flag it lost) but
+	// far above the play area, out of reach of games' tracker auto-assignment.
 	if (tf.control.hidden)
 		pose.vecWorldFromDriverTranslation[1] += HiddenPoseOffsetY;
-
-	return true;
 }

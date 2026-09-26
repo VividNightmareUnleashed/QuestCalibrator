@@ -11,6 +11,7 @@ ImFont *g_fontSmall = nullptr;
 ImFont *g_fontTitle = nullptr;
 
 IdentifyPulseState g_identifyPulse;
+MainTab s_mainTab = MainTab::Calibration;
 
 void UpdateIdentifyPulse(double now)
 {
@@ -23,8 +24,8 @@ void UpdateIdentifyPulse(double now)
 		return;
 	}
 
-	// Main-loop ownership makes shutdown safe. Wake at the original 5 ms
-	// cadence without creating detached workers or overlapping pulse trains.
+	// Driven by the main loop, so shutdown is safe and pulse trains never
+	// overlap; it asks to be woken every 5 ms while pulsing.
 	CalCtx.wantedUpdateInterval = std::min(CalCtx.wantedUpdateInterval, 0.005);
 	if (now < g_identifyPulse.nextPulseTime)
 		return;
@@ -44,33 +45,94 @@ void BuildHeader()
 {
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 	ImVec2 p = ImGui::GetCursorScreenPos();
-	float cw = ImGui::GetWindowContentRegionWidth();
+	float cw = ImGui::GetContentRegionAvail().x;
 	const float h = 44.0f;
+	static const char *const tabs[] = { "Calibration", "Lighthouse", "Smoothing" };
+	// Each module's tab, and what it says while greyed out.
+	struct ModuleTab
+	{
+		MainTab tab;
+		questcal::ModuleStatus status;
+		const char *notInstalledTip;
+	};
+	const ModuleTab moduleTabs[] = {
+		{ MainTab::Lighthouse, CalCtx.modules.lighthouse,
+			"Lighthouse module is currently not installed. Select it during installation." },
+		{ MainTab::Smoothing, CalCtx.modules.smoothing, nullptr },
+	};
+	unsigned disabled = 0;
+	const char *disabledTips[3] = {};
+	for (const ModuleTab &m : moduleTabs)
+	{
+		if (questcal::Modules::On(m.status))
+			continue;
+		const int i = static_cast<int>(m.tab);
+		disabled |= 1u << i;
+		disabledTips[i] = m.status == questcal::ModuleStatus::NotBuilt ? "Work in progress" : m.notInstalledTip;
+	}
 
-	// Logo mark
-	ImVec2 lp = ImVec2(p.x, p.y + (h - 38.0f) * 0.5f);
-	dl->AddRectFilled(lp, ImVec2(lp.x + 38, lp.y + 38), Pal::U32(Pal::Card), 11.0f);
-	dl->AddRect(lp, ImVec2(lp.x + 38, lp.y + 38), Pal::U32(Pal::Border), 11.0f);
-	IconLogo(dl, ImVec2(lp.x + 19, lp.y + 19), 12.0f, Pal::U32(Pal::Text));
+	// One row: the brand at the left, the gear at the right, and the tab
+	// switch centred on the row as a whole rather than on what is left
+	// between them, so it stays put when the title's width changes.
+	FlexLayout fl;
+	YGNodeRef row = fl.Root();
+	YGNodeStyleSetHeight(row, h);
+	YGNodeStyleSetAlignItems(row, YGAlignCenter);
+	YGNodeStyleSetJustifyContent(row, YGJustifySpaceBetween);
 
-	dl->AddText(g_fontTitle, g_fontTitle->FontSize,
-		ImVec2(p.x + 52.0f, p.y + (h - g_fontTitle->FontSize) * 0.5f),
+	YGNodeRef brand = fl.Row(row);
+	YGNodeStyleSetAlignItems(brand, YGAlignCenter);
+	YGNodeStyleSetGap(brand, YGGutterColumn, 14.0f);
+	YGNodeRef logo = fl.Add(brand);
+	YGNodeStyleSetWidth(logo, 38.0f);
+	YGNodeStyleSetHeight(logo, 38.0f);
+	YGNodeRef title = fl.Text(brand, g_fontTitle, "QuestCalibrator");
+
+	YGNodeRef tabsNode = fl.Add(row);
+	YGNodeStyleSetPositionType(tabsNode, YGPositionTypeAbsolute);
+	YGNodeStyleSetPositionPercent(tabsNode, YGEdgeLeft, 50.0f);
+	YGNodeStyleSetWidth(tabsNode, SegmentedTabsWidth(tabs, 3));
+	YGNodeStyleSetHeight(tabsNode, SegmentedTabsHeight());
+	YGNodeStyleSetMargin(tabsNode, YGEdgeLeft, -SegmentedTabsWidth(tabs, 3) * 0.5f);
+
+	YGNodeRef gear = fl.Add(row);
+	YGNodeStyleSetWidth(gear, 38.0f);
+	YGNodeStyleSetHeight(gear, 38.0f);
+	fl.Compute(p, cw, h);
+
+	const FlexRect lr = fl.Rect(logo);
+	dl->AddRectFilled(lr.min, lr.max, Pal::U32(Pal::Card), 11.0f);
+	dl->AddRect(lr.min, lr.max, Pal::U32(Pal::Border), 11.0f);
+	IconLogo(dl, lr.Center(), 12.0f, Pal::U32(Pal::Text));
+
+	dl->AddText(g_fontTitle, g_fontTitle->LegacySize, fl.Rect(title).min,
 		Pal::U32(Pal::Text), "QuestCalibrator");
 
-	// Gear (settings) toggle at the far right
-	const float gearS = 38.0f;
-	ImVec2 gp = ImVec2(p.x + cw - gearS, p.y + (h - gearS) * 0.5f);
-	ImGui::SetCursorScreenPos(gp);
-	if (ImGui::InvisibleButton("##settingsgear", ImVec2(gearS, gearS)))
+	// The tab switch. Picking a tab is also the way back out of Settings.
+	// A module's tab is greyed out until the installer has put it in.
+	{
+		ImGui::SetCursorScreenPos(fl.Rect(tabsNode).min);
+		const int picked = SegmentedTabs("maintab", static_cast<int>(s_mainTab), tabs, 3,
+			disabled, disabledTips);
+		if (picked != static_cast<int>(s_mainTab))
+		{
+			s_mainTab = static_cast<MainTab>(picked);
+			s_showSettings = false;
+		}
+	}
+
+	const FlexRect gr = fl.Rect(gear);
+	ImGui::SetCursorScreenPos(gr.min);
+	if (ImGui::InvisibleButton("##settingsgear", gr.Size(), ImGuiButtonFlags_EnableNav))
 		s_showSettings = !s_showSettings;
 	bool gearHov = ImGui::IsItemHovered();
 	{
 		ImVec4 bg = s_showSettings ? ImVec4(Pal::Accent.x, Pal::Accent.y, Pal::Accent.z, 0.20f)
 			: (gearHov ? Pal::CardHov : Pal::Card);
-		dl->AddRectFilled(gp, ImVec2(gp.x + gearS, gp.y + gearS), Pal::U32(bg), 10.0f);
-		dl->AddRect(gp, ImVec2(gp.x + gearS, gp.y + gearS),
+		dl->AddRectFilled(gr.min, gr.max, Pal::U32(bg), 10.0f);
+		dl->AddRect(gr.min, gr.max,
 			Pal::U32(s_showSettings ? Pal::Accent : (gearHov ? Pal::BorderHov : Pal::Border)), 10.0f);
-		IconGear(dl, ImVec2(gp.x + gearS * 0.5f, gp.y + gearS * 0.5f), 9.0f,
+		IconGear(dl, gr.Center(), 9.0f,
 			Pal::U32(s_showSettings || gearHov ? Pal::Text : Pal::Dim));
 	}
 
@@ -81,8 +143,7 @@ void BuildHeader()
 void BuildFooter(bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
-	float cw = ImGui::GetWindowContentRegionWidth();
-	// ---- Footer ----
+	float cw = ImGui::GetContentRegionAvail().x;
 	{
 		float footerY = ImGui::GetWindowHeight() - 40.0f;
 		if (ImGui::GetCursorPosY() < footerY)
@@ -112,14 +173,14 @@ void BuildFooter(bool runningInOverlay)
 		const bool keyboardHint = io.NavVisible || ImGui::GetTime() - s_lastMouseMove > 6.0;
 		if (!runningInOverlay && keyboardHint)
 		{
-			const char *hint = "Arrow keys move, Enter presses";
+			const char *hint = Tr("Arrow keys to move \xC2\xB7 Enter to select");
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
 		}
 		if (runningInOverlay)
 		{
-			const char *hint = "Close VR overlay to use mouse";
+			const char *hint = Tr("Close the SteamVR dashboard to use the mouse");
 			ImVec2 ts = ImGui::CalcTextSize(hint);
 			ImGui::SameLine(cw - ts.x);
 			ImGui::TextColored(Pal::Faint, hint);
@@ -146,8 +207,8 @@ void BuildMainWindow(bool runningInOverlay)
 {
 	auto &io = ImGui::GetIO();
 
-	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiSetCond_Always);
-	ImGui::SetNextWindowSize(io.DisplaySize, ImGuiSetCond_Always);
+	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
 
 	if (!ImGui::Begin("MainWindow", nullptr, bareWindowFlags))
 	{
@@ -155,10 +216,8 @@ void BuildMainWindow(bool runningInOverlay)
 		return;
 	}
 
-	// The device list changes on the order of minutes, but this runs at the
-	// ~90 Hz dashboard frame rate — re-querying vrserver's properties (plus
-	// per-device icon disk stats) every frame is a cross-process call storm.
-	// A 1 Hz refresh keeps the panes current without it.
+	// Refreshed at 1 Hz: re-querying vrserver's properties and the icon files
+	// at the ~90 Hz dashboard frame rate would be a cross-process call storm.
 	static VRState state;
 	static double lastStateRefresh = -1e9;
 	double now = ImGui::GetTime();
@@ -174,9 +233,9 @@ void BuildMainWindow(bool runningInOverlay)
 	if (!CalCtx.uiError.empty())
 	{
 		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
-		ImGui::TextWrapped("%s", CalCtx.uiError.c_str());
+		ImGui::TextWrapped("%s", Tr(CalCtx.uiError.c_str()));
 		ImGui::PopStyleColor();
-		if (ImGui::SmallButton("Dismiss error"))
+		if (ImGui::SmallButton((std::string(Tr("Dismiss")) + "###dismisserror").c_str()))
 		{
 			CalCtx.uiError.clear();
 			CalCtx.uiErrorSource = CalibrationContext::ErrorSource::None;
@@ -189,22 +248,33 @@ void BuildMainWindow(bool runningInOverlay)
 	// NavFlattened: keyboard focus walks straight from the header into the
 	// content's controls instead of stopping on the child as one item.
 	ImGui::BeginChild("##content",
-		ImVec2(0.0f, ImGui::GetWindowHeight() - ImGui::GetCursorPosY() - s_bottomReserve), false,
-		ImGuiWindowFlags_NavFlattened);
-	// The settings screen replaces the whole content area; keeping the device
-	// panes above it buried the settings below the fold for no benefit.
+		ImVec2(0.0f, ImGui::GetWindowHeight() - ImGui::GetCursorPosY() - s_bottomReserve),
+		ImGuiChildFlags_NavFlattened);
+	// The settings screen replaces the whole content area.
 	bool inSettings = (CalCtx.state == CalibrationState::None && s_showSettings);
-	if (!inSettings)
+	// The Lighthouse tab owns the content area only while nothing else
+	// does: a calibration in progress or the profile editor keeps its
+	// screen whatever the tab says.
+	const bool lighthouseTab = !inSettings && CalCtx.state == CalibrationState::None &&
+		questcal::Modules::On(CalCtx.modules.lighthouse) && s_mainTab == MainTab::Lighthouse;
+	if (lighthouseTab)
 	{
-		BuildSpacesSection(state);
-		ImGui::Spacing();
+		BuildLighthouseScreen(state);
 	}
-	BuildMenu(state, runningInOverlay);
+	else
+	{
+		if (!inSettings)
+		{
+			BuildSpacesSection(state);
+			ImGui::Spacing();
+		}
+		BuildMenu(state, runningInOverlay);
+	}
 	ImGui::EndChild();
 
-	// The pinned bottom block: the band on the main screen, the footer
-	// everywhere.
-	if (!inSettings && CalCtx.state == CalibrationState::None)
+	// The pinned bottom block: the band on the calibration screen, the
+	// footer everywhere.
+	if (!inSettings && !lighthouseTab && CalCtx.state == CalibrationState::None)
 		BuildStatusBand(state);
 	else
 		s_bottomReserve = 48.0f;
