@@ -76,8 +76,10 @@ try {
         $hash = (Get-FileHash -LiteralPath $f.Path -Algorithm SHA256).Hash.ToLowerInvariant()
         Write-Host "$($f.Name)  $hash"
         $report = Invoke-VT -Uri "$api/files/$hash"
+        $results = $null
         if ($report) {
             $stats = $report.data.attributes.last_analysis_stats
+            $results = $report.data.attributes.last_analysis_results
         } elseif ($NoUpload) {
             Write-Host '  not on VirusTotal yet (skipped: -NoUpload)' -ForegroundColor Yellow
             $stats = $null
@@ -92,10 +94,18 @@ try {
                 Write-Host '  analysis still running; re-run later for final numbers' -ForegroundColor Yellow
             }
             $stats = $analysis.data.attributes.stats
+            $results = $analysis.data.attributes.results
         }
         $result = if ($stats) { Format-Stats $stats } else { 'not scanned' }
         Write-Host "  detections: $result"
-        [pscustomobject]@{ Name = $f.Name; Hash = $hash; Result = $result }
+        # Which engine said what, so the notes can name each detection.
+        $flags = @(if ($results) {
+            $results.PSObject.Properties |
+                Where-Object { $_.Value.category -in 'malicious', 'suspicious' } |
+                ForEach-Object { [pscustomobject]@{ Engine = $_.Name; Label = $_.Value.result } }
+        })
+        $flags | ForEach-Object { Write-Host "    $($_.Engine): $($_.Label)" -ForegroundColor Yellow }
+        [pscustomobject]@{ Name = $f.Name; Hash = $hash; Result = $result; Flags = $flags }
     }
 } finally {
     Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
@@ -108,6 +118,37 @@ $md = @(
         "| ``$($_.Name)`` | ``$($_.Hash)`` | $($_.Result) | [report](https://www.virustotal.com/gui/file/$($_.Hash)) |"
     }
 )
+
+# Every detection is named in the notes, with what its kind of label means,
+# rather than left as a bare count. Whether it is a false positive is for the
+# person publishing to find out and say.
+$flagged = @($rows | ForEach-Object { $row = $_; $row.Flags | ForEach-Object {
+    [pscustomobject]@{ File = $row.Name; Engine = $_.Engine; Label = $_.Label } } })
+if ($flagged) {
+    $md += ''
+    $md += 'Detections at the time of the scan:'
+    $md += ''
+    $md += $flagged | ForEach-Object { "- ``$($_.File)``: $($_.Engine), ``$($_.Label)``" }
+    # Labels from a machine-learning model or a heuristic, rather than from a
+    # match to a known sample: Microsoft's !ml suffix, and the generic names
+    # other engines give such verdicts.
+    $modelLabel = '!ml\b|\bML\b|Heur|Generic|\bAI\b|Suspicious|Malicious_confidence|Static AI'
+    if ($flagged | Where-Object { $_.Label -match $modelLabel }) {
+        $md += ''
+        $md += ('A label ending in `!ml`, or naming a heuristic or generic verdict, comes from a model ' +
+            'that judges a file by its features, not from a match to known malware. New, unsigned ' +
+            'builds like these are often flagged this way until they have a reputation.')
+    }
+    if ($flagged | Where-Object Engine -eq 'Microsoft') {
+        $md += ''
+        $md += ('Microsoft''s engine is the one in Microsoft Defender, so Windows may warn about or ' +
+            'quarantine the flagged file.')
+    }
+    $md += ''
+    $md += ('Each SHA-256 above, and `SHA256SUMS.txt` in the package, lets you check that your download ' +
+        'is the file that was scanned, and the source it was built from is in this repository at ' +
+        'the release''s tag.')
+}
 $mdPath = [IO.Path]::ChangeExtension($Package, '.virustotal.md')
 [IO.File]::WriteAllLines($mdPath, [string[]]$md)
 Write-Host ""

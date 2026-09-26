@@ -85,8 +85,11 @@ committed.
   inside the package, and the zip's own hash to `<zip>.sha256` beside it.
 - `virustotal-scan.ps1` hashes the executables, DLLs and scripts inside the zip, plus
   the zip itself, uploads any VirusTotal hasn't seen, and writes
-  `<zip-name>.virustotal.md`, which `release.ps1` puts in the release notes.
-  Investigate any detection before publishing.
+  `<zip-name>.virustotal.md`, which the release notes carry. Below the table it
+  names every detection (file, engine, label) and says what a model or heuristic
+  label means and that Microsoft's engine is Defender's. Investigate any detection
+  before publishing, and add what you found (and whether you reported it to the
+  vendor) under that list.
 - Test install, SteamVR startup and handshake, calibration, upgrade, and uninstall
   on a clean supported Windows environment, using the package from the draft.
   Confirm the original Space Calibrator driver is disabled so transforms are not
