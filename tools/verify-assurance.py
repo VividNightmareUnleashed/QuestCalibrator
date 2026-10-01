@@ -107,6 +107,8 @@ CAPTURE_MUTANTS = {
                         "test_seeded_frame_removal_and_half_turns": None},
     "V08-bracketing": {"test_quantitative_context_requires_complete_observed_bracketing": "True != False"},
 }
+PUBLIC_INVENTORY_MUTANTS = {name: contract for name, contract in INVENTORY_MUTANTS.items()
+                            if not name.startswith('V')}
 
 
 def validate_cpp_mutants(mutants, registry):
@@ -287,6 +289,18 @@ def validate(record, identity, expected, required=REQUIRED_SUITES, release=True,
                 validate_capture_mutants(controls.get("captureMutants"))
                 if any(type(check.get("cases")) is not int or check["cases"] <= 0 for check in checks):
                     raise ValueError("Inventory extension has an empty positive witness")
+        if suite == "public-inventory-extension":
+            if (len(expected[suite]) != 23 or any(name.startswith('V') for name in expected[suite])):
+                raise ValueError("Public inventory scope contains private or missing obligations")
+            controls = entry.get("negativeControls")
+            if require_negative_controls or controls is not None:
+                if not isinstance(controls, dict) or controls.get("acceptanceFixtures") != 144:
+                    raise ValueError("Missing public inventory negative-control acceptance evidence")
+                validate_cpp_mutants(controls.get("mutants"), PUBLIC_INVENTORY_MUTANTS)
+                if controls.get("privateSelectionsRefused") != 6:
+                    raise ValueError("Private inventory selections were not refused")
+                if any(type(check.get("cases")) is not int or check["cases"] <= 0 for check in checks):
+                    raise ValueError("Public inventory extension has an empty positive witness")
         if suite == "binary-correspondence" and "V09" in expected[suite]:
             validate_binary_controls(entry.get("negativeControls"))
             if any(type(check.get("cases")) is not int or check["cases"] != 4577 for check in checks):

@@ -16,6 +16,8 @@ def main():
     parser.add_argument("--pwsh", default="pwsh")
     parser.add_argument("--makensis", default="makensis")
     parser.add_argument("--jobs", type=int, choices=(1, 2, 3, 4), default=2)
+    parser.add_argument("--public-only", action="store_true",
+                        help="Exclude VirtualQuest-specific checks from public CI")
     args = parser.parse_args()
     root, out = args.source_root.resolve(), args.output_dir.resolve()
     virtual = root / "VirtualQuest"
@@ -32,36 +34,52 @@ def main():
         subprocess.run([sys.executable, str(virtual / "formal/verify-extension.py"),
                         "--source-root", str(root), "--output-dir", str(out),
                         "--compiler", args.compiler, "--pwsh", args.pwsh,
-                        "--makensis", args.makensis, "--jobs", str(args.jobs)], check=True)
+                        "--makensis", args.makensis, "--jobs", str(args.jobs),
+                        *(["--public-only"] if args.public_only else [])], check=True)
         record = json.loads((out / "result.json").read_text())
         record["success"] = False
         inventory = record["executions"]["inventory"]
         if not inventory.get("success") or not inventory.get("sourcesUnchanged"):
             raise ValueError("Inventory execution failed or changed sources")
-        assurance.validate_inventory_mutants(inventory.get("mutants"))
-        capture = record["executions"]["capture"]
-        capture_controls = [dict(row, log=(out / "capture" / (row["name"] + ".log")).read_text())
-                            for row in capture["mutants"]]
-        assurance.validate_capture_mutants(capture_controls)
-        capture["assertionControls"] = capture_controls
-        suite = record["suites"]["inventory-extension"]
-        suite["negativeControls"] = {
-            "mutants": inventory["mutants"],
-            "acceptanceFixtures": assurance.inventory_negative_control_fixtures(),
-            "captureMutants": capture_controls,
-            "captureAcceptanceFixtures": assurance.capture_negative_control_fixtures(capture_controls),
-        }
+        suite_name = "public-inventory-extension" if args.public_only else "inventory-extension"
+        suite = record["suites"][suite_name]
+        if args.public_only:
+            if set(record["executions"]) != {"inventory", "installer"}:
+                raise ValueError("Private execution leaked into public inventory checks")
+            assurance.validate_cpp_mutants(inventory.get("mutants"), assurance.PUBLIC_INVENTORY_MUTANTS)
+            suite["negativeControls"] = {
+                "mutants": inventory["mutants"],
+                "acceptanceFixtures": assurance.cpp_negative_control_fixtures(assurance.PUBLIC_INVENTORY_MUTANTS),
+                "privateSelectionsRefused": inventory.get("privateSelectionsRefused"),
+            }
+        else:
+            assurance.validate_inventory_mutants(inventory.get("mutants"))
+            capture = record["executions"]["capture"]
+            capture_controls = [dict(row, log=(out / "capture" / (row["name"] + ".log")).read_text())
+                                for row in capture["mutants"]]
+            assurance.validate_capture_mutants(capture_controls)
+            capture["assertionControls"] = capture_controls
+            suite["negativeControls"] = {
+                "mutants": inventory["mutants"],
+                "acceptanceFixtures": assurance.inventory_negative_control_fixtures(),
+                "captureMutants": capture_controls,
+                "captureAcceptanceFixtures": assurance.capture_negative_control_fixtures(capture_controls),
+            }
         record["sourcesUnchanged"] = identity == assurance.source_identity(root, virtual)
         record["dirty"] = any(assurance.git(repo, "status", "--porcelain") for repo in (root, virtual))
         record["success"] = record["sourcesUnchanged"]
         registry = json.loads((virtual / "formal/inventory-scope.json").read_text())
         now = {"A01", "A02", "A03", "P01", "P02", "P03", "P04", "P05", "S04", "S07", "N05", "N06"}
-        expected = {"inventory-extension": sorted(set(registry["items"]) - now - {"V09"})}
-        if len(registry["items"]) != 44 or len(expected["inventory-extension"]) != 31:
+        selected = set(registry["items"]) - now - {"V09"}
+        if args.public_only:
+            selected = {name for name in selected if not name.startswith('V')}
+        expected = {suite_name: sorted(selected)}
+        if len(registry["items"]) != 44 or len(selected) != (23 if args.public_only else 31):
             raise ValueError("Inventory scope changed without updating acceptance")
-        assurance.validate(record, identity, expected, required={"inventory-extension"},
+        assurance.validate(record, identity, expected, required={suite_name},
                            release=False, require_negative_controls=True)
-        print("All 26 C++ and four Python mutants reached their intended assertions; 222 acceptance fixtures passed.")
+        print("All 20 public mutants reached their intended assertions; 144 acceptance fixtures passed."
+              if args.public_only else "All 26 C++ and four Python mutants reached their intended assertions; 222 acceptance fixtures passed.")
     except BaseException:
         record["success"] = False
         raise

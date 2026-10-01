@@ -6,6 +6,7 @@
 # secret, and the job hung until cancelled. Here the key is normalized, Git's
 # own ssh runs in batch mode (it fails instead of prompting), and github.com's
 # host key is pinned rather than accepted on first use.
+param([string]$LocalAssurancePath = '')
 $ErrorActionPreference = 'Stop'
 if (-not $env:VIRTUALQUEST_DEPLOY_KEY) { throw 'VIRTUALQUEST_DEPLOY_KEY is empty.' }
 
@@ -49,6 +50,18 @@ try
     git -C $target checkout --quiet --detach FETCH_HEAD
     if ($LASTEXITCODE -ne 0) { throw "Checking out VirtualQuest $sha failed." }
     Write-Host "VirtualQuest at $sha"
+    if ($LocalAssurancePath) {
+        $questCommit = (git -C $root rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the QuestCalibrator commit.' }
+        $notesRef = "refs/notes/formal-assurance/$questCommit"
+        git -C $target fetch --quiet --depth 1 origin $notesRef
+        if ($LASTEXITCODE -ne 0) { throw 'No local formal evidence is published for this exact pair. Run the local suites, assemble Linux assurance, and publish it with tools/local-assurance.py --publish.' }
+        $evidence = git -C $target show "FETCH_HEAD:$sha"
+        if ($LASTEXITCODE -ne 0) { throw 'The local assurance note is missing the pinned VirtualQuest entry.' }
+        $parent = Split-Path -Parent $LocalAssurancePath
+        if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        $evidence | Set-Content -LiteralPath $LocalAssurancePath -Encoding utf8
+    }
 }
 finally
 {

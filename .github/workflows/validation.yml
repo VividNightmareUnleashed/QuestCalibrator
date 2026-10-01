@@ -29,6 +29,11 @@ name: Validation
 # hash. A pull request only reads caches
 # saved on its own or its base branch, so the image a push to alpha saves lets
 # pull requests into alpha skip the build.
+#
+# The Now and inventory-extension jobs check production contracts, intended
+# mutation failures and acceptance fixtures on Linux. They use the exact
+# VirtualQuest pin for their harnesses; the private core proof suite remains
+# separate from ordinary push validation.
 on:
   push:
     branches: [alpha, stable]
@@ -210,7 +215,7 @@ jobs:
         timeout-minutes: 45
         shell: pwsh
         run: |
-          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Only input-validation -Strict -Shard ${{ matrix.shard }}/4 | Tee-Object -Variable lines
+          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Only input-validation -PublicInputValidation -Strict -Shard ${{ matrix.shard }}/4 | Tee-Object -Variable lines
           if ($LASTEXITCODE -ne 0) { throw 'An input-validation check did not come out as expected.' }
           if ($lines | Where-Object { "$_" -match '^SKIP ' }) { throw 'An input-validation check was skipped.' }
           if (-not ($lines | Where-Object { "$_" -match '^ok ' })) { throw 'This share ran no input-validation check.' }
@@ -236,11 +241,43 @@ jobs:
           sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$ELAN_TOOLCHAIN"
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Check all Now contracts and negative cases
-        run: python VirtualQuest/formal/verify-now.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/now"
+        run: python tools/verify-now-contracts.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/now"
+      - name: Check local evidence acceptance and metadata redaction
+        run: python tools/test-local-assurance.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: now-contracts
           path: ${{ runner.temp }}/now/result.json
+          if-no-files-found: error
+          retention-days: 90
+
+  inventory-extension:
+    if: github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out VirtualQuest
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+      - name: Install the NSIS compiler
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nsis
+      - name: Check the worthwhile public inventory extension
+        timeout-minutes: 20
+        run: python tools/verify-inventory-extension.py --public-only --source-root "$PWD" --output-dir "$RUNNER_TEMP/extension"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inventory-extension
+          path: ${{ runner.temp }}/extension/result.json
           if-no-files-found: error
           retention-days: 90

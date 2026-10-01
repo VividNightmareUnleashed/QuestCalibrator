@@ -37,14 +37,42 @@ repository root. Package output in `install/out/` and `install/test-out/` is nev
 committed.
 
 Both draft-release paths now require complete formal assurance for the exact
-QuestCalibrator commit and its VirtualQuest gitlink. The hosted workflow collects
-the private core, numeric proofs, twelve Now contracts, the worthwhile inventory
-extension and Windows hub traces,
+QuestCalibrator commit and its VirtualQuest gitlink. The hosted workflow verifies
+locally collected Linux proof evidence and collects fresh Windows hub traces,
 and refuses a draft when any named check or source/tool provenance is missing.
 For a local release, assemble and verify the same evidence as described in
 [`formal-now.md`](formal-now.md), then pass
 `-FormalEvidence /path/to/complete.json` to `install\release.ps1`. A focused Now
 report or a Linux-only record cannot satisfy this gate.
+
+VirtualQuest-specific checks V01–V09 and the private core run locally. Normal
+QuestCalibrator validation retains its parallel Windows, static-analysis and four
+numeric proof jobs. Separate Linux jobs run the twelve Now obligations and the
+23 public extension obligations. The public extension compiles without the
+VirtualQuest simulation implementation; its six private C++ selections are
+explicitly refused. The existing private checkout supplies shared harnesses and
+the generated persistence table. Private capture/smoother/binary checks are not
+part of ordinary push validation.
+The numeric jobs use `-PublicInputValidation`; the four simulator guard harnesses
+are checked in the complete local numeric run instead.
+
+Before pushing a release tag, run the local suites for its exact committed source
+pair, assemble Linux assurance, and publish the verified metadata:
+
+```bash
+python tools/assemble-assurance.py --contracts /tmp/now/result.json --extension /tmp/extension/result.json --binary /tmp/binary/result.json --core /tmp/core-1.json /tmp/core-2.json --numeric /tmp/numeric.json --linux-only --output /tmp/assurance-linux.json
+python tools/local-assurance.py --evidence /tmp/assurance-linux.json --publish
+```
+
+This uses a private VirtualQuest Git note at
+`refs/notes/formal-assurance/<QuestCalibrator commit>`, keyed by the VirtualQuest
+commit. It creates no branch and changes neither source tree nor commit identity.
+An existing valid record for the pair is reused. Only hashes, tool versions,
+named outcomes and assertion metadata are retained; source snippets, local
+paths, execution logs and binaries are excluded. The existing read-only deploy
+key retrieves the note for release CI, which validates every required check and
+both source identities. Missing or stale local evidence stops the release.
+The local Windows release path still consumes `-FormalEvidence` directly.
 
 ## Source preflight
 

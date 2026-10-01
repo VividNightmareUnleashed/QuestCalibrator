@@ -8,75 +8,24 @@ on:
 permissions:
   contents: read
 jobs:
-  linux:
+  local-evidence:
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
-    env:
-      LEAN_TOOLCHAIN: leanprover/lean4:v4.34.0
-      ELAN_TOOLCHAIN: leanprover/lean4:v4.34.0
-      TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
-      TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-      JAVA_TOOL_OPTIONS: -Xmx5g
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - name: Check out the exact VirtualQuest pin
+      - name: Read local evidence for the exact source pair
         shell: pwsh
         env:
           VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
-        run: tools/ci/checkout-virtualquest.ps1
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - name: Prepare the pinned tools
-        run: |
-          curl -fsSL "$TLA2TOOLS_URL" -o "$RUNNER_TEMP/tla2tools.jar"
-          echo "$TLA2TOOLS_SHA256  $RUNNER_TEMP/tla2tools.jar" | sha256sum -c -
-          echo "TLA2TOOLS_JAR=$RUNNER_TEMP/tla2tools.jar" >> "$GITHUB_ENV"
-          curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
-          sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$LEAN_TOOLCHAIN"
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-          docker build -t questcal-genmc VirtualQuest/formal/seqlock
-          docker build -t questcal-esbmc VirtualQuest/formal/input-validation
-      - name: Validate the complete private suite
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -Strict -SourceRoot $PWD -ResultPath "$env:RUNNER_TEMP/core.json"
-          if ($LASTEXITCODE -ne 0) { throw 'Private formal suite failed.' }
-      - name: Validate every numeric obligation
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Only input-validation -Strict -SourceRoot $PWD -ResultPath "$env:RUNNER_TEMP/numeric.json"
-          if ($LASTEXITCODE -ne 0) { throw 'Numeric formal suite failed.' }
-      - name: Check every Now contract and intended mutant
-        run: python tools/verify-now-contracts.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/now"
-      - name: Check the worthwhile inventory extension
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y nsis
-          python tools/verify-inventory-extension.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/extension"
-      - name: Check pinned vendor instruction correspondence
-        run: |
-          python -m venv "$RUNNER_TEMP/binary-python"
-          "$RUNNER_TEMP/binary-python/bin/python" -m pip install -r VirtualQuest/formal/binary-requirements.txt
-          "$RUNNER_TEMP/binary-python/bin/python" tools/verify-binary-correspondence.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/binary"
-      - name: Bind Linux evidence to both exact commits
-        run: |
-          python tools/assemble-assurance.py --contracts "$RUNNER_TEMP/now/result.json" --extension "$RUNNER_TEMP/extension/result.json" --binary "$RUNNER_TEMP/binary/result.json" --core "$RUNNER_TEMP/core.json" --numeric "$RUNNER_TEMP/numeric.json" --linux-only --output "$RUNNER_TEMP/assurance-linux.json"
+        run: tools/ci/checkout-virtualquest.ps1 -LocalAssurancePath "$env:RUNNER_TEMP/local-assurance.json"
+      - name: Verify local proof outcomes and source provenance
+        run: python tools/local-assurance.py --source-root "$PWD" --evidence "$RUNNER_TEMP/local-assurance.json" --output "$RUNNER_TEMP/assurance-linux.json"
       - uses: actions/upload-artifact@v4
         with:
           name: assurance-linux
-          path: |
-            ${{ runner.temp }}/assurance-linux.json
-            ${{ runner.temp }}/core.json
-            ${{ runner.temp }}/numeric.json
-            ${{ runner.temp }}/now/result.json
-            ${{ runner.temp }}/extension/result.json
-            ${{ runner.temp }}/binary/result.json
-            ${{ runner.temp }}/binary/execution/result.json
-            ${{ runner.temp }}/binary/execution.log
+          path: ${{ runner.temp }}/assurance-linux.json
           if-no-files-found: error
           retention-days: 90

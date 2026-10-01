@@ -94,8 +94,19 @@ run details. `--linux-only` explicitly produces partial evidence that cannot pas
 the release verifier. Generated evidence belongs in CI artifacts or a private
 assurance record, not in the source tree.
 
-The release workflow checks the exact tag and gitlink, collects Linux proof
-evidence and real Windows traces, verifies the complete assembled record, and
+For ordinary public CI, run the extension with `--public-only`. It reports a
+distinct 23-obligation partial suite with 20 intended mutants and 144 acceptance
+fixtures. V01–V09, private portable simulations, smoothing and capture checks
+remain local. That partial public suite cannot replace the full extension record
+in a release certificate.
+
+Publish the complete locally assembled Linux record with
+`python tools/local-assurance.py --evidence /tmp/assurance-linux.json --publish`
+before tagging a hosted release. The private Git note stores verification
+metadata; it leaves both source commits unchanged.
+
+The release workflow checks the exact tag and gitlink, reads the local Linux proof
+record and collects real Windows traces, verifies the complete assembled record, and
 only then creates a draft. The local release entry point requires
 `-FormalEvidence /path/to/complete.json` for the same gate. Publishing and hardware
 acceptance remain the normal release process described in `releasing.md`.
