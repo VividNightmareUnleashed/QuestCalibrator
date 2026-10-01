@@ -2,6 +2,7 @@
 #include "Hooking.h"
 #include "InterfaceHookInjector.h"
 #include "OpenVRHookLayout.h"
+#include "HookLifecyclePolicy.h"
 #include "ServerTrackedDeviceProvider.h"
 
 #include <atomic>
@@ -21,42 +22,11 @@ std::atomic<ServerTrackedDeviceProvider *> Driver{ nullptr };
 std::atomic<bool> AcceptingHookRequests{ false };
 std::atomic<bool> PoseHook005Ready{ false };
 std::atomic<bool> PoseHook006Ready{ false };
-std::atomic<uint32_t> ActiveCallbacks{ 0 };
+questcal::hooks::CallbackActivity ActiveCallbacks;
 std::mutex HookSetupMutex;
 bool MinHookInitialized = false;   // protected by HookSetupMutex
-
-class CallbackGuard
-{
-public:
-	CallbackGuard()
-	{
-		ActiveCallbacks.fetch_add(1, std::memory_order_seq_cst);
-	}
-
-	~CallbackGuard()
-	{
-		ActiveCallbacks.fetch_sub(1, std::memory_order_seq_cst);
-	}
-
-	CallbackGuard(const CallbackGuard &) = delete;
-	CallbackGuard &operator=(const CallbackGuard &) = delete;
-};
-
-struct ModuleRange
-{
-	uintptr_t begin = 0;
-	uintptr_t end = 0;
-
-	bool IsValid() const
-	{
-		return begin != 0 && end > begin;
-	}
-
-	bool Contains(uintptr_t address) const
-	{
-		return address >= begin && address < end;
-	}
-};
+using CallbackGuard = questcal::hooks::CallbackActivity::Guard;
+using ModuleRange = questcal::hooks::ModuleRange;
 
 // Resolved before the first target can be enabled and kept for the whole hook
 // lifetime, so teardown never has to look it up (and fail) on demand.
@@ -320,7 +290,7 @@ void ForwardPoseUpdate(PoseUpdateHook &hook, void *_this,
 void DetourTrackedDevicePoseUpdated005(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
-	CallbackGuard callback;
+	CallbackGuard callback(ActiveCallbacks);
 	ForwardPoseUpdate(TrackedDevicePoseUpdatedHook005, _this, unWhichDevice, newPose,
 		unPoseStructSize);
 }
@@ -328,7 +298,7 @@ void DetourTrackedDevicePoseUpdated005(void *_this,
 void DetourTrackedDevicePoseUpdated006(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
-	CallbackGuard callback;
+	CallbackGuard callback(ActiveCallbacks);
 	ForwardPoseUpdate(TrackedDevicePoseUpdatedHook006, _this, unWhichDevice, newPose,
 		unPoseStructSize);
 }
@@ -411,7 +381,7 @@ void TryInstallPoseHook(const char *interfaceVersion, void *originalInterface)
 void *DetourGetGenericInterface(vr::IVRDriverContext *_this,
 	const char *pchInterfaceVersion, vr::EVRInitError *peError)
 {
-	CallbackGuard callback;
+	CallbackGuard callback(ActiveCallbacks);
 	auto original = GetGenericInterfaceHook.originalFunc.load(std::memory_order_acquire);
 	if (!original)
 		return nullptr;
@@ -470,8 +440,17 @@ bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 		pDriverContext, openvr_hook::GetGenericInterfaceSlot, &DetourGetGenericInterface))
 	{
 		Driver.store(nullptr, std::memory_order_release);
-		MH_Uninitialize();
-		MinHookInitialized = false;
+		// A failed enable can also fail to remove its allocated trampoline.
+		// Retain initialization until every owned hook and MinHook itself have
+		// actually released it; Cleanup can then retry instead of forgetting it.
+		if (GetGenericInterfaceHook.Destroy())
+		{
+			auto cleanup = MH_Uninitialize();
+			if (cleanup == MH_OK || cleanup == MH_ERROR_NOT_INITIALIZED)
+				MinHookInitialized = false;
+			else
+				LOG("MinHook cleanup after failed installation will retry: %s", MH_StatusToString(cleanup));
+		}
 		return false;
 	}
 
@@ -562,8 +541,7 @@ bool DisableHooks()
 		bool referencesModule = true;
 		bool inspected = suspended.SuspendAllOtherThreads() &&
 			suspended.AnyStackReferences(module, referencesModule);
-		bool callbacksDrained = ActiveCallbacks.load(std::memory_order_seq_cst) == 0;
-		if (inspected && !referencesModule && callbacksDrained)
+		if (questcal::hooks::CanRelease(inspected, referencesModule, ActiveCallbacks.Count()))
 		{
 			// Hooks are disabled, so after this proven-empty snapshot no new
 			// detour stack can form. Resume before freeing to avoid allocator or
@@ -600,7 +578,7 @@ bool DisableHooks()
 		{
 			LOG("Waiting for hook detour stacks to drain (inspect=%d, references=%d, active=%u)",
 				inspected ? 1 : 0, referencesModule ? 1 : 0,
-				ActiveCallbacks.load(std::memory_order_seq_cst));
+				ActiveCallbacks.Count());
 			lastWaitLog = GetTickCount64();
 		}
 		// A failed inspection can be permanent, and a thread can sit in this

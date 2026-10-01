@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'FilesystemPolicy.ps1')
 
 function Fail([string]$msg) {
     Write-Host ""
@@ -44,6 +45,7 @@ if ($steamProcesses) {
 
 $installDir = (Get-ItemProperty 'HKLM:\Software\QuestCalibrator\Main' -ErrorAction SilentlyContinue).'(default)'
 if (-not $installDir) { $installDir = Join-Path ${env:ProgramFiles} 'QuestCalibrator' }
+Assert-QuestcalTree $installDir 'QuestCalibrator'
 
 # --- Deregister from SteamVR ---------------------------------------------------
 # GUI binary: use Start-Process -Wait so the app has actually exited before we
@@ -53,7 +55,7 @@ if (Test-Path $appExe) {
     $proc = Start-Process -FilePath $appExe -ArgumentList @('-removemanifest', '-noui') `
         -WorkingDirectory $installDir -Wait -PassThru
     if ($proc.ExitCode -ne 0) {
-        Write-Host "Warning: could not deregister from SteamVR (exit code $($proc.ExitCode)). Continuing." -ForegroundColor Yellow
+        Fail "SteamVR deregistration failed (exit code $($proc.ExitCode)). Installed files were kept so you can retry."
     } else {
         Write-Host "Deregistered from SteamVR"
     }
@@ -118,8 +120,9 @@ if (-not $vrRuntimePath -or -not (Test-Path $vrRuntimePath)) { $vrRuntimePath = 
 
 if ($vrRuntimePath) {
     $driverDir = Join-Path $vrRuntimePath 'drivers\01questcalibrator'
+    Assert-QuestcalTree $driverDir '01questcalibrator'
     if (Test-Path $driverDir) {
-        Remove-Item $driverDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-QuestcalTree $driverDir '01questcalibrator'
         if (Test-Path $driverDir) {
             Write-Host "Warning: could not fully remove $driverDir - delete it manually after a reboot." -ForegroundColor Yellow
         } else {
@@ -127,12 +130,12 @@ if ($vrRuntimePath) {
         }
     }
 } else {
-    Write-Host "Warning: could not locate the SteamVR runtime; the driver folder may still be present." -ForegroundColor Yellow
+    Fail 'The SteamVR runtime could not be located. App files were kept; repair the runtime path and retry removal.'
 }
 
 # --- Remove installed files ------------------------------------------------------
 if (Test-Path $installDir) {
-    Remove-Item $installDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-QuestcalTree $installDir 'QuestCalibrator'
     if (Test-Path $installDir) {
         Write-Host "Warning: could not fully remove $installDir - delete it manually after a reboot." -ForegroundColor Yellow
     } else {
@@ -143,9 +146,12 @@ if (Test-Path $installDir) {
 # --- Registry + shortcut -----------------------------------------------------------
 # SteamVR's activateMultipleDrivers setting is deliberately left enabled: other
 # OpenVR tools rely on it, and turning it off would break them.
-Remove-Item 'HKLM:\Software\QuestCalibrator' -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\QuestCalibrator' -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\QuestCalibrator.lnk') -Force -ErrorAction SilentlyContinue
+foreach ($path in @('HKLM:\Software\QuestCalibrator',
+    'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\QuestCalibrator',
+    (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\QuestCalibrator.lnk'))) {
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop }
+    if (Test-Path -LiteralPath $path) { Fail "Cleanup did not complete: $path" }
+}
 
 if (-not $Silent) {
     Write-Host ""

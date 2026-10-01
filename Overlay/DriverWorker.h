@@ -83,6 +83,7 @@ public:
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		DriverStateSubmission submission;
+		if (stopping || nextSequence == UINT64_MAX) return submission;
 		submission.sequence = ++nextSequence;
 		submission.stateChanged = !lastSubmission || !(*lastSubmission == job);
 		lastSubmission = job;
@@ -94,6 +95,7 @@ public:
 	uint64_t Neutralize(const std::array<uint32_t, 2> &deviceIds, double time)
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		if (stopping || nextSequence == UINT64_MAX) return 0;
 		const uint64_t sequence = ++nextSequence;
 		neutralizationHeld = true;
 		pendingNeutralization = Neutralization{ sequence, deviceIds, time };
@@ -207,7 +209,7 @@ private:
 	std::thread worker;
 	std::mutex mutex;
 	std::condition_variable wake;
-	bool stopping = false;
+	bool stopping = true; // submissions before Start/after Stop are refused with sequence 0
 	bool neutralizationHeld = false;
 	uint64_t nextSequence = 0;
 	std::optional<SequencedState> pendingState;

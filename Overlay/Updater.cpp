@@ -289,28 +289,79 @@ const char *UpdateHelperScript()
     [Parameter(Mandatory=$true)][string]$ExpectedSha256
 )
 $ErrorActionPreference = 'Stop'
+function Expand-VerifiedUpdate([string]$Path, [string]$ExpectedHash, [string]$Destination) {
+    if (-not [IO.Path]::IsPathRooted($Path) -or -not [IO.Path]::IsPathRooted($Destination)) { throw 'Update paths must be absolute.' }
+    foreach ($checkedPath in @($Path, $Destination)) {
+        $ancestor = [IO.Path]::GetFullPath($checkedPath)
+        while ($ancestor) {
+            if (Test-Path -LiteralPath $ancestor) {
+                if ((Get-Item -LiteralPath $ancestor -Force -ErrorAction Stop).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Update paths must not traverse reparse points.' }
+            }
+            $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+        }
+    }
+    # A read-only handle pins the bytes through hashing and extraction. On
+    # Windows FileShare.Read excludes concurrent writes and replacement.
+    $package = [IO.FileStream]::new($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        if ($package.Length -gt 64MB) { throw 'The update archive exceeds its size budget.' }
+        $actual = (Get-FileHash -InputStream $package -Algorithm SHA256).Hash
+        if ($actual -ine $ExpectedHash) { throw 'The downloaded package no longer matches its verified SHA-256 digest.' }
+        $package.Position = 0
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archive = [IO.Compression.ZipArchive]::new($package, [IO.Compression.ZipArchiveMode]::Read, $true)
+        try {
+            if ($archive.Entries.Count -gt 4096) { throw 'The update archive contains too many entries.' }
+            $root = [IO.Path]::GetFullPath($Destination + [IO.Path]::DirectorySeparatorChar)
+            $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            $total = 0L
+            foreach ($entry in $archive.Entries) {
+                $name = $entry.FullName.Replace('\','/')
+                $parts = $name.TrimEnd('/').Split('/')
+                if ($name.StartsWith('/') -or $name -match '[:\x00-\x1f<>"|?*]' -or
+                    (($entry.ExternalAttributes -shr 16) -band 0xf000) -eq 0xa000 -or
+                    ($parts | Where-Object { -not $_ -or $_ -eq '.' -or $_ -eq '..' -or $_ -match '[. ]$|^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)' })) {
+                    throw 'The update package contains an unsafe path.'
+                }
+                $target = [IO.Path]::GetFullPath((Join-Path $Destination $name))
+                if (-not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or -not $names.Add($target)) {
+                    throw 'The update package contains an escaping or duplicate path.'
+                }
+                if ($entry.Length -gt 64MB) { throw 'An update archive entry exceeds its size budget.' }
+                $total += $entry.Length
+                if ($total -gt 256MB) { throw 'The expanded update exceeds its size budget.' }
+            }
+            # A fresh unpredictable directory prevents reuse of old contents.
+            # The staging tree must remain exclusively owned until launch.
+            New-Item -ItemType Directory -Path $Destination -ErrorAction Stop | Out-Null
+            foreach ($entry in $archive.Entries) {
+                $name = $entry.FullName.Replace('\','/')
+                $target = Join-Path $Destination $name
+                if ($name.EndsWith('/')) { New-Item -ItemType Directory -Path $target -Force | Out-Null; continue }
+                New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($target)) -Force | Out-Null
+                $entryStream = $entry.Open()
+                try {
+                    $output = [IO.FileStream]::new($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                    try {
+                        $buffer = [byte[]]::new(65536)
+                        $written = 0L
+                        while (($read = $entryStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                            $written += $read
+                            if ($written -gt $entry.Length -or $written -gt 64MB) { throw 'An expanded entry exceeds its declared size.' }
+                            $output.Write($buffer, 0, $read)
+                        }
+                        if ($written -ne $entry.Length) { throw 'An expanded entry is incomplete.' }
+                    } finally { $output.Dispose() }
+                } finally { $entryStream.Dispose() }
+            }
+        } finally { $archive.Dispose() }
+    } finally { $package.Dispose() }
+}
 try {
     Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue
-    $actual = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash
-    if ($actual -ine $ExpectedSha256) { throw 'The downloaded package no longer matches its verified SHA-256 digest.' }
-
     $updateDir = Split-Path -Parent $ZipPath
-    $extractDir = Join-Path $updateDir 'package'
-    if (Test-Path -LiteralPath $extractDir) { Remove-Item -LiteralPath $extractDir -Recurse -Force }
-    New-Item -ItemType Directory -Path $extractDir | Out-Null
-
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $root = [IO.Path]::GetFullPath($extractDir + [IO.Path]::DirectorySeparatorChar)
-    $archive = [IO.Compression.ZipFile]::OpenRead($ZipPath)
-    try {
-        foreach ($entry in $archive.Entries) {
-            $destination = [IO.Path]::GetFullPath((Join-Path $extractDir $entry.FullName))
-            if (-not $destination.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
-                throw 'The update package contains an unsafe path.'
-            }
-        }
-    } finally { $archive.Dispose() }
-    Expand-Archive -LiteralPath $ZipPath -DestinationPath $extractDir -Force
+    $extractDir = Join-Path $updateDir ('package-' + [Guid]::NewGuid().ToString('N'))
+    Expand-VerifiedUpdate $ZipPath $ExpectedSha256 $extractDir
 
     $installers = @(Get-ChildItem -LiteralPath $extractDir -Filter Install.ps1 -File -Recurse)
     if ($installers.Count -ne 1) { throw 'The update package does not contain exactly one installer.' }
@@ -638,10 +689,11 @@ bool Updater::LaunchInstaller(std::string &error)
 {
 	ReleaseCandidate release;
 	std::filesystem::path package;
+	uint64_t offeredRevision = 0;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		// Ready is only published after readyPackagePath is set for the same revision.
-		if (snapshot.state != State::Ready)
+		if (!enabled || stopping || snapshot.state != State::Ready)
 		{
 			error = "No verified update is ready to install.";
 		}
@@ -649,6 +701,7 @@ bool Updater::LaunchInstaller(std::string &error)
 		{
 			release = readyRelease;
 			package = readyPackagePath;
+			offeredRevision = revision;
 		}
 	}
 	if (package.empty())
@@ -683,10 +736,25 @@ bool Updater::LaunchInstaller(std::string &error)
 		STARTUPINFOW startup{};
 		startup.cb = sizeof startup;
 		PROCESS_INFORMATION process{};
-		if (!CreateProcessW(powershell.c_str(), commandLine.data(), nullptr,
-			nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr,
-			package.parent_path().c_str(), &startup, &process))
-			throw NetworkError("Starting the update helper");
+		{
+			// File verification/helper creation can take time. Serialize the
+			// final revision check and process creation with disable/shutdown.
+			std::lock_guard<std::mutex> lock(mutex);
+			const bool launched = LaunchCurrentRevision(enabled, stopping, revision,
+				offeredRevision, snapshot.state == State::Ready, [&]() {
+					if (!CreateProcessW(powershell.c_str(), commandLine.data(), nullptr,
+						nullptr, FALSE, CREATE_NEW_CONSOLE, nullptr,
+						package.parent_path().c_str(), &startup, &process))
+						throw NetworkError("Starting the update helper");
+					return true;
+				});
+			if (!launched)
+				throw std::runtime_error("The update was cancelled before installer handoff.");
+			// A second click cannot launch the same ready handoff twice.
+			snapshot.state = State::Idle;
+			readyPackagePath.clear();
+			readyRelease = ReleaseCandidate();
+		}
 		CloseHandle(process.hThread);
 		CloseHandle(process.hProcess);
 		Log("installer handoff started for " + VersionString(release.version) +

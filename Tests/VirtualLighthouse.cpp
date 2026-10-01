@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <random>
+#include <cmath>
+#include <stdexcept>
 
 namespace vlighthouse
 {
@@ -97,6 +99,49 @@ void EmitChange(const Config &cfg, double t, const std::vector<int> &from, const
 Output Run(const Config &cfg, const Truth &truth,
 	const std::vector<VisibilityChange> &schedule, double duration)
 {
+	// Guard conversions, distribution preconditions and finite run budgets
+	// before allocating or invoking the caller's trajectory oracle.
+	if (!truth || cfg.deviceId >= vr::k_unMaxTrackedDeviceCount ||
+		cfg.serial.empty() || cfg.serial.size() > 128 ||
+		!std::isfinite(duration) || duration < 0 || duration > 86400 ||
+		!std::isfinite(cfg.frameRate) || cfg.frameRate <= 0 || cfg.frameRate > 1000 ||
+		!std::isfinite(cfg.qpcToSeconds) || cfg.qpcToSeconds < 1e-12 || cfg.qpcToSeconds > 1 ||
+		!std::isfinite(cfg.unixEpoch) || std::abs(cfg.unixEpoch) > 4e9 ||
+		cfg.stationIdBase > UINT32_MAX - 31 || schedule.size() > 10000)
+		throw std::invalid_argument("Invalid lighthouse run configuration");
+	for (double value : {cfg.positionJitter, cfg.singleStationSlideRate,
+		cfg.singleStationSlideMax, cfg.coastValidSeconds})
+		if (!std::isfinite(value) || value < 0 || value > 1e6)
+			throw std::invalid_argument("Invalid lighthouse noise or timing configuration");
+	if (!cfg.singleStationDirection.allFinite() ||
+		cfg.singleStationDirection.norm() < 1e-12 || cfg.singleStationDirection.norm() > 1e6 ||
+		!cfg.coastBias.allFinite() || cfg.coastBias.cwiseAbs().maxCoeff() > 1e6)
+		throw std::invalid_argument("Invalid lighthouse direction or bias");
+	const double frameLimit = std::floor(duration * cfg.frameRate + 0.5);
+	if (frameLimit + 1 > 100000)
+		throw std::invalid_argument("Lighthouse run exceeds its frame budget");
+	const double lastTick = frameLimit * (1.0 / cfg.frameRate);
+	double previousTime = 0;
+	for (const auto &change : schedule)
+	{
+		if (!std::isfinite(change.time) || change.time < previousTime ||
+			change.time > lastTick || change.visible.size() > 16)
+			throw std::invalid_argument("Invalid lighthouse visibility schedule");
+		std::vector<int> channels = change.visible;
+		std::sort(channels.begin(), channels.end());
+		if ((!channels.empty() && (channels.front() < 0 || channels.back() > 31)) ||
+			std::adjacent_find(channels.begin(), channels.end()) != channels.end())
+			throw std::invalid_argument("Invalid lighthouse channel set");
+		previousTime = change.time;
+	}
+	const auto checkedTruth = [&](double time) {
+		auto value = truth(time);
+		if (!value.position.allFinite() || !value.velocity.allFinite() ||
+			value.position.cwiseAbs().maxCoeff() > 1e6 ||
+			value.velocity.cwiseAbs().maxCoeff() > 1e6)
+			throw std::invalid_argument("Invalid lighthouse trajectory sample");
+		return value;
+	};
 	Output out;
 	std::mt19937 rng(1);
 	std::uniform_real_distribution<double> jitter(-cfg.positionJitter, cfg.positionJitter);
@@ -115,11 +160,12 @@ Output Run(const Config &cfg, const Truth &truth,
 	int previousCount = static_cast<int>(visible.size());
 	double singleSince = 0.0;
 	double coastSince = 0.0;
-	Eigen::Vector3d coastOrigin = Eigen::Vector3d::Zero();
-	Eigen::Vector3d coastVelocity = Eigen::Vector3d::Zero();
-	Eigen::Vector3d lastReported = truth(0.0).position;
+	const TruthSample initial = checkedTruth(0.0);
+	Eigen::Vector3d coastOrigin = initial.position;
+	Eigen::Vector3d coastVelocity = initial.velocity;
+	Eigen::Vector3d lastReported = initial.position;
 
-	const long frames = static_cast<long>(duration * cfg.frameRate + 0.5);
+	const long frames = static_cast<long>(frameLimit);
 	for (long i = 0; i <= frames; ++i)
 	{
 		const double t = i * dt;
@@ -138,12 +184,12 @@ Output Run(const Config &cfg, const Truth &truth,
 			{
 				coastSince = t;
 				coastOrigin = lastReported;
-				coastVelocity = truth(t).velocity;
+				coastVelocity = checkedTruth(t).velocity;
 			}
 			previousCount = count;
 		}
 
-		const TruthSample now = truth(t);
+		const TruthSample now = checkedTruth(t);
 		Frame f;
 		f.time = t;
 		Eigen::Vector3d position = now.position;

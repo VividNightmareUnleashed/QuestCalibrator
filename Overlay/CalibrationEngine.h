@@ -160,6 +160,8 @@ enum class EngineFailure
 	PositionResidual,        // jittery tracking or motion too fast
 	TimeOffset,              // latency could not be measured
 	ScaleNotIdentifiable,
+	InvalidConfiguration,
+	ResourceLimit,
 };
 
 struct EngineResult
@@ -208,8 +210,9 @@ class CalibrationEngine
 {
 public:
 	// Full pipeline over two raw streams (each sorted by time). The only entry
-	// point that validates its samples; the ones below expect finite poses in
-	// strictly increasing time order.
+	// point over raw streams. EstimateTimeOffset and SolveAligned also validate
+	// their inputs; InterpolateAt requires a sorted stream and checks its local
+	// bracket. Every entry rejects invalid configuration/resource bounds.
 	static EngineResult Solve(const std::vector<PoseSample> &refStream,
 	                          const std::vector<PoseSample> &targetStream,
 	                          const EngineConfig &config);

@@ -93,6 +93,7 @@ std::string Format(const char *fmt, ...)
 
 void JumpDetector::Push(const protocol::DevicePoseSample &s)
 {
+	if (s.deviceId >= vr::k_unMaxTrackedDeviceCount) return;
 	auto &dev = devices[s.deviceId];
 	auto breakObservationContinuity = [&](const std::string &reason)
 	{

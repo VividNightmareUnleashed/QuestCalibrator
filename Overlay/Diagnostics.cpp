@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Diagnostics.h"
+#include "DiagnosticsPolicy.h"
 #include "Calibration.h"
 #include "Updater.h"
 #include "../common/Version.h"
@@ -53,40 +54,17 @@ std::wstring EnvW(const wchar_t *name)
 	return std::wstring(buf, len);
 }
 
-// Case-insensitive replace of every occurrence: Windows paths arrive in
-// whatever case the writer used. `needle` must not be empty.
-void ReplaceAllNoCase(std::string &text, const std::string &needle, const std::string &with)
-{
-	std::string lowerText = text, lowerNeedle = needle;
-	std::transform(lowerText.begin(), lowerText.end(), lowerText.begin(),
-		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	std::transform(lowerNeedle.begin(), lowerNeedle.end(), lowerNeedle.begin(),
-		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	std::string out;
-	size_t pos = 0;
-	for (;;)
-	{
-		size_t hit = lowerText.find(lowerNeedle, pos);
-		if (hit == std::string::npos)
-		{
-			out.append(text, pos, std::string::npos);
-			break;
-		}
-		out.append(text, pos, hit - pos);
-		out += with;
-		pos = hit + needle.size();
-	}
-	text.swap(out);
-}
-
 std::string ReadWholeFile(const std::wstring &path)
 {
 	std::ifstream in(path.c_str(), std::ios::in | std::ios::binary);
 	if (!in.is_open())
 		return std::string();
-	std::ostringstream ss;
-	ss << in.rdbuf();
-	return ss.str();
+	constexpr size_t limit = 4 * 1024 * 1024;
+	std::string text(limit, '\0');
+	in.read(text.data(), static_cast<std::streamsize>(text.size()));
+	text.resize(static_cast<size_t>(in.gcount()));
+	if (in.peek() != std::char_traits<char>::eof()) text += "\n[log truncated after 4 MiB]\n";
+	return text;
 }
 
 std::string ReadFileTail(const std::wstring &path)
@@ -154,12 +132,15 @@ void DescribeRawPoses(std::ostream &out, const PoseStreamHub::Diagnostics &strea
 	out << "channel open: " << OnOff(stream.open) << ", stream boundaries " << stream.streamBoundaries
 		<< ", gap markers " << stream.gapMarkers << ", reported loss " << stream.reportedLoss
 		<< " (includes one marker per boundary)\n";
-	out << "Latest pre-calibration samples; device counts include all input, even while continuous mode is off.\n";
+	out << "Latest pre-calibration samples on the QPC capture clock; missing slots are unobserved, not evidence of absence or frame agreement. Counts include all input, even while continuous mode is off.\n";
 	for (uint32_t id = 0; id < stream.devices.size(); ++id)
 	{
 		const auto &device = stream.devices[id];
 		if (!device.received)
+		{
+			out << "device " << id << ": unobserved in this raw stream; presence and frame unknown\n";
 			continue;
+		}
 		const auto &s = device.latest;
 		out << "device " << id << ": received " << device.received << ", stream boundary " << device.streamBoundary
 			<< ", capture age (ms) " << (qpcNow > 0.0 ? (qpcNow - RingCaptureTime(s, qpcToSeconds)) * 1000.0 : -1.0)
@@ -203,12 +184,15 @@ void DescribeRuntimePoses(std::ostream &out, const CalibrationContext &ctx, vr::
 	out << "raw-to-standing transform (3 rows; translation in meters):\n";
 	for (const auto &row : floor.m)
 		out << row[0] << " " << row[1] << " " << row[2] << " " << row[3] << "\n";
-	out << "Runtime poses include the active driver calibration. Standing Y is height above SteamVR's floor.\n";
+	out << "Runtime poses include the active driver calibration and hiding. This query is a separate snapshot from the raw capture; it cannot establish a simultaneous transition. Standing Y is height above SteamVR's floor.\n";
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 	{
 		const auto &pose = poses[id];
 		if (!pose.bDeviceIsConnected && !pose.bPoseIsValid && !ctx.targetDeviceMask[id])
+		{
+			out << "device " << id << ": no connected runtime pose; may be absent, disconnected or hidden\n";
 			continue;
+		}
 		auto property = [&](vr::ETrackedDeviceProperty key) {
 			char value[256]{};
 			vr::ETrackedPropertyError error = vr::TrackedProp_Success;
@@ -322,39 +306,14 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 }
 
 std::string AnonymiseDiagnosticsText(const std::string &text,
-	const std::string &userProfileDir, const std::string &userName, const std::string &computerName)
+ const std::string &userProfileDir, const std::string &userName, const std::string &computerName)
 {
-	std::string out = text;
-	// Longest first, so the directory goes before the bare name inside it.
-	if (!userProfileDir.empty())
-		ReplaceAllNoCase(out, userProfileDir, "<user>");
-	if (userName.size() >= 2)
-		ReplaceAllNoCase(out, userName, "<user>");
-	if (computerName.size() >= 2)
-		ReplaceAllNoCase(out, computerName, "<pc>");
-	return out;
+ return questcal::diagnostics::AnonymiseDiagnosticsText(text, userProfileDir, userName, computerName);
 }
-
 std::string ShortenUserPath(const std::string &path,
-	const std::string &localAppData, const std::string &userProfileDir)
+ const std::string &localAppData, const std::string &userProfileDir)
 {
-	auto startsWithFolder = [&](const std::string &prefix)
-	{
-		if (prefix.size() < 3 || path.size() < prefix.size())
-			return false;
-		for (size_t i = 0; i < prefix.size(); ++i)
-			if (std::tolower(static_cast<unsigned char>(path[i])) !=
-				std::tolower(static_cast<unsigned char>(prefix[i])))
-				return false;
-		// A whole folder only: C:\Users\jo is not the start of C:\Users\joanna.
-		return path.size() == prefix.size() || path[prefix.size()] == '\\' || path[prefix.size()] == '/';
-	};
-	// %LOCALAPPDATA% first: it sits inside the profile directory.
-	if (startsWithFolder(localAppData))
-		return "%LOCALAPPDATA%" + path.substr(localAppData.size());
-	if (startsWithFolder(userProfileDir))
-		return "%USERPROFILE%" + path.substr(userProfileDir.size());
-	return path;
+ return questcal::diagnostics::ShortenUserPath(path, localAppData, userProfileDir);
 }
 
 std::string PathForLog(const std::string &utf8Path)

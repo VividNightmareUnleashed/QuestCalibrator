@@ -410,6 +410,7 @@ void ContinuousAlignment::Decide(double now, const Eigen::Quaterniond &calRotati
 	WindowEstimate est;
 	if (!EstimateWindow(calRotation, calTranslationMeters, expectedAt, est))
 	{
+		ClearConfirmMarks();
 		deviation.valid = false;
 		return;
 	}
@@ -872,12 +873,11 @@ void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotati
 
 	FormObservations(calScale, calTimeOffset);
 	TrimWindows(now);
-	// A pending jump candidate already cleared these when it was raised.
+	// Too few observations interrupt every sustained-evidence timer, even
+	// while the last observation is fresh or evaluation is rate limited.
 	if (observations.size() < config.minObsForEstimate)
 	{
-		correctionEligible = false;
-		pendingCorrection.reset();
-		pendingTimeOffset.reset();
+		ClearConfirmMarks();
 	}
 
 	bool obsFresh = lastObsTime > 0.0 && (now - lastObsTime) <= config.coastGapSeconds;

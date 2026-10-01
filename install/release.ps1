@@ -11,6 +11,7 @@
 [CmdletBinding()]
 param(
     [string]$Tag = '',
+    [string]$FormalEvidence = '',
     # Stop before creating the release.
     [switch]$DryRun,
     [switch]$SkipScan,
@@ -62,6 +63,12 @@ try {
             throw "$releaseRepo already has a release for $Tag. Never replace a release; tag a new version."
         }
         $global:LASTEXITCODE = 0
+    }
+
+    if (-not $DryRun) {
+        if (-not $FormalEvidence) { throw 'Supply -FormalEvidence with the complete exact-pair assurance result.' }
+        & python tools/verify-assurance.py --evidence $FormalEvidence
+        if ($LASTEXITCODE -ne 0) { throw 'Formal release evidence is incomplete or stale.' }
     }
 
     # --- Build and test --------------------------------------------------------

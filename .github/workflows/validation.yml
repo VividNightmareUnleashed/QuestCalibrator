@@ -21,7 +21,8 @@ name: Validation
 # questcal-esbmc image) against this tree's headers. VirtualQuest's own
 # formal.yml skips them, since it has no QuestCalibrator sources, and nothing
 # else here catches a loosened bound in them, so the job fails on a skipped
-# check as well as a wrong outcome. The release workflow does not run it. It
+# check as well as a wrong outcome. The release workflow requires the same full
+# suite through formal-assurance.yml. This validation job
 # runs on four runners at once (check.ps1 -Shard, which balances them by the
 # time each check last took), so each of the three longest checks runs with
 # only a few short ones beside it. The image is cached by its Dockerfile's
@@ -109,7 +110,7 @@ jobs:
           $env:TLA2TOOLS_JAR = $jar
           $env:JAVA_HOME = $env:JAVA_HOME_17_X64
           $env:Path = "$env:JAVA_HOME_17_X64\bin;$env:Path"
-          pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces
+          pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces -Strict
           if ($LASTEXITCODE -ne 0) { throw 'A recorded hub run is not a behaviour of the model.' }
 
       - name: Duplicate scan (advisory)
@@ -213,3 +214,33 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'An input-validation check did not come out as expected.' }
           if ($lines | Where-Object { "$_" -match '^SKIP ' }) { throw 'An input-validation check was skipped.' }
           if (-not ($lines | Where-Object { "$_" -match '^ok ' })) { throw 'This share ran no input-validation check.' }
+
+  now-contracts:
+    if: github.event.pull_request.head.repo.fork != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ELAN_TOOLCHAIN: leanprover/lean4:v4.34.0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out VirtualQuest
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+      - name: Install the pinned Lean toolchain
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$ELAN_TOOLCHAIN"
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Check all Now contracts and negative cases
+        run: python VirtualQuest/formal/verify-now.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/now"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: now-contracts
+          path: ${{ runner.temp }}/now/result.json
+          if-no-files-found: error
+          retention-days: 90

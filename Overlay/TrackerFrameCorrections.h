@@ -63,7 +63,7 @@ public:
 	{
 		if (move.id >= frames.size() || !std::isfinite(move.time) ||
 			(restoredKeys[move.id] != 0 && serials[move.id].empty()) ||
-			move.time < usableAfter[move.id] ||
+			move.time <= usableAfter[move.id] ||
 			!IsValidCalibrationTransform(move.rotation, move.translation, 1.0))
 			return false;
 		const auto &old = frames[move.id];
@@ -86,7 +86,7 @@ public:
 
 	bool Normalize(uint32_t id, PoseSample &sample) const
 	{
-		if (id >= frames.size() || sample.time < usableAfter[id])
+		if (id >= frames.size() || !std::isfinite(sample.time) || sample.time < usableAfter[id])
 			return false;
 		ApplyToPose(id, sample);
 		return true;

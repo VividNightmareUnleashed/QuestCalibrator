@@ -263,8 +263,15 @@ jobs:
           $env:TLA2TOOLS_JAR = $jar
           $env:JAVA_HOME = $env:JAVA_HOME_17_X64
           $env:Path = "$env:JAVA_HOME_17_X64\bin;$env:Path"
-          pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces
+          pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces -Strict -ResultPath "$env:RUNNER_TEMP/traces.json"
           if ($LASTEXITCODE -ne 0) { throw 'A recorded hub run is not a behaviour of the model.' }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: assurance-traces
+          path: ${{ runner.temp }}/traces.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Duplicate scan (advisory)
         timeout-minutes: 5
@@ -284,8 +291,15 @@ jobs:
       ref: refs/tags/${{ inputs.tag || github.ref_name }}
     secrets: inherit
 
+  formal-assurance:
+    needs: check
+    uses: ./.github/workflows/formal-assurance.yml
+    with:
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+    secrets: inherit
+
   publish:
-    needs: [build, traces, clang-tidy]
+    needs: [build, traces, clang-tidy, formal-assurance]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -294,6 +308,35 @@ jobs:
       tag: ${{ env.TAG }}
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - name: Check out the exact VirtualQuest pin
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+      - uses: actions/download-artifact@v4
+        with:
+          name: assurance-linux
+          path: ${{ runner.temp }}/assurance
+      - uses: actions/download-artifact@v4
+        with:
+          name: assurance-traces
+          path: ${{ runner.temp }}/assurance
+      - name: Require complete exact-pair assurance
+        run: |
+          python tools/assemble-assurance.py --contracts "$RUNNER_TEMP/assurance/now/result.json" --extension "$RUNNER_TEMP/assurance/extension/result.json" --binary "$RUNNER_TEMP/assurance/binary/result.json" --core "$RUNNER_TEMP/assurance/core.json" --numeric "$RUNNER_TEMP/assurance/numeric.json" --traces "$RUNNER_TEMP/assurance/traces.json" --output "$RUNNER_TEMP/assurance/complete.json"
+          python tools/verify-assurance.py --evidence "$RUNNER_TEMP/assurance/complete.json"
+      - name: Keep complete assurance with this release run
+        uses: actions/upload-artifact@v4
+        with:
+          name: assurance-complete
+          path: ${{ runner.temp }}/assurance/complete.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Fetch the package
         uses: actions/download-artifact@v4
         with:

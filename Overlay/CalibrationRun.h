@@ -165,6 +165,14 @@ struct CalibrationRun
 	double lastTargetSample = 0.0;
 	double lastIdentityCheck = -1e9;
 
+    template<class Release> bool End(Release release)
+    {
+        const bool held = neutralizationSequence != 0;
+        if (held) release();
+        Reset();
+        return held;
+    }
+
 	void Reset()
 	{
 		*this = CalibrationRun{};

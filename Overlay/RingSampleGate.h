@@ -25,7 +25,8 @@ using questcal::numeric::IsBoundedVector3;
 // the positive QPC period.
 inline bool IsUsableRingSample(const protocol::DevicePoseSample &s, double qpcToSeconds)
 {
-	if (!std::isfinite(s.poseTimeOffset) ||
+	if (!std::isfinite(qpcToSeconds) || qpcToSeconds <= 0.0 ||
+		!std::isfinite(s.poseTimeOffset) ||
 		std::abs(s.poseTimeOffset) > protocol::limits::MaxAbsTimeOffsetSeconds ||
 		!IsAcceptableQuaternion(s.worldFromDriverRotation) ||
 		!IsAcceptableQuaternion(s.rotation) ||

@@ -34,6 +34,7 @@ class TrackingStreamDigest
 public:
 	void Note(const protocol::DevicePoseSample &s, double qpcToSeconds)
 	{
+		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount) return;
 		Device &d = devices[s.deviceId];
 		++d.samples;
 		questcal::PoseSample p;
@@ -42,6 +43,11 @@ public:
 			++d.invalid;
 			d.havePrevious = false;
 			return;
+		}
+		if (d.haveTime && p.time <= d.previousTime)
+		{
+			++d.stale;
+			return; // a delayed/duplicate capture is not another prediction pair
 		}
 		if (d.havePrevious)
 		{
@@ -68,14 +74,19 @@ public:
 			}
 		}
 		d.havePrevious = true;
+		d.haveTime = true;
 		d.previous = s;
 		d.previousTime = p.time;
 		if (d.valid == 0)
 			d.firstTime = p.time;
 		++d.valid;
 		d.lastTime = p.time;
-		d.speeds.push_back(p.vel.norm());
-		d.turns.push_back(p.angVel.norm());
+		if (d.speeds.size() < MaxStatisticsSamples)
+		{
+			d.speeds.push_back(p.vel.norm());
+			d.turns.push_back(p.angVel.norm());
+		}
+		else ++d.statisticsOmitted;
 		d.position = p.pos;
 		d.yaw = std::atan2(2.0 * (p.rot.w() * p.rot.y() + p.rot.x() * p.rot.z()),
 			1.0 - 2.0 * (p.rot.x() * p.rot.x() + p.rot.y() * p.rot.y()));
@@ -95,6 +106,7 @@ public:
 	std::vector<std::string> Flush(double time)
 	{
 		std::vector<std::string> lines;
+		if (!std::isfinite(time) || time < 0.0 || time < lastFlush) return lines;
 		if (lastFlush < -1e8)
 			lastFlush = time;
 		if (time - lastFlush < 60.0)
@@ -129,6 +141,14 @@ public:
 					d.nearest, d.farthest);
 			}
 			lines.push_back(buf);
+			if (d.stale || d.statisticsOmitted)
+			{
+				snprintf(buf, sizeof buf,
+					"tracking stream, device %u: %llu stale/duplicate captures ignored; speed/turn percentiles use the first %zu valid captures, %llu omitted",
+					entry.first, static_cast<unsigned long long>(d.stale), d.speeds.size(),
+					static_cast<unsigned long long>(d.statisticsOmitted));
+				lines.push_back(buf);
+			}
 			d.Restart();
 		}
 		if (dropEvents > 0)
@@ -150,15 +170,18 @@ public:
 	}
 
 private:
+	static constexpr size_t MaxStatisticsSamples = 65536;
 	struct Device
 	{
 		uint64_t samples = 0, valid = 0, invalid = 0, gaps = 0, pairs = 0;
 		uint64_t repredicted = 0, angularOnly = 0, positionRepeats = 0, heldWhileTurning = 0;
+		uint64_t stale = 0, statisticsOmitted = 0;
 		double firstTime = 0.0, lastTime = 0.0, longest = 0.0;
 		std::vector<double> speeds, turns;
 		Eigen::Vector3d position{ 0, 0, 0 };
 		double yaw = 0.0, nearest = 1e9, farthest = 0.0;
 		bool havePrevious = false;
+		bool haveTime = false;
 		protocol::DevicePoseSample previous{};
 		double previousTime = 0.0;
 
@@ -166,6 +189,7 @@ private:
 		{
 			samples = valid = invalid = gaps = pairs = 0;
 			repredicted = angularOnly = positionRepeats = heldWhileTurning = 0;
+			stale = statisticsOmitted = 0;
 			longest = 0.0;
 			speeds.clear();
 			turns.clear();

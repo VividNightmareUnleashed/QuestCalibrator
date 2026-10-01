@@ -149,7 +149,7 @@ public:
 	explicit JumpDetector(double qpcToSeconds) : qpcToSeconds(qpcToSeconds) { }
 
 	// Feed one reference-system sample, in ring order and valid or not (a bad
-	// frame breaks continuity). The caller bounds deviceId; non-reference
+	// frame breaks continuity). Invalid device indices are ignored; non-reference
 	// devices must not be pushed.
 	void Push(const protocol::DevicePoseSample &sample);
 

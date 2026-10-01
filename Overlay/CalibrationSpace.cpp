@@ -4,6 +4,7 @@
 #include "Calibration.h"
 #include "CalibrationDriver.h"
 #include "ChaperoneMath.h"
+#include "ChaperoneRestorePolicy.h"
 #include "Configuration.h"
 #include "JumpDetector.h"
 #include "PoseStreamHub.h"
@@ -964,19 +965,22 @@ bool ApplyChaperoneBounds(bool logSuccess)
 	}
 
 	const ChaperoneOwnerStatus owner = CurrentChaperoneOwner(CalCtx.chaperone);
-	if (owner == ChaperoneOwnerStatus::Unavailable)
+	const auto permission = questcal::ChaperoneRestorePermission(
+		owner != ChaperoneOwnerStatus::Unavailable, owner == ChaperoneOwnerStatus::Match,
+		owner == ChaperoneOwnerStatus::Match && ChaperoneBaselineIsCurrent(CalCtx.chaperone));
+	if (permission == questcal::ChaperonePermission::OwnerUnavailable)
 	{
 		CalCtx.ReportError(
 			"Couldn't restore the chaperone: the headset isn't reporting to SteamVR yet.\n",
 			CalibrationContext::ErrorSource::Chaperone);
 		return false;
 	}
-	if (owner == ChaperoneOwnerStatus::Mismatch)
+	if (permission == questcal::ChaperonePermission::ForeignOwner)
 	{
 		DisarmChaperoneAndPersist(CalCtx, CalCtx.timeLastTick, ForeignHeadsetChaperone);
 		return false;
 	}
-	if (!ChaperoneBaselineIsCurrent(CalCtx.chaperone))
+	if (permission == questcal::ChaperonePermission::Unsettled)
 	{
 		CalCtx.ReportError(
 			"Couldn't restore the chaperone yet: the headset hasn't been tracked this session. Put it on and try again.\n",
@@ -993,48 +997,53 @@ bool ApplyChaperoneBounds(bool logSuccess)
 		return false;
 	}
 
-	setup->RevertWorkingCopy();
-	if (!CalCtx.chaperone.geometry.empty())
-		setup->SetWorkingCollisionBoundsInfo(CalCtx.chaperone.geometry.data(),
-			static_cast<uint32_t>(CalCtx.chaperone.geometry.size()));
-	setup->SetWorkingStandingZeroPoseToRawTrackingPose(
-		&CalCtx.chaperone.standingCenter);
-	setup->SetWorkingPlayAreaSize(
-		CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1]);
-	if (!setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live))
+	const int restored = questcal::RestoreChaperoneTransaction(
+		[&]() { setup->RevertWorkingCopy(); },
+		[&]() {
+			if (!CalCtx.chaperone.geometry.empty())
+				setup->SetWorkingCollisionBoundsInfo(CalCtx.chaperone.geometry.data(),
+					static_cast<uint32_t>(CalCtx.chaperone.geometry.size()));
+			setup->SetWorkingStandingZeroPoseToRawTrackingPose(
+				&CalCtx.chaperone.standingCenter);
+			setup->SetWorkingPlayAreaSize(
+				CalCtx.chaperone.playSpaceSize.v[0], CalCtx.chaperone.playSpaceSize.v[1]);
+		},
+		[&]() { return setup->CommitWorkingCopy(vr::EChaperoneConfigFile_Live); },
+		[&]() {
+			bool verified = true;
+			if (!CalCtx.chaperone.geometry.empty())
+			{
+				uint32_t liveQuadCount = 0;
+				bool readOk = false;
+				verified = LiveGeometryMatches(setup, CalCtx.chaperone.geometry,
+					liveQuadCount, readOk);
+			}
+			vr::HmdMatrix34_t standing{};
+			vr::HmdVector2_t size{};
+			verified = verified &&
+				setup->GetWorkingStandingZeroPoseToRawTrackingPose(&standing) &&
+				setup->GetWorkingPlayAreaSize(&size.v[0], &size.v[1]);
+			for (int row = 0; verified && row < 3; ++row)
+				for (int column = 0; verified && column < 4; ++column)
+					verified = std::abs(standing.m[row][column] -
+						CalCtx.chaperone.standingCenter.m[row][column]) <=
+						ChaperoneCompareTolerance;
+			verified = verified &&
+				std::abs(size.v[0] - CalCtx.chaperone.playSpaceSize.v[0]) <=
+					ChaperoneCompareTolerance &&
+				std::abs(size.v[1] - CalCtx.chaperone.playSpaceSize.v[1]) <=
+					ChaperoneCompareTolerance;
+			return verified;
+		});
+	if (restored == 1)
 	{
-		setup->RevertWorkingCopy();
 		CalCtx.ReportError(
 			"Couldn't restore the chaperone: SteamVR rejected the update.\n",
 			CalibrationContext::ErrorSource::Chaperone);
 		return false;
 	}
 
-	bool verified = true;
-	if (!CalCtx.chaperone.geometry.empty())
-	{
-		uint32_t liveQuadCount = 0;
-		bool readOk = false;
-		verified = LiveGeometryMatches(setup, CalCtx.chaperone.geometry,
-			liveQuadCount, readOk);
-	}
-	setup->RevertWorkingCopy();
-	vr::HmdMatrix34_t standing{};
-	vr::HmdVector2_t size{};
-	verified = verified &&
-		setup->GetWorkingStandingZeroPoseToRawTrackingPose(&standing) &&
-		setup->GetWorkingPlayAreaSize(&size.v[0], &size.v[1]);
-	for (int row = 0; verified && row < 3; ++row)
-		for (int column = 0; verified && column < 4; ++column)
-			verified = std::abs(standing.m[row][column] -
-				CalCtx.chaperone.standingCenter.m[row][column]) <=
-				ChaperoneCompareTolerance;
-	verified = verified &&
-		std::abs(size.v[0] - CalCtx.chaperone.playSpaceSize.v[0]) <=
-			ChaperoneCompareTolerance &&
-		std::abs(size.v[1] - CalCtx.chaperone.playSpaceSize.v[1]) <=
-			ChaperoneCompareTolerance;
-	if (!verified)
+	if (restored == 2)
 	{
 		CalCtx.ReportError(
 			"Couldn't verify the restored chaperone. Check it in SteamVR Room Setup before relying on it.\n",

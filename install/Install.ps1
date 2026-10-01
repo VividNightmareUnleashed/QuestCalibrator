@@ -17,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'FilesystemPolicy.ps1')
 
 function Pause-ForUser {
     if (-not $Unattended) { Read-Host "Press Enter to close" | Out-Null }
@@ -185,13 +186,15 @@ if ($spaceCalUninstall) {
 
     $spaceCalDir = (Get-ItemProperty 'HKLM:\Software\OpenVR-SpaceCalibrator\Main' -ErrorAction SilentlyContinue).'(default)'
     if (-not $spaceCalDir) { $spaceCalDir = Join-Path ${env:ProgramFiles} 'OpenVR-SpaceCalibrator' }
+    Assert-QuestcalTree $spaceCalDir 'OpenVR-SpaceCalibrator'
 
     $spaceCalUninstaller = Join-Path $spaceCalDir 'Uninstall.exe'
     if (Test-Path $spaceCalUninstaller) {
         Write-Host "Uninstalling OpenVR-SpaceCalibrator..."
-        Start-Process -FilePath $spaceCalUninstaller -ArgumentList '/S', "_?=$spaceCalDir" -Wait
+        $removedConflict = Start-Process -FilePath $spaceCalUninstaller -ArgumentList '/S', "_?=$spaceCalDir" -Wait -PassThru
+        if ($removedConflict.ExitCode -ne 0) { Fail "Conflicting uninstaller failed (exit code $($removedConflict.ExitCode))." }
         Remove-Item $spaceCalUninstaller -Force -ErrorAction SilentlyContinue
-        Remove-Item $spaceCalDir -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-QuestcalTree $spaceCalDir 'OpenVR-SpaceCalibrator'
     } else {
         # Half-removed install: uninstaller is gone, clean up its traces directly
         Remove-Item 'HKLM:\Software\OpenVR-SpaceCalibrator' -Recurse -Force -ErrorAction SilentlyContinue
@@ -209,11 +212,12 @@ foreach ($conflict in @('01spacecalibrator', '000spacecalibrator')) {
     if (-not $p.StartsWith($driversRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
         Fail 'Conflicting driver path is outside the SteamVR drivers directory.'
     }
+    Assert-QuestcalTree $p $conflict
     if (Test-Path -LiteralPath $p) {
         Write-Host "Removing conflicting driver: $p"
         for ($i = 1; $i -le 3; $i++) {
             try {
-                Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop
+                Remove-QuestcalTree $p $conflict
                 break
             } catch {
                 if ($i -lt 3) {
@@ -231,23 +235,30 @@ foreach ($conflict in @('01spacecalibrator', '000spacecalibrator')) {
 }
 
 # --- Install location ---------------------------------------------------------
-$installDir = Join-Path ${env:ProgramFiles} 'QuestCalibrator'
+$installDir = (Get-ItemProperty 'HKLM:\Software\QuestCalibrator\Main' -ErrorAction SilentlyContinue).'(default)'
+if (-not $installDir) { $installDir = Join-Path ${env:ProgramFiles} 'QuestCalibrator' }
+Assert-QuestcalTree $appSrc
+Assert-QuestcalTree $driverSrc
+Assert-QuestcalTree $installDir 'QuestCalibrator'
 
 # Upgrade path: clear out whichever installer put files here last. Early builds
 # shipped an NSIS installer, so Uninstall.exe has to be handled too - otherwise
 # it is orphaned in Program Files with its registry entry overwritten by ours.
 if (Test-Path (Join-Path $installDir 'Uninstall.ps1')) {
     Write-Host "Existing installation found - upgrading..."
-    & (Join-Path $installDir 'Uninstall.ps1') -Silent
+    $oldRemoval = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $installDir 'Uninstall.ps1') + '"'), '-Silent', '-UserLocalAppData', ('"' + $UserLocalAppData + '"')) -Wait -PassThru
+    if ($oldRemoval.ExitCode -ne 0) { Fail "Existing uninstall failed (exit code $($oldRemoval.ExitCode))." }
 } elseif (Test-Path (Join-Path $installDir 'Uninstall.exe')) {
     Write-Host "Existing NSIS installation found - removing it first..."
-    Start-Process -FilePath (Join-Path $installDir 'Uninstall.exe') -ArgumentList '/S', "_?=$installDir" -Wait
+    $oldRemoval = Start-Process -FilePath (Join-Path $installDir 'Uninstall.exe') -ArgumentList '/S', "_?=$installDir" -Wait -PassThru
+    if ($oldRemoval.ExitCode -ne 0) { Fail "Existing uninstall failed (exit code $($oldRemoval.ExitCode))." }
     Remove-Item (Join-Path $installDir 'Uninstall.exe') -Force -ErrorAction SilentlyContinue
 }
 
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 Copy-Item (Join-Path $appSrc '*') -Destination $installDir -Recurse -Force
 Copy-Item (Join-Path $packageDir 'Uninstall.ps1')      -Destination $installDir -Force
+Copy-Item (Join-Path $packageDir 'FilesystemPolicy.ps1') -Destination $installDir -Force
 Copy-Item (Join-Path $packageDir 'README-INSTALL.txt') -Destination $installDir -Force -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $packageDir 'LICENSE')            -Destination $installDir -Force -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $packageDir 'THIRD-PARTY-NOTICES.txt') -Destination $installDir -Force -ErrorAction SilentlyContinue
@@ -261,13 +272,14 @@ if (-not $version) { $version = 'unknown' }
 
 # --- Driver files -------------------------------------------------------------
 $driverDest = Join-Path $vrRuntimePath 'drivers\01questcalibrator'
+Assert-QuestcalTree $driverDest '01questcalibrator'
 if (Test-Path $driverDest) {
     # The driver DLL may be locked by a recently-closed SteamVR or AV scan.
     # Retry a few times with a delay before giving up.
     $removed = $false
     for ($i = 1; $i -le 3; $i++) {
         try {
-            Remove-Item $driverDest -Recurse -Force -ErrorAction Stop
+            Remove-QuestcalTree $driverDest '01questcalibrator'
             $removed = $true
             break
         } catch {

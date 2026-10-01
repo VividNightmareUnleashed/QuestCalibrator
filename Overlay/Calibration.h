@@ -10,6 +10,7 @@
 #include "LighthouseVisibility.h"
 #include "Modules.h"
 #include "TrackerFrameCorrections.h"
+#include "SettingsRecordJson.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -209,8 +210,8 @@ struct CalibrationContext : CalibrationProfileState
 
 	// Player-given device names keyed by serial (persisted in Settings): six
 	// identical "VIVE Tracker 3.0" rows are told apart by hex serial otherwise.
-	static constexpr size_t DeviceNameMaxBytes = 32;
-	static constexpr size_t DeviceNameMaxCount = 64;
+	static constexpr size_t DeviceNameMaxBytes = questcal::DeviceNameMaxBytes;
+	static constexpr size_t DeviceNameMaxCount = questcal::DeviceNameMaxCount;
 	std::map<std::string, std::string> deviceNames;
 
 	// One-time drift warning shown before the first chaperone protect.

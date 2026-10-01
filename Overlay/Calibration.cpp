@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "Calibration.h"
+#include "CalibrationActionPolicy.h"
 #include "CalibrationDriver.h"
 #include "CalibrationEngine.h"
 #include "CalibrationSpace.h"
@@ -759,9 +760,23 @@ static bool DuringUniverseSetup(const CalibrationContext &ctx, double moveTime)
 // The shared calibration stays in one target space. A proven frame move is
 // cancelled only for the device that reported it: N_i' = N_i o F_i^-1.
 // The watch also handles hidden trackers and returns after tracking loss.
+static bool EndCalibrationRun(CalibrationContext &ctx);
+
 static void CompensateTrackerFrameMoves(CalibrationContext &ctx)
 {
+	const bool overflow = FrameWatch.TakeMoveOverflow();
 	auto moves = FrameWatch.TakeMoves();
+	if (overflow)
+	{
+		EndCalibrationRun(ctx);
+		ctx.enabled = false;
+		ctx.profileUniverseUnsafe = true;
+		ctx.persistence.MarkProfile(ctx.timeLastTick);
+		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::StreamGap);
+		ctx.Diag("lighthouse frame move queue overflowed; calibration disabled until a new measurement");
+		SynchronizeCalibrationDriver(ctx);
+		return;
+	}
 	std::sort(moves.begin(), moves.end(), [](const auto &a, const auto &b)
 	{ return a.time < b.time; });
 	bool changed = false;
@@ -1640,11 +1655,8 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 
 static bool EndCalibrationRun(CalibrationContext &ctx)
 {
-	const bool heldDriver = ctx.run.neutralizationSequence != 0;
-	if (heldDriver)
-		questcal::ReleaseCalibrationDeviceNeutralization();
+	const bool heldDriver = ctx.run.End([] { questcal::ReleaseCalibrationDeviceNeutralization(); });
 	ctx.state = CalibrationState::None;
-	ctx.run.Reset();
 	return heldDriver;
 }
 
@@ -2176,6 +2188,12 @@ static void FinishCalibration(CalibrationContext &ctx)
 
 bool StartCalibration()
 {
+	if (!questcal::MayStartManualRun(CalCtx.state == CalibrationState::None,
+		CalCtx.referenceID, CalCtx.targetID, vr::k_unMaxTrackedDeviceCount))
+	{
+		CalCtx.ReportError("Finish the current calibration and pick two different available devices before starting.\n");
+		return false;
+	}
 	if (!questcal::IsValidTrackingSystemPair(
 		CalCtx.pendingReferenceTrackingSystem,
 		CalCtx.pendingTargetTrackingSystem))
@@ -2197,8 +2215,9 @@ bool StartCalibration()
 
 bool StartAnchorCalibration()
 {
-	if (CalCtx.pendingReferenceTrackingSystem != CalCtx.referenceTrackingSystem ||
-		CalCtx.pendingTargetTrackingSystem != CalCtx.targetTrackingSystem)
+	if (!questcal::MayStartAnchorRun(CalCtx.validProfile, CalCtx.profileUniverseUnsafe,
+		CalCtx.pendingReferenceTrackingSystem == CalCtx.referenceTrackingSystem &&
+		CalCtx.pendingTargetTrackingSystem == CalCtx.targetTrackingSystem))
 	{
 		CalCtx.ReportError("Anchors need the same reference and target systems as the current calibration. Pick those devices first.\n");
 		return false;

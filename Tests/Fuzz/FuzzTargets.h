@@ -1,5 +1,6 @@
 #pragma once
 #include "../../Overlay/FrameRecovery.h"
+#include "../../Overlay/SettingsRecordJson.h"
 
 // The properties every untrusted input must keep, one function per input the
 // program parses or validates. Each takes arbitrary bytes and returns "" when
@@ -624,6 +625,41 @@ inline std::vector<std::string> FrameRecoverySeeds()
 	return { std::string(reinterpret_cast<const char *>(&response), sizeof response) };
 }
 
+inline std::string CheckSettingsRecord(const uint8_t *data, size_t size)
+{
+    questcal::SettingsRecord record;
+    record.uiAdvanced = true;  // a late parse failure must preserve this too
+    std::ostringstream before;
+    questcal::WriteSettings(record, 7, before);
+    questcal::PersistedRevision revision;
+    try {
+        std::istringstream input(Text(data, size));
+        revision = questcal::ParseSettings(record, input);
+    } catch (const std::exception &) {
+        std::ostringstream after;
+        questcal::WriteSettings(record, 7, after);
+        return before.str() == after.str() ? "" : "refused Settings changed live state";
+    }
+    const uint32_t value = revision.present ? revision.value : 1;
+    std::ostringstream encoded;
+    questcal::WriteSettings(record, value, encoded);
+    questcal::SettingsRecord decoded;
+    std::istringstream input(encoded.str());
+    const auto reread = questcal::ParseSettings(decoded, input);
+    std::ostringstream again;
+    questcal::WriteSettings(decoded, value, again);
+    if (!reread.present || reread.value != value || encoded.str() != again.str())
+        return "accepted Settings do not round-trip";
+    return "";
+}
+inline std::vector<std::string> SettingsSeeds()
+{
+    return {"{}", "{\"ui_advanced\":false,\"calibration_speed\":99}",
+        "{\"chaperone\":{}}", "{\"persistence_revision\":4294967295,\"language\":\"it\"}",
+        "{\"device_names\":{\"one\":\"waist\"}}", "{\"ui_advanced\":[]}"
+    };
+}
+
 struct Target
 {
 	const char *name;
@@ -635,6 +671,7 @@ inline const std::vector<Target> &Targets()
 {
 	static const std::vector<Target> targets = {
 		{ "profile", CheckProfileRecord, ProfileSeeds },
+        { "settings", CheckSettingsRecord, SettingsSeeds },
 		{ "feed", CheckReleaseFeed, FeedSeeds },
 		{ "lighthouse", CheckLighthouseLine, LighthouseSeeds },
 		{ "request", CheckDriverRequest, RequestSeeds },

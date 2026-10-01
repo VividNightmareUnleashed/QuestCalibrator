@@ -18,9 +18,12 @@ source-state SHA-256, commit, timestamp, and built-binary hashes.
 Install/uninstall works identically to the release package; only the packaging
 differs.
 
-Both must stay in step: `Install.ps1` detects and removes an existing NSIS
-install before upgrading, so anyone moving from the old package doesn't end up
-with an orphaned `Uninstall.exe`.
+The NSIS executable stages the same scripts and payload in its private temporary
+directory and runs `Install.ps1 -Unattended` with 64-bit PowerShell. It has no
+separate deletion implementation or generated uninstaller. Close Steam and remove
+conflicting software first; use the zip installer for interactive optional-module
+selection. `Install.ps1` still removes old NSIS installations before upgrading,
+including a registered custom location whose final directory is QuestCalibrator.
 
 `build-package.ps1` reads the version from the built `QuestCalibrator.exe`'s
 version resource, which comes from `common/Version.h`. That header is the single

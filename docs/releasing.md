@@ -36,6 +36,16 @@ VirusTotal key comes from `$env:VT_API_KEY` or the git-ignored `.env` at the
 repository root. Package output in `install/out/` and `install/test-out/` is never
 committed.
 
+Both draft-release paths now require complete formal assurance for the exact
+QuestCalibrator commit and its VirtualQuest gitlink. The hosted workflow collects
+the private core, numeric proofs, twelve Now contracts, the worthwhile inventory
+extension and Windows hub traces,
+and refuses a draft when any named check or source/tool provenance is missing.
+For a local release, assemble and verify the same evidence as described in
+[`formal-now.md`](formal-now.md), then pass
+`-FormalEvidence /path/to/complete.json` to `install\release.ps1`. A focused Now
+report or a Linux-only record cannot satisfy this gate.
+
 ## Source preflight
 
 - Confirm the release is authorized by the QuestCalibrator copyright holder.
@@ -204,3 +214,20 @@ Two consequences of the suffix reaching the version resources:
 - `install\build-package.ps1` names the ZIP from that string, so a prerelease package
   is named for the prerelease. Stable releases are unaffected, and the exact
   `QuestCalibrator-MAJOR.MINOR.PATCH.zip` asset name above still applies to them.
+
+The extension record is produced by `tools/verify-inventory-extension.py`;
+pass `--extension /path/to/extension/result.json` when assembling assurance.
+The public runner and release verifier require all 26 compiling mutations to
+reach their registered assertion messages. Unrelated runtime exceptions,
+compiler errors and incomplete negative-control records cannot satisfy the gate.
+The four capture mutations must fail their intended named tests and assertions.
+Produce the Now record with `tools/verify-now-contracts.py`; its nine mutations
+also require their registered assertions. Use fresh output directories for both
+public runners. The private runners remain supplementary conformance commands.
+V09 is also required: install `VirtualQuest/formal/binary-requirements.txt`, run
+`tools/verify-binary-correspondence.py --source-root . --output-dir /tmp/binary`,
+and pass `--binary /tmp/binary/result.json` to the assembler. Its ten registered
+failure controls and 45 acceptance fixtures bind the selected original-instruction
+comparisons to the exact supplied binary pins and source pair.
+Its bounded scopes and platform premises are listed in
+`VirtualQuest/formal/inventory-assumptions.json`.

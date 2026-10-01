@@ -15,6 +15,7 @@
 #include <utility>
 
 #include "Protocol.h"
+#include "PoseRingCounters.h"
 
 namespace protocol
 {
@@ -132,16 +133,18 @@ namespace protocol
 	// with the next generation and no count, so a word a reader loaded is still
 	// current only if nothing was harvested since, even when later failures bring
 	// the count back to the same value. The count cannot reach 2^32 between
-	// harvests (weeks of every publish failing at the assumed rate), and the
-	// generation cannot come round in the few instructions a reader holds a word.
+	// harvests. At the conservative envelope of 64 devices * 1000 Hz this
+	// requires a harvest within 18.6 hours of continuous publish failures.
+	// Generation wrap (2^32 harvests) must not occur while a reader holds a
+	// word for CAS. These are bounded-stall assumptions, not uptime proofs.
 	inline uint64_t PendingDropCount(uint64_t word)
 	{
-		return word & 0xffffffffull;
+		return questcal_pose_pending_drop_count(word);
 	}
 
 	inline uint64_t PendingDropsAfterHarvest(uint64_t word)
 	{
-		return ((word >> 32) + 1) << 32;
+		return questcal_pose_after_drop_harvest(word);
 	}
 
 	class PoseRingWriter
@@ -510,7 +513,7 @@ namespace protocol
 			{
 				auto &slot = ring->slots[pos & (PoseRing::Capacity - 1)];
 				uint64_t seq = slot.seq.load(std::memory_order_acquire);
-				intptr_t difference = static_cast<intptr_t>(seq - pos);
+				int difference = questcal_pose_sequence_relation(seq, pos);
 
 				if (difference == 0)
 				{
@@ -585,7 +588,7 @@ namespace protocol
 			{
 				auto &slot = ring->slots[pos & (PoseRing::Capacity - 1)];
 				uint64_t seq = slot.seq.load(std::memory_order_acquire);
-				intptr_t difference = static_cast<intptr_t>(seq - (pos + 1));
+				int difference = questcal_pose_sequence_relation(seq, pos + 1);
 				if (difference < 0)
 					return false;
 				if (difference > 0)
@@ -770,14 +773,14 @@ namespace protocol
 				uint64_t discardedLosses = 0;
 				if (!TrySnapshotDiscardState(pos, discardedLosses))
 					return DrainStatus::Drained;
-				if (discardedLosses > observedDiscardedLossCount)
+				if (discardedLosses != observedDiscardedLossCount)
 				{
 					gapFn(discardedLosses - observedDiscardedLossCount);
 					observedDiscardedLossCount = discardedLosses;
 				}
 				auto &slot = ring->slots[pos & (PoseRing::Capacity - 1)];
 				uint64_t seq = slot.seq.load(std::memory_order_acquire);
-				intptr_t difference = static_cast<intptr_t>(seq - (pos + 1));
+				int difference = questcal_pose_sequence_relation(seq, pos + 1);
 				if (difference < 0)
 				{
 					EmitTerminalGapIfEmpty(gapFn, beforeTerminalCas);

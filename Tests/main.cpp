@@ -3279,7 +3279,7 @@ void RunSolverPrimitiveScenarios()
 
 		EngineConfig cfg;
 		cfg.estimateTimeOffset = false;
-		cfg.maxAlignedSamples = 10000;
+		cfg.maxAlignedSamples = 4096; // supported budget, above this 1800-sample stream
 		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
 		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
 		double transErr = (truth.translation - r.translation).norm();
@@ -3428,9 +3428,9 @@ void RunSolverRobustnessScenarios()
 			detail);
 	}
 
-	// Force JointRefine's meter/radian conversion out of finite range while the
-	// sequential solve stays finite: refinement must keep that seed exactly,
-	// never accept a NaN candidate whose cost comparisons came out false.
+	// The numeric configuration envelope now rejects a meter/radian conversion
+	// capable of overflowing before either the sequential solve or refinement.
+	// Keep the original extreme regression inputs: they must never become valid.
 	{
 		SceneConfig scene;
 		auto aligned = GenerateAlignedSamples(scene, truth, 4330);
@@ -3451,7 +3451,9 @@ void RunSolverRobustnessScenarios()
 			std::isfinite(fallback.translationRmsMeters);
 		double rotDiff = fallback.rotation.angularDistance(sequential.rotation);
 		double transDiff = (fallback.translation - sequential.translation).norm();
-		bool retained = sequential.valid && fallback.valid &&
+		bool retained = !sequential.valid && !fallback.valid &&
+			sequential.failure == EngineFailure::InvalidConfiguration &&
+			fallback.failure == EngineFailure::InvalidConfiguration &&
 			!fallback.refinementApplied && finiteFallback &&
 			rotDiff < 1e-12 && transDiff < 1e-12 &&
 			std::abs(fallback.scale - sequential.scale) < 1e-12;
@@ -3459,7 +3461,7 @@ void RunSolverRobustnessScenarios()
 			"sequential %d fallback %d refined %d finite %d rotDiff %.2e transDiff %.2e",
 			sequential.valid, fallback.valid, fallback.refinementApplied, finiteFallback,
 			rotDiff, transDiff);
-		Check("solver: non-finite refinement fallback", retained, detail);
+		Check("solver: non-finite refinement configuration refused", retained, detail);
 	}
 
 	// Each quality gate gets a deliberately non-rigid data set while the other

@@ -1,6 +1,7 @@
 // Palette, theme, icon glyphs, textures and the hand-painted widgets.
 #include "stdafx.h"
 #include "UiInternal.h"
+#include "TexturePolicy.h"
 
 // ---------------------------------------------------------------------------
 // Palette + theme
@@ -359,14 +360,12 @@ static bool DecodeTexture(IWICImagingFactory *factory, IWICBitmapDecoder *decode
 	UINT w = 0, h = 0;
 	if (FAILED(conv->GetSize(&w, &h)))
 		return false;
-	const bool validDimensions = guide
-		? ((w == 4608 && h == 5880) || (w == 5120 && h == 5760))
-		: (w > 0 && h > 0 && w <= 1024 && h <= 1024);
-	if (!validDimensions)
+	questcal::TextureAllocation allocation;
+	if (!questcal::PlanTextureAllocation(w, h, guide, allocation))
 		return false;
 
-	std::vector<unsigned char> pixels((size_t)w * h * 4);
-	if (FAILED(conv->CopyPixels(nullptr, w * 4, (UINT)pixels.size(), pixels.data())))
+	std::vector<unsigned char> pixels(allocation.bytes);
+	if (FAILED(conv->CopyPixels(nullptr, allocation.stride, allocation.bytes, pixels.data())))
 		return false;
 
 	GLuint tex = 0;

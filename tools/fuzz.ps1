@@ -22,7 +22,7 @@
 #>
 param(
     [int]$Seconds = 60,
-    [string[]]$Targets = @('profile', 'feed', 'lighthouse', 'request', 'frame-recovery')
+    [string[]]$Targets = @('profile', 'settings', 'feed', 'lighthouse', 'request', 'frame-recovery')
 )
 
 # Continue, not Stop: cl and the fuzzers write progress to stderr, which
@@ -52,6 +52,7 @@ $sources = @('Tests\Fuzz\FuzzMain.cpp', 'Driver\AlignmentField.cpp', 'Overlay\Li
 $numbers = @('nan', 'inf', '-0', '1e999', '1e-320', '4294967295', '4294967296', '0.25', '4.000000000000001',
     '10000.000000000002', '100.00000000000001', '0.049999999999999996')
 $dictionaries = @{
+    settings   = $numbers + @('ui_advanced', 'chaperone', 'geometry', 'standing_center', 'play_space_size', 'calibration_speed', 'persistence_revision', 'language', 'device_names')
     profile    = $numbers + @('persistence_revision', 'reference_tracking_system', 'target_tracking_system',
         'rotation_quat', 'translation_meters', 'scale', 'time_offset', 'calibration_time', 'universe_unsafe',
         'hmd_serial', 'universe_hmd_serial', 'universe_world_from_driver_rotation_quat',

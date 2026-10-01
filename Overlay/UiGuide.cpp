@@ -1,6 +1,7 @@
 // The guided calibration modal (art, meters, stages) and the other modals.
 #include "stdafx.h"
 #include "UiInternal.h"
+#include "CalibrationActionPolicy.h"
 
 // The guide owns presentation state; CalibrationContext owns the measurement.
 
@@ -14,6 +15,7 @@ bool s_modalDetails = false;
 
 void OpenGuide(bool anchor, bool mountRun)
 {
+	if (!g_uiPreviewMode && CalCtx.state != CalibrationState::None) return;
 	s_modalDetails = CalCtx.uiAdvanced;
 	s_guide = GuideState();
 	s_guide.anchor = anchor;
@@ -31,6 +33,7 @@ void OpenGuide(bool anchor, bool mountRun)
 // Mount measurement uses the headset as reference and its tracker as target.
 void StartMountSetup(const VRState &state)
 {
+	if (!g_uiPreviewMode && CalCtx.state != CalibrationState::None) return;
 	const VRDevice *hmd = nullptr;
 	const VRDevice *tracker = nullptr;
 	for (const auto &d : state.devices)

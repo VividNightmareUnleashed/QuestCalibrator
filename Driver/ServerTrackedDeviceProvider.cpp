@@ -1,7 +1,7 @@
 #include "ServerTrackedDeviceProvider.h"
 #include "Logging.h"
 #include "InterfaceHookInjector.h"
-#include "PoseTransform.h"
+#include "RuntimePose.h"
 #include "ProtocolValidation.h"
 
 #include <utility>
@@ -177,30 +177,10 @@ bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeS
 void ServerTrackedDeviceProvider::ReadRuntimeState(uint32_t openVRID,
 	DeviceTransform &out, protocol::SetAlignmentField &field)
 {
-	auto &slot = transforms[openVRID];
-
-	for (int attempt = 0; attempt < 8; ++attempt)
-	{
-		uint32_t before = runtimeSequence.load(std::memory_order_acquire);
-		if (before & 1)
-			continue;
-
-		out = slot.Load();
-		field = alignmentField.Load();
-
-		uint32_t after = runtimeSequence.load(std::memory_order_acquire);
-		if (before == after)
-		{
-			lastGood[openVRID] = out;
-			lastGoodField[openVRID] = field;
-			return;
-		}
-	}
-
-	// A writer kept racing us; use the last consistent snapshot rather than
-	// stalling vrserver's pose thread.
-	out = lastGood[openVRID];
-	field = lastGoodField[openVRID];
+    const auto snapshot = questcal::runtimesnapshot::Read(runtimeSequence,
+        transforms[openVRID], alignmentField, lastGood[openVRID]);
+    out = snapshot.transform;
+    field = snapshot.field;
 }
 
 void ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose)
@@ -259,86 +239,8 @@ void ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 		nowSeconds = poseTimeForTest;
 #endif
 
-	if (tf.control.enabled)
-	{
-		// The raw ring was published above. Cancel only this device's frame
-		// motion, before scale, base slew, and the field's spatial lookup.
-		questcal::driverpose::Apply(pose, tf.frame.rotation, tf.frame.translation.v, 1.0, 0.0);
-		const protocol::SetDeviceTransform &cal = tf.calibration;
-		vr::HmdVector3d_t scaledPosition = questcal::driverpose::Scale(pose.vecPosition, cal.scale);
-		vr::HmdVector3d_t rotatedPosition = questcal::driverpose::RotateVector(
-			pose.qWorldFromDriverRotation, scaledPosition.v);
-		vr::HmdVector3d_t scaledOrigin = questcal::driverpose::Scale(
-			pose.vecWorldFromDriverTranslation, cal.scale);
-		vr::HmdVector3d_t rawWorld = questcal::driverpose::Add(rotatedPosition.v, scaledOrigin.v);
-		// Standable hides physical trackers by clearing their connection flag
-		// while they still publish valid Running_OK poses. Keep both calibration
-		// layers current for those poses; a disconnected device that is no longer
-		// tracking must still leave the smoothing state alone.
-		bool usablePosition = pose.poseIsValid &&
-			(pose.deviceIsConnected || pose.result == vr::TrackingResult_Running_OK) &&
-			questcal::numeric::IsBoundedVector3(rawWorld.v,
-				cal.scale * protocol::limits::MaxAbsPosePositionMeters);
-
-		// Base-calibration slew or snap, by generation (see Protocol.h). A read
-		// that fell back to lastGood may briefly carry an older generation; the
-		// next consistent read then snaps to where it was slewing, which is benign.
-		auto &bs = baseState[openVRID];
-		if (usablePosition)
-			alignfield::SlewTowardAt(cal.rotation, cal.translation.v, rawWorld.v, nowSeconds,
-				alignfield::BaseSlewLimits, tf.control.generation, bs);
-		else if (!bs.hasCurrent)
-			alignfield::SlewToward(cal.rotation, cal.translation.v, nowSeconds,
-				alignfield::BaseSlewLimits, tf.control.generation, bs);
-		// Invalid positions must not enter persistent smoothing state. Hold the
-		// previous transform and clock; recovery after a long gap snaps normally.
-		vr::HmdQuaternion_t baseRot = bs.rot;
-		vr::HmdVector3d_t baseTrans{ { bs.trans[0], bs.trans[1], bs.trans[2] } };
-
-		// Spatial correction field: blend the anchor deltas at this device's
-		// own base-calibrated position and left-compose the result onto the
-		// base calibration (world = delta(base(raw))). Blending on the
-		// device's own position keeps a static tripod tracker static while
-		// the user walks, and needs no cross-thread HMD position cache.
-		vr::HmdQuaternion_t calRot = baseRot;
-		vr::HmdVector3d_t calTrans = baseTrans;
-
-		auto &fs = fieldState[openVRID];
-		if (!field.enabled || field.anchorCount == 0)
-		{
-			fs.hasCurrent = false;   // re-enabling later snaps
-		}
-		else if (usablePosition)
-		{
-			vr::HmdVector3d_t rotatedRawWorld =
-				questcal::driverpose::RotateVector(baseRot, rawWorld.v);
-			vr::HmdVector3d_t basePos =
-				questcal::driverpose::Add(rotatedRawWorld.v, baseTrans.v);
-
-			alignfield::Evaluate(field, basePos.v, nowSeconds, fs);
-		}
-		// Invalid pose: keep the previous delta without advancing the
-		// slew clock; Evaluate's gap check snaps after a long loss.
-
-		if (fs.hasCurrent)
-		{
-			calRot = questcal::driverpose::Multiply(fs.rot, baseRot);
-			vr::HmdVector3d_t rotatedBase =
-				questcal::driverpose::RotateVector(fs.rot, baseTrans.v);
-			calTrans = questcal::driverpose::Add(rotatedBase.v, fs.trans);
-		}
-
-		// Apply the exact solver model to the composed raw-world pose, including
-		// scale on worldFromDriver translation and every linear derivative.
-		questcal::driverpose::Apply(
-			pose, calRot, calTrans.v, cal.scale, cal.timeOffset);
-	}
-	else
-	{
-		// Re-enabling later must snap, not slew from a stale state.
-		baseState[openVRID].hasCurrent = false;
-		fieldState[openVRID].hasCurrent = false;
-	}
+	questcal::driverpose::ApplyRuntimePose(pose, tf.calibration, tf.frame,
+        field, nowSeconds, baseState[openVRID], fieldState[openVRID]);
 
 	if (logFrame && LogFile)
 	{

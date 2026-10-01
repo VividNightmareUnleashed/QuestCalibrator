@@ -124,6 +124,31 @@ inline void CopyFrameSerialKeys(const uint64_t (&input)[vr::k_unMaxTrackedDevice
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id) output[id] = input[id];
 }
 
+// The post-validation publication copy has its own direct proof. Explicit
+// scalar assignments avoid the checker's expensive byte-level array copies.
+inline void CopyAlignmentField(const protocol::SetAlignmentField &input,
+	protocol::SetAlignmentField &output)
+{
+	output.enabled = input.enabled;
+	output.generation = input.generation;
+	output.anchorCount = input.anchorCount;
+	output.sigmaMeters = input.sigmaMeters;
+	for (uint32_t i = 0; i < protocol::SetAlignmentField::MaxAnchors; ++i)
+	{
+		const auto &source = input.anchors[i];
+		auto &destination = output.anchors[i];
+		for (uint32_t component = 0; component < 3; ++component)
+		{
+			destination.position[component] = source.position[component];
+			destination.translationDelta[component] = source.translationDelta[component];
+		}
+		destination.rotationDelta.w = source.rotationDelta.w;
+		destination.rotationDelta.x = source.rotationDelta.x;
+		destination.rotationDelta.y = source.rotationDelta.y;
+		destination.rotationDelta.z = source.rotationDelta.z;
+	}
+}
+
 inline bool ValidateAndSanitize(const protocol::SetRuntimeState &input,
 	protocol::SetRuntimeState &output)
 {
@@ -146,7 +171,7 @@ inline bool ValidateAndSanitize(const protocol::SetRuntimeState &input,
 	output.enabledMask = input.enabledMask;
 	output.hiddenMask = input.hiddenMask;
 	output.transform = transform;
-	output.field = field;
+	CopyAlignmentField(field, output.field);
 	output.frameProfileKey = input.frameProfileKey;
 	output.expectedSessionId = input.expectedSessionId;
 	CopyFrameSerialKeys(input.frameSerialKeys, output.frameSerialKeys);

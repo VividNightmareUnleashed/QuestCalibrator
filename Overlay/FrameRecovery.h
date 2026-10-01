@@ -46,6 +46,11 @@ inline bool RecoverTrackerFrames(const protocol::Response &response, uint64_t se
 		session == 0 || response.driverSessionId != session || profile == 0 ||
 		saved.frameProfileKey != profile)
 		return false;
+	for (uint32_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+        for (uint32_t j = i + 1; j < vr::k_unMaxTrackedDeviceCount; ++j)
+            if ((serials[i] != 0 && serials[i] == serials[j]) ||
+                (saved.frameSerialKeys[i] != 0 && saved.frameSerialKeys[i] == saved.frameSerialKeys[j]))
+                return false;
 	RecoveredFrames recovered{};
 	FrameSerialKeys keys{};
 	std::array<bool, vr::k_unMaxTrackedDeviceCount> used{};

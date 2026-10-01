@@ -1,4 +1,5 @@
 #include "IPCServer.h"
+#include "../common/IPCFramePolicy.h"
 #include "Logging.h"
 
 #include <algorithm>
@@ -452,7 +453,7 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 	// Only exactly-sized messages are dispatched: a short one would leave stale
 	// bytes from the previous request in the buffer. Logged apart from I/O
 	// errors, and only this connection closes.
-	if (err == 0 && bytesRead != sizeof(protocol::Request))
+	if (err == 0 && !questcal::ipc::RequestFrameComplete(err, bytesRead))
 	{
 		LOG("IPC client disconnecting: malformed request rejected (bytesRead: %u, expected: %u)",
 			bytesRead, static_cast<unsigned>(sizeof(protocol::Request)));

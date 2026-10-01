@@ -108,8 +108,8 @@ void SlewTowardAt(const vr::HmdQuaternion_t &targetRot, const double (&targetTra
 	double maxStep = limits.maxTranslationPerSec * dt;
 	double f = len > maxStep ? maxStep / len : 1.0;
 
-	// Rotation: cap the angular step, then nlerp (both quaternions are near
-	// identity and near each other, so nlerp error is negligible).
+	// Use the same fraction for device displacement and the shortest angular
+	// arc. Nlerp does not advance by f * angle and can exceed the angle cap.
 	{
 		double dot = state.rot.w * targetRot.w + state.rot.x * targetRot.x
 			+ state.rot.y * targetRot.y + state.rot.z * targetRot.z;
@@ -123,11 +123,22 @@ void SlewTowardAt(const vr::HmdQuaternion_t &targetRot, const double (&targetTra
 		if (angle > maxAngle)
 			f = std::min(f, maxAngle / angle);
 
+		double fromWeight = 1.0 - f, toWeight = f;
+		if (c < 1.0 - 1e-12)
+		{
+			const double halfAngle = angle * 0.5;
+			const double denominator = std::sin(halfAngle);
+			fromWeight = std::sin((1.0 - f) * halfAngle) / denominator;
+			toWeight = std::sin(f * halfAngle) / denominator;
+		}
+		// The near-identity branch avoids a vanishing sine denominator. Its
+		// nlerp angular error is below 1e-17 radians for unit inputs; libm and
+		// normalization rounding remain subject to the documented tolerance.
 		double q[4] = {
-			(1.0 - f) * state.rot.w + f * sign * targetRot.w,
-			(1.0 - f) * state.rot.x + f * sign * targetRot.x,
-			(1.0 - f) * state.rot.y + f * sign * targetRot.y,
-			(1.0 - f) * state.rot.z + f * sign * targetRot.z,
+			fromWeight * state.rot.w + toWeight * sign * targetRot.w,
+			fromWeight * state.rot.x + toWeight * sign * targetRot.x,
+			fromWeight * state.rot.y + toWeight * sign * targetRot.y,
+			fromWeight * state.rot.z + toWeight * sign * targetRot.z,
 		};
 		double norm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
 		state.rot = { q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm };

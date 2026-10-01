@@ -3,10 +3,11 @@
 // The Config record's JSON codec: envelope, profile fields, and the legacy
 // global settings that Config-only releases embedded alongside them. Free of
 // CalibrationContext and the registry so the harness can pin the write -> read
-// identity. The chaperone snapshot needs the OpenVR geometry types and is
-// parsed in Configuration.cpp.
+// identity. SettingsRecordJson.h shares these guarded primitives with the
+// settings and chaperone codecs.
 
 #include "ProfileValidation.h"
+#include "RecordBounds.h"
 
 #include <picojson.h>
 
@@ -30,7 +31,9 @@ inline double GetDouble(const picojson::value &v)
 {
 	if (!v.is<double>())
 		throw std::runtime_error("expected number");
-	return v.get<double>();
+	const double number = v.get<double>();
+	if (!std::isfinite(number)) throw std::runtime_error("expected finite number");
+	return number;
 }
 
 template<typename T>
@@ -93,7 +96,6 @@ inline PersistedRevision ReadPersistenceRevision(const picojson::object &obj)
 // schemas nest at most three levels; brackets inside strings do not count.
 inline void RejectExcessiveJsonNesting(const std::string &text)
 {
-	constexpr int maxDepth = 16;
 	int depth = 0;
 	bool inString = false;
 	bool escaped = false;
@@ -114,7 +116,7 @@ inline void RejectExcessiveJsonNesting(const std::string &text)
 			inString = true;
 		else if (c == '[' || c == '{')
 		{
-			if (++depth > maxDepth)
+			if (!IsValidJsonDepth(++depth))
 				throw std::runtime_error("record nesting is too deep");
 		}
 		else if (c == ']' || c == '}')
@@ -154,7 +156,15 @@ inline std::string ParseRecordJson(picojson::value &v, std::istream &stream)
 {
 	try
 	{
-		return picojson::parse(v, stream);
+        std::string text;
+        char chunk[4096];
+        while (stream) {
+            stream.read(chunk, sizeof chunk);
+            text.append(chunk, static_cast<size_t>(stream.gcount()));
+            if (!IsValidRecordByteCount(text.size())) return "record is too large";
+        }
+        RejectExcessiveJsonNesting(text);
+        return picojson::parse(v, text);
 	}
 	catch (const std::overflow_error &)
 	{
@@ -183,7 +193,7 @@ inline picojson::value ParseProfileEnvelope(std::istream &stream)
 	return arr[0];
 }
 
-inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
+inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 	LegacyProfileSettings &legacy, const picojson::object &obj, size_t maxAnchors)
 {
 	ProfileParseResult result;
@@ -462,6 +472,17 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &profile,
 	if (!ValidateProfileRecord(profile, maxAnchors, why))
 		throw std::runtime_error(why);
 	return result;
+}
+
+inline ProfileParseResult ParseProfileObject(ProfileRecord &destination,
+    LegacyProfileSettings &legacyDestination, const picojson::object &obj, size_t maxAnchors)
+{
+    ProfileRecord parsed = destination;
+    LegacyProfileSettings legacy = legacyDestination;
+    const auto result = ParseProfileObjectUnchecked(parsed, legacy, obj, maxAnchors);
+    destination = std::move(parsed);
+    legacyDestination = std::move(legacy);
+    return result;
 }
 
 inline void WriteProfile(const ProfileRecord &record,

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -167,6 +168,43 @@ void Warm(questcal::ContinuousAlignment &aligner, double offset)
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *))
 {
 	using CA = questcal::ContinuousAlignment;
+	{
+		LighthouseFrameWatch watch;
+		watch.Note(Sample(1, 10.0, 0.0), QpcSeconds, false);
+		watch.Note(Sample(2, 10.0, 0.0), QpcSeconds, true);
+		auto lost = Sample(1, 10.1, 0.0);
+		lost.deviceIsConnected = lost.poseIsValid = false;
+		watch.Note(lost, QpcSeconds, false);
+		auto station = Sample(2, 10.2, 0.0);
+		station.worldFromDriverTranslation[0] = 0.5;
+		watch.Note(station, QpcSeconds, true);
+		auto returned = Sample(1, 9.9, 0.0);
+		returned.worldFromDriverTranslation[0] = 0.5;
+		watch.Note(returned, QpcSeconds, false);
+		const bool staleRefused = watch.TakeMoves().empty();
+		returned.sampleTimeQpc = 10300000;
+		watch.Note(returned, QpcSeconds, false);
+		const auto moves = watch.TakeMoves();
+		check("lighthouse frame: a delayed return cannot consume the fresh return correction",
+			staleRefused && moves.size() == 1 && moves[0].returned &&
+			std::abs(moves[0].time - 10.3) < 1e-9, "");
+	}
+	{
+		LighthouseFrameWatch watch;
+		watch.Note(Sample(1, 10.0, 0.0), QpcSeconds, false);
+		auto stale = Sample(1, 9.9, 0.0);
+		stale.deviceIsConnected = stale.poseIsValid = false;
+		watch.Note(stale, QpcSeconds, false);
+		auto invalidTime = Sample(1, 10.0, 0.0);
+		invalidTime.sampleTimeQpc = (std::numeric_limits<int64_t>::max)();
+		watch.Note(invalidTime, QpcSeconds, false);
+		auto moved = Sample(1, 10.1, 0.0);
+		moved.worldFromDriverTranslation[0] = 0.5;
+		watch.Note(moved, QpcSeconds, false);
+		const auto moves = watch.TakeMoves();
+		check("lighthouse frame: delayed loss and invalid timestamps cannot erase a fresh frame move",
+			moves.size() == 1 && !moves[0].returned, "");
+	}
 	Deltas r = Replay([](int f, uint32_t) { return f >= 150 ? .15 : 0.; }, {0, 1});
 	check("recovery: 15 cm HMD/controller reset, no mounted tracker",
 		r.count == 1 && std::abs(r.last.translation.x() - .15) < 1e-8, "matching persistent pose steps, unchanged WFD");

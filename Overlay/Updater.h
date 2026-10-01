@@ -1,6 +1,7 @@
 #pragma once
 
 #include "UpdatePolicy.h"
+#include "UpdaterRevisionPolicy.h"
 
 #include <atomic>
 #include <array>
@@ -73,7 +74,7 @@ private:
 	// Requires `mutex`.
 	bool IsCurrentLocked(uint64_t checkRevision) const
 	{
-		return enabled && !stopping && revision == checkRevision;
+		return CurrentRevision(enabled, stopping, revision, checkRevision);
 	}
 	bool Publish(uint64_t revision, State state, const std::string &message,
 		const std::string &version = std::string(), uint64_t downloaded = 0,

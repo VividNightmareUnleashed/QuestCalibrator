@@ -1,8 +1,12 @@
 #include "CalibrationEngine.h"
+#include "EngineConfigValidation.h"
+#include "RobustPolicy.h"
+#include "SolverQualityPolicy.h"
 #include "../common/TransformLimits.h"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace questcal
 {
@@ -19,10 +23,7 @@ constexpr double MaxQuaternionNormSquaredError = 1e-3;
 // driver, so a malformed stream can span any time range.
 constexpr double MaxResampledPointCount = 1000000.0;
 
-inline double HuberWeight(double residual, double knee)
-{
-	return residual <= knee ? 1.0 : knee / residual;
-}
+using questcal::robust::HuberWeight;
 
 bool IsFinitePose(const PoseSample &sample)
 {
@@ -237,12 +238,17 @@ bool EstimateMotionGain(const std::vector<PoseSample> &refStream,
 	double end = std::min(refStream.back().time + offset, targetStream.back().time);
 	if (end - start < 5.0)
 		return false;
+	const double pointCount = std::floor((end - start) / dt) + 1.0;
+	if (!std::isfinite(pointCount) || pointCount < 0 || pointCount > MaxResampledPointCount)
+		return false;
+	const size_t gridCount = static_cast<size_t>(pointCount);
 
 	std::vector<PoseSample> refAt, tgtAt;
-	refAt.reserve(static_cast<size_t>((end - start) / dt + 1.0));
+	refAt.reserve(gridCount);
 	tgtAt.reserve(refAt.capacity());
-	for (double t = start; t <= end; t += dt)
+	for (size_t index = 0; index < gridCount; ++index)
 	{
+		const double t = start + static_cast<double>(index) * dt;
 		PoseSample a, b;
 		if (!CalibrationEngine::InterpolateAt(targetStream, t, config.maxInterpolationGap, b) ||
 		    !CalibrationEngine::InterpolateAt(refStream, t - offset, config.maxInterpolationGap, a))
@@ -472,7 +478,7 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 	R = Eigen::Quaterniond(R).normalized().toRotationMatrix();
 
 	double after = robustCost(R, t, d, C, s);
-	if (!std::isfinite(after) || after >= before)
+	if (!robust::CostImproved(before, after))
 		return false;
 	rotInOut = R;
 	transInOut = t;
@@ -485,7 +491,8 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 bool CalibrationEngine::InterpolateAt(const std::vector<PoseSample> &stream, double t,
                                       double maxGap, PoseSample &out)
 {
-	if (stream.size() < 2 || !std::isfinite(t) ||
+	if (stream.size() < 2 || stream.size() > solverresource::MaxRawSamples ||
+		!std::isfinite(maxGap) || maxGap <= 0 || !std::isfinite(t) ||
 	    t < stream.front().time || t > stream.back().time)
 		return false;
 
@@ -493,12 +500,19 @@ bool CalibrationEngine::InterpolateAt(const std::vector<PoseSample> &stream, dou
 	size_t lo = 0, hi = stream.size() - 1;
 	while (lo + 1 < hi)
 	{
-		size_t mid = (lo + hi) / 2;
+		size_t mid = lo + (hi - lo) / 2;
 		if (stream[mid].time < t) lo = mid; else hi = mid;
 	}
 
 	const PoseSample &a = stream[lo];
 	const PoseSample &b = stream[hi];
+	if (!std::isfinite(a.time) || !std::isfinite(b.time) || b.time <= a.time ||
+		!a.rot.coeffs().allFinite() || !b.rot.coeffs().allFinite() ||
+		std::abs(a.rot.squaredNorm() - 1) > MaxQuaternionNormSquaredError ||
+		std::abs(b.rot.squaredNorm() - 1) > MaxQuaternionNormSquaredError ||
+		!a.pos.allFinite() || !b.pos.allFinite() || !a.vel.allFinite() || !b.vel.allFinite() ||
+		!a.angVel.allFinite() || !b.angVel.allFinite())
+		return false;
 	if (std::abs(t - a.time) <= 1e-9)
 	{
 		out = a;
@@ -545,6 +559,12 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	};
 	if (refStream.size() < 8 || targetStream.size() < 8)
 		return refuse("fewer than 8 samples on a side");
+	if (!IsValidEngineConfig(config))
+		return refuse("invalid solver configuration");
+	if (refStream.size() > solverresource::MaxRawSamples ||
+		targetStream.size() > solverresource::MaxRawSamples ||
+		!IsValidStream(refStream) || !IsValidStream(targetStream))
+		return refuse("invalid or oversized pose stream");
 
 	double start = std::max(refStream.front().time, targetStream.front().time) + config.timeOffsetRange;
 	double end = std::min(refStream.back().time, targetStream.back().time) - config.timeOffsetRange;
@@ -556,14 +576,17 @@ bool CalibrationEngine::EstimateTimeOffset(const std::vector<PoseSample> &refStr
 	// by an exact IEEE division (a power-of-two divisor, or the identity).
 	const int subdiv = (config.timeOffsetStep >= 2e-3) ? 2 : 1;
 	const double dt = config.timeOffsetStep / subdiv;
-	size_t count = static_cast<size_t>((end - start) / dt);
+	const double rawCount = (end - start) / dt;
+	if (!std::isfinite(rawCount) || rawCount < 0 || rawCount > MaxResampledPointCount)
+		return refuse("the search is outside the resampling budget");
+	size_t count = static_cast<size_t>(rawCount);
 
 	int steps = static_cast<int>(config.timeOffsetRange / config.timeOffsetStep);
 	// The shared grid spans the union of every lag's window: `steps` whole steps
 	// of lead-in and the same of run-out.
 	double gridPointCount = static_cast<double>(count) +
 		2.0 * static_cast<double>(steps) * static_cast<double>(subdiv);
-	if (gridPointCount > MaxResampledPointCount)
+	if (!solverresource::GridFits(gridPointCount, steps))
 		return refuse("the search is outside the resampling budget");
 	size_t gridCount = static_cast<size_t>(gridPointCount);
 
@@ -679,6 +702,32 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 {
 	EngineResult result;
 	result.samplesUsed = samples.size();
+	if (!IsValidEngineConfig(config))
+	{
+		result.failure = EngineFailure::InvalidConfiguration;
+		result.message = "Invalid solver configuration.";
+		return result;
+	}
+	if (samples.size() > solverresource::MaxAlignedSamples)
+	{
+		result.failure = EngineFailure::ResourceLimit;
+		result.message = "Aligned samples exceed the solver budget.";
+		return result;
+	}
+	double previousAlignedTime = -std::numeric_limits<double>::infinity();
+	for (const auto &sample : samples)
+	{
+		// Each stream point is checked independently; equal inter-system times
+		// are permitted. The aligned sequence itself must increase strictly.
+		if (!std::isfinite(sample.time) || sample.time <= previousAlignedTime ||
+			!IsFinitePose(sample.ref) || !IsFinitePose(sample.target))
+		{
+			result.failure = EngineFailure::InvalidSamples;
+			result.message = "Invalid aligned pose sample.";
+			return result;
+		}
+		previousAlignedTime = sample.time;
+	}
 	if (samples.size() < 8)
 	{
 		result.failure = EngineFailure::NotEnoughSamples;
@@ -1113,13 +1162,13 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	result.translationRmsMeters = transRms;
 
 	// ---- validation --------------------------------------------------------
+	const auto quality = JudgeSolverQuality(result.axisSpread, result.transEigRatio,
+		result.rotationRmsDeg, result.translationRmsMeters, config.minAxisSpread,
+		config.minTransEigRatio, config.maxRotationRms, config.maxTranslationRms);
 	if (!result.rotation.coeffs().allFinite() ||
 	    !result.translation.allFinite() ||
 	    !std::isfinite(result.scale) ||
-	    !std::isfinite(result.rotationRmsDeg) ||
-	    !std::isfinite(result.translationRmsMeters) ||
-	    !std::isfinite(result.axisSpread) ||
-	    !std::isfinite(result.transEigRatio))
+	    quality == SolverQuality::NonFinite)
 	{
 		result.failure = EngineFailure::NonFinite;
 		result.message = "Calibration solve produced non-finite values.";
@@ -1132,28 +1181,28 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 		result.message = "Calibration solve produced a transform outside the supported range.";
 		return result;
 	}
-	if (result.axisSpread < config.minAxisSpread)
+	if (quality == SolverQuality::SingleAxis)
 	{
 		result.failure = EngineFailure::SingleAxis;
 		result.message = "Rotation happened around only one axis -- tilt and roll are unconstrained. "
 		                 "Rotate the devices together around two different axes and recalibrate.";
 		return result;
 	}
-	if (result.transEigRatio < config.minTransEigRatio)
+	if (quality == SolverQuality::TranslationUnobservable)
 	{
 		result.failure = EngineFailure::TranslationUnobservable;
 		result.message = "Not enough varied rotation to pin the position along every direction -- "
 		                 "rotate the devices together around at least two different axes and recalibrate.";
 		return result;
 	}
-	if (result.rotationRmsDeg > config.maxRotationRms)
+	if (quality == SolverQuality::RotationResidual)
 	{
 		result.failure = EngineFailure::RotationResidual;
 		result.message = "Rotation residual too high (" + std::to_string(result.rotationRmsDeg).substr(0, 4) +
 		                 " deg) -- tracking is jittery or the devices are not rigidly attached.";
 		return result;
 	}
-	if (result.translationRmsMeters > config.maxTranslationRms)
+	if (quality == SolverQuality::PositionResidual)
 	{
 		result.failure = EngineFailure::PositionResidual;
 		result.message = "Position residual too high (" +
@@ -1172,6 +1221,19 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
                                       const EngineConfig &config)
 {
 	EngineResult failure;
+	if (!IsValidEngineConfig(config))
+	{
+		failure.failure = EngineFailure::InvalidConfiguration;
+		failure.message = "Invalid solver configuration.";
+		return failure;
+	}
+	if (refStream.size() > solverresource::MaxRawSamples ||
+		targetStream.size() > solverresource::MaxRawSamples)
+	{
+		failure.failure = EngineFailure::ResourceLimit;
+		failure.message = "Pose streams exceed the solver budget.";
+		return failure;
+	}
 	if (refStream.size() < 8 || targetStream.size() < 8)
 	{
 		failure.failure = EngineFailure::NotEnoughSamples;
@@ -1238,9 +1300,8 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	{
 		std::vector<AlignedSample> thinned;
 		thinned.reserve(config.maxAlignedSamples);
-		double stride = static_cast<double>(aligned.size()) / static_cast<double>(config.maxAlignedSamples);
 		for (size_t i = 0; i < config.maxAlignedSamples; ++i)
-			thinned.push_back(aligned[static_cast<size_t>(i * stride)]);
+			thinned.push_back(aligned[solverresource::ThinIndex(i, aligned.size(), config.maxAlignedSamples)]);
 		aligned.swap(thinned);
 	}
 

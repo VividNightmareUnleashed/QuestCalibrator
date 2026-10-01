@@ -18,6 +18,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'FilesystemPolicy.ps1')
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $outDir   = if ($OutDir) { $OutDir } else { Join-Path $PSScriptRoot 'out' }
@@ -61,7 +62,8 @@ if (-not $stageRoot.StartsWith($outDir.TrimEnd('\', '/') + [IO.Path]::DirectoryS
     [StringComparison]::OrdinalIgnoreCase)) {
     throw 'The staging directory must stay inside the package output directory.'
 }
-if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
+Assert-QuestcalTree $stageRoot 'stage'
+if (Test-Path -LiteralPath $stageRoot) { Remove-QuestcalTree $stageRoot 'stage' }
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
 # app/
@@ -85,6 +87,7 @@ Copy-Item $driverDll $driverBin
 # scripts + license + readme at package root
 Copy-Item (Join-Path $PSScriptRoot 'Install.ps1')        $stageDir
 Copy-Item (Join-Path $PSScriptRoot 'Uninstall.ps1')      $stageDir
+Copy-Item (Join-Path $PSScriptRoot 'FilesystemPolicy.ps1') $stageDir
 Copy-Item (Join-Path $PSScriptRoot 'README-INSTALL.txt') $stageDir
 Copy-Item (Join-Path $repoRoot 'LICENSE')                $stageDir
 Copy-Item (Join-Path $repoRoot 'THIRD-PARTY-NOTICES.txt') $stageDir
@@ -146,4 +149,3 @@ $zip = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
 try { $zip.Entries | ForEach-Object { Write-Host "  $($_.FullName)" } } finally { $zip.Dispose() }
 Write-Host ""
 Write-Host "Test: extract the zip, right-click Install.ps1 -> Run with PowerShell (as admin)."
-

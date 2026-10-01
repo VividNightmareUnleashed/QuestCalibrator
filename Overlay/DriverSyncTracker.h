@@ -44,7 +44,8 @@ struct DriverSyncTracker
 	// never deliver a verdict.
 	bool NoteVerdict(uint64_t sequence, bool synchronized)
 	{
-		if (sequence < latestStateChangeSequence)
+		if (sequence == 0 || sequence > latestSequence ||
+			sequence < latestStateChangeSequence || sequence < lastAcceptedVerdictSequence)
 			return false;
 		lastAcceptedVerdictSequence = sequence;
 		lastVerdictRefused = !synchronized;

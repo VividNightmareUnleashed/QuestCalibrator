@@ -1,5 +1,6 @@
 ﻿#include "stdafx.h"
 #include "IPCClient.h"
+#include "../common/IPCFramePolicy.h"
 
 #include <string>
 
@@ -185,7 +186,7 @@ protocol::Response IPCClient::ReceiveConnected()
 	ReadFile(pipe, &response, sizeof response, nullptr, &ov);
 	DWORD bytesRead = AwaitOverlapped(ov, "reading IPC response");
 
-	if (bytesRead != sizeof response)
+	if (!questcal::ipc::ResponseFrameComplete(bytesRead))
 	{
 		throw std::runtime_error("Invalid IPC response with size " + std::to_string(bytesRead));
 	}

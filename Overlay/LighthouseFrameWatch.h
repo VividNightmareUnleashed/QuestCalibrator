@@ -149,6 +149,13 @@ public:
 		if (s.deviceId >= vr::k_unMaxTrackedDeviceCount)
 			return;
 		Device &d = devices[s.deviceId];
+		const double sampleTime = RingSampleTime(s, qpcToSeconds);
+		if (!std::isfinite(qpcToSeconds) || qpcToSeconds <= 0.0 ||
+			!questcal::numeric::IsFiniteBounded(s.poseTimeOffset, protocol::limits::MaxAbsTimeOffsetSeconds) ||
+			!questcal::numeric::IsFiniteBounded(sampleTime, protocol::limits::MaxAbsPoseTimestampSeconds) ||
+			sampleTime <= d.lastSeenTime)
+			return;
+		d.lastSeenTime = sampleTime;
 		const bool tracking = s.poseIsValid &&
 			s.trackingResult == static_cast<uint32_t>(vr::TrackingResult_Running_OK) &&
 			IsUsableRingSample(s, qpcToSeconds);
@@ -167,7 +174,8 @@ public:
 		Device now;
 		now.valid = true;
 		now.baseStation = baseStation;
-		now.time = RingSampleTime(s, qpcToSeconds);
+		now.time = sampleTime;
+		now.lastSeenTime = sampleTime;
 		now.wfdRot = p.wfdRot;
 		now.wfdTrans = p.wfdTrans;
 		now.drvRot = p.drvRot;
@@ -177,6 +185,7 @@ public:
 		now.mark = nextTransition;
 
 		latestTime = (std::max)(latestTime, now.time);
+		ExpireInferences();
 		if (!baseStation && trackingSince > 1e299)
 			trackingSince = now.time;
 		const bool changed = (d.valid || d.away) &&
@@ -220,6 +229,10 @@ public:
 		out.swap(moves);
 		return out;
 	}
+
+    // Overflow invalidates completeness: callers must stop applying the
+    // profile until recalibration, rather than silently use partial frames.
+    bool TakeMoveOverflow() { const bool out = moveOverflow; moveOverflow = false; return out; }
 
 	// True the first time a frame move is asked about: its devices report it
 	// one by one, often across two ticks, and it is acted on once.
@@ -283,6 +296,7 @@ public:
 		open.clear();
 		closed.clear();
 		moves.clear();
+        moveOverflow = false;
 		transitions.clear();
 		inferences.clear();
 		frameMoves.clear();
@@ -355,6 +369,7 @@ private:
 		bool away = false;     // disconnected after a valid sample, which is kept
 		uint64_t mark = 0;     // the next transition's sequence number at this sample
 		double time = 0.0;
+		double lastSeenTime = -1e300; // includes loss samples; reset on identity change
 		Eigen::Quaterniond wfdRot{ 1, 0, 0, 0 };
 		Eigen::Vector3d wfdTrans{ 0, 0, 0 };
 		Eigen::Quaterniond drvRot{ 1, 0, 0, 0 };
@@ -502,7 +517,7 @@ private:
 
 		for (size_t i = 0; i < inferences.size();)
 		{
-			if (Leads(inferences[i]))
+			if (inferences[i].move.time >= latestTime - config.inferSeconds && Leads(inferences[i]))
 			{
 				Hand(inferences[i].move);
 				inferences.erase(inferences.begin() + static_cast<std::ptrdiff_t>(i));
@@ -570,6 +585,8 @@ private:
 	{
 		if (moves.size() < MaxPendingMoves)
 			moves.push_back(m);
+        else
+            moveOverflow = true;
 	}
 
 	void ExpireInferences()
@@ -589,6 +606,7 @@ private:
 	std::vector<Change> open;
 	std::vector<Report> closed;
 	std::vector<Move> moves;
+    bool moveOverflow = false;
 	std::vector<Transition> transitions;
 	std::vector<Inference> inferences;
 	std::vector<Move> frameMoves;
