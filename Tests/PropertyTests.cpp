@@ -25,7 +25,7 @@
 // fraction keeps the device inside its translation and rotation budgets and
 // never overshoots, in exact rational arithmetic and with the angle it is
 // given. Here the same three claims are checked of the doubles the driver
-// runs, the rotation measured on the quaternion nlerp actually produces.
+// runs, the rotation measured on the quaternion the driver actually produces.
 namespace
 {
 using Check = void (*)(const char *, bool, const char *);
@@ -274,9 +274,11 @@ void SlewProperties(Check check, int trials, uint32_t propertySeed)
 			worstRotSmall = (std::max)(worstRotSmall, rotRatio);
 		if (!std::isfinite(s.rot.w) || !questcalfuzz::UnitQuat(s.rot) || !questcalfuzz::Finite3(s.trans))
 			++finiteFails;
-		// Translation to rounding; rotation to what nlerp adds over slerp at
-		// the corrections the driver slews (a few degrees), a small fraction.
-		if (transRatio > 1.0 + 1e-9 || (spread <= 0.05 && rotRatio > 1.0 + 1e-4))
+		// Both budgets hold across the full angular range, within double
+		// rounding. Use an absolute angular tolerance for very small steps,
+		// where dividing by the budget amplifies cancellation in the angle.
+		if (transRatio > 1.0 + 1e-9 ||
+			turned > limits.maxRotationPerSec * dt * (1.0 + 1e-9) + 1e-10)
 			++budgetFails;
 		if (Distance(p1, goalPoint) > Distance(p0, goalPoint) + 1e-12 ||
 			AngleBetween(s.rot, targetRot) > AngleBetween(before.rot, targetRot) + 1e-9)
@@ -315,11 +317,9 @@ void SlewProperties(Check check, int trials, uint32_t propertySeed)
 	check("slew: floating point keeps the proved budgets", budgetFails + overshootFails + convergeFails +
 		snapFails + finiteFails == 0, detail);
 
-	// Where nlerp runs ahead of slerp: a step of three quarters of what
-	// remains, at the largest step each profile allows (a quarter-second gap).
-	// For a remaining half-angle t, nlerp at fraction f turns 2 atan2(f sin t,
-	// 1 - f + f cos t) where slerp turns 2 f t: about t^2/48 over the budget at
-	// f = 3/4, its worst. The step must be exactly that.
+	// A three-quarter step at each profile's largest allowed gap reproduces
+	// the old nlerp overshoot. The corrected interpolation must advance by
+	// exactly the angular budget instead of reproducing that overshoot.
 	double worstField = 0.0, worstBase = 0.0;
 	bool bounded = true;
 	for (const alignfield::SlewLimits *limits : { &alignfield::FieldSlewLimits, &alignfield::BaseSlewLimits })
@@ -335,11 +335,10 @@ void SlewProperties(Check check, int trials, uint32_t propertySeed)
 		alignfield::SlewTowardAt(target, none, origin, 1.0 + limits->maxGapSeconds, *limits, 0, s);
 		const double ratio = AngleBetween({ 1.0, 0.0, 0.0, 0.0 }, s.rot) / maxAngle;
 		(limits == &alignfield::FieldSlewLimits ? worstField : worstBase) = ratio;
-		const double nlerp = 2.0 * std::atan2(0.75 * std::sin(half), 0.25 + 0.75 * std::cos(half)) / maxAngle;
-		bounded = bounded && std::abs(ratio - nlerp) <= 1e-9 && ratio <= 1.0 + half * half / 47.0;
+		bounded = bounded && std::abs(ratio - 1.0) <= 1e-9;
 	}
 	snprintf(detail, sizeof detail, "worst step/budget: field %.9f, base calibration %.12f", worstField, worstBase);
-	check("slew: nlerp overshoots the rotation budget by about t^2/48 at most", bounded, detail);
+	check("slew: slerp keeps a three-quarter step within the rotation budget", bounded, detail);
 }
 
 // ---------------------------------------------------------------------------
