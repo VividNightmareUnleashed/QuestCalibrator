@@ -71,7 +71,9 @@ jobs:
         run: |
           $checks = pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -ListChecks -SourceRoot $PWD -Shard ${{ matrix.shard }}/6 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Listing the checks of this share failed.' }
-          "genmc=$(([bool]@($checks | Where-Object Tool -eq 'genmc')).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          foreach ($tool in 'genmc', 'lean') {
+            "$tool=$(([bool]@($checks | Where-Object Tool -eq $tool)).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Java for TLC
         uses: actions/setup-java@v4
@@ -88,16 +90,27 @@ jobs:
 
       - name: Restore Lean
         id: lean-cache
+        if: steps.share.outputs.lean == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.elan
           key: elan-${{ runner.os }}-${{ env.LEAN_TOOLCHAIN }}
 
       - name: Install Lean
-        if: steps.lean-cache.outputs.cache-hit != 'true'
+        if: steps.share.outputs.lean == 'true' && steps.lean-cache.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
           sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$LEAN_TOOLCHAIN" > /dev/null
+
+      # Lean's first run on a fresh runner is far slower than any later one:
+      # the first proof of each share failed under check.ps1's two-minute
+      # limit while every later one passed. A throwaway import takes that run.
+      - name: Warm up Lean
+        if: steps.share.outputs.lean == 'true'
+        timeout-minutes: 15
+        run: |
+          echo 'import Lean' > "$RUNNER_TEMP/warm-up.lean"
+          ~/.elan/bin/lean "$RUNNER_TEMP/warm-up.lean"
 
       # GenMC is built from source, which takes a long while, so the image is
       # cached by its Dockerfile's hash.
