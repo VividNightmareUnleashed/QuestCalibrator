@@ -195,6 +195,11 @@ function Invoke-MSBuildValidation {
         else {
             $arguments += '/t:Rebuild'
         }
+        # Clang-Tidy reports nothing from a header unless its path matches this
+        # filter, and most of the overlay's logic is header-only. It names the
+        # first-party folders by their last component, so a header reached
+        # through ..\lib\ (Eigen, OpenVR, ImGui) stays out of it.
+        $headerFilter = '.*[\\/]([Dd]river|[Oo]verlay|[Cc]ommon|[Tt]ests|[Ff]uzz)[\\/][^\\/]+$'
         $arguments += @(
             "/p:ClangTidyToolPath=$clangTidyDirectory",
             # The Windows SDK otherwise uses MSVC's non-constant offsetof
@@ -203,7 +208,8 @@ function Invoke-MSBuildValidation {
             '/p:RunCppAnalysis=true',
             '/p:EnableMicrosoftCodeAnalysis=false',
             '/p:EnableClangTidyCodeAnalysis=true',
-            "/p:ClangTidyChecks=$checks"
+            "/p:ClangTidyChecks=$checks",
+            "/p:ClangTidyHeaderFilter=$headerFilter"
         )
     }
 
@@ -219,7 +225,6 @@ function Invoke-MSBuildValidation {
         # MSBuild writes the canonical diagnostics to per-project ClangTidy
         # logs; console formatting varies between PowerShell/MSBuild versions.
         # Third-party sources remain outside the policy boundary.
-        $rootPattern = [regex]::Escape($Root.TrimEnd('\', '/'))
         $projectDirectories = @($(if ($Project) { $Project } else { 'Driver', 'Overlay', 'Tests' }) | ForEach-Object { Join-Path $Root $_ })
         $logs = @(
             Get-ChildItem -LiteralPath $projectDirectories `
@@ -232,11 +237,14 @@ function Invoke-MSBuildValidation {
             $directory = $_ + [System.IO.Path]::DirectorySeparatorChar
             -not ($logs | Where-Object { $_.FullName.StartsWith($directory, [StringComparison]::OrdinalIgnoreCase) })
         })
-        $analyzed = @(
-            $logs |
-                ForEach-Object { Get-Content -LiteralPath $_.FullName } |
-                Where-Object { $_ -match '^\[\d+/\d+\] Processing file ' }
-        ).Count
+        # Clang-Tidy numbers its files ("[2/7] Processing file ...") only when it
+        # has more than one, so a log without those lines is one analyzed file.
+        $analyzed = 0
+        foreach ($log in $logs) {
+            $processed = @(Get-Content -LiteralPath $log.FullName |
+                Where-Object { $_ -match '^\[\d+/\d+\] Processing file ' }).Count
+            $analyzed += [Math]::Max(1, $processed)
+        }
         if ($unanalyzed.Count -gt 0 -or $analyzed -eq 0) {
             Write-Output ('Clang-Tidy did not analyze every project (no log from: ' +
                 (($unanalyzed | ForEach-Object { Split-Path -Leaf $_ }) -join ', ') +
@@ -250,12 +258,24 @@ function Invoke-MSBuildValidation {
         }
         Write-Output ("Clang-Tidy analyzed $analyzed translation unit(s) in $($logs.Count) project(s)" +
             $(if ($share) { " (share $Shard of $Project)." } else { '.' }))
+        # A header's path keeps the ..\ it was included through, so each finding's
+        # path is resolved before it is judged first-party, and a header finding
+        # every translation unit including it repeats is listed once. The
+        # VirtualQuest scenarios build into the harness, so their findings count.
+        $firstPartyPrefixes = @('Driver', 'Overlay', 'common', 'Tests', 'VirtualQuest\Tests') |
+            ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $Root $_)).TrimEnd('\') + '\' }
         $findings = @(
             $logs |
                 ForEach-Object { Get-Content -LiteralPath $_.FullName } |
-                Where-Object {
-                    $_ -match "^$rootPattern[\\/](Driver|Overlay|common|Tests)[\\/].*:\d+:\d+: (warning|error):"
-                }
+                ForEach-Object {
+                    if ($_ -notmatch '^(?<path>.+?)(?<rest>:\d+:\d+: (warning|error):.*)$') { return }
+                    $rest = $Matches.rest
+                    try { $path = [System.IO.Path]::GetFullPath($Matches.path) } catch { return }
+                    if ($firstPartyPrefixes | Where-Object { $path.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) {
+                        $path + $rest
+                    }
+                } |
+                Sort-Object -Unique
         )
         if ($findings.Count -gt 0) {
             Write-Output "Clang-Tidy reported $($findings.Count) first-party finding(s):"

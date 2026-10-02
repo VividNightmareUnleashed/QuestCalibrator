@@ -2,8 +2,9 @@ name: Clang-Tidy
 
 # Visual Studio's integrated Clang-Tidy over every first-party translation unit:
 # tools\validate-cpp.ps1 -Mode Analyze compiles each file with its own MSVC
-# defines, include paths and precompiled header and analyzes it. The tree has no
-# findings, so any first-party finding fails the job: it is new. The validation
+# defines, include paths and precompiled header and analyzes it, and reports
+# what it finds in the first-party headers those files include as well. The tree
+# has no findings, so any first-party finding fails the job: it is new. The validation
 # workflow calls this on pushes and pull requests, and the release workflow on
 # the tag before it drafts a release, so the analysis no longer has to be run by
 # hand.
@@ -14,8 +15,9 @@ name: Clang-Tidy
 # analyzed exactly the files it selected, so the shares cover every file between
 # them. The harness runs in the validation and release builds, not here. With
 # the VIRTUALQUEST_DEPLOY_KEY secret (passed on by the caller) the test shares
-# include the simulated headset's scenarios, as locally; without it the public
-# suite is analyzed. Third-party sources are outside the check either way.
+# include the simulated headset's scenarios, as locally, and their findings fail
+# the job too; without it the public suite is analyzed. Third-party sources and
+# headers are outside the check either way.
 on:
   workflow_call:
     inputs:
@@ -37,7 +39,8 @@ jobs:
       # Every share reports, so one share's findings do not hide another's.
       fail-fast: false
       matrix:
-        # About a dozen files a runner: 7 driver, 30 overlay and 35 test files.
+        # About a dozen files a runner: 7 driver, 30 overlay and 36 test files
+        # (33 without the simulated headset's).
         include:
           - { project: Driver, shard: 1/1 }
           - { project: Overlay, shard: 1/2 }
