@@ -1,6 +1,7 @@
 #include "../Driver/ServerTrackedDeviceProvider.h"
 #include "../Driver/ProtocolValidation.h"
 #include "../Driver/PoseTransform.h"
+#include "../Driver/Logging.h"
 #include "../Overlay/TrackerFrameCorrections.h"
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/DriverSession.h"
@@ -9,8 +10,10 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <limits>
 #include <memory>
+#include <string>
 
 namespace
 {
@@ -577,6 +580,47 @@ void ContinuousSpace(Check check)
 		pass && diagnostics.observations > 0 && !engine.PollReanchor(correction) &&
 		(!engine.PollCorrection(correction) || correction.translation.norm() < 1e-9), "");
 }
+
+void DeferredFrameLog(Check check)
+{
+	// A pose callback only records a frame change; the IPC thread's next
+	// request writes it, so a pose never waits on the log file.
+	FILE *const saved = LogFile;
+	const auto path = std::filesystem::temp_directory_path() / "questcal-frame-log-test.txt";
+	FILE *file = nullptr;
+	bool pass = fopen_s(&file, path.string().c_str(), "w+") == 0 && file != nullptr;
+	std::string written;
+	if (file)
+	{
+		LogFile = file;
+		auto driver = std::make_unique<ServerTrackedDeviceProvider>();
+		protocol::SetRuntimeState state;
+		state.enabledMask = uint64_t{1} << 9;
+		state.frames[9].translation.v[0] = 0.25;
+		pass &= driver->TrySetRuntimeState(state);
+		driver->SetPoseTimeForTest(20);
+		for (int i = 0; i < 2; ++i)
+		{
+			auto pose = DriverPose(Sample(9, 20 + i * 0.01, V(0.1, 1.5, 0.2)));
+			driver->HandleDevicePoseUpdated(9, pose);
+		}
+		std::fseek(file, 0, SEEK_END);
+		pass &= std::ftell(file) == 0;
+		pass &= driver->TrySetRuntimeState(state) && driver->TrySetRuntimeState(state);
+		std::fflush(file);
+		std::fseek(file, 0, SEEK_SET);
+		char buffer[1024] = {};
+		written.assign(buffer, std::fread(buffer, 1, sizeof buffer - 1, file));
+		LogFile = saved;
+		std::fclose(file);
+		std::error_code ignored;
+		std::filesystem::remove(path, ignored);
+	}
+	const size_t first = written.find("frame applied device 9 ");
+	check("driver: frame-change log lines are written off the pose callback, once per change",
+		pass && first != std::string::npos && written.find("frame applied", first + 1) == std::string::npos,
+		written.c_str());
+}
 } // namespace
 
 void RunTrackerFrameCorrectionScenarios(Check check)
@@ -589,4 +633,5 @@ void RunTrackerFrameCorrectionScenarios(Check check)
 	RecalibrationSpace(check);
 	RestartRecovery(check);
 	RecoveryProtocolGate(check);
+	DeferredFrameLog(check);
 }

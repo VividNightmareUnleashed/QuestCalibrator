@@ -91,6 +91,24 @@ private:
 	alignfield::EvalState baseState[vr::k_unMaxTrackedDeviceCount];
 	protocol::FrameCorrection lastLoggedFrame[vr::k_unMaxTrackedDeviceCount];
 
+	// A device's pose right after its frame correction changed, recorded by
+	// its pose callback and written to the log by the IPC thread
+	// (FlushFrameLog), so a pose callback never waits on the log file. The flag
+	// is set only while a record waits to be written.
+	struct FrameLogRecord
+	{
+		long long qpc = 0;
+		int connected = 0;
+		uint32_t generation = 0;
+		vr::HmdVector3d_t inputPosition{};
+		vr::HmdQuaternion_t inputRotation{};
+		vr::HmdVector3d_t outputPosition{};
+		vr::HmdQuaternion_t outputRotation{};
+	};
+	FrameLogRecord frameLog[vr::k_unMaxTrackedDeviceCount];
+	std::atomic<bool> frameLogReady[vr::k_unMaxTrackedDeviceCount] = {};
+	void FlushFrameLog();
+
 	uint64_t driverSessionId = 0;
 	protocol::SetRuntimeState recoveryState;
 	double qpcToSeconds = 0.0;

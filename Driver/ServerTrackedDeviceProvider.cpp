@@ -80,6 +80,8 @@ void ServerTrackedDeviceProvider::Teardown()
 	// away, or a pose thread still publishing would write into an unmapped view.
 	bool quiesced = DisableHooks();
 	poseRingReady.store(false, std::memory_order_release);
+	// The IPC thread has stopped; write what it would have.
+	FlushFrameLog();
 	if (quiesced)
 		poseRing.Close();
 	else
@@ -124,8 +126,30 @@ void ServerTrackedDeviceProvider::RunFrame()
 	lastPoseRingCreateAttemptMs = GetTickCount64();
 }
 
+void ServerTrackedDeviceProvider::FlushFrameLog()
+{
+	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+	{
+		if (!frameLogReady[id].load(std::memory_order_acquire))
+			continue;
+		const FrameLogRecord record = frameLog[id];
+		frameLogReady[id].store(false, std::memory_order_release);
+		if (!LogFile)
+			continue;
+		LOG("frame applied device %u QPC %lld connected %d: raw p %.6f %.6f %.6f q %.6f %.6f %.6f %.6f; "
+			"output before hiding p %.6f %.6f %.6f q %.6f %.6f %.6f %.6f (base generation %u)",
+			id, record.qpc, record.connected,
+			record.inputPosition.v[0], record.inputPosition.v[1], record.inputPosition.v[2],
+			record.inputRotation.w, record.inputRotation.x, record.inputRotation.y, record.inputRotation.z,
+			record.outputPosition.v[0], record.outputPosition.v[1], record.outputPosition.v[2],
+			record.outputRotation.w, record.outputRotation.x, record.outputRotation.y, record.outputRotation.z,
+			record.generation);
+	}
+}
+
 bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform)
 {
+	FlushFrameLog();
 	protocol::SetDeviceTransform sanitized;
 	if (!questcal::driverinput::ValidateAndSanitize(newTransform, sanitized))
 	{
@@ -144,6 +168,9 @@ bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDevic
 
 bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeState &newState)
 {
+	// The overlay sends its complete state about once a second, so a frame
+	// change reaches the log within about that.
+	FlushFrameLog();
 	if (newState.expectedSessionId != 0 && newState.expectedSessionId != driverSessionId)
 		return false;
 	protocol::SetRuntimeState sanitized;
@@ -222,8 +249,9 @@ void ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	DeviceTransform tf;
 	protocol::SetAlignmentField field;
 	ReadRuntimeState(openVRID, tf, field);
-	const bool logFrame = tf.control.enabled && pose.poseIsValid &&
-		!(lastLoggedFrame[openVRID] == tf.frame);
+	const bool logFrame = LogFile && tf.control.enabled && pose.poseIsValid &&
+		!(lastLoggedFrame[openVRID] == tf.frame) &&
+		!frameLogReady[openVRID].load(std::memory_order_acquire);
 	vr::HmdVector3d_t inputPosition{};
 	vr::HmdQuaternion_t inputRotation{};
 	if (logFrame)
@@ -242,17 +270,19 @@ void ServerTrackedDeviceProvider::HandleDevicePoseUpdated(uint32_t openVRID, vr:
 	questcal::driverpose::ApplyRuntimePose(pose, tf.calibration, tf.frame,
         field, nowSeconds, baseState[openVRID], fieldState[openVRID]);
 
-	if (logFrame && LogFile)
+	if (logFrame)
 	{
+		// Written by the IPC thread on its next request (FlushFrameLog).
+		auto &record = frameLog[openVRID];
 		const auto rotated = questcal::driverpose::RotateVector(pose.qWorldFromDriverRotation, pose.vecPosition);
-		const auto output = questcal::driverpose::Add(rotated.v, pose.vecWorldFromDriverTranslation);
-		const auto rotation = questcal::driverpose::Multiply(pose.qWorldFromDriverRotation, pose.qRotation);
-		LOG("frame applied device %u QPC %lld connected %d: raw p %.6f %.6f %.6f q %.6f %.6f %.6f %.6f; "
-			"output before hiding p %.6f %.6f %.6f q %.6f %.6f %.6f %.6f (base generation %u)",
-			openVRID, static_cast<long long>(now.QuadPart), pose.deviceIsConnected,
-			inputPosition.v[0], inputPosition.v[1], inputPosition.v[2],
-			inputRotation.w, inputRotation.x, inputRotation.y, inputRotation.z,
-			output.v[0], output.v[1], output.v[2], rotation.w, rotation.x, rotation.y, rotation.z, tf.control.generation);
+		record.qpc = static_cast<long long>(now.QuadPart);
+		record.connected = pose.deviceIsConnected;
+		record.generation = tf.control.generation;
+		record.inputPosition = inputPosition;
+		record.inputRotation = inputRotation;
+		record.outputPosition = questcal::driverpose::Add(rotated.v, pose.vecWorldFromDriverTranslation);
+		record.outputRotation = questcal::driverpose::Multiply(pose.qWorldFromDriverRotation, pose.qRotation);
+		frameLogReady[openVRID].store(true, std::memory_order_release);
 		lastLoggedFrame[openVRID] = tf.frame;
 	}
 
