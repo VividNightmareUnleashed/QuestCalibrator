@@ -67,6 +67,18 @@ def raw_linux(args, assurance, identity, expected):
     assurance.validate(record, identity, expected, required={"contracts"}, release=False,
                        require_negative_controls=True)
     extension = load(args.extension)
+    validate_extension(extension, assurance, identity, expected)
+    record["suites"]["inventory-extension"] = extension["suites"]["inventory-extension"]
+    binary = load(args.binary)
+    assurance.validate(binary, identity, expected, required={"binary-correspondence"}, release=False,
+                       require_negative_controls=True)
+    if binary.get("negativeControls") != binary["suites"]["binary-correspondence"]["negativeControls"]:
+        raise ValueError("Binary execution and accepted negative controls disagree")
+    record["suites"]["binary-correspondence"] = binary["suites"]["binary-correspondence"]
+    return record
+
+
+def validate_extension(extension, assurance, identity, expected):
     assurance.validate(extension, identity, expected, required={"inventory-extension"}, release=False,
                        require_negative_controls=True)
     executions = extension.get("executions", {})
@@ -81,14 +93,6 @@ def raw_linux(args, assurance, identity, expected):
     if (capture_controls != extension["suites"]["inventory-extension"]["negativeControls"]["captureMutants"]
             or [{k:row[k] for k in ("name", "status", "method")} for row in capture_controls] != executions["capture"].get("mutants")):
         raise ValueError("Capture execution and accepted negative controls disagree")
-    record["suites"]["inventory-extension"] = extension["suites"]["inventory-extension"]
-    binary = load(args.binary)
-    assurance.validate(binary, identity, expected, required={"binary-correspondence"}, release=False,
-                       require_negative_controls=True)
-    if binary.get("negativeControls") != binary["suites"]["binary-correspondence"]["negativeControls"]:
-        raise ValueError("Binary execution and accepted negative controls disagree")
-    record["suites"]["binary-correspondence"] = binary["suites"]["binary-correspondence"]
-    return record
 
 
 def proof_suite(paths, quest, virtual):

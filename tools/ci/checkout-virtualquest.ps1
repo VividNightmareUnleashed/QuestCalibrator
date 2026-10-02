@@ -19,8 +19,8 @@ $known = "$key.known_hosts"
 # https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints
 [IO.File]::WriteAllText($known,
     "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl`n")
-# On Linux (the input-validation job) ssh ignores a key others can read, so the
-# file is made private before the key goes into it.
+# On Linux ssh ignores a key others can read, so the file is made private
+# before the key goes into it.
 [IO.File]::WriteAllText($key, '')
 if ($IsLinux -or $IsMacOS)
 {
@@ -55,9 +55,9 @@ try
         if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve the QuestCalibrator commit.' }
         $notesRef = "refs/notes/formal-assurance/$questCommit"
         git -C $target fetch --quiet --depth 1 origin $notesRef
-        if ($LASTEXITCODE -ne 0) { throw 'No local formal evidence is published for this exact pair. Run the local suites, assemble Linux assurance, and publish it with tools/local-assurance.py --publish.' }
+        if ($LASTEXITCODE -ne 0) { throw 'No V09 record is published for this exact pair. Run tools/verify-binary-correspondence.py locally and publish it with tools/local-assurance.py --binary-only --publish (docs/releasing.md).' }
         $evidence = git -C $target show "FETCH_HEAD:$sha"
-        if ($LASTEXITCODE -ne 0) { throw 'The local assurance note is missing the pinned VirtualQuest entry.' }
+        if ($LASTEXITCODE -ne 0) { throw 'The V09 note is missing the pinned VirtualQuest entry.' }
         $parent = Split-Path -Parent $LocalAssurancePath
         if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         $evidence | Set-Content -LiteralPath $LocalAssurancePath -Encoding utf8

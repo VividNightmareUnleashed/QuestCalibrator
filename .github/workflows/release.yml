@@ -2,9 +2,11 @@ name: Release
 
 # Pushing a questcalibrator-v* tag builds it on a clean Windows machine with the
 # full test suite (VirtualQuest included) and the pose hub trace replay through
-# its TLA+ model, analyzes it with Clang-Tidy, packages it, scans it on
-# VirusTotal, creates a DRAFT release here, and runs the install test on that
-# draft. Nothing reaches users until the draft is published by hand.
+# its TLA+ model, analyzes it with Clang-Tidy, proves it against VirtualQuest's
+# formal suite on Linux (formal-assurance.yml, with the V09 record published
+# from a local run), packages it, scans it on VirusTotal, creates a DRAFT
+# release here, and runs the install test on that draft. Nothing reaches users
+# until the draft is published by hand.
 #
 # Installed copies look for updates only in VividNightmareUnleashed/QuestCalibrator,
 # so a run anywhere else (a fork, or this repository under another name) stops
@@ -296,6 +298,7 @@ jobs:
     uses: ./.github/workflows/formal-assurance.yml
     with:
       ref: refs/tags/${{ inputs.tag || github.ref_name }}
+      evidence: true
     secrets: inherit
 
   publish:

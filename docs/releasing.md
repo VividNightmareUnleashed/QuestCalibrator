@@ -41,42 +41,55 @@ VirusTotal key comes from `$env:VT_API_KEY` or the git-ignored `.env` at the
 repository root. Package output in `install/out/` and `install/test-out/` is never
 committed.
 
-Both draft-release paths now require complete formal assurance for the exact
-QuestCalibrator commit and its VirtualQuest gitlink. The hosted workflow verifies
-locally collected Linux proof evidence and collects fresh Windows hub traces,
-and refuses a draft when any named check or source/tool provenance is missing.
-For a local release, assemble and verify the same evidence as described in
+Both draft-release paths require complete formal assurance for the exact
+QuestCalibrator commit and its VirtualQuest gitlink. The hosted workflow proves
+the Linux suites itself (`formal-assurance.yml`), all at once: VirtualQuest's
+private core (TLC, Lean and GenMC) on six runners, the complete numeric suite on
+four, the production contracts and the complete inventory extension. It assembles
+them with the V09 record and fresh Windows hub traces, and refuses a draft when
+any named check or source/tool provenance is missing. This repository is public,
+so those jobs keep the private checks' output off the log and pass only check
+names, statuses, counts, tool versions and source hashes between them; a failure
+names the checks that failed, and is investigated locally. For a local release,
+assemble and verify the same evidence as described in
 [`formal-now.md`](formal-now.md), then pass
 `-FormalEvidence /path/to/complete.json` to `install\release.ps1`. A focused Now
 report or a Linux-only record cannot satisfy this gate.
 
-VirtualQuest-specific checks V01–V09 and the private core run locally. Normal
-QuestCalibrator validation retains its parallel Windows, static-analysis and four
-numeric proof jobs. Separate Linux jobs run the twelve Now obligations and the
-23 public extension obligations. The public extension compiles without the
-VirtualQuest simulation implementation; its six private C++ selections are
-explicitly refused. The existing private checkout supplies shared harnesses and
-the generated persistence table. Private capture/smoother/binary checks are not
-part of ordinary push validation.
-The numeric jobs use `-PublicInputValidation`; the four simulator guard harnesses
-are checked in the complete local numeric run instead.
+Normal QuestCalibrator validation runs the Windows build and harness, Clang-Tidy,
+four public numeric proof jobs, the twelve Now obligations, the 23 public
+extension obligations and the private core. The public extension compiles
+without the VirtualQuest simulation implementation; its six private C++
+selections are explicitly refused. The numeric jobs use
+`-PublicInputValidation`; the four simulator guard harnesses, V01–V08 and the
+private portable, smoother and capture checks run in the release's formal
+assurance.
 
-Before pushing a release tag, run the local suites for its exact committed source
-pair, assemble Linux assurance, and publish the verified metadata:
+V09 compares instructions of the supplied third-party binaries, so it never runs
+on a hosted runner. Before pushing a release tag, run it on clean checkouts of the
+exact committed source pair and publish its verified metadata:
 
 ```bash
-python tools/assemble-assurance.py --contracts /tmp/now/result.json --extension /tmp/extension/result.json --binary /tmp/binary/result.json --core /tmp/core-1.json /tmp/core-2.json --numeric /tmp/numeric.json --linux-only --output /tmp/assurance-linux.json
-python tools/local-assurance.py --evidence /tmp/assurance-linux.json --publish
+python -m pip install -r VirtualQuest/formal/binary-requirements.txt
+python tools/verify-binary-correspondence.py --source-root . --output-dir /tmp/binary
+python tools/local-assurance.py --binary-only --evidence /tmp/binary/result.json --publish
 ```
 
 This uses a private VirtualQuest Git note at
 `refs/notes/formal-assurance/<QuestCalibrator commit>`, keyed by the VirtualQuest
 commit. It creates no branch and changes neither source tree nor commit identity.
 An existing valid record for the pair is reused. Only hashes, tool versions,
-named outcomes and assertion metadata are retained; source snippets, local
-paths, execution logs and binaries are excluded. The existing read-only deploy
-key retrieves the note for release CI, which validates every required check and
-both source identities. Missing or stale local evidence stops the release.
+named outcomes and control metadata are retained; local paths, execution logs and
+binaries are excluded. The existing read-only deploy key retrieves the note for
+release CI, which checks it against both exact commits before the proofs finish.
+A missing or stale record stops the release. To try the whole Linux evidence
+before tagging, run validation by hand on the pushed release commit; it replaces
+a validation run of `alpha` still in progress:
+
+```bash
+gh workflow run validation.yml --ref alpha -f evidence=true
+```
+
 The local Windows release path still consumes `-FormalEvidence` directly.
 
 ## Source preflight
@@ -102,29 +115,28 @@ The local Windows release path still consumes `-FormalEvidence` directly.
   tools\validate-cpp.ps1 -Mode Build
   ```
 
-- Push `alpha` and wait for its validation workflow (build, harness, hub trace
-  replay, duplicate scan, input-validation proofs and Clang-Tidy) on the exact
-  release commit. Review every advisory clone it reports.
-- Run the private VirtualQuest suite locally after committing its changes:
+- Push VirtualQuest's commits, then `alpha`, and wait for its validation workflow
+  (build, harness, hub trace replay, duplicate scan, input-validation proofs,
+  Clang-Tidy, the Now and public extension checks and the private core) on the
+  exact release commit. Review every advisory clone it reports.
+- Run V09 on that commit and publish its record as described above.
+- A private check that fails in a hosted run is reproduced locally; its output
+  never reaches the log:
 
   ```powershell
   pwsh -NoProfile -File VirtualQuest/formal/validate-local.ps1 -Setup
   ```
 
-  Keep the successful `.local-validation/run-*/result.json` and shard logs as the
-  local release record. Its `commit` must match the pinned VirtualQuest commit,
-  `fullSuite` and `sourcesUnchanged` must be true, and every shard must pass without
-  skipped checks. This covers TLC, Lean and GenMC; the public workflow covers
-  ESBMC, Gappa and trace replay. Both gates must pass before pushing the tag.
-  The private hosted workflow is manual-only and is not required when this local
-  record passes. See `VirtualQuest/formal/README.md` for tool setup and resources.
+  Its `.local-validation/run-*/result.json` records the VirtualQuest commit, tool
+  versions and every shard's status. See `VirtualQuest/formal/README.md` for tool
+  setup and resources.
 
 ## Remote validation setup
 
 The local private-suite entry point also supports a Linux runner with PowerShell 7.
 Keep `VirtualQuest/formal/validate-local.ps1`, `check.ps1`, all model and proof
-sources, both formal Dockerfiles and `.github/workflows/formal.yml` in Git.
-The manual hosted workflow documents the existing tool setup as a fallback.
+sources and both formal Dockerfiles in Git. `formal-assurance.yml` here documents
+the hosted tool setup.
 
 Provision Java 11 or newer, PowerShell 7, Git, elan and a working Linux Docker
 daemon. Give the runner read access to the private VirtualQuest repository through

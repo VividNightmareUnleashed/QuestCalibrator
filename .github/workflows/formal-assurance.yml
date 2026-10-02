@@ -1,28 +1,370 @@
 name: Formal assurance
+
+# VirtualQuest's private formal suite, run here because the private repository
+# has no hosted Actions: TLC, Lean and GenMC (check.ps1 -Core) on six runners.
+# With evidence it also runs, each on runners of its own and all at once, the
+# complete numeric suite (ESBMC and Gappa, the four simulator guard harnesses
+# included) on four, the production contracts, and the complete inventory
+# extension; one last job assembles them with the binary correspondence record
+# (V09) into the exact-pair Linux evidence a release needs. V09 runs on the
+# supplied third-party binaries, so it stays off these runners: it is run
+# locally and published to VirtualQuest's private Git notes
+# (tools/local-assurance.py --binary-only --publish; see docs/releasing.md).
+#
+# This repository is public, so anyone can read its logs and artifacts. Each
+# private check writes its output to the runner's temp folder, never to the log
+# (tools/ci/run-private-check.py), and the private Docker images are built
+# quietly: the log shows how many checks passed and the names of any that did
+# not. Only check names, statuses, counts, tool versions and source hashes pass
+# between jobs. Investigate a failure locally.
 on:
   workflow_call:
     inputs:
       ref:
+        description: The commit, branch or tag to check; the caller's own by default
         type: string
-        required: true
+        default: ''
+      evidence:
+        description: Also assemble the release's exact-pair Linux evidence
+        type: boolean
+        default: false
+
 permissions:
   contents: read
+
+env:
+  TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+  TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+  LEAN_TOOLCHAIN: leanprover/lean4:v4.34.0
+
 jobs:
-  local-evidence:
+  # check.ps1 -Shard balances the shares by the time each check last took:
+  # PoseRingQueue, about 16 minutes, has one to itself and the rest take about
+  # 13 each.
+  private-core:
+    name: private-core (${{ matrix.shard }}/6)
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 90
+    strategy:
+      # Every share reports, so one failure does not hide another.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the source
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
-      - name: Read local evidence for the exact source pair
+
+      - name: Check out VirtualQuest
+        timeout-minutes: 5
         shell: pwsh
         env:
           VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
-        run: tools/ci/checkout-virtualquest.ps1 -LocalAssurancePath "$env:RUNNER_TEMP/local-assurance.json"
-      - name: Verify local proof outcomes and source provenance
-        run: python tools/local-assurance.py --source-root "$PWD" --evidence "$RUNNER_TEMP/local-assurance.json" --output "$RUNNER_TEMP/assurance-linux.json"
+        run: tools/ci/checkout-virtualquest.ps1
+
+      - name: Tools this share needs
+        id: share
+        shell: pwsh
+        run: |
+          $checks = pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -ListChecks -SourceRoot $PWD -Shard ${{ matrix.shard }}/6 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Listing the checks of this share failed.' }
+          "genmc=$(([bool]@($checks | Where-Object Tool -eq 'genmc')).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Java for TLC
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: tla2tools.jar v1.7.4
+        run: |
+          jar="$RUNNER_TEMP/tla2tools.jar"
+          curl -fsSL "$TLA2TOOLS_URL" -o "$jar"
+          echo "$TLA2TOOLS_SHA256  $jar" | sha256sum -c - > /dev/null
+          echo "TLA2TOOLS_JAR=$jar" >> "$GITHUB_ENV"
+
+      - name: Restore Lean
+        id: lean-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ env.LEAN_TOOLCHAIN }}
+
+      - name: Install Lean
+        if: steps.lean-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$LEAN_TOOLCHAIN" > /dev/null
+
+      # GenMC is built from source, which takes a long while, so the image is
+      # cached by its Dockerfile's hash.
+      - name: Restore the GenMC image
+        id: genmc-cache
+        if: steps.share.outputs.genmc == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/questcal-genmc.tar
+          key: questcal-genmc-${{ hashFiles('VirtualQuest/formal/seqlock/Dockerfile') }}
+
+      - name: Load or build the GenMC image
+        if: steps.share.outputs.genmc == 'true'
+        timeout-minutes: 45
+        run: |
+          if [ '${{ steps.genmc-cache.outputs.cache-hit }}' = 'true' ]; then
+            docker load -i "$RUNNER_TEMP/questcal-genmc.tar" > /dev/null
+          else
+            docker build -q -t questcal-genmc VirtualQuest/formal/seqlock > /dev/null 2>&1 || { echo 'Building the GenMC image failed.'; exit 1; }
+            docker save -o "$RUNNER_TEMP/questcal-genmc.tar" questcal-genmc
+          fi
+
+      - name: Save the GenMC image
+        if: steps.share.outputs.genmc == 'true' && steps.genmc-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/questcal-genmc.tar
+          key: questcal-genmc-${{ hashFiles('VirtualQuest/formal/seqlock/Dockerfile') }}
+
+      - name: Check share ${{ matrix.shard }} of 6
+        timeout-minutes: 60
+        env:
+          # TLC's default heap is a quarter of the runner's memory.
+          JAVA_TOOL_OPTIONS: -Xmx5g
+        run: >
+          python tools/ci/run-private-check.py --label "private core ${{ matrix.shard }}/6"
+          --raw "$RUNNER_TEMP/core-raw.json" --result "$RUNNER_TEMP/proofs/core-${{ matrix.shard }}.json" --
+          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -Strict -Shard ${{ matrix.shard }}/6
+          -SourceRoot "$PWD" -ResultPath "$RUNNER_TEMP/core-raw.json"
+
+      - name: Keep the reduced record for the evidence
+        if: inputs.evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-core-${{ matrix.shard }}
+          path: ${{ runner.temp }}/proofs/core-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # Every numeric obligation, the simulator guard harnesses included: the
+  # expanded 64-frame checks need one memory-heavy process per runner.
+  numeric:
+    if: inputs.evidence
+    name: numeric (${{ matrix.shard }}/4)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check out VirtualQuest
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+
+      - name: Restore the ESBMC image
+        id: esbmc-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/questcal-esbmc.tar
+          key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
+
+      - name: Load or build the ESBMC image
+        timeout-minutes: 20
+        run: |
+          if [ '${{ steps.esbmc-cache.outputs.cache-hit }}' = 'true' ]; then
+            docker load -i "$RUNNER_TEMP/questcal-esbmc.tar" > /dev/null
+          else
+            docker build -q -t questcal-esbmc VirtualQuest/formal/input-validation > /dev/null 2>&1 || { echo 'Building the ESBMC image failed.'; exit 1; }
+            docker save -o "$RUNNER_TEMP/questcal-esbmc.tar" questcal-esbmc
+          fi
+
+      - name: Save the ESBMC image
+        if: steps.esbmc-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/questcal-esbmc.tar
+          key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
+
+      - name: Check share ${{ matrix.shard }} of 4
+        timeout-minutes: 75
+        run: >
+          python tools/ci/run-private-check.py --label "numeric ${{ matrix.shard }}/4"
+          --raw "$RUNNER_TEMP/numeric-raw.json" --result "$RUNNER_TEMP/proofs/numeric-${{ matrix.shard }}.json" --
+          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Only input-validation -Strict -Shard ${{ matrix.shard }}/4
+          -SourceRoot "$PWD" -ResultPath "$RUNNER_TEMP/numeric-raw.json"
+
+      - name: Keep the reduced record for the evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-numeric-${{ matrix.shard }}
+          path: ${{ runner.temp }}/proofs/numeric-${{ matrix.shard }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # The same contracts validation.yml checks on every push, whose record is
+  # public there too.
+  contracts:
+    if: inputs.evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check out VirtualQuest
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+
+      - name: Install the pinned Lean toolchain
+        timeout-minutes: 5
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$LEAN_TOOLCHAIN" > /dev/null
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Production contracts
+        timeout-minutes: 20
+        run: >
+          python tools/ci/run-private-check.py --label "production contracts" --
+          python tools/verify-now-contracts.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/now"
+
+      - name: Keep the record for the evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-contracts
+          path: ${{ runner.temp }}/now/result.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # The complete record holds capture logs from private tests; only what the
+  # assembly checks of it leaves this runner (tools/local-assurance.py
+  # extension_metadata), after the whole record has passed those checks here.
+  extension:
+    if: inputs.evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check out VirtualQuest
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+
+      - name: Install the NSIS compiler
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nsis > /dev/null
+
+      - name: Complete inventory extension
+        timeout-minutes: 30
+        run: >
+          python tools/ci/run-private-check.py --label "inventory extension" --record extension
+          --raw "$RUNNER_TEMP/extension/result.json" --result "$RUNNER_TEMP/proofs/extension.json" --
+          python tools/verify-inventory-extension.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/extension"
+
+      - name: Keep the reduced record for the evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-extension
+          path: ${{ runner.temp }}/proofs/extension.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # Read first and on its own, so a missing record fails the run in a minute
+  # rather than after the proofs.
+  binary:
+    if: inputs.evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check out VirtualQuest and read the published V09 record
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1 -LocalAssurancePath "$env:RUNNER_TEMP/proofs/binary.json"
+
+      - name: Check it describes this exact pair
+        run: python tools/local-assurance.py --binary-only --evidence "$RUNNER_TEMP/proofs/binary.json"
+
+      - name: Keep it for the evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: proof-binary
+          path: ${{ runner.temp }}/proofs/binary.json
+          if-no-files-found: error
+          retention-days: 1
+
+  linux-evidence:
+    if: inputs.evidence
+    needs: [private-core, numeric, contracts, extension, binary]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check out VirtualQuest
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+
+      - name: Fetch the records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: proof-*
+          path: ${{ runner.temp }}/proofs
+
+      - name: Assemble the exact-pair Linux evidence
+        run: |
+          proofs="$RUNNER_TEMP/proofs"
+          python tools/assemble-assurance.py --contracts "$proofs/proof-contracts/result.json" \
+            --extension "$proofs/proof-extension/extension.json" --binary "$proofs/proof-binary/binary.json" \
+            --core "$proofs"/proof-core-*/core-*.json --numeric "$proofs"/proof-numeric-*/numeric-*.json \
+            --linux-only --output "$RUNNER_TEMP/linux.json"
+          python tools/local-assurance.py --evidence "$RUNNER_TEMP/linux.json" --output "$RUNNER_TEMP/assurance-linux.json"
+
       - uses: actions/upload-artifact@v4
         with:
           name: assurance-linux
