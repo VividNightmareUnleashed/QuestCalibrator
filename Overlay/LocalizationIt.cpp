@@ -22,7 +22,7 @@ const char *const kItalianNativeName = "Italiano";
 const Entry kItalian[] = {
 	{ "Continuous calibration paused after the headset tracker restarted. It resumes if tracking recovers; another tracker restart may be needed.", "Calibrazione continua in pausa dopo il riavvio del tracker del visore. Riprende se il tracciamento si ripristina; potrebbe servire un altro riavvio del tracker." },
 	{ "QuestCalibrator: tracking has not recovered after the headset tracker restarted. Wait, or turn that tracker off and on in view of its base stations.", "QuestCalibrator: il tracciamento non si è ripristinato dopo il riavvio del tracker del visore. Attendi, oppure spegni e riaccendi il tracker in vista delle stazioni base." },
-	{ "Restart the headset tracker in view of its base stations. If stable tracking stays misaligned, recalibrate.", "Il tracker del visore non si è ripristinato. Spegnilo e riaccendilo in vista delle stazioni base. Se il tracciamento è stabile ma resta disallineato, ricalibra." },
+	{ "Restart the headset tracker in view of its base stations. If stable tracking stays misaligned, recalibrate.", "Spegni e riaccendi il tracker del visore in vista delle sue stazioni base. Se il tracciamento è stabile ma resta disallineato, ricalibra." },
 	{ "Continuous calibration is paused after a tracker restart. Recovery may need another tracker restart.", "Calibrazione continua in pausa dopo un riavvio del tracker. Potrebbe servire un altro riavvio del tracker." },
 	// ---- Window, tabs, footer ----
 	{ "Calibration", "Calibrazione" },

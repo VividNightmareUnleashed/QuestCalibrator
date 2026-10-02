@@ -20,7 +20,7 @@ const char *const kJapaneseNativeName = "日本語";
 const Entry kJapanese[] = {
 	{ "Continuous calibration paused after the headset tracker restarted. It resumes if tracking recovers; another tracker restart may be needed.", "ヘッドセットトラッカーの再起動後、連続キャリブレーションは一時停止中です。トラッキングが回復すると再開します。トラッカーの再起動がもう一度必要な場合があります。" },
 	{ "QuestCalibrator: tracking has not recovered after the headset tracker restarted. Wait, or turn that tracker off and on in view of its base stations.", "QuestCalibrator: ヘッドセットトラッカーの再起動後、トラッキングが回復していません。待つか、ベースステーションから見える場所でトラッカーの電源を入れ直してください。" },
-	{ "Restart the headset tracker in view of its base stations. If stable tracking stays misaligned, recalibrate.", "ヘッドセットトラッカーが回復していません。ベースステーションから見える場所で電源を入れ直してください。トラッキングが安定しても位置がずれる場合は、再キャリブレーションしてください。" },
+	{ "Restart the headset tracker in view of its base stations. If stable tracking stays misaligned, recalibrate.", "ベースステーションから見える場所で、ヘッドセットトラッカーの電源を入れ直してください。トラッキングが安定しても位置がずれる場合は、再キャリブレーションしてください。" },
 	{ "Continuous calibration is paused after a tracker restart. Recovery may need another tracker restart.", "トラッカーの再起動後、連続キャリブレーションは一時停止中です。回復にはトラッカーの再起動がもう一度必要な場合があります。" },
 	// ---- Window, tabs, footer ----
 	{ "Calibration", "キャリブレーション" },
