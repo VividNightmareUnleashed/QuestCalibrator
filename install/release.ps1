@@ -77,6 +77,14 @@ try {
     powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode $buildMode
     if ($LASTEXITCODE -ne 0) { throw 'The build or the solver tests failed.' }
 
+    # The hosted release drafts only after Clang-Tidy has passed over every
+    # translation unit (clang-tidy.yml); so does this one. A dry run skips it.
+    if (-not $DryRun) {
+        Write-Host 'Analyzing every translation unit with Clang-Tidy' -ForegroundColor Cyan
+        powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Analyze -All
+        if ($LASTEXITCODE -ne 0) { throw 'Clang-Tidy reported a first-party finding or did not analyze every project.' }
+    }
+
     $version = (Get-Item x64\Release\QuestCalibrator.exe).VersionInfo.ProductVersion
     if ("questcalibrator-v$version" -ne $Tag) {
         throw "The build reports version $version, but the tag is $Tag. Fix common/Version.h and tag again."

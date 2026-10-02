@@ -18,14 +18,12 @@ name: Validation
 # cannot run Linux containers, it runs VirtualQuest's bounded model checks of
 # the driver's inbound validation, the ring sample gate and the profile scalar
 # bounds (formal/check.ps1 -Only input-validation: ESBMC and Gappa in the
-# questcal-esbmc image) against this tree's headers. VirtualQuest's own
-# formal.yml skips them, since it has no QuestCalibrator sources, and nothing
-# else here catches a loosened bound in them, so the job fails on a skipped
-# check as well as a wrong outcome. The release workflow requires the same full
-# suite through formal-assurance.yml. This validation job
-# runs on four runners at once (check.ps1 -Shard, which balances them by the
-# time each check last took), so each of the three longest checks runs with
-# only a few short ones beside it. The image is cached by its Dockerfile's
+# questcal-esbmc image) against this tree's headers. Nothing else here catches
+# a loosened bound in them, so the job fails on a skipped check as well as a
+# wrong outcome. The release workflow requires the same full suite through
+# formal-assurance.yml. This validation job runs on four runners at once
+# (check.ps1 -Shard, which balances them by the time each check last took),
+# about 25 checks each. The image is cached by its Dockerfile's
 # hash. A pull request only reads caches
 # saved on its own or its base branch, so the image a push to alpha saves lets
 # pull requests into alpha skip the build.

@@ -24,11 +24,16 @@ install test on that draft. It refuses to run if the tag already has a release. 
 release is written with the workflow's own token; its secrets are
 `VIRTUALQUEST_DEPLOY_KEY` (a read-only deploy key on VirtualQuest; required, so a
 release is never tested on less than a local build) and `VT_API_KEY` (without it the
-scan is skipped and the notes say so). A failed run can be repeated for an existing
-tag from the Actions tab (`workflow_dispatch`).
+scan is skipped and the notes say so). A run that failed before it created the draft
+can be repeated for its tag from the Actions tab (`workflow_dispatch`); once the tag
+has a draft the check refuses, and the way on is a new version.
 
-`install\release.ps1` does the same locally, from the tagged commit with PowerShell 7,
-with your own `gh` login: the fallback when Actions is unavailable. To keep the tag
+`install\release.ps1` is the local fallback when Actions is unavailable, run from the
+tagged commit with PowerShell 7 and your own `gh` login. It builds with the full solver
+suite, runs Clang-Tidy over every translation unit (skipped by `-DryRun`), requires the
+complete formal evidence described below, packages, scans and creates the draft. It
+does not replay the hub traces itself (the formal evidence carries them), run the
+advisory duplicate scan or run the install test. To keep the tag
 push from starting the workflow, put `[skip release]` in the message of the commit
 the tag points to (the version bump). It checks that the working tree is clean and
 that the tag is at HEAD and pushed; `-DryRun` stops before creating the release. Its
