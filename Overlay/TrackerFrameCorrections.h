@@ -124,6 +124,33 @@ public:
 		return ExpressCalibration(Eigen::Quaterniond(frame.rotation.w, frame.rotation.x, frame.rotation.y, frame.rotation.z),
 			Eigen::Vector3d(frame.translation.v), rotation, translation, scale);
 	}
+	// ExpressCalibration with the N captured at a run's first sample holds only
+	// if every move the run carried back to its start frame (toStart) was also
+	// followed here: the target's N is then N_start o toStart. A move left alone
+	// (SteamVR still placing its stations) or refused would put the result off
+	// by that move.
+	static bool FollowedRun(const Eigen::Quaterniond &startRotation, const Eigen::Vector3d &startTranslation,
+		const Eigen::Quaterniond &toStartRotation, const Eigen::Vector3d &toStartTranslation,
+		const protocol::FrameCorrection &now)
+	{
+		const Eigen::Quaterniond expectedRotation = (startRotation * toStartRotation).normalized();
+		const Eigen::Vector3d expectedTranslation = startRotation * toStartTranslation + startTranslation;
+		return !questcal::WorldFromDriverChanged(expectedRotation, expectedTranslation,
+			Eigen::Quaterniond(now.rotation.w, now.rotation.x, now.rotation.y, now.rotation.z),
+			Eigen::Vector3d(now.translation.v));
+	}
+	// After a recalibration measured on `source`, a device reported against the
+	// same base station takes its correction: the two share SteamVR's geometry,
+	// so a difference between them can only be a move one of them missed. A
+	// parked recovery entry stays with its own device.
+	bool Align(uint32_t id, uint32_t source)
+	{
+		if (id >= frames.size() || source >= frames.size() || id == source ||
+			(restoredKeys[id] != 0 && serials[id].empty()) || frames[id] == frames[source])
+			return false;
+		frames[id] = frames[source];
+		return true;
+	}
 	const std::string &Serial(uint32_t id) const { return serials.at(id); }
 	uint64_t IdentityKey(uint32_t id) const { return restoredKeys.at(id); }
 

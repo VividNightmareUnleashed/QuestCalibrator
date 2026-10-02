@@ -5,6 +5,7 @@
 #include "../Overlay/TrackerFrameCorrections.h"
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/DriverSession.h"
+#include "../Overlay/CalibrationRun.h"
 
 #include <algorithm>
 #include <array>
@@ -581,6 +582,112 @@ void ContinuousSpace(Check check)
 		(!engine.PollCorrection(correction) || correction.translation.norm() < 1e-9), "");
 }
 
+void PausedMonitorAndRecalibration(Check check)
+{
+	// SteamVR re-solves a station while the monitor is paused and a body
+	// tracker is switched off. The watch keeps every device's frame through
+	// the pause, so the station and the resting headset tracker prove the move
+	// on their first samples after it, and the returning tracker gets the same.
+	const Q r(Eigen::AngleAxisd(0.35, V::UnitY()) * Eigen::AngleAxisd(0.05, V::UnitZ()));
+	const V t(0.6, 0.0, -0.4);
+	const V headLocal(0.1, 1.6, 0.2), bodyLocal(0.3, 0.9, -0.4), otherLocal(-0.5, 0.4, 0.7);
+	const Q otherFrame(Eigen::AngleAxisd(-0.4, V::UnitY()));
+	const V otherOrigin(1.5, 0.0, 2.0);
+	LighthouseFrameWatch watch;
+	auto head = Sample(9, 10, headLocal);
+	auto body = Sample(14, 10, bodyLocal);
+	auto other = Sample(15, 10, otherLocal, otherFrame, otherOrigin);
+	auto station = Sample(1, 10, V::Zero());
+	watch.Note(head, TickScale, false);
+	watch.Note(body, TickScale, false);
+	watch.Note(other, TickScale, false);
+	watch.Note(station, TickScale, true);
+	const V headWorld = Composed(head).pos, bodyWorld = Composed(body).pos;
+	body.poseIsValid = body.deviceIsConnected = false;
+	body.sampleTimeQpc += 500000;
+	watch.Note(body, TickScale, false);
+	station = Sample(1, 300, V::Zero(), r, t);
+	head = Sample(9, 300.01, headLocal, r, t);
+	body = Sample(14, 300.02, bodyLocal, r, t);
+	watch.Note(station, TickScale, true);
+	watch.Note(head, TickScale, false);
+	watch.Note(body, TickScale, false);
+	auto moves = watch.TakeMoves();
+	std::sort(moves.begin(), moves.end(), [](const auto &a, const auto &b) { return a.time < b.time; });
+	questcal::TrackerFrameCorrections frames;
+	frames.Bind(9, "head");
+	frames.Bind(14, "body");
+	frames.Bind(15, "other");
+	bool pass = moves.size() == 2;
+	for (const auto &move : moves)
+		pass &= frames.Follow(move);
+	auto headNow = Composed(head), bodyNow = Composed(body);
+	pass &= frames.Normalize(9, headNow) && frames.Normalize(14, bodyNow);
+	check("frame correction: a move made while the monitor is paused reaches a switched-off tracker",
+		pass && (headNow.pos - headWorld).norm() < 1e-9 && (bodyNow.pos - bodyWorld).norm() < 1e-9, "");
+
+	// Had the body tracker missed that move, a recalibration on the headset
+	// tracker realigns it: the watch saw both last in the same station's frame.
+	// The tracker in another station's frame keeps its own correction.
+	questcal::TrackerFrameCorrections missed;
+	missed.Bind(9, "head");
+	missed.Bind(14, "body");
+	missed.Bind(15, "other");
+	LighthouseFrameWatch::Move split;
+	split.id = 15;
+	split.time = 200;
+	split.rotation = Q(Eigen::AngleAxisd(0.2, V::UnitX()));
+	split.translation = V(0.1, 0.2, 0.3);
+	pass = missed.Follow(split);
+	for (const auto &move : moves)
+		if (move.id == 9)
+			pass &= missed.Follow(move);
+	const auto otherBefore = missed.Snapshot()[15];
+	Q headRotation, frameRotation;
+	V headTranslation, frameTranslation;
+	pass &= watch.LastFrame(9, headRotation, headTranslation) && !watch.LastFrame(1, frameRotation, frameTranslation);
+	int aligned = 0;
+	for (const uint32_t id : { 14u, 15u })
+		if (watch.LastFrame(id, frameRotation, frameTranslation) &&
+			!questcal::WorldFromDriverChanged(frameRotation, frameTranslation, headRotation, headTranslation) &&
+			missed.Align(id, 9))
+			++aligned;
+	auto bodyAligned = Composed(body);
+	pass &= aligned == 1 && missed.Normalize(14, bodyAligned) && !missed.Align(14, 9);
+	check("frame lifecycle: recalibration realigns trackers in the target's frame only",
+		pass && (bodyAligned.pos - bodyWorld).norm() < 1e-9 && missed.Snapshot()[15] == otherBefore, "");
+
+	// A recalibration whose target frame SteamVR moved mid-run: the run carries
+	// the move back to its start frame, and expressing the result with the
+	// start N is right only when the watch followed that same move.
+	questcal::CalibrationRun::TargetFrame run;
+	const ringpose::DriverLocalPoseSample first{ 10.0, Q::Identity(), headLocal, V::Zero(), V::Zero() };
+	const ringpose::DriverLocalPoseSample second{ 10.011, Q::Identity(), headLocal, V::Zero(), V::Zero() };
+	run.Accept(first, Q::Identity(), V::Zero());
+	pass = run.Accept(second, r, t) == questcal::CalibrationRun::TargetFrame::Verdict::Moved;
+	questcal::TrackerFrameCorrections start;
+	start.Bind(9, "head");
+	LighthouseFrameWatch::Move earlier = split;
+	earlier.id = 9;
+	earlier.time = 5.0;
+	pass &= start.Follow(earlier);
+	const auto nStart = start.Snapshot()[9];
+	const Q startRotation(nStart.rotation.w, nStart.rotation.x, nStart.rotation.y, nStart.rotation.z);
+	const V startTranslation(nStart.translation.v);
+	LighthouseFrameWatch::Move during;
+	during.id = 9;
+	during.time = 10.011;
+	during.rotation = r;
+	during.translation = t;
+	auto followed = start;
+	pass &= followed.Follow(during);
+	pass &= questcal::TrackerFrameCorrections::FollowedRun(startRotation, startTranslation,
+		run.toStartRot, run.toStartTrans, followed.Snapshot()[9]);
+	pass &= !questcal::TrackerFrameCorrections::FollowedRun(startRotation, startTranslation,
+		run.toStartRot, run.toStartTrans, start.Snapshot()[9]);
+	check("frame lifecycle: a recalibration requires the watch to have followed the run's frame moves", pass, "");
+}
+
 void DeferredFrameLog(Check check)
 {
 	// A pose callback only records a frame change; the IPC thread's next
@@ -633,5 +740,6 @@ void RunTrackerFrameCorrectionScenarios(Check check)
 	RecalibrationSpace(check);
 	RestartRecovery(check);
 	RecoveryProtocolGate(check);
+	PausedMonitorAndRecalibration(check);
 	DeferredFrameLog(check);
 }

@@ -221,6 +221,21 @@ public:
 	// started or was reset; far in the future until one has.
 	double TrackingSince() const { return trackingSince; }
 
+	// The frame a device, base stations aside, was last seen tracking in,
+	// kept while it is switched off; false for one not seen since the watch
+	// started or was reset.
+	bool LastFrame(uint32_t id, Eigen::Quaterniond &rotation, Eigen::Vector3d &translation) const
+	{
+		if (id >= vr::k_unMaxTrackedDeviceCount)
+			return false;
+		const Device &d = devices[id];
+		if (!(d.valid || d.away) || d.baseStation)
+			return false;
+		rotation = d.wfdRot;
+		translation = d.wfdTrans;
+		return true;
+	}
+
 	// The moved devices since the last call, in the order they moved. Bounded:
 	// once MaxPendingMoves wait untaken, later ones are dropped.
 	std::vector<Move> TakeMoves()

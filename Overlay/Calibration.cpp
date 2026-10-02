@@ -885,9 +885,11 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		{
 			questcal::ResetUniverseObservations(ctx);
 			Drift->Reset();
-			// A frame change across the pause is not one the calibration
-			// missed: a recalibration in it already measured the new frame.
-			FrameWatch.Reset();
+			// The frame watch keeps each device's last frame across the pause:
+			// a station SteamVR re-solved meanwhile is still found from the
+			// samples on either side of it, and corrections are kept for the
+			// profile when it comes back. Forgetting them would leave a tracker
+			// off by that move until the next fresh calibration.
 			Monitors.ResetObservations();
 			MonitorActive = false;
 		}
@@ -923,10 +925,13 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		// We lost part of our own observation window; baselines across the
 		// hole are unsafe. For the drift monitor a drain hole would read as a
-		// tracking loss and could fake a discontinuity event.
+		// tracking loss and could fake a discontinuity event. The frame watch
+		// judges each device across the hole by its own samples, as it does a
+		// pause, and starts over only for a new SteamVR session.
 		questcal::ResetUniverseObservations(ctx);
 		Drift->Reset();
-		FrameWatch.Reset();
+		if (hole.sessionBoundary)
+			FrameWatch.Reset();
 		Monitors.ResetObservations();
 	}
 	else if (dropped > 0)
@@ -2078,6 +2083,18 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// follows the target's start frame to the frame in which collection ended.
 	if (run.preserveTrackerFrames)
 	{
+		if (run.normalizationCaptured && !questcal::TrackerFrameCorrections::FollowedRun(
+			run.targetNormalizationRotation, run.targetNormalizationTranslation,
+			run.targetFrame.toStartRot, run.targetFrame.toStartTrans,
+			ctx.trackerFrames.Snapshot()[run.targetId]))
+		{
+			AbortCalibration(ctx, {
+				DeviceName(ctx, run.targetModel, run.targetSerial, false) + "'s tracking reset during the measurement.",
+				"Let tracking settle for a few seconds, then start again.",
+				"The target's frame correction did not follow every frame move of the measurement",
+				CalibrationContext::GuideHint::WaitForTracking });
+			return;
+		}
 		if (!run.normalizationCaptured || !questcal::TrackerFrameCorrections::ExpressCalibration(run.targetNormalizationRotation,
 			run.targetNormalizationTranslation, result.rotation, result.translation, result.scale))
 		{
@@ -2086,6 +2103,33 @@ static void FinishCalibration(CalibrationContext &ctx)
 			return;
 		}
 		ctx.Log("Recalibration retained the devices' relative lighthouse frame corrections\n");
+
+		// Recalibrating is what players do when trackers look off, so it also
+		// realigns every tracker reported against the target's base station:
+		// they share SteamVR's geometry, so a correction differing from the
+		// target's is a move it missed. Trackers in other stations' frames
+		// keep their own.
+		if (run.targetFrame.valid)
+		{
+			int aligned = 0;
+			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+			{
+				Eigen::Quaterniond frameRotation;
+				Eigen::Vector3d frameTranslation;
+				if (id != run.targetId && ctx.targetDeviceMask[id] &&
+					FrameWatch.LastFrame(id, frameRotation, frameTranslation) &&
+					!questcal::WorldFromDriverChanged(frameRotation, frameTranslation,
+						run.targetFrame.wfdRot, run.targetFrame.wfdTrans) &&
+					ctx.trackerFrames.Align(id, run.targetId))
+					++aligned;
+			}
+			if (aligned > 0)
+			{
+				snprintf(buf, sizeof buf,
+					"Recalibration realigned %d tracker(s) reported against the target's base station\n", aligned);
+				ctx.Log(buf);
+			}
+		}
 	}
 	else if (run.targetFrame.moves > 0)
 	{
