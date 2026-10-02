@@ -317,6 +317,12 @@ inline bool UnitQuat(const vr::HmdQuaternion_t &q)
 	return std::isfinite(n) && std::abs(n - 1.0) <= 1e-12;
 }
 
+// Inside [lo, hi], so never NaN.
+inline bool Within(double value, double lo, double hi)
+{
+	return value >= lo && value <= hi;
+}
+
 // Poses at the edges of what the overlay's ring gate lets through: the driver
 // transforms whatever vrserver hands it, and must never hand back a NaN.
 inline std::vector<vr::DriverPose_t> EdgePoses()
@@ -356,7 +362,7 @@ inline std::string CheckTransform(const protocol::SetDeviceTransform &t)
 	if (t.openVRID >= vr::k_unMaxTrackedDeviceCount || t.enabled > 1 || t.hidden > 1)
 		return "an accepted transform has an out-of-range id or flag";
 	if (!questcal::numeric::IsBoundedVector3(t.translation.v, MaxAbsTranslationMeters) ||
-		!(t.scale >= MinScale && t.scale <= MaxScale) ||
+		!Within(t.scale, MinScale, MaxScale) ||
 		!questcal::numeric::IsFiniteBounded(t.timeOffset, MaxAbsTimeOffsetSeconds))
 		return "an accepted transform is out of bounds";
 	if (!UnitQuat(t.rotation))
@@ -374,7 +380,7 @@ inline std::string CheckField(const protocol::SetAlignmentField &f)
 {
 	using namespace protocol::limits;
 	if (f.enabled > 1 || f.anchorCount > protocol::SetAlignmentField::MaxAnchors ||
-		!(f.sigmaMeters >= MinFieldSigmaMeters && f.sigmaMeters <= MaxFieldSigmaMeters))
+		!Within(f.sigmaMeters, MinFieldSigmaMeters, MaxFieldSigmaMeters))
 		return "an accepted field is out of range";
 	for (uint32_t i = 0; i < protocol::SetAlignmentField::MaxAnchors; ++i)
 	{

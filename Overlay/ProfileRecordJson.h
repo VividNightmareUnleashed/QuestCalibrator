@@ -481,7 +481,7 @@ inline ProfileParseResult ParseProfileObject(ProfileRecord &destination,
     LegacyProfileSettings legacy = legacyDestination;
     const auto result = ParseProfileObjectUnchecked(parsed, legacy, obj, maxAnchors);
     destination = std::move(parsed);
-    legacyDestination = std::move(legacy);
+    legacyDestination = legacy;
     return result;
 }
 

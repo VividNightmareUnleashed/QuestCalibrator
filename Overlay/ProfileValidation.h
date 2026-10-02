@@ -460,29 +460,23 @@ inline PersistenceLoadPlan PlanPersistenceLoad(const PersistenceLoadFacts &facts
 	{
 		plan.gate = ChaperoneLoadGate::ProfileUnreadable;
 		if (armed)
-		{
 			plan.disarmChaperone = true;
-			armed = false;
-		}
 	}
 	else if (facts.settings == RecordLoadState::Unreadable && armed)
 	{
 		plan.gate = ChaperoneLoadGate::SettingsUnreadable;
 		plan.disarmChaperone = true;
-		armed = false;
 	}
 	else if (armed && !facts.chaperoneOwnerComplete)
 	{
 		plan.gate = ChaperoneLoadGate::IncompleteOwner;
 		plan.disarmChaperone = true;
-		armed = false;
 		plan.settingsRewriteNeeded = settingsCanRewrite;
 	}
 	else if (armed && facts.profileValid && !facts.chaperoneOwnerMatchesReference)
 	{
 		plan.gate = ChaperoneLoadGate::ForeignTrackingSystem;
 		plan.disarmChaperone = true;
-		armed = false;
 		plan.settingsRewriteNeeded = settingsCanRewrite;
 	}
 

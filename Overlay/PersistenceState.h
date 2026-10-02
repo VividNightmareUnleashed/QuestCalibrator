@@ -108,8 +108,10 @@ namespace questcal
 		{
 			if (!HasDirty())
 				return false;
-			return !(now - dirtyTime <= QuietPeriodSeconds &&
-				now - firstDirtyTime <= MaxDirtyAgeSeconds);
+			// Negated, so a time that is not a number makes the record due.
+			const bool settling = now - dirtyTime <= QuietPeriodSeconds;
+			const bool young = now - firstDirtyTime <= MaxDirtyAgeSeconds;
+			return !(settling && young);
 		}
 
 		// Restart both clocks: a record that keeps refusing the write must retry
