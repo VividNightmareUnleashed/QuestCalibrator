@@ -233,13 +233,21 @@ def source_identity(quest, virtual):
         paths = subprocess.check_output(
             ["git", "-C", str(root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"]
         ).decode().split("\0")
+        # Every file Git stores as text is hashed with LF line endings, as a
+        # Linux checkout has it: a Windows checkout of the same commit can hold
+        # CRLF copies of any of them, whatever their extension.
+        text = set()
+        for entry in subprocess.check_output(["git", "-C", str(root), "ls-files", "-z", "--eol"]).decode().split("\0"):
+            info, _, path = entry.partition("\t")
+            if info.split()[:1] and info.split()[0] in ("i/lf", "i/crlf", "i/mixed"):
+                text.add(path)
         hashes = {}
         for path in sorted(set(paths)):
             file = root / path
             if not file.is_file():
                 continue
             data = file.read_bytes()
-            if file.suffix.lower() in {".h", ".cpp", ".c", ".lean", ".tla", ".cfg", ".ps1", ".py", ".yml", ".json", ".inc", ".g", ".vcxproj", ".targets", ".nsi", ".md", ".txt"} or file.name == "Dockerfile":
+            if path in text or file.suffix.lower() in {".h", ".cpp", ".c", ".lean", ".tla", ".cfg", ".ps1", ".py", ".yml", ".json", ".inc", ".g", ".vcxproj", ".targets", ".nsi", ".md", ".txt"} or file.name == "Dockerfile":
                 data = data.replace(b"\r\n", b"\n")
             hashes[path] = hashlib.sha256(data).hexdigest()
         identities[name] = {"commit": git(root, "rev-parse", "HEAD"), "files": hashes}
