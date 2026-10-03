@@ -22,18 +22,19 @@ name: Validation
 # a loosened bound in them, so the job fails on a skipped check as well as a
 # wrong outcome. The release workflow runs the complete suite, the four
 # simulator guard harnesses included, through formal-assurance.yml. This job
-# runs on four runners at once (check.ps1 -Shard, which balances them by the
-# time each check last took), about 25 checks each. The image is cached by its
-# Dockerfile's hash. A pull request only reads caches saved on its own or its
-# base branch, so the image a push to alpha saves lets pull requests into alpha
-# skip the build.
+# runs on six runners at once (check.ps1 -Shard, which balances them by the
+# time each check last took), about 16 minutes of checks each: it is the
+# longest job a push waits for, so it gets the runners the shorter jobs do not
+# need. The image is cached by its Dockerfile's hash. A pull request only reads
+# caches saved on its own or its base branch, so the image a push to alpha
+# saves lets pull requests into alpha skip the build.
 #
 # The Now and inventory-extension jobs check production contracts, intended
 # mutation failures and acceptance fixtures on Linux. They use the exact
 # VirtualQuest pin for their harnesses.
 #
 # The private-core job runs VirtualQuest's own formal suite, TLC, Lean and
-# GenMC, on six runners (formal-assurance.yml). Its output stays off this
+# GenMC, on four runners (formal-assurance.yml). Its output stays off this
 # public log; a failure names the checks that failed, to be run locally. Run
 # by hand with evidence, it also assembles the release's Linux evidence for the
 # commit, which needs its published V09 record: the release's formal gate,
@@ -143,14 +144,14 @@ jobs:
     secrets: inherit
 
   input-validation:
-    name: input-validation (${{ matrix.shard }}/4)
+    name: input-validation (${{ matrix.shard }}/6)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
       # Every share reports, so one failure does not hide another.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     env:
       HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
 
@@ -224,7 +225,7 @@ jobs:
         timeout-minutes: 45
         shell: pwsh
         run: |
-          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Only input-validation -PublicInputValidation -Strict -Shard ${{ matrix.shard }}/4 | Tee-Object -Variable lines
+          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Only input-validation -PublicInputValidation -Strict -Shard ${{ matrix.shard }}/6 | Tee-Object -Variable lines
           if ($LASTEXITCODE -ne 0) { throw 'An input-validation check did not come out as expected.' }
           if ($lines | Where-Object { "$_" -match '^SKIP ' }) { throw 'An input-validation check was skipped.' }
           if (-not ($lines | Where-Object { "$_" -match '^ok ' })) { throw 'This share ran no input-validation check.' }
@@ -251,11 +252,21 @@ jobs:
         env:
           VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
         run: tools/ci/checkout-virtualquest.ps1
+      # The private core caches Lean under the same key, so a download by
+      # either job serves both until the toolchain changes.
+      - name: Restore Lean
+        id: lean-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ env.ELAN_TOOLCHAIN }}
       - name: Install the pinned Lean toolchain
+        if: steps.lean-cache.outputs.cache-hit != 'true'
         run: |
           curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
           sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$ELAN_TOOLCHAIN"
-          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Put Lean on the path
+        run: echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Check all Now contracts and negative cases
         run: python tools/verify-now-contracts.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/now"
       - name: Check local evidence acceptance and metadata redaction

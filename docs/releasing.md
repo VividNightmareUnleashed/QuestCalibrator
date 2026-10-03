@@ -59,7 +59,7 @@ committed.
 Both draft-release paths require complete formal assurance for the exact
 QuestCalibrator commit and its VirtualQuest gitlink. The hosted workflow proves
 the Linux suites itself (`formal-assurance.yml`), all at once: VirtualQuest's
-private core (TLC, Lean and GenMC) on six runners, the complete numeric suite on
+private core (TLC, Lean and GenMC) on four runners, the complete numeric suite on
 four, the production contracts and the complete inventory extension. It assembles
 them with the V09 record and fresh Windows hub traces, and refuses a draft when
 any named check or source/tool provenance is missing. This repository is public,
@@ -72,7 +72,7 @@ assemble and verify the same evidence as described in
 report or a Linux-only record cannot satisfy this gate.
 
 Normal QuestCalibrator validation runs the Windows build and harness, Clang-Tidy,
-four public numeric proof jobs, the twelve Now obligations, the 23 public
+six public numeric proof jobs, the twelve Now obligations, the 23 public
 extension obligations and the private core. The public extension compiles
 without the VirtualQuest simulation implementation; its six private C++
 selections are explicitly refused. The numeric jobs use

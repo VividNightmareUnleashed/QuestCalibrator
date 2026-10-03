@@ -1,7 +1,7 @@
 name: Formal assurance
 
 # VirtualQuest's private formal suite, run here because the private repository
-# has no hosted Actions: TLC, Lean and GenMC (check.ps1 -Core) on six runners.
+# has no hosted Actions: TLC, Lean and GenMC (check.ps1 -Core) on four runners.
 # With evidence it also runs, each on runners of its own and all at once, the
 # complete numeric suite (ESBMC and Gappa, the four simulator guard harnesses
 # included) on four, the production contracts, and the complete inventory
@@ -106,11 +106,12 @@ jobs:
           path: ${{ runner.temp }}/questcal-esbmc.tar
           key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
 
-  # check.ps1 -Shard balances the shares by the time each check last took:
-  # PoseRingQueue, about 16 minutes, has one to itself and the rest take about
-  # 13 each.
+  # check.ps1 -Shard balances the shares by the time each check last took. On
+  # six runners each share took six to nine minutes, setup included; four
+  # should take about twelve, still well inside the input-validation proofs a
+  # push waits for, with two runners fewer.
   private-core:
-    name: private-core (${{ matrix.shard }}/6)
+    name: private-core (${{ matrix.shard }}/4)
     needs: images
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -118,7 +119,7 @@ jobs:
       # Every share reports, so one failure does not hide another.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Check out the source
@@ -138,7 +139,7 @@ jobs:
         id: share
         shell: pwsh
         run: |
-          $checks = pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -ListChecks -SourceRoot $PWD -Shard ${{ matrix.shard }}/6 | ConvertFrom-Json
+          $checks = pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -ListChecks -SourceRoot $PWD -Shard ${{ matrix.shard }}/4 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Listing the checks of this share failed.' }
           foreach ($tool in 'genmc', 'lean') {
             "$tool=$(([bool]@($checks | Where-Object Tool -eq $tool)).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
@@ -194,15 +195,15 @@ jobs:
         timeout-minutes: 10
         run: docker load -i "$RUNNER_TEMP/questcal-genmc.tar" > /dev/null
 
-      - name: Check share ${{ matrix.shard }} of 6
+      - name: Check share ${{ matrix.shard }} of 4
         timeout-minutes: 60
         env:
           # TLC's default heap is a quarter of the runner's memory.
           JAVA_TOOL_OPTIONS: -Xmx5g
         run: >
-          python tools/ci/run-private-check.py --label "private core ${{ matrix.shard }}/6"
+          python tools/ci/run-private-check.py --label "private core ${{ matrix.shard }}/4"
           --raw "$RUNNER_TEMP/core-raw.json" --result "$RUNNER_TEMP/proofs/core-${{ matrix.shard }}.json" --
-          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -Strict -Shard ${{ matrix.shard }}/6
+          pwsh -NoProfile -File VirtualQuest/formal/check.ps1 -Core -Strict -Shard ${{ matrix.shard }}/4
           -SourceRoot "$PWD" -ResultPath "$RUNNER_TEMP/core-raw.json"
 
       - name: Keep the reduced record for the evidence

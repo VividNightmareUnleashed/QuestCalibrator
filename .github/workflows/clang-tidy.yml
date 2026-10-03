@@ -9,11 +9,13 @@ name: Clang-Tidy
 # the tag before it drafts a release, so the analysis no longer has to be run by
 # hand.
 #
-# Visual Studio analyzes a project's files one after another, so each project's
-# files are split over runners (-Project, -Shard k/n): every n-th file, as it
-# analyzes a selected file, compiled without linking. Each share fails unless it
-# analyzed exactly the files it selected, so the shares cover every file between
-# them. The harness runs in the validation and release builds, not here. With
+# Each project is analyzed on a runner of its own (-Project) as a single share
+# (-Shard 1/1): every first-party file, compiled without linking, the way
+# Visual Studio analyzes selected files. A project can be split over more
+# runners with -Shard k/n (every n-th file); each share fails unless it
+# analyzed exactly the files it selected, so the shares cover every file
+# between them. The harness runs in the validation and release builds, not
+# here. With
 # the VIRTUALQUEST_DEPLOY_KEY secret (passed on by the caller) the test shares
 # include the simulated headset's scenarios, as locally, and their findings fail
 # the job too; without it the public suite is analyzed. Third-party sources and
@@ -39,15 +41,14 @@ jobs:
       # Every share reports, so one share's findings do not hide another's.
       fail-fast: false
       matrix:
-        # About a dozen files a runner: 7 driver, 30 overlay and 36 test files
-        # (33 without the simulated headset's).
+        # 7 driver, 31 overlay and 42 test files (39 without the simulated
+        # headset's). The test project takes about eight minutes, far less
+        # than the input-validation proofs that pushes and releases also wait
+        # for, so more runners would not finish either sooner.
         include:
           - { project: Driver, shard: 1/1 }
-          - { project: Overlay, shard: 1/2 }
-          - { project: Overlay, shard: 2/2 }
-          - { project: Tests, shard: 1/3 }
-          - { project: Tests, shard: 2/3 }
-          - { project: Tests, shard: 3/3 }
+          - { project: Overlay, shard: 1/1 }
+          - { project: Tests, shard: 1/1 }
     env:
       HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
 

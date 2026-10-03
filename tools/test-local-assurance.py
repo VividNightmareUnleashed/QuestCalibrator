@@ -227,7 +227,8 @@ def main():
     assert len(complete_numeric) == 106 and len(public_numeric) == 102
     assert set(complete_numeric) - set(public_numeric) == {
         'SimulatorController', 'SimulatorCache', 'SimulatorHealth', 'SimulatorScheduler'}
-    shards = [numeric('-PublicInputValidation', '-Shard', f'{i}/4') for i in range(1, 5)]
+    # The validation workflow's input-validation job takes six shards.
+    shards = [numeric('-PublicInputValidation', '-Shard', f'{i}/6') for i in range(1, 7)]
     assert all(shards) and sorted(sum(shards, [])) == sorted(public_numeric)
     assert len(sum(shards, [])) == len(set(sum(shards, [])))
     passed += 1
