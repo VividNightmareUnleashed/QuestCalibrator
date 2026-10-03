@@ -309,8 +309,6 @@ en: Correct for tracking delay
 ja: トラッキング遅延を補正
 en: Uses the delay between the two systems measured during calibration.
 ja: キャリブレーション中に測定した、2 つのシステム間の遅延を使います。
-en: Manual tracking delay override (debug)
-ja: トラッキング遅延を手動で指定（デバッグ）
 en: Continuous calibration
 ja: 連続キャリブレーション
 en: Keeps devices aligned while you play, using a tracker strapped to your headset.

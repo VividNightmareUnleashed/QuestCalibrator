@@ -179,10 +179,9 @@ void BuildSettingsScreen(const VRState &state)
 				SaveSettingOrRestore(CalCtx.solveScale, previous);
 		}
 
-		// Time offset (+ the manual override spike tool, advanced mode only)
+		// Time offset
 		{
-			const float nestedH = CalCtx.uiAdvanced ? 52.0f : 0.0f;
-			RowCard row(kRowHeight + kRowSubLineH + nestedH);
+			RowCard row(kRowHeight + kRowSubLineH);
 			const ImVec2 p = row.pos;
 			ImDrawList *dl = ImGui::GetWindowDrawList();
 
@@ -194,48 +193,13 @@ void BuildSettingsScreen(const VRState &state)
 			RowSubLine(p, "Uses the delay between the two systems measured during calibration.");
 
 			// The number is for the advanced reader; the switch is the setting.
-			if (CalCtx.uiAdvanced && CalCtx.validProfile && (CalCtx.applyTimeOffset || CalCtx.useManualTimeOffset))
+			if (CalCtx.uiAdvanced && CalCtx.validProfile && CalCtx.applyTimeOffset)
 			{
 				std::string applied = FormatString("%+.1f ms", CalCtx.appliedTimeOffset * 1000.0);
 				ImVec2 ts = ImGui::CalcTextSize(applied.c_str());
 				dl->AddText(g_fontBody, g_fontBody->LegacySize,
 					ImVec2(p.x + cw - kRowInsetX - ts.x, p.y + 26.0f - g_fontBody->LegacySize * 0.5f),
 					Pal::U32(Pal::Dim), applied.c_str());
-			}
-
-			// Nested inset: manual override spike tool (verifies the poseTimeOffset
-			// sign convention against a live session; bypasses the solved value).
-			// Developer scaffolding, so it exists only in advanced mode.
-			if (CalCtx.uiAdvanced)
-			{
-				ImVec2 np = ImVec2(p.x + 12.0f, p.y + kRowHeight + kRowSubLineH);
-				ImVec2 nb = ImVec2(p.x + cw - 12.0f, p.y + row.height - 10.0f);
-				dl->AddRectFilled(np, nb, Pal::U32(Pal::Inset), 9.0f);
-
-				ImGui::SetCursorScreenPos(ImVec2(np.x + 12.0f, np.y + 9.0f));
-				QCCheckbox("##manualOverride", &CalCtx.useManualTimeOffset);
-				dl->AddText(g_fontBody, g_fontBody->LegacySize,
-					ImVec2(np.x + 48.0f, (np.y + nb.y) * 0.5f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Text), Tr("Manual tracking delay override (debug)"));
-
-				ImVec2 msSize = ImGui::CalcTextSize("ms");
-				float inputW = 110.0f;
-				dl->AddText(g_fontBody, g_fontBody->LegacySize,
-					ImVec2(nb.x - 14.0f - msSize.x, (np.y + nb.y) * 0.5f - g_fontBody->LegacySize * 0.5f),
-					Pal::U32(Pal::Dim), "ms");
-				ImGui::SetCursorScreenPos(ImVec2(nb.x - 14.0f - msSize.x - 10.0f - inputW, np.y + 5.0f));
-				ImGui::PushItemWidth(inputW);
-				float manualMs = (float)CalCtx.manualTimeOffsetMs;
-				ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 6));
-				if (ImGui::InputFloat("##manualTimeOffset", &manualMs, 0.0f, 0.0f, "%.1f"))
-				{
-					if (!std::isfinite(manualMs)) manualMs = 0.0f;
-					if (manualMs > 50.0f) manualMs = 50.0f;
-					if (manualMs < -50.0f) manualMs = -50.0f;
-					CalCtx.manualTimeOffsetMs = manualMs;
-				}
-				ImGui::PopStyleVar();
-				ImGui::PopItemWidth();
 			}
 		}
 

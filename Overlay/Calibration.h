@@ -186,12 +186,8 @@ struct CalibrationContext : CalibrationProfileState
 	questcal::CalibrationRun run;
 
 	// Runtime latency re-prediction: when enabled, the solved time offset is
-	// applied to target devices via ComputeAppliedTimeOffset. The manual
-	// override injects an explicit poseTimeOffset shift instead (milliseconds,
-	// bypassing the solved value) — the live sign-pinning spike tool.
+	// applied to target devices via ComputeAppliedTimeOffset.
 	bool applyTimeOffset = true;
-	bool useManualTimeOffset = false;
-	double manualTimeOffsetMs = 0.0;
 
 	// Playspace scale solving is opt-in: streamed reference poses are motion-
 	// smoothed, which under-reports calibration motion and biases the solved

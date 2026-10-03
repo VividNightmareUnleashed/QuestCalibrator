@@ -293,9 +293,7 @@ void SynchronizeCalibrationDriver(CalibrationContext &ctx)
 	}
 
 	double timeShift = 0.0;
-	if (ctx.useManualTimeOffset)
-		timeShift = ctx.manualTimeOffsetMs / 1000.0;
-	else if (ctx.applyTimeOffset)
+	if (ctx.applyTimeOffset)
 		timeShift = ComputeAppliedTimeOffset(ctx.transform.timeOffset);
 	if (!std::isfinite(timeShift) ||
 		std::abs(timeShift) > protocol::limits::MaxAbsTimeOffsetSeconds ||

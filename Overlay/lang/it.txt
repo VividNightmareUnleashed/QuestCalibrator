@@ -317,8 +317,6 @@ en: Correct for tracking delay
 it: Compensa il ritardo di tracciamento
 en: Uses the delay between the two systems measured during calibration.
 it: Usa il ritardo tra i due sistemi misurato durante la calibrazione.
-en: Manual tracking delay override (debug)
-it: Ritardo di tracciamento manuale (debug)
 en: Continuous calibration
 it: Calibrazione continua
 en: Keeps devices aligned while you play, using a tracker strapped to your headset.

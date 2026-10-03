@@ -414,7 +414,6 @@ void DescribeSettings(std::ostream &out, const CalibrationContext &ctx)
 	out << "notifications in VR: " << OnOff(ctx.notifyPoorCalibration) << "\n";
 	out << "solve scale: " << OnOff(ctx.solveScale) << "\n";
 	out << "apply time offset: " << OnOff(ctx.applyTimeOffset) << "\n";
-	out << "manual time override: " << OnOff(ctx.useManualTimeOffset) << ", value " << ctx.manualTimeOffsetMs << " ms\n";
 	out << "requested driver time shift: " << ctx.appliedTimeOffset * 1000.0 << " ms\n";
 	out << "latency reestimation: " << OnOff(ctx.continuousLatencyReestimation)
 		<< ", require trigger: " << OnOff(ctx.continuousRequireTrigger)
