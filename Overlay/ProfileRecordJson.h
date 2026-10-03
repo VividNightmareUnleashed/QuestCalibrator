@@ -96,7 +96,6 @@ inline PersistedRevision ReadPersistenceRevision(const picojson::object &obj)
 // to do with it.
 struct LegacyProfileSettings
 {
-	int settingsVersion = 1;
 	bool hasApplyTimeOffset = false;
 	bool applyTimeOffset = true;
 	bool hasSolveScale = false;
@@ -109,9 +108,17 @@ struct LegacyProfileSettings
 	int calibrationSpeed = static_cast<int>(PersistedCalibrationSpeed::Fast);
 };
 
+// The Config record's schema. It is stored under "settings_version", the key
+// every earlier build reads, and older builds accept any whole number from 1
+// to 100 there (IsValidSettingsVersion), so a record a newer build wrote still
+// loads in an older one. A change an older record has to be brought through
+// bumps it and adds its step to ConfigMigrations.
+constexpr int ConfigSchema = 2;
+
 struct ProfileParseResult
 {
 	PersistedRevision revision;
+	int schema = ConfigSchema;   // the schema the record was written at
 	bool migratedScaleSetting = false;
 	bool suspiciousLegacyScale = false;
 };
@@ -159,6 +166,36 @@ inline picojson::value ParseProfileEnvelope(std::istream &stream)
 		throw std::runtime_error("profile entry is not an object");
 	return arr[0];
 }
+
+// One step of an older Config record towards ConfigSchema, from `from` to
+// the next, on what the parser read.
+struct ConfigMigration
+{
+	int from;
+	void (*apply)(const ProfileRecord &profile, LegacyProfileSettings &legacy,
+		ProfileParseResult &result);
+};
+
+// 1 to 2: scale solving goes off, whatever the record held. Streamed
+// reference poses are motion-smoothed and the solved scale absorbs the
+// attenuation. The applied scale is kept; it was solved jointly with the
+// translation, and clearing it without re-solving would misalign the space.
+inline void MigrateConfigScaleSolvingOff(const ProfileRecord &profile,
+	LegacyProfileSettings &legacy, ProfileParseResult &result)
+{
+	legacy.hasSolveScale = true;
+	legacy.solveScale = false;
+	result.migratedScaleSetting = true;
+	result.suspiciousLegacyScale = profile.scale < 0.98 || profile.scale > 1.02;
+}
+
+// In order, one per older schema: a record at schema s runs every step from
+// s on.
+inline constexpr ConfigMigration ConfigMigrations[] = {
+	{ 1, MigrateConfigScaleSolvingOff },
+};
+static_assert(sizeof ConfigMigrations / sizeof ConfigMigrations[0] == ConfigSchema - 1,
+	"one Config migration step for each older schema");
 
 inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 	LegacyProfileSettings &legacy, const picojson::object &obj, size_t maxAnchors)
@@ -280,17 +317,14 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 		legacy.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
 	}
 
-	// One-time migration (settings_version < 2) turns scale solving off:
-	// streamed reference poses are motion-smoothed and the solved scale absorbs
-	// the attenuation. The applied scale is kept; it was solved jointly with the
-	// translation, and clearing it without re-solving would misalign the space.
-	double settingsVersionValue = HasTypedValue<double>(obj, "settings_version")
+	// The schema the record was written at; one from before the key existed
+	// is schema 1. ConfigMigrations brings it up to date below.
+	double schemaValue = HasTypedValue<double>(obj, "settings_version")
 		? GetDouble(obj.at("settings_version")) : 1.0;
-	if (!IsValidSettingsVersion(settingsVersionValue))
+	if (!IsValidSettingsVersion(schemaValue))
 		throw std::runtime_error("invalid settings_version");
-	legacy.settingsVersion = static_cast<int>(settingsVersionValue);
-	bool hasSolveScale = HasTypedValue<bool>(obj, "solve_scale");
-	if (legacy.settingsVersion >= 2 && hasSolveScale)
+	result.schema = static_cast<int>(schemaValue);
+	if (HasTypedValue<bool>(obj, "solve_scale"))
 	{
 		legacy.hasSolveScale = true;
 		legacy.solveScale = obj.at("solve_scale").get<bool>();
@@ -421,13 +455,9 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 		}
 	}
 
-	if (legacy.settingsVersion < 2)
-	{
-		legacy.hasSolveScale = true;
-		legacy.solveScale = false;
-		result.migratedScaleSetting = true;
-		result.suspiciousLegacyScale = profile.scale < 0.98 || profile.scale > 1.02;
-	}
+	for (const auto &step : ConfigMigrations)
+		if (step.from >= result.schema)
+			step.apply(profile, legacy, result);
 
 	profile.valid = true;
 
@@ -504,9 +534,9 @@ inline void WriteProfile(const ProfileRecord &record,
 		profile["universe_world_from_driver_translation_meters"].set<picojson::array>(
 			std::move(universeTranslation));
 	}
-	// Bumped when a load-time migration must not re-run (see ParseProfileObject).
-	double settingsVersion = 2.0;
-	profile["settings_version"].set<double>(settingsVersion);
+	// What ConfigMigrations brings every record to, so none re-runs.
+	double schema = ConfigSchema;
+	profile["settings_version"].set<double>(schema);
 	profile["continuous_enabled"].set<bool>(record.continuousEnabled);
 	if (!record.continuousTrackerSerial.empty())
 		profile["continuous_tracker_serial"].set<std::string>(record.continuousTrackerSerial);

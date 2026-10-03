@@ -7424,6 +7424,12 @@ void RunPersistenceRoundTripScenario()
 		return PersistReadBack(PersistWrite(record, revision), back, legacy, result);
 	};
 
+	// A0: the Config migrations run in order, one per older schema, up to the
+	// one the writer stamps.
+	for (size_t i = 0; i < sizeof ConfigMigrations / sizeof ConfigMigrations[0]; ++i)
+		if (ConfigMigrations[i].from != static_cast<int>(i) + 1)
+			fail("A0", "steps out of order");
+
 	// A1: fully populated, both optional blocks present, two anchors in range.
 	const ProfileRecord good = PersistGoodRecord();
 	const std::string a1Text = PersistWrite(good, 7);
@@ -7444,9 +7450,10 @@ void RunPersistenceRoundTripScenario()
 		if (!back.valid) fail("A1", "valid=false");
 		if (!result.revision.present || result.revision.value != 7)
 			fail("A1", "revision");
-		// The writer stamps settings_version 2, so a round-tripped record must
-		// not re-run the one-time v1 scale migration on every launch.
+		// The writer stamps ConfigSchema, so a round-tripped record must not
+		// re-run the one-time v1 scale migration on every launch.
 		if (result.migratedScaleSetting) fail("A1", "migration re-ran");
+		if (result.schema != ConfigSchema) fail("A1", "schema");
 	}
 
 	// A2: an empty continuous serial is written by omission and must come back

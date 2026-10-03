@@ -22,6 +22,11 @@ struct ChaperoneRecord
 	double copyUnixTime = 0.0;
 };
 
+// The Settings record's schema, stored under "settings_version" as the
+// Config record's is (see ConfigSchema). No change has needed a migration
+// yet; the first one bumps it and adds a step table as ConfigMigrations.
+constexpr int SettingsSchema = 1;
+
 struct SettingsRecord
 {
 	bool uiAdvanced = false;
@@ -188,11 +193,11 @@ inline void WriteSettings(const SettingsRecord &record,
 	uint32_t persistenceRevisionValue, std::ostream &out)
 {
 	picojson::object settings;
-	double settingsVersion = 1.0;
+	double schema = SettingsSchema;
 	double calibrationSpeed = static_cast<double>(record.calibrationSpeed);
 	double persistenceRevision = static_cast<double>(persistenceRevisionValue);
 	settings["persistence_revision"].set<double>(persistenceRevision);
-	settings["settings_version"].set<double>(settingsVersion);
+	settings["settings_version"].set<double>(schema);
 	settings["ui_advanced"].set<bool>(record.uiAdvanced);
 	settings["notify_poor_calibration"].set<bool>(record.notifyPoorCalibration);
 	settings["chaperone_warning_ack"].set<bool>(record.chaperoneWarningAck);
