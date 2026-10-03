@@ -39,7 +39,8 @@ def main():
         record['success'] = record['sourcesUnchanged']
         assurance.validate(record, identity, {'binary-correspondence': ['V09']},
                            required={'binary-correspondence'}, release=False, require_negative_controls=True)
-        print('V09 passed for all three supplied pins; ten intended failure controls and 45 acceptance fixtures passed.')
+        print(f"V09 passed for all three supplied pins; {len(suite['negativeControls'])} intended failure controls "
+              f"and {suite['acceptanceFixtures']} acceptance fixtures passed.")
     except BaseException:
         record['success'] = False
         raise

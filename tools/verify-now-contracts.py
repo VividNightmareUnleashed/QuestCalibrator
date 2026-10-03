@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Now contracts and require their nine intended mutation assertions."""
+"""Run Now contracts and require each mutant to reach its intended assertion."""
 import argparse
 import importlib.util
 import json
@@ -49,7 +49,8 @@ def main():
         expected = {"contracts": ["A01", "A02", "A03", *assurance.NOW_MUTANTS]}
         assurance.validate(record, identity, expected, required={"contracts"},
                            release=False, require_negative_controls=True)
-        print("All nine Now mutants reached their intended assertions; 67 acceptance fixtures passed.")
+        fixtures = record["suites"]["contracts"]["negativeControls"]["acceptanceFixtures"]
+        print(f"All {len(controls)} Now mutants reached their intended assertions; {fixtures} acceptance fixtures passed.")
     except BaseException:
         record["success"] = False
         raise
