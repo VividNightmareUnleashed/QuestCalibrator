@@ -65,7 +65,9 @@ try {
     }
     $parent=Join-Path $root 'linked-parent';New-Item -ItemType SymbolicLink -Path $parent -Target $destination | Out-Null
     Refuses { Expand-VerifiedUpdate $valid $hash (Join-Path $parent 'child') } 'Linked staging ancestor accepted'
-    Remove-Item -LiteralPath $parent -Force
+    # Windows PowerShell's Remove-Item throws on a directory link; this removes
+    # the link alone, never what it points to.
+    [IO.Directory]::Delete($parent)
     Refuses { Expand-VerifiedUpdate $valid $hash 'relative-stage' } 'Relative staging path accepted'
     $truncated=Join-Path $root 'truncated.zip';[IO.File]::WriteAllBytes($truncated,[byte[]](1..32))
     Refuses { Expand-VerifiedUpdate $truncated (Get-FileHash $truncated -Algorithm SHA256).Hash (Join-Path $root 'truncated') } 'Malformed archive accepted'
