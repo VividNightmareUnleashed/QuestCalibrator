@@ -38,11 +38,80 @@ env:
   LEAN_TOOLCHAIN: leanprover/lean4:v4.34.0
 
 jobs:
+  # The Docker images the proofs run in, found or built once for every share.
+  # A record names its tool by the image's ID, two builds of one Dockerfile get
+  # different IDs, and the evidence refuses shares that disagree. GenMC and
+  # ESBMC are built from source, so an image is cached by its Dockerfile's hash;
+  # a run from a tag cannot read the caches a branch saved and builds its own.
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Check out VirtualQuest
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools/ci/checkout-virtualquest.ps1
+
+      - name: Find the GenMC image
+        id: genmc
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/questcal-genmc.tar
+          key: questcal-genmc-${{ hashFiles('VirtualQuest/formal/seqlock/Dockerfile') }}
+          lookup-only: true
+
+      - name: Build the GenMC image
+        if: steps.genmc.outputs.cache-hit != 'true'
+        timeout-minutes: 60
+        run: |
+          docker build -q -t questcal-genmc VirtualQuest/formal/seqlock > /dev/null 2>&1 || { echo 'Building the GenMC image failed.'; exit 1; }
+          docker save -o "$RUNNER_TEMP/questcal-genmc.tar" questcal-genmc
+
+      - name: Save the GenMC image
+        if: steps.genmc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/questcal-genmc.tar
+          key: questcal-genmc-${{ hashFiles('VirtualQuest/formal/seqlock/Dockerfile') }}
+
+      - name: Find the ESBMC image
+        id: esbmc
+        if: inputs.evidence
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/questcal-esbmc.tar
+          key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
+          lookup-only: true
+
+      - name: Build the ESBMC image
+        if: inputs.evidence && steps.esbmc.outputs.cache-hit != 'true'
+        timeout-minutes: 30
+        run: |
+          docker build -q -t questcal-esbmc VirtualQuest/formal/input-validation > /dev/null 2>&1 || { echo 'Building the ESBMC image failed.'; exit 1; }
+          docker save -o "$RUNNER_TEMP/questcal-esbmc.tar" questcal-esbmc
+
+      - name: Save the ESBMC image
+        if: inputs.evidence && steps.esbmc.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/questcal-esbmc.tar
+          key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
+
   # check.ps1 -Shard balances the shares by the time each check last took:
   # PoseRingQueue, about 16 minutes, has one to itself and the rest take about
   # 13 each.
   private-core:
     name: private-core (${{ matrix.shard }}/6)
+    needs: images
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -112,33 +181,18 @@ jobs:
           echo 'import Lean' > "$RUNNER_TEMP/warm-up.lean"
           ~/.elan/bin/lean "$RUNNER_TEMP/warm-up.lean"
 
-      # GenMC is built from source, which takes a long while, so the image is
-      # cached by its Dockerfile's hash.
       - name: Restore the GenMC image
-        id: genmc-cache
         if: steps.share.outputs.genmc == 'true'
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/questcal-genmc.tar
           key: questcal-genmc-${{ hashFiles('VirtualQuest/formal/seqlock/Dockerfile') }}
+          fail-on-cache-miss: true
 
-      - name: Load or build the GenMC image
+      - name: Load the GenMC image
         if: steps.share.outputs.genmc == 'true'
-        timeout-minutes: 45
-        run: |
-          if [ '${{ steps.genmc-cache.outputs.cache-hit }}' = 'true' ]; then
-            docker load -i "$RUNNER_TEMP/questcal-genmc.tar" > /dev/null
-          else
-            docker build -q -t questcal-genmc VirtualQuest/formal/seqlock > /dev/null 2>&1 || { echo 'Building the GenMC image failed.'; exit 1; }
-            docker save -o "$RUNNER_TEMP/questcal-genmc.tar" questcal-genmc
-          fi
-
-      - name: Save the GenMC image
-        if: steps.share.outputs.genmc == 'true' && steps.genmc-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/questcal-genmc.tar
-          key: questcal-genmc-${{ hashFiles('VirtualQuest/formal/seqlock/Dockerfile') }}
+        timeout-minutes: 10
+        run: docker load -i "$RUNNER_TEMP/questcal-genmc.tar" > /dev/null
 
       - name: Check share ${{ matrix.shard }} of 6
         timeout-minutes: 60
@@ -165,6 +219,7 @@ jobs:
   numeric:
     if: inputs.evidence
     name: numeric (${{ matrix.shard }}/4)
+    needs: images
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -187,28 +242,15 @@ jobs:
         run: tools/ci/checkout-virtualquest.ps1
 
       - name: Restore the ESBMC image
-        id: esbmc-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/questcal-esbmc.tar
           key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
+          fail-on-cache-miss: true
 
-      - name: Load or build the ESBMC image
-        timeout-minutes: 20
-        run: |
-          if [ '${{ steps.esbmc-cache.outputs.cache-hit }}' = 'true' ]; then
-            docker load -i "$RUNNER_TEMP/questcal-esbmc.tar" > /dev/null
-          else
-            docker build -q -t questcal-esbmc VirtualQuest/formal/input-validation > /dev/null 2>&1 || { echo 'Building the ESBMC image failed.'; exit 1; }
-            docker save -o "$RUNNER_TEMP/questcal-esbmc.tar" questcal-esbmc
-          fi
-
-      - name: Save the ESBMC image
-        if: steps.esbmc-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/questcal-esbmc.tar
-          key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
+      - name: Load the ESBMC image
+        timeout-minutes: 10
+        run: docker load -i "$RUNNER_TEMP/questcal-esbmc.tar" > /dev/null
 
       - name: Check share ${{ matrix.shard }} of 4
         timeout-minutes: 75
