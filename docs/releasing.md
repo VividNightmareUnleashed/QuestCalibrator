@@ -32,8 +32,9 @@ builds with the full solver suite (including the VirtualQuest scenarios and the
 formal-model links), and in parallel jobs replays the pose hub traces through their
 TLA+ model, runs the duplicate scan as an advisory gate, and runs Clang-Tidy over every
 translation unit (`clang-tidy.yml`, where any first-party finding stops the release).
-It checks the version against the tag, packages with `install\build-package.ps1`, scans
-with `install\virustotal-scan.ps1`, creates a **draft** release with the zip, its
+It checks the version against the tag and packages, scans and writes the notes with
+`install\package-release.ps1` (which runs `install\build-package.ps1` and
+`install\virustotal-scan.ps1`), creates a **draft** release with the zip, its
 `.sha256` and notes carrying the hash and the VirusTotal table, and then runs the
 install test on that draft. It refuses to run if the tag already has a release. The
 release is written with the workflow's own token; its secrets are
@@ -44,11 +45,14 @@ can be repeated for its tag from the Actions tab (`workflow_dispatch`); once the
 has a draft the check refuses, and the way on is a new version.
 
 `install\release.ps1` is the local fallback when Actions is unavailable, run from the
-tagged commit with PowerShell 7 and your own `gh` login. It builds with the full solver
-suite, runs Clang-Tidy over every translation unit (skipped by `-DryRun`), requires the
-complete formal evidence described below, packages, scans and creates the draft. It
-does not replay the hub traces itself (the formal evidence carries them), run the
-advisory duplicate scan or run the install test. To keep the tag
+tagged commit with PowerShell 7 and your own `gh` login. It holds a release to the same
+gates: it refuses unless VirtualQuest is checked out, unchanged, at the commit the tag
+pins, builds with the full solver suite, runs Clang-Tidy over every translation unit
+(skipped by `-DryRun`), requires the complete formal evidence described below, and
+creates the draft. Both paths package, scan and write the notes with
+`install\package-release.ps1`, so the package, its `BUILD-INFO.txt` and the notes
+cannot drift apart. It does not replay the hub traces itself (the formal evidence
+carries them), run the advisory duplicate scan or run the install test. To keep the tag
 push from starting the workflow, put `[skip release]` in the message of the commit
 the tag points to (the version bump). It checks that the working tree is clean and
 that the tag is at HEAD and pushed; `-DryRun` stops before creating the release. Its
