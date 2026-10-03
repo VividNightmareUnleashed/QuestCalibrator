@@ -47,7 +47,6 @@ void GLFWErrorCallback(int error, const char* description)
 	fprintf(stderr, "GLFW Error %d: %s\n", error, description);
 }
 
-static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved);
 static std::string Narrow(const std::wstring &wide);
 
 static GLFWwindow *glfwWindow = nullptr;
@@ -116,35 +115,57 @@ static std::string AppFile(const char *name)
 	return appDir + "\\" + name;
 }
 
-// Release builds are a GUI binary with no console, so the CLI commands report
-// through a message box, unless -noui is passed: the installer does, so a
-// scripted install never blocks on a modal window and reads the exit code.
-static bool g_cliNoUi = false;
+// What the command line asks for, read without acting on it: wWinMain runs
+// it, and every path, a command's or the overlay's, returns its exit code.
+struct LaunchOptions
+{
+	enum class Command { Overlay, OpenVrPath, InstallManifest, RemoveManifest, ActivateMultipleDrivers };
+	Command command = Command::Overlay;
 
-// -frames N: render exactly N frames and return. With -uipreview (no SteamVR
-// needed) this is a UI smoke test: a crash leaves a non-zero exit code.
-static int g_frameLimit = 0;
+	// Release builds are a GUI binary with no console, so the CLI commands
+	// report through a message box, unless -noui is passed: the installer does,
+	// so a scripted install never blocks on a modal window and reads the exit
+	// code.
+	bool noUi = false;
 
-// -shot PATH: write the last frame's 1200x800 overlay texture to PATH as a PNG,
-// then return as -frames does (thirty frames by default, enough for the tab
-// thumb and hover fades to settle).
-static std::wstring g_shotPath;
+	// -frames N: render exactly N frames and return. With -uipreview (no
+	// SteamVR needed) this is a UI smoke test: a crash leaves a non-zero exit
+	// code.
+	int frameLimit = 0;
 
-// -lang CODE: show the overlay in this language for the session, whatever the
-// saved setting says, so a preview can be shot in each language.
-// -i18n-missing PATH: on exit, write the English strings the current language
-// had no translation for, one per line; a translator's checklist.
-static std::string g_langOverride;
-static std::wstring g_missingPath;
+	// -shot PATH: write the last frame's 1200x800 overlay texture to PATH as a
+	// PNG, then return as -frames does (thirty frames by default, enough for
+	// the tab thumb and hover fades to settle).
+	std::wstring shotPath;
 
-static void CliReport(const char *message, bool isError)
+	// -lang CODE: show the overlay in this language for the session, whatever
+	// the saved setting says, so a preview can be shot in each language.
+	// -i18n-missing PATH: on exit, write the English strings the current
+	// language had no translation for, one per line; a translator's checklist.
+	std::string langOverride;
+	std::wstring missingPath;
+
+	// -uipreview and its variants: the overlay on fake state, without SteamVR.
+	bool preview = false;
+	bool previewMany = false;
+	PreviewScenario previewScenario = PreviewScenario::Healthy;
+
+	// Why the command line is refused, reported as a command's failure.
+	std::string error;
+};
+
+static LaunchOptions ParseCommandLine(LPWSTR lpCmdLine);
+static int RunCommand(const LaunchOptions &options);
+static int CliFinish(const LaunchOptions &options, const std::string &message, bool isError);
+
+static void CliReport(bool noUi, const char *message, bool isError)
 {
 	if (isError)
 		fprintf(stderr, "%s\n", message);
 	else
 		printf("%s\n", message);
 
-	if (g_cliNoUi)
+	if (noUi)
 		return;
 
 	MessageBoxA(nullptr, message, "QuestCalibrator",
@@ -536,7 +557,7 @@ static bool SavePreviewShot(const std::wstring &path, std::string &error)
 	return true;
 }
 
-void RunLoop()
+void RunLoop(const LaunchOptions &options)
 {
 	int framesRendered = 0;
 	while (!glfwWindowShouldClose(glfwWindow))
@@ -709,11 +730,11 @@ void RunLoop()
 		if (waitEventsTimeout < 0.005)
 			waitEventsTimeout = 0.005;
 
-		if (g_frameLimit > 0 && ++framesRendered >= g_frameLimit)
+		if (options.frameLimit > 0 && ++framesRendered >= options.frameLimit)
 		{
 			std::string error;
-			if (!g_shotPath.empty() && !SavePreviewShot(g_shotPath, error))
-				CliReport(error.c_str(), true);
+			if (!options.shotPath.empty() && !SavePreviewShot(options.shotPath, error))
+				CliReport(options.noUi, error.c_str(), true);
 			return;
 		}
 
@@ -757,7 +778,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 {
 	// Resolve first: the CLI commands below register and load files by path.
 	bool appDirResolved = ResolveAppDir();
-	HandleCommandLine(lpCmdLine, appDirResolved);
+	const LaunchOptions options = ParseCommandLine(lpCmdLine);
+	if (!appDirResolved)
+		return CliFinish(options, "QuestCalibrator couldn't find its own install folder.", true);
+	if (!options.error.empty())
+		return CliFinish(options, options.error, true);
+	if (options.command != LaunchOptions::Command::Overlay)
+		return RunCommand(options);
+	g_uiPreviewMode = options.preview;
+	g_uiPreviewMany = options.previewMany;
+	g_uiPreviewScenario = options.previewScenario;
 
 	// After the CLI commands, so registering a manifest still works while the
 	// overlay runs, and before the session log, so a duplicate launch cannot
@@ -870,8 +900,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 		}
 		// The override changes only the language drawn, never the saved one.
 		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(
-			g_langOverride.empty() ? CalCtx.language : g_langOverride));
-		RunLoop();
+			options.langOverride.empty() ? CalCtx.language : options.langOverride));
+		RunLoop(options);
 	}
 	catch (const std::exception &e)
 	{
@@ -883,8 +913,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 	}
 
 	questcal::update::AppUpdater.Shutdown();
-	if (!g_missingPath.empty())
-		questcal::i18n::WriteMissing(g_missingPath);
+	if (!options.missingPath.empty())
+		questcal::i18n::WriteMissing(options.missingPath);
 
 	// One shutdown pair for every path, before the modal dialog below can block:
 	// ShutdownCalibrator flushes debounced profile/settings writes. The
@@ -918,13 +948,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 }
 
 
-// Shared exit path for the CLI commands: report, shut OpenVR down, and exit with
-// a code the installer can act on.
-static void CliExit(const std::string &message, bool isError)
+// Shared end of the CLI commands: report, shut OpenVR down, and return a code
+// the installer can act on.
+static int CliFinish(const LaunchOptions &options, const std::string &message, bool isError)
 {
-	CliReport(message.c_str(), isError);
+	CliReport(options.noUi, message.c_str(), isError);
 	vr::VR_Shutdown();
-	exit(isError ? -2 : 0);
+	return isError ? -2 : 0;
 }
 
 static std::string InitErrorMessage(vr::EVRInitError vrErr)
@@ -937,12 +967,14 @@ static std::string InitErrorMessage(vr::EVRInitError vrErr)
 
 // The CLI commands need an initialised OpenVR session. The preview flags must
 // not call this: they run without SteamVR.
-static void InitVRUtilityOrExit()
+static bool InitVRUtility(std::string &error)
 {
 	auto vrErr = vr::VRInitError_None;
 	vr::VR_Init(&vrErr, vr::VRApplication_Utility);
-	if (vrErr != vr::VRInitError_None)
-		CliExit(InitErrorMessage(vrErr), true);
+	if (vrErr == vr::VRInitError_None)
+		return true;
+	error = InitErrorMessage(vrErr);
+	return false;
 }
 
 static std::string Narrow(const std::wstring &wide)
@@ -959,7 +991,7 @@ static std::string Narrow(const std::wstring &wide)
 	return out;
 }
 
-static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
+static LaunchOptions ParseCommandLine(LPWSTR lpCmdLine)
 {
 	// CommandLineToArgvW applies program-name rules to the first token, so
 	// prepend a placeholder for it.
@@ -974,77 +1006,101 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 		LocalFree(argv);
 	}
 
+	LaunchOptions options;
 	std::wstring cmd, unrecognised;
 	for (size_t i = 0; i < args.size(); ++i)
 	{
 		const std::wstring &arg = args[i];
 		if (arg == L"-noui")
-			g_cliNoUi = true;
+			options.noUi = true;
 		else if (arg == L"-frames" && i + 1 < args.size() &&
 			_wtoi(args[i + 1].c_str()) > 0)
-			g_frameLimit = _wtoi(args[++i].c_str());
+			options.frameLimit = _wtoi(args[++i].c_str());
 		else if (arg == L"-shot" && i + 1 < args.size())
-			g_shotPath = args[++i];
+			options.shotPath = args[++i];
 		else if (arg == L"-lang" && i + 1 < args.size())
-			g_langOverride = Narrow(args[++i]);
+			options.langOverride = Narrow(args[++i]);
 		else if (arg == L"-i18n-missing" && i + 1 < args.size())
-			g_missingPath = args[++i];
+			options.missingPath = args[++i];
 		else if (cmd.empty())
 			cmd = arg;
 		else if (unrecognised.empty())
 			unrecognised = arg;
 	}
 
-	if (!appDirResolved)
-		CliExit("QuestCalibrator couldn't find its own install folder.", true);
+	if (!options.shotPath.empty() && options.frameLimit == 0)
+		options.frameLimit = 30;
 
+	using Command = LaunchOptions::Command;
 	if (!unrecognised.empty())
-		CliExit("Unrecognized command-line argument: " + Narrow(unrecognised), true);
-
-	if (!g_shotPath.empty() && g_frameLimit == 0)
-		g_frameLimit = 30;
-
-	if (cmd == L"-uipreview")
+		options.error = "Unrecognized command-line argument: " + Narrow(unrecognised);
+	else if (cmd == L"-uipreview")
 	{
-		g_uiPreviewMode = true;
+		options.preview = true;
 	}
 	else if (cmd == L"-uipreview-many")
 	{
-		g_uiPreviewMode = true;
-		g_uiPreviewMany = true;
+		options.preview = true;
+		options.previewMany = true;
 	}
 	else if (cmd == L"-uipreview-guide" || cmd == L"-uipreview-guide-wait" || cmd == L"-uipreview-result")
 	{
-		g_uiPreviewMode = true;
-		g_uiPreviewMany = true;
-		g_uiPreviewScenario = cmd == L"-uipreview-guide" ? PreviewScenario::Guide
+		options.preview = true;
+		options.previewMany = true;
+		options.previewScenario = cmd == L"-uipreview-guide" ? PreviewScenario::Guide
 			: cmd == L"-uipreview-guide-wait" ? PreviewScenario::GuideWait : PreviewScenario::Result;
 	}
 	else if (cmd == L"-uipreview-frozen" || cmd == L"-uipreview-trackeroff" ||
 		cmd == L"-uipreview-failed" || cmd == L"-uipreview-empty")
 	{
-		g_uiPreviewMode = true;
-		g_uiPreviewMany = true;
-		g_uiPreviewScenario = cmd == L"-uipreview-frozen" ? PreviewScenario::Frozen
+		options.preview = true;
+		options.previewMany = true;
+		options.previewScenario = cmd == L"-uipreview-frozen" ? PreviewScenario::Frozen
 			: cmd == L"-uipreview-trackeroff" ? PreviewScenario::TrackerOff
 			: cmd == L"-uipreview-failed" ? PreviewScenario::Failed : PreviewScenario::Empty;
 	}
 	else if (cmd == L"-uipreview-lighthouse")
 	{
-		g_uiPreviewMode = true;
-		g_uiPreviewMany = true;
-		g_uiPreviewScenario = PreviewScenario::Lighthouse;
+		options.preview = true;
+		options.previewMany = true;
+		options.previewScenario = PreviewScenario::Lighthouse;
 	}
 	else if (cmd == L"-uipreview-settings")
 	{
-		g_uiPreviewMode = true;
-		g_uiPreviewMany = true;
-		g_uiPreviewScenario = PreviewScenario::Settings;
+		options.preview = true;
+		options.previewMany = true;
+		options.previewScenario = PreviewScenario::Settings;
 	}
 	else if (cmd == L"-openvrpath")
+		options.command = Command::OpenVrPath;
+	else if (cmd == L"-installmanifest")
+		options.command = Command::InstallManifest;
+	else if (cmd == L"-removemanifest")
+		options.command = Command::RemoveManifest;
+	else if (cmd == L"-activatemultipledrivers")
+		options.command = Command::ActivateMultipleDrivers;
+	else if (!cmd.empty())
 	{
-		InitVRUtilityOrExit();
+		// Never fall through to a GUI launch: a scripted install
+		// (Start-Process -Wait) could not tell its exit code 0 from success.
+		options.error = "Unrecognized command-line argument: " + Narrow(cmd);
+	}
+	return options;
+}
 
+// Runs the CLI command the options name, which all need OpenVR, and returns
+// its exit code.
+static int RunCommand(const LaunchOptions &options)
+{
+	std::string vrError;
+	if (!InitVRUtility(vrError))
+		return CliFinish(options, vrError, true);
+
+	using Command = LaunchOptions::Command;
+	switch (options.command)
+	{
+	case Command::OpenVrPath:
+	{
 		char stackRuntimePath[MAX_PATH] = { 0 };
 		uint32_t requiredBytes = 0;
 		bool pathRead = vr::VR_GetRuntimePath(stackRuntimePath,
@@ -1070,27 +1126,24 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 			!std::memchr(runtimePath, '\0', runtimePathCapacity) ||
 			runtimePath[0] == '\0')
 		{
-			CliExit("Couldn't read the OpenVR runtime path.", true);
+			return CliFinish(options, "Couldn't read the OpenVR runtime path.", true);
 		}
 
 		// Machine-readable, so no trailing newline: callers capture this on
 		// stdout and use it directly as a path.
 		printf("%s", runtimePath);
-		if (!g_cliNoUi)
+		if (!options.noUi)
 			MessageBoxA(nullptr, runtimePath, "QuestCalibrator", MB_OK | MB_ICONINFORMATION);
 		vr::VR_Shutdown();
-		exit(0);
+		return 0;
 	}
-	else if (cmd == L"-installmanifest")
+	case Command::InstallManifest:
 	{
-		InitVRUtilityOrExit();
 		ManifestInstallResult install = EnsureManifestRegistration(true);
-		CliExit(install.message, !install.success);
+		return CliFinish(options, install.message, !install.success);
 	}
-	else if (cmd == L"-removemanifest")
+	case Command::RemoveManifest:
 	{
-		InitVRUtilityOrExit();
-
 		std::string manifestPath = AppFile("manifest.vrmanifest");
 		if (vr::VRApplications()->IsApplicationInstalled(OPENVR_APPLICATION_KEY))
 		{
@@ -1098,32 +1151,30 @@ static void HandleCommandLine(LPWSTR lpCmdLine, bool appDirResolved)
 				manifestPath.c_str());
 			if (vrAppErr != vr::VRApplicationError_None)
 			{
-				CliExit("Couldn't unregister QuestCalibrator from SteamVR.\n\n" +
+				return CliFinish(options, "Couldn't unregister QuestCalibrator from SteamVR.\n\n" +
 					manifestPath + "\n\n" +
 					vr::VRApplications()->GetApplicationsErrorNameFromEnum(vrAppErr), true);
 			}
 		}
 
-		CliExit("QuestCalibrator deregistered from SteamVR.", false);
+		return CliFinish(options, "QuestCalibrator deregistered from SteamVR.", false);
 	}
-	else if (cmd == L"-activatemultipledrivers")
+	case Command::ActivateMultipleDrivers:
 	{
-		InitVRUtilityOrExit();
-
 		try
 		{
 			ActivateMultipleDrivers();
 		}
 		catch (std::runtime_error &e)
 		{
-			CliExit(std::string("Couldn't turn on SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
+			return CliFinish(options, std::string("Couldn't turn on SteamVR's multiple-drivers setting.\n\n") + e.what(), true);
 		}
-		CliExit("SteamVR multiple-driver support enabled.", false);
+		return CliFinish(options, "SteamVR multiple-driver support enabled.", false);
 	}
-	else if (!cmd.empty())
-	{
-		// Never fall through to a GUI launch: a scripted install
-		// (Start-Process -Wait) could not tell its exit code 0 from success.
-		CliExit("Unrecognized command-line argument: " + Narrow(cmd), true);
+	case Command::Overlay:
+		break;
 	}
+	// The overlay is no command: wWinMain starts it rather than calling this.
+	vr::VR_Shutdown();
+	return 0;
 }
