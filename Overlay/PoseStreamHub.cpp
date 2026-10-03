@@ -309,13 +309,13 @@ void PoseStreamHub::DrainLoop(const std::string &shmemName)
 	const DWORD shortestPauseMs = 1000, longestPauseMs = 30000;
 	const ULONGLONG goodRunMs = 60000;
 	DWORD pauseMs = shortestPauseMs;
-	while (!stopRequested.load(std::memory_order_acquire))
+	// True once stop is requested, false after a failure it recorded.
+	const auto drain = [&]
 	{
-		const ULONGLONG started = GetTickCount64();
 		try
 		{
 			DrainRing(shmemName);   // returns only once stop is requested
-			break;
+			return true;
 		}
 		catch (const std::exception &e)
 		{
@@ -325,6 +325,13 @@ void PoseStreamHub::DrainLoop(const std::string &shmemName)
 		{
 			RecordFailure("unknown exception");
 		}
+		return false;
+	};
+	while (!stopRequested.load(std::memory_order_acquire))
+	{
+		const ULONGLONG started = GetTickCount64();
+		if (drain())
+			break;
 		ringOpen.store(false, std::memory_order_release);
 		if (GetTickCount64() - started >= goodRunMs)
 			pauseMs = shortestPauseMs;

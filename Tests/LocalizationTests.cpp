@@ -362,7 +362,7 @@ void EveryShownLiteralIsTranslated(Check check)
 						continue;
 					++literals;
 					if (!HasTranslation(Language::Japanese, value) || !HasTranslation(Language::Italian, value))
-						missing.push_back(name + ": " + value);
+						missing.emplace_back(name).append(": ").append(value);
 				}
 			}
 		}
