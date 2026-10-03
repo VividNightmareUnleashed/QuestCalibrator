@@ -552,6 +552,7 @@ void RebindCalibrationUniverse(CalibrationContext &ctx,
 	const std::string &hmdSerial, bool priorUniverseUnsafe)
 {
 	ctx.profileUniverseUnsafe = false;
+	ctx.frameMovesLost = false;
 	ctx.profileUniverseValid = false;
 	ctx.profileHmdSerial = hmdSerial;
 	std::string currentHmdSerial;
@@ -798,6 +799,7 @@ void ProfileUniverseTick(CalibrationContext &ctx, double now)
 	}
 
 	ctx.profileUniverseUnsafe = true;
+	ctx.frameMovesLost = false;   // the status names this, the latest cause
 	ctx.enabled = false;
 	ctx.persistence.MarkProfile(now);
 	const bool autoApplyChanged = ctx.chaperone.autoApply;

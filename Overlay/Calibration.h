@@ -120,11 +120,17 @@ struct CalibrationProfileState
 		HmdMismatch,
 		DriverUnreachable,
 		UniverseUnsafe,
+		FrameMovesLost,
 	};
 	DisableReason disableReason = DisableReason::None;
 	bool validProfile = false;
 	// Physical HMD and raw universe in which `transform` was solved.
 	bool profileUniverseUnsafe = false;
+	// Set with profileUniverseUnsafe when lighthouse frame moves were lost to
+	// the frame watch's full queue rather than the headset re-centering unseen,
+	// so the status names that cause. Not persisted: after a restart the saved
+	// flag alone reads as the usual unseen re-center.
+	bool frameMovesLost = false;
 	bool profileUniverseValid = false;
 	std::string profileHmdSerial;
 	Eigen::Quaterniond profileWorldFromDriverRotation{ 1, 0, 0, 0 };

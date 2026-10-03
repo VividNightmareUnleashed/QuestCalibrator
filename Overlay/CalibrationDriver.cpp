@@ -216,7 +216,9 @@ void SynchronizeCalibrationDriver(CalibrationContext &ctx)
 	ctx.enabled = ctx.validProfile && !ctx.profileUniverseUnsafe;
 	ctx.disableReason = ctx.enabled
 		? CalibrationContext::DisableReason::None
-		: CalibrationContext::DisableReason::UniverseUnsafe;
+		: ctx.frameMovesLost
+			? CalibrationContext::DisableReason::FrameMovesLost
+			: CalibrationContext::DisableReason::UniverseUnsafe;
 
 	if (ctx.enabled && !IsValidTrackingSystemPair(
 		ctx.referenceTrackingSystem, ctx.targetTrackingSystem))

@@ -538,6 +538,9 @@ void BuildMainScreen()
 				case Reason::UniverseUnsafe:
 					why = "The headset re-centered while QuestCalibrator wasn't watching, so the saved alignment is off. Recalibrate.";
 					break;
+				case Reason::FrameMovesLost:
+					why = "SteamVR moved the base stations more often than QuestCalibrator could follow, so the saved alignment may be off. Recalibrate.";
+					break;
 				case Reason::None:
 					// Never borrow another cause's sentence: a universe change
 					// that was not observed is not something to assert.

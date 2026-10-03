@@ -196,6 +196,7 @@ static void ApplyProfileRecord(CalibrationContext &ctx, ProfileRecord record)
 	ctx.transform.timeOffset = record.timeOffset;
 	ctx.calibrationUnixTime = record.calibrationUnixTime;
 	ctx.profileUniverseUnsafe = record.universeUnsafe;
+	ctx.frameMovesLost = false;   // not saved; see its declaration
 	ctx.profileUniverseValid = record.universeValid;
 	ctx.profileHmdSerial = std::move(record.universeHmdSerial);
 	ctx.profileWorldFromDriverRotation = record.universeRotation;

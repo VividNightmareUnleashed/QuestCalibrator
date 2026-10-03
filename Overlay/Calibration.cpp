@@ -772,9 +772,12 @@ static void CompensateTrackerFrameMoves(CalibrationContext &ctx)
 		EndCalibrationRun(ctx);
 		ctx.enabled = false;
 		ctx.profileUniverseUnsafe = true;
+		ctx.frameMovesLost = true;
 		ctx.persistence.MarkProfile(ctx.timeLastTick);
 		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::StreamGap);
-		ctx.Diag("lighthouse frame move queue overflowed; calibration disabled until a new measurement");
+		ctx.Log("Lighthouse frame move queue overflowed; calibration disabled until a new measurement\n");
+		ctx.ReportError("SteamVR moved the base stations more often than QuestCalibrator could follow. "
+			"The calibration is off until you recalibrate.\n");
 		SynchronizeCalibrationDriver(ctx);
 		return;
 	}
@@ -797,8 +800,10 @@ static void CompensateTrackerFrameMoves(CalibrationContext &ctx)
 		}
 		else if (!ctx.trackerFrames.Follow(move))
 		{
-			ctx.Diag("lighthouse: rejected out-of-order or unsafe frame correction for device " +
-				std::to_string(move.id));
+			// Logged always, not only in detailed logging: the tracker stays
+			// off by the move it reported, and the log has to say why.
+			ctx.Log("Lighthouse: rejected an out-of-order or unsafe frame correction for device " +
+				std::to_string(move.id) + "\n");
 			continue;
 		}
 		else
