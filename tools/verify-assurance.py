@@ -247,7 +247,7 @@ def source_identity(quest, virtual):
             if not file.is_file():
                 continue
             data = file.read_bytes()
-            if path in text or file.suffix.lower() in {".h", ".cpp", ".c", ".lean", ".tla", ".cfg", ".ps1", ".py", ".yml", ".json", ".inc", ".g", ".vcxproj", ".targets", ".nsi", ".md", ".txt"} or file.name == "Dockerfile":
+            if path in text or file.suffix.lower() in {".h", ".cpp", ".c", ".lean", ".tla", ".cfg", ".ps1", ".py", ".yml", ".json", ".inc", ".g", ".vcxproj", ".targets", ".md", ".txt"} or file.name == "Dockerfile":
                 data = data.replace(b"\r\n", b"\n")
             hashes[path] = hashlib.sha256(data).hexdigest()
         identities[name] = {"commit": git(root, "rev-parse", "HEAD"), "files": hashes}

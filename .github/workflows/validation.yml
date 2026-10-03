@@ -364,11 +364,6 @@ jobs:
         env:
           VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
         run: tools/ci/checkout-virtualquest.ps1
-      - name: Install the NSIS compiler
-        timeout-minutes: 5
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y nsis
       - name: Check the worthwhile public inventory extension
         timeout-minutes: 20
         run: python tools/verify-inventory-extension.py --public-only --source-root "$PWD" --output-dir "$RUNNER_TEMP/extension"

@@ -14,7 +14,6 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--compiler", default="g++")
     parser.add_argument("--pwsh", default="pwsh")
-    parser.add_argument("--makensis", default="makensis")
     parser.add_argument("--jobs", type=int, choices=(1, 2, 3, 4), default=2)
     parser.add_argument("--public-only", action="store_true",
                         help="Exclude VirtualQuest-specific checks from public CI")
@@ -34,7 +33,7 @@ def main():
         subprocess.run([sys.executable, str(virtual / "formal/verify-extension.py"),
                         "--source-root", str(root), "--output-dir", str(out),
                         "--compiler", args.compiler, "--pwsh", args.pwsh,
-                        "--makensis", args.makensis, "--jobs", str(args.jobs),
+                        "--jobs", str(args.jobs),
                         *(["--public-only"] if args.public_only else [])], check=True)
         record = json.loads((out / "result.json").read_text())
         record["success"] = False
