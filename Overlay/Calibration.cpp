@@ -32,6 +32,7 @@
 #include <vector>
 
 static PoseStreamHub PoseHub;
+static uint64_t PoseHubFailuresLogged = 0;
 static int CollectorConsumer = -1;
 static std::vector<protocol::DevicePoseSample> CollectorScratch;
 static double QpcToSeconds = 0.0;
@@ -2319,6 +2320,14 @@ void CalibrationTick(double time)
 	// Channel health is independent of SteamVR and of the profile: the UI must
 	// report it even on the ticks that return early below.
 	ctx.poseRingOpen = PoseHub.RingOpen();
+	// The hub restarts a failed drain by itself. Say why the samples stopped,
+	// or the outage reads as the driver going away.
+	const uint64_t poseHubFailures = PoseHub.Failures();
+	if (poseHubFailures != PoseHubFailuresLogged)
+	{
+		PoseHubFailuresLogged = poseHubFailures;
+		ctx.Log("Pose stream failed (" + PoseHub.LastFailure() + "); restarting it\n");
+	}
 	// Persistence is independent of SteamVR, profile validity, and the current
 	// UI/calibration state. In particular, settings-only retries must continue
 	// while the runtime is unavailable or the advanced editor is open.

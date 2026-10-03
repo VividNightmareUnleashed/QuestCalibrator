@@ -2924,6 +2924,88 @@ void RunPoseHubLiveResetGateScenario()
 		detail);
 }
 
+void RunPoseHubDrainFailureScenario()
+{
+	// A ring drain that throws (bad_alloc growing the scratch buffer, in
+	// practice) must neither stop the hub for good nor let a consumer bridge
+	// the outage: the hub records the failure, publishes a boundary, and
+	// resumes by itself. Stop must not wait out the restart pause.
+	std::string mappingName = PoseRingMappingName("HubFailure");
+	protocol::PoseRingWriter writer;
+	bool created = writer.Create(mappingName.c_str());
+	std::atomic<bool> failNextDrain{ false };   // outlives the hub's thread
+	PoseStreamHub hub;
+	int consumer = hub.CreateConsumer();
+	hub.SetRingDrainHookForTest([&]
+	{
+		if (failNextDrain.exchange(false))
+			throw std::runtime_error("injected drain failure");
+	});
+	if (created)
+	{
+		hub.Start(mappingName.c_str());
+		WaitFor([&] { return hub.RingOpen(); }, 1);
+	}
+	const protocol::DevicePoseSample before = TokenSample(17000000, 20);
+	bool published = hub.RingOpen() && writer.Publish(before);
+	uint64_t drops = 0;
+	bool receivedBefore = published && DrainUntilReceived(hub, consumer, before, drops);
+	const uint64_t boundariesBefore = hub.StreamBoundaries();
+	if (receivedBefore)
+	{
+		failNextDrain.store(true);
+		WaitFor([&] { return hub.Failures() != 0; }, 1);
+	}
+	const bool failed = hub.Failures() == 1;
+	const bool reasonKept = hub.LastFailure() == "injected drain failure";
+
+	// Published during the restart pause: the queue holds it for the reopened
+	// reader, behind the boundary.
+	const protocol::DevicePoseSample after = TokenSample(17000001, 20);
+	bool publishedAfter = failed && writer.Publish(after);
+	bool receivedAfter = false;
+	bool boundaryInHole = false;
+	uint64_t dropsAfter = 0;
+	std::vector<protocol::DevicePoseSample> out;
+	const ULONGLONG deadline = GetTickCount64() + 5000;
+	while (publishedAfter && !receivedAfter && GetTickCount64() < deadline)
+	{
+		PoseStreamHub::Hole hole;
+		dropsAfter += hub.Drain(consumer, out, &hole);
+		receivedAfter = out.size() == 1 && out[0].sampleTimeQpc == after.sampleTimeQpc;
+		boundaryInHole = hole.sessionBoundary;
+		if (!receivedAfter)
+			Sleep(1);
+	}
+	const bool reopened = hub.RingOpen();
+	const uint64_t boundariesAdded = hub.StreamBoundaries() - boundariesBefore;
+
+	// A second failure starts a two-second pause; Stop cuts it short.
+	if (receivedAfter)
+	{
+		failNextDrain.store(true);
+		WaitFor([&] { return hub.Failures() == 2; }, 1);
+	}
+	const bool failedAgain = hub.Failures() == 2;
+	const ULONGLONG stopStarted = GetTickCount64();
+	hub.Stop();
+	const ULONGLONG stopMs = GetTickCount64() - stopStarted;
+
+	char detail[224];
+	snprintf(detail, sizeof detail,
+		"created %d before %d/%llu failed %d reason %d after %d/%d boundary %d/%llu gaps %llu reopened %d again %d stop %llums",
+		created, receivedBefore, static_cast<unsigned long long>(drops), failed, reasonKept,
+		publishedAfter, receivedAfter, boundaryInHole,
+		static_cast<unsigned long long>(boundariesAdded),
+		static_cast<unsigned long long>(dropsAfter), reopened, failedAgain,
+		static_cast<unsigned long long>(stopMs));
+	Check("pose hub: a failed drain restarts behind a boundary",
+		created && receivedBefore && drops == 0 && failed && reasonKept &&
+		publishedAfter && receivedAfter && boundaryInHole && boundariesAdded == 1 &&
+		dropsAfter == 1 && reopened && failedAgain && stopMs < 1000,
+		detail);
+}
+
 void RunPoseChannelScenarios()
 {
 	RunPoseSampleScenarios();
@@ -2943,6 +3025,7 @@ void RunPoseChannelScenarios()
 	RunPoseHubMidDrainOverflowScenario();
 	RunPoseHubWriterLivenessScenario();
 	RunPoseHubLiveResetGateScenario();
+	RunPoseHubDrainFailureScenario();
 }
 
 void RunSolverPrimitiveScenarios()

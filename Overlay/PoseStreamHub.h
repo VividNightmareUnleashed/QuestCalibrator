@@ -41,6 +41,13 @@ public:
 	// Whether the underlying shmem ring is currently open (driver present).
 	bool RingOpen() const { return ringOpen.load(std::memory_order_acquire); }
 
+	// Drains that failed so far. A failed drain loses the samples it had read,
+	// so it publishes a session boundary, then restarts after a pause that
+	// doubles while failures repeat.
+	uint64_t Failures() const { return failures.load(std::memory_order_acquire); }
+	// The latest failure's exception message; empty before the first.
+	std::string LastFailure();
+
 	struct Diagnostics
 	{
 		struct Device
@@ -115,6 +122,10 @@ public:
 	void AppendGapForTest(uint64_t count);
 	void AppendSessionBoundaryForTest();
 	void SetDrainChunkHookForTest(std::function<void()> hook);
+	// Runs on the drain thread after every ring drain, before the batch is
+	// published; a throw fails the drain as a bad_alloc there would. Before
+	// Start only.
+	void SetRingDrainHookForTest(std::function<void()> hook);
 	// Shrinks the history and the copy chunk so a short run reaches overflow
 	// and chunk boundaries. Before the first append or Start only.
 	void SetGeometryForTest(uint64_t historyCapacity, uint64_t copyChunk);
@@ -152,13 +163,16 @@ private:
 	// predate a universe rebase) and marks the position so the next drain
 	// reports a gap rather than bridging it.
 	void AppendSessionBoundaryLocked();
-	// Thread entry: an exception stops the drain, not the process.
+	// Thread entry: an exception fails the drain, not the process.
 	void DrainLoop(const std::string &shmemName);
 	void DrainRing(const std::string &shmemName);
+	// From DrainLoop's handlers. Allocates nothing: the failure may be bad_alloc.
+	void RecordFailure(const char *what);
 
 	std::thread drainThread;
 	std::atomic<bool> stopRequested{ false };
 	std::atomic<bool> ringOpen{ false };
+	std::atomic<uint64_t> failures{ 0 };
 
 	std::mutex mutex;                                   // guards all fields below
 	Diagnostics diagnostics;
@@ -169,8 +183,10 @@ private:
 	uint64_t sampleCount = 0;                           // actual samples, excluding gap markers
 	uint64_t sourceDropCount = 0;                       // cumulative source-gap sequence
 	std::vector<ConsumerCursor> consumers;              // private per-consumer positions
+	std::array<char, 160> lastFailure{};                // NUL-terminated
 #ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
 	std::function<void()> drainChunkHookForTest;
+	std::function<void()> ringDrainHookForTest;         // set before Start, read unlocked
 	std::atomic<uint64_t> resetDeferralsForTest{ 0 };
 #endif
 };

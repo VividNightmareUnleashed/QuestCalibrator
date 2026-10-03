@@ -98,6 +98,12 @@ uint64_t PoseStreamHub::StreamBoundaries()
 	return diagnostics.streamBoundaries;
 }
 
+std::string PoseStreamHub::LastFailure()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return lastFailure.data();
+}
+
 uint64_t PoseStreamHub::DrainAppend(int consumer, std::vector<protocol::DevicePoseSample> &out, Hole &hole)
 {
 	const size_t start = out.size();
@@ -274,6 +280,12 @@ void PoseStreamHub::SetDrainChunkHookForTest(std::function<void()> hook)
 	drainChunkHookForTest = std::move(hook);
 }
 
+void PoseStreamHub::SetRingDrainHookForTest(std::function<void()> hook)
+{
+	if (!drainThread.joinable())
+		ringDrainHookForTest = std::move(hook);
+}
+
 void PoseStreamHub::SetGeometryForTest(uint64_t historyCapacity, uint64_t chunk)
 {
 	std::lock_guard<std::mutex> lock(mutex);
@@ -290,15 +302,47 @@ void PoseStreamHub::DrainLoop(const std::string &shmemName)
 	// An exception escaping a thread entry calls std::terminate with no
 	// unwind, so ShutdownCalibrator would never flush the debounced profile
 	// and settings writes. The scratch buffer grows to a full ring drain, so
-	// bad_alloc is reachable: stop draining instead, and RingOpen() reads false.
-	try
+	// bad_alloc is reachable. Unwinding frees that buffer and closes the ring,
+	// so after a pause the drain starts over. The pause doubles while failures
+	// come quickly, and starts again from the shortest after a long good run.
+	const DWORD shortestPauseMs = 1000, longestPauseMs = 30000;
+	const ULONGLONG goodRunMs = 60000;
+	DWORD pauseMs = shortestPauseMs;
+	while (!stopRequested.load(std::memory_order_acquire))
 	{
-		DrainRing(shmemName);
-	}
-	catch (...)
-	{
+		const ULONGLONG started = GetTickCount64();
+		try
+		{
+			DrainRing(shmemName);   // returns only once stop is requested
+			break;
+		}
+		catch (const std::exception &e)
+		{
+			RecordFailure(e.what());
+		}
+		catch (...)
+		{
+			RecordFailure("unknown exception");
+		}
+		ringOpen.store(false, std::memory_order_release);
+		if (GetTickCount64() - started >= goodRunMs)
+			pauseMs = shortestPauseMs;
+		for (DWORD slept = 0; slept < pauseMs && !stopRequested.load(std::memory_order_acquire); slept += 50)
+			Sleep(50);
+		pauseMs = (std::min)(pauseMs * 2, longestPauseMs);
 	}
 	ringOpen.store(false, std::memory_order_release);
+}
+
+void PoseStreamHub::RecordFailure(const char *what)
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	strncpy_s(lastFailure.data(), lastFailure.size(), what, _TRUNCATE);
+	// The failed drain had taken samples off the ring that no consumer will
+	// see, and the reopened reader does not report what the producers drop
+	// meanwhile: consumers must not bridge the outage.
+	AppendSessionBoundaryLocked();
+	failures.fetch_add(1, std::memory_order_release);
 }
 
 void PoseStreamHub::DrainRing(const std::string &shmemName)
@@ -353,6 +397,10 @@ void PoseStreamHub::DrainRing(const std::string &shmemName)
 			{
 				scratch.push_back({ true, protocol::DevicePoseSample{}, count });
 			});
+#ifdef QUESTCAL_POSE_STREAM_HUB_TEST_SEAM
+		if (ringDrainHookForTest)
+			ringDrainHookForTest();
+#endif
 		if (drainStatus == protocol::PoseRingReader::DrainStatus::WriterDead)
 		{
 			reader.Close();
