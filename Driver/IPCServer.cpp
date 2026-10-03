@@ -411,10 +411,12 @@ bool IPCServer::CreateAndConnectInstance(const char *name, LPOVERLAPPED overlap,
 	overlap->Offset = 0;
 	overlap->OffsetHigh = 0;
 
+	// The overlay is always on this machine, and a named pipe is reachable over
+	// the network unless told otherwise.
 	pipe = CreateNamedPipeA(
 		name,
 		PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+		PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
 		PIPE_UNLIMITED_INSTANCES,
 		sizeof(protocol::Response),
 		sizeof(protocol::Request),
