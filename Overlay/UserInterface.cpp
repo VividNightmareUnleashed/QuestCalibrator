@@ -268,7 +268,7 @@ void BuildMainWindow(bool runningInOverlay)
 			BuildSpacesSection(state);
 			ImGui::Spacing();
 		}
-		BuildMenu(state, runningInOverlay);
+		BuildMenu(state);
 	}
 	ImGui::EndChild();
 

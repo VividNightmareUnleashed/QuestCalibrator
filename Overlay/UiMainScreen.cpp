@@ -506,7 +506,7 @@ void BuildStatusBand(const VRState &state)
 	}
 }
 
-void BuildMainScreen(const VRState &state)
+void BuildMainScreen()
 {
 	float cw = ImGui::GetContentRegionAvail().x;
 	const float gap = 12.0f;

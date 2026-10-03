@@ -735,10 +735,11 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 		bool whole = moved.reports.size() == 1;
 		if (whole)
 		{
-			const auto &r = moved.reports[0];
-			whole = r.moved == 5 && r.movedBaseStations == 3 && r.reExpressed == 0 && r.unclear == 0 &&
-				std::abs(r.yawDeg - 62.0) < 0.01 && std::abs(r.tiltDeg - 78.6) < 0.01 &&
-				r.spreadDeg < 1e-6 && r.spreadM < 1e-6 && r.largestShiftM > 1.0 &&
+			const auto &report = moved.reports[0];
+			whole = report.moved == 5 && report.movedBaseStations == 3 && report.reExpressed == 0 &&
+				report.unclear == 0 &&
+				std::abs(report.yawDeg - 62.0) < 0.01 && std::abs(report.tiltDeg - 78.6) < 0.01 &&
+				report.spreadDeg < 1e-6 && report.spreadM < 1e-6 && report.largestShiftM > 1.0 &&
 				moved.line.find("5 device(s) (3 base station(s), the headset tracker among them)") != std::string::npos;
 		}
 		check("lighthouse frame: a universe move is one report, every device, one delta",
@@ -796,9 +797,9 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 					(m.translation - delta.second).norm() < 1e-9 && m.time >= 5.0 && m.time < 5.01;
 			};
 			const auto tracker = movesOf(moved, 9);
-			const auto still = movesOf(moved, 10);
-			const bool universe = moved.moves.size() == 2 && tracker.size() == 1 && still.size() == 1 &&
-				exact(tracker[0]) && exact(still[0]) && tracker[0].shiftM > 1.0;
+			const auto stillMoves = movesOf(moved, 10);
+			const bool universe = moved.moves.size() == 2 && tracker.size() == 1 && stillMoves.size() == 1 &&
+				exact(tracker[0]) && exact(stillMoves[0]) && tracker[0].shiftM > 1.0;
 			const bool twoApart = twice.moves.size() == 4 && movesOf(twice, 9).size() == 2;
 			const bool none = reexpressed.moves.empty() && jumped.moves.empty();
 			const auto jumpedWith = movesOf(both, 9);
@@ -806,7 +807,7 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 				exact(jumpedWith[0]) && movesOf(both, 10).size() == 1 && !tracker.empty() && !tracker[0].ownJump;
 			char buf[160];
 			snprintf(buf, sizeof buf, "moves %zu (tracker %zu, still %zu), twice %zu, re-expressed %zu, jumped %zu, both %zu",
-				moved.moves.size(), tracker.size(), still.size(), twice.moves.size(),
+				moved.moves.size(), tracker.size(), stillMoves.size(), twice.moves.size(),
 				reexpressed.moves.size(), jumped.moves.size(), both.moves.size());
 			check("lighthouse frame: a moved tracker's own delta is handed out at once",
 				universe && twoApart && none && apart, buf);
@@ -917,7 +918,7 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 			};
 
 			const Result once = away(0, { 6.0 }, 0, false, 9.0);
-			const Result twice = away(0, { 5.0, 7.0 }, 0, true, 9.0);
+			const Result awayTwice = away(0, { 5.0, 7.0 }, 0, true, 9.0);
 			const Result late = away(0, { 8.99 }, 0, false, 9.0);
 			const Result elsewhere = away(0, { 6.0 }, 1, true, 9.0);
 			const Result otherStation = away(1, { 6.0 }, 0, true, 9.0);
@@ -925,10 +926,10 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 			char buf[200];
 			snprintf(buf, sizeof buf, "once %zu, twice %zu, station published after it %zu, "
 				"back in another frame %zu, another station moved %zu, nothing moved %zu",
-				once.moves.size(), twice.moves.size(), late.moves.size(), elsewhere.moves.size(),
+				once.moves.size(), awayTwice.moves.size(), late.moves.size(), elsewhere.moves.size(),
 				otherStation.moves.size(), nothing.moves.size());
 			check("lighthouse frame: a station re-solved while the tracker was off is handed out when it is back in that frame",
-				exactly(once, resolve, 9.0) && exactly(twice, compose(resolve, resolve), 9.0) &&
+				exactly(once, resolve, 9.0) && exactly(awayTwice, compose(resolve, resolve), 9.0) &&
 				exactly(late, resolve, 9.0) && elsewhere.moves.empty() && otherStation.moves.empty() &&
 				nothing.moves.empty(), buf);
 		}

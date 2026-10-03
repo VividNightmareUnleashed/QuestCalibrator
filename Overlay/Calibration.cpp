@@ -1175,11 +1175,11 @@ struct TrackerPresenceState
 	void Restart(uint32_t trackerId)
 	{
 		const bool hinted = settingHinted;
-		const double noticed = lastNoticeAt;
+		const double lastNotice = lastNoticeAt;
 		*this = TrackerPresenceState{};
 		id = trackerId;
 		settingHinted = hinted;
-		lastNoticeAt = noticed;
+		lastNoticeAt = lastNotice;
 	}
 };
 static TrackerPresenceState TrackerPresence;

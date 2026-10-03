@@ -35,6 +35,11 @@
   <ImportGroup Label="Shared">
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <!-- Headers under lib\ are vendored, so their warnings are not reported
+       (/external:W0), whichever way a file includes them. -->
+  <PropertyGroup>
+    <ExternalIncludePath>$(ProjectDir)..\lib;$(ExternalIncludePath)</ExternalIncludePath>
+  </PropertyGroup>
   <!-- Pinned relative to the project, not the solution: building this .vcxproj
        directly leaves $(SolutionDir) undefined, so the default output landed in
        Tests\x64\ for a standalone build and in x64\ for a solution build. The
@@ -52,7 +57,9 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
@@ -68,7 +75,9 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <ExternalWarningLevel>TurnOffAllWarnings</ExternalWarningLevel>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <Optimization>MaxSpeed</Optimization>
@@ -189,6 +198,14 @@
     <ClInclude Include="..\Overlay\RingSampleGate.h" />
     <ClInclude Include="..\Overlay\UpdatePolicy.h" />
     <ClInclude Include="..\Overlay\PoseStreamHub.h" />
+  </ItemGroup>
+  <!-- First-party code builds at /W4 with warnings as errors. The vendored
+       sources under lib\ keep the level they were written for. -->
+  <ItemGroup>
+    <ClCompile Update="..\lib\**">
+      <WarningLevel>Level3</WarningLevel>
+      <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="..\tools\clang-tidy-first-party.targets" />

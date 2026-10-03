@@ -326,27 +326,27 @@ void VisibilityScenarios(Check check)
 		down1.empty() && down2.find("down to one station") == 0 &&
 		vis.Disturbed("LHR-1", 205.0) && vis.Disturbed("LHR-1", 229.0) &&
 		vis.Find("LHR-1")->degraded, detail);
-	std::string back = vis.Apply(Made(K::StationAdded, "LHR-1", 8, { 5, 8 }), 230.0);
+	std::string returned = vis.Apply(Made(K::StationAdded, "LHR-1", 8, { 5, 8 }), 230.0);
 	check("lighthouse state: the return to two stations disturbs for the window only",
-		back.find("back to 2 stations") == 0 && !vis.Find("LHR-1")->degraded &&
+		returned.find("back to 2 stations") == 0 && !vis.Find("LHR-1")->degraded &&
 		vis.Disturbed("LHR-1", 235.0) && vis.Disturbed("LHR-1", 240.0) &&
-		!vis.Disturbed("LHR-1", 241.0), back.c_str());
+		!vis.Disturbed("LHR-1", 241.0), returned.c_str());
 
 	// Full loss and bootstrap.
 	std::string lost = vis.Apply(Made(K::StationDropped, "LHR-1", 8, { 5 }), 300.0);
 	std::string last = vis.Apply(Made(K::StationDropped, "LHR-1", 5, {}), 300.2);
 	std::string none = vis.Apply(Made(K::NoneSeen, "LHR-1", -1, {}), 300.3);
-	std::string boot = vis.Apply(Made(K::Bootstrapped, "LHR-1", 8, {}), 309.0);
-	std::string again = vis.Apply(Made(K::StationAdded, "LHR-1", 8, { 8 }), 309.1);
+	std::string booted = vis.Apply(Made(K::Bootstrapped, "LHR-1", 8, {}), 309.0);
+	std::string rejoined = vis.Apply(Made(K::StationAdded, "LHR-1", 8, { 8 }), 309.1);
 	const bool singleAfterBoot = vis.Find("LHR-1")->degraded && vis.Disturbed("LHR-1", 311.0);
 	std::string second = vis.Apply(Made(K::StationAdded, "LHR-1", 5, { 5, 8 }), 312.0);
 	one = vis.Find("LHR-1");
 	snprintf(detail, sizeof detail, "losses %u bootstraps %u drops %u notes '%s' / '%s' / '%s' / '%s'",
-		one->losses, one->bootstraps, one->drops, last.c_str(), boot.c_str(), again.c_str(),
+		one->losses, one->bootstraps, one->drops, last.c_str(), booted.c_str(), rejoined.c_str(),
 		second.c_str());
 	check("lighthouse state: a full loss counts once and every recovery line disturbs",
 		last.find("lost its last station") == 0 && !none.empty() && one->losses == 1 &&
-		boot.find("started a new solution") == 0 && again.find("tracking again") == 0 &&
+		booted.find("started a new solution") == 0 && rejoined.find("tracking again") == 0 &&
 		singleAfterBoot && second.find("back to 2 stations") == 0 &&
 		one->bootstraps == 1 && one->drops == 5 && Same(one->visible, { 5, 8 }) &&
 		!one->degraded && vis.Disturbed("LHR-1", 321.0) && !vis.Disturbed("LHR-1", 323.0), detail);
