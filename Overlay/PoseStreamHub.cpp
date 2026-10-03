@@ -1,5 +1,6 @@
 #include "stdafx.h"
 #include "PoseStreamHub.h"
+#include "../common/PoseRingReader.h"
 
 PoseStreamHub::~PoseStreamHub()
 {

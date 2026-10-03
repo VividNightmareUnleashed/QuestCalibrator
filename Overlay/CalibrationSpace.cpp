@@ -12,7 +12,7 @@
 #include "RingPoseMath.h"
 #include "UniverseVerdict.h"
 #include "../common/MathConstants.h"
-#include "../common/PoseChannel.h"
+#include "../common/Protocol.h"
 
 #include <algorithm>
 #include <cmath>

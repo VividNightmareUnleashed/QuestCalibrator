@@ -103,7 +103,8 @@
   <ItemGroup>
     <ClInclude Include="..\common\MathConstants.h" />
     <ClInclude Include="..\common\NumericValidation.h" />
-    <ClInclude Include="..\common\PoseChannel.h" />
+    <ClInclude Include="..\common\PoseRing.h" />
+    <ClInclude Include="..\common\PoseRingReader.h" />
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\common\Version.h" />
     <ClInclude Include="Calibration.h" />

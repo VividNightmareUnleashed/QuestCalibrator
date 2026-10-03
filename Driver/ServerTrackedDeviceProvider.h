@@ -3,7 +3,7 @@
 #include "AlignmentField.h"
 #include "RuntimeSnapshot.h"
 #include "IPCServer.h"
-#include "../common/PoseChannel.h"
+#include "../common/PoseRingWriter.h"
 
 #include <openvr_driver.h>
 

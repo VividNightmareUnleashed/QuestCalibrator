@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../common/PoseChannel.h"
+#include "../common/Protocol.h"
 
 #include <atomic>
 #include <array>

@@ -40,7 +40,8 @@
 #include "../Overlay/RingPoseMath.h"
 #include "../Overlay/PoseStreamHub.h"
 #include "../common/MathConstants.h"
-#include "../common/PoseChannel.h"
+#include "../common/PoseRingReader.h"
+#include "../common/PoseRingWriter.h"
 #include "../common/Version.h"
 
 #include <algorithm>

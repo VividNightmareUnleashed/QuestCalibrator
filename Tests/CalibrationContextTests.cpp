@@ -3,6 +3,9 @@
 #include "../Overlay/Diagnostics.h"
 #include "../Overlay/DiagnosticsPolicy.h"
 #include "../Overlay/SessionLogTrim.h"
+
+#include <windows.h>
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>

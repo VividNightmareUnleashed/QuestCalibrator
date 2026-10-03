@@ -57,7 +57,10 @@
     <ClInclude Include="PoseTransform.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="..\common\PoseChannel.h">
+    <ClInclude Include="..\common\PoseRing.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\PoseRingWriter.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="..\common\TransformLimits.h">

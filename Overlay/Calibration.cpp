@@ -21,7 +21,6 @@
 #include "SessionLogTrim.h"
 #include "StreamEvents.h"
 #include "../common/MathConstants.h"
-#include "../common/PoseChannel.h"
 #include "../common/Version.h"
 
 #include <Eigen/Dense>
