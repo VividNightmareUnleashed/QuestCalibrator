@@ -85,6 +85,10 @@ env:
   # runner without a GPU. The digest is the one GitHub lists for the asset.
   MESA_URL: https://github.com/pal1000/mesa-dist-win/releases/download/26.2.3/mesa3d-26.2.3-release-msvc.7z
   MESA_SHA256: 3f3613adb43cfd0f2e665ce2400b130c275f0b3317cb3a05566320a3a67589ed
+  # elan at a pinned release, checked against the digest GitHub lists for it;
+  # its install script would fetch whatever release is newest.
+  ELAN_URL: https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz
+  ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
 
 jobs:
   validate:
@@ -95,7 +99,7 @@ jobs:
 
     steps:
       - name: Check out the source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -173,7 +177,7 @@ jobs:
 
       - name: Keep the screens with this run
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: screens
           path: ${{ runner.temp }}/screens
@@ -233,7 +237,7 @@ jobs:
 
     steps:
       - name: Check out the source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -266,7 +270,8 @@ jobs:
   # after it.
   clang-tidy:
     uses: ./.github/workflows/clang-tidy.yml
-    secrets: inherit
+    secrets:
+      VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
 
   input-validation:
     name: input-validation (${{ matrix.shard }}/6)
@@ -281,7 +286,7 @@ jobs:
 
     steps:
       - name: Check out the source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
@@ -309,7 +314,7 @@ jobs:
       # still leaves the image for the next run.
       - name: Restore the ESBMC image
         id: esbmc-cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/questcal-esbmc.tar
           key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
@@ -326,7 +331,7 @@ jobs:
 
       - name: Save the ESBMC image
         if: steps.esbmc-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ runner.temp }}/questcal-esbmc.tar
           key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
@@ -349,7 +354,8 @@ jobs:
     uses: ./.github/workflows/formal-assurance.yml
     with:
       evidence: ${{ inputs.evidence == true }}
-    secrets: inherit
+    secrets:
+      VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
 
   now-contracts:
     if: github.repository == 'VividNightmareUnleashed/QuestCalibrator' && github.event.pull_request.head.repo.fork != true
@@ -358,7 +364,7 @@ jobs:
     env:
       ELAN_TOOLCHAIN: leanprover/lean4:v4.34.0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Check out VirtualQuest
@@ -370,22 +376,24 @@ jobs:
       # either job serves both until the toolchain changes.
       - name: Restore Lean
         id: lean-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.elan
-          key: elan-${{ runner.os }}-${{ env.ELAN_TOOLCHAIN }}
+          key: elan-${{ runner.os }}-v4.2.4-${{ env.ELAN_TOOLCHAIN }}
       - name: Install the pinned Lean toolchain
         if: steps.lean-cache.outputs.cache-hit != 'true'
         run: |
-          curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
-          sh "$RUNNER_TEMP/elan-init.sh" -y --no-modify-path --default-toolchain "$ELAN_TOOLCHAIN"
+          curl -fsSL "$ELAN_URL" -o "$RUNNER_TEMP/elan.tar.gz"
+          echo "$ELAN_SHA256  $RUNNER_TEMP/elan.tar.gz" | sha256sum -c - > /dev/null
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --no-modify-path --default-toolchain "$ELAN_TOOLCHAIN"
       - name: Put Lean on the path
         run: echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
       - name: Check all Now contracts and negative cases
         run: python tools/verify-now-contracts.py --source-root "$PWD" --output-dir "$RUNNER_TEMP/now"
       - name: Check local evidence acceptance and metadata redaction
         run: python tools/test-local-assurance.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: now-contracts
@@ -398,7 +406,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Check out VirtualQuest
@@ -410,7 +418,7 @@ jobs:
       - name: Check the worthwhile public inventory extension
         timeout-minutes: 20
         run: python tools/verify-inventory-extension.py --public-only --source-root "$PWD" --output-dir "$RUNNER_TEMP/extension"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: inventory-extension

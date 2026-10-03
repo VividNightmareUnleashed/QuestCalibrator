@@ -97,7 +97,7 @@ jobs:
 
     steps:
       - name: Check out the tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
@@ -141,7 +141,7 @@ jobs:
 
       - name: Keep the package with this run
         timeout-minutes: 10
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: package-${{ env.TAG }}
           path: |
@@ -161,7 +161,7 @@ jobs:
 
     steps:
       - name: Check out the tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
@@ -196,7 +196,7 @@ jobs:
           pwsh -NoProfile -File VirtualQuest\formal\check.ps1 -Only Traces -Strict -ResultPath "$env:RUNNER_TEMP/traces.json"
           if ($LASTEXITCODE -ne 0) { throw 'A recorded hub run is not a behaviour of the model.' }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: assurance-traces
           path: ${{ runner.temp }}/traces.json
@@ -219,7 +219,8 @@ jobs:
     uses: ./.github/workflows/clang-tidy.yml
     with:
       ref: refs/tags/${{ inputs.tag || github.ref_name }}
-    secrets: inherit
+    secrets:
+      VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
 
   formal-assurance:
     needs: check
@@ -227,7 +228,8 @@ jobs:
     with:
       ref: refs/tags/${{ inputs.tag || github.ref_name }}
       evidence: true
-    secrets: inherit
+    secrets:
+      VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
 
   publish:
     needs: [build, traces, clang-tidy, formal-assurance]
@@ -239,7 +241,7 @@ jobs:
       tag: ${{ env.TAG }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
@@ -248,11 +250,11 @@ jobs:
         env:
           VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
         run: tools/ci/checkout-virtualquest.ps1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: assurance-linux
           path: ${{ runner.temp }}/assurance
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: assurance-traces
           path: ${{ runner.temp }}/assurance
@@ -261,7 +263,7 @@ jobs:
           python tools/assemble-assurance.py --linux-evidence "$RUNNER_TEMP/assurance/assurance-linux.json" --traces "$RUNNER_TEMP/assurance/traces.json" --output "$RUNNER_TEMP/assurance/complete.json"
           python tools/verify-assurance.py --evidence "$RUNNER_TEMP/assurance/complete.json"
       - name: Keep complete assurance with this release run
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: assurance-complete
           path: ${{ runner.temp }}/assurance/complete.json
@@ -269,7 +271,7 @@ jobs:
           retention-days: 90
 
       - name: Fetch the package
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: package-${{ env.TAG }}
           path: package
