@@ -1,13 +1,14 @@
 name: Validation
 
 # The release gates on pushes to alpha and stable and on pull requests into
-# them: the Release build and the solver harness (blocking), then the duplicate
-# scan (advisory, as locally: its findings need a human's review, not an
-# automatic veto); in parallel jobs, the harness again in Debug and with
-# AddressSanitizer (blocking), and Clang-Tidy over every translation unit
-# (clang-tidy.yml; blocking, since the tree has no findings). Changes to
-# documentation alone don't trigger it; the release workflow runs every gate on
-# the tagged commit anyway.
+# them: the Release build and the solver harness, every preview screen drawn
+# in each language, and the installer's tests on the build's own package
+# (blocking), then the duplicate scan (advisory, as locally: its findings need
+# a human's review, not an automatic veto); in parallel jobs, the harness again
+# in Debug and with AddressSanitizer (blocking), and Clang-Tidy over every
+# translation unit (clang-tidy.yml; blocking, since the tree has no findings).
+# Changes to documentation alone don't trigger it; the release workflow
+# builds, tests and analyzes the tagged commit anyway.
 #
 # With the VIRTUALQUEST_DEPLOY_KEY secret (a read-only deploy key on the
 # private VirtualQuest repository) the harness also builds the simulated
@@ -167,6 +168,37 @@ jobs:
           path: ${{ runner.temp }}/screens
           if-no-files-found: warn
           retention-days: 14
+
+      # The installer on every push, not first after tagging: its helper tests
+      # in Windows PowerShell, the engine the installer and the updater run
+      # in, then this build's own package installed, upgraded from the newest
+      # published release and uninstalled against the fake OpenVR runtime, as
+      # the release workflow tests each draft. The runner is thrown away
+      # afterwards, so the install test may write to Program Files and HKLM.
+      - name: Test the installer
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 20
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          foreach ($test in 'test-filesystem-policy', 'test-update-helper', 'test-conflict-removal') {
+            powershell -NoProfile -ExecutionPolicy Bypass -File "install\$test.ps1"
+            if ($LASTEXITCODE -ne 0) { throw "install\$test.ps1 failed." }
+          }
+          install\build-package.ps1 -OutDir "$env:RUNNER_TEMP\package"
+          if ($LASTEXITCODE -ne 0) { throw 'Packaging the build failed.' }
+          tools\fake-openvr-runtime\build.ps1 -Out "$env:RUNNER_TEMP\fake-steamvr"
+          $arguments = @{ Package = (Get-Item "$env:RUNNER_TEMP\package\*.zip").FullName; Runtime = "$env:RUNNER_TEMP\fake-steamvr" }
+          $previous = gh release list --repo $env:GITHUB_REPOSITORY --exclude-drafts --limit 1 --json tagName --jq '.[].tagName'
+          if ($previous) {
+            Write-Host "Upgrade scenario from $previous"
+            gh release download $previous --repo $env:GITHUB_REPOSITORY --pattern '*.zip' --dir "$env:RUNNER_TEMP\previous"
+            if ($LASTEXITCODE -ne 0) { throw "Downloading $previous failed." }
+            $arguments.Previous = (Get-Item "$env:RUNNER_TEMP\previous\*.zip").FullName
+          }
+          tools\fake-openvr-runtime\test-install.ps1 @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'The install test failed; the failing checks are listed above.' }
 
       - name: Duplicate scan (advisory)
         timeout-minutes: 5

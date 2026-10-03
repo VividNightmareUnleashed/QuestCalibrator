@@ -6,6 +6,8 @@ name: Install test
 # runtime in tools/fake-openvr-runtime, which records what the overlay
 # registers with it. The release workflow runs it on every draft it creates;
 # run it by hand to test a draft again or against another earlier release.
+# Every push already installs its own build's package the same way
+# (validation.yml); this tests the package users download.
 on:
   workflow_dispatch:
     inputs:

@@ -220,9 +220,11 @@ inputs to this workflow and must not be committed.
   runtime in `tools/fake-openvr-runtime`, then covers reinstall, removal of leftover
   Space Calibrator drivers, an upgrade from the newest published release (or the
   `previous` input), and uninstall. It checks files, the driver, registry, shortcut,
-  and what the overlay registered with the runtime. It does not replace the SteamVR,
-  handshake, and calibration checks above. Record the run URL, then publish the draft
-  and record the final GitHub Release URL.
+  and what the overlay registered with the runtime. Every push to `alpha` and
+  `stable` already runs the same test on its own build's package; this run tests
+  the package users download. It does not replace the SteamVR, handshake, and
+  calibration checks above. Record the run URL, then publish the draft and record
+  the final GitHub Release URL.
 - Download the ZIP from the published release and verify its SHA-256 against the
   release notes once more.
 - On `alpha`, point the README's VirusTotal badge at the new zip's report (its row

@@ -24,6 +24,19 @@ QuestCalibrator.
 version resource, which comes from `common/Version.h`, the single source of
 truth.
 
+## Testing the installer
+
+`test-filesystem-policy.ps1`, `test-update-helper.ps1` and
+`test-conflict-removal.ps1` test the filesystem policy, the update helper
+embedded in `Overlay/Updater.cpp` and the installer's conflict removal. None of
+them installs anything; run them in Windows PowerShell, which the installer and
+the updater use (the filesystem policy test creates a symbolic link, so it needs
+an elevated shell). `tools/fake-openvr-runtime/test-install.ps1` installs,
+upgrades and uninstalls a package for real against a fake OpenVR runtime, so it
+runs only on a disposable machine. The validation workflow runs all four on every
+push, the last on the push's own package, upgrading from the newest published
+release; the release workflow runs the install test again on each draft.
+
 ## Calling the app from a script
 
 `QuestCalibrator.exe` is a **GUI-subsystem binary**. Two consequences:
