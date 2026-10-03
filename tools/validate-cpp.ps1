@@ -35,13 +35,15 @@ $testProject = [System.IO.Path]::GetFullPath(
 $duplicateMinLines = [int]$config.duplicateMinLines
 $duplicateMinTokens = [int]$config.duplicateMinTokens
 $minScenarios = [int]$config.minScenarios
+$minScenariosWithVirtualQuest = [int]$config.minScenariosWithVirtualQuest
 if (-not $solution.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not [string]$config.testExecutable -or
     -not $testExecutable.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not [string]$config.testProject -or
     -not $testProject.StartsWith($Root, [System.StringComparison]::OrdinalIgnoreCase) -or
     -not $configuration -or -not $platform -or
-    $duplicateMinLines -lt 1 -or $duplicateMinTokens -lt 1 -or $minScenarios -lt 1) {
+    $duplicateMinLines -lt 1 -or $duplicateMinTokens -lt 1 -or $minScenarios -lt 1 -or
+    $minScenariosWithVirtualQuest -lt $minScenarios) {
     Write-Output "Invalid C++ validation config: $configPath"
     exit 2
 }
@@ -355,23 +357,74 @@ function Invoke-SolverTests {
     $summary = $output | Select-Object -Last 1
     # A zero exit means "nothing failed", which is also what an empty run
     # reports. Assert the harness actually ran its scenarios, so deleting a
-    # Run*Scenarios() call fails here instead of passing quietly.
+    # Run*Scenarios() call fails here instead of passing quietly. That holds
+    # only while each floor equals its suite's real count: a floor left at half
+    # the suite let half of it vanish with this check still green.
     if ($summary -notmatch '^(\d+) scenario\(s\) ran, \d+ failed$') {
         Write-Output "Could not read a scenario count from the harness summary: $summary"
         exit 2
     }
     $ran = [int]$Matches[1]
-    if ($ran -lt $minScenarios) {
-        Write-Output "Solver harness ran $ran scenario(s), below the floor of $minScenarios."
-        Write-Output 'Coverage regressed, or the floor in cpp-validation.json needs raising.'
+    # The same test SolverTests.vcxproj uses to compile the private scenarios.
+    $withVirtualQuest = Test-Path -LiteralPath (Join-Path (Split-Path -Parent $testProject) `
+        '..\VirtualQuest\Tests\VirtualQuestTests.cpp') -PathType Leaf
+    $floorName = if ($withVirtualQuest) { 'minScenariosWithVirtualQuest' } else { 'minScenarios' }
+    $floor = if ($withVirtualQuest) { $minScenariosWithVirtualQuest } else { $minScenarios }
+    if ($ran -lt $floor) {
+        Write-Output "Solver harness ran $ran scenario(s), below the $floorName floor of $floor."
+        Write-Output "Coverage regressed, or $floorName in cpp-validation.json needs lowering on purpose."
         exit 1
     }
 
     Write-Output "Solver tests passed: $summary"
+    if ($ran -gt $floor) {
+        Write-Output "Raise $floorName in cpp-validation.json to $ran so a later deletion fails."
+    }
+}
+
+function Test-FuzzTargetLists {
+    # The fuzz targets are named in three places nothing else ties together:
+    # the table the fuzzers and the harness replay, the weekly workflow's
+    # matrix and fuzz.ps1's defaults. A target added to the table alone is
+    # replayed on every run but never gets the long coverage-guided search.
+    $paths = @{
+        Table    = Join-Path $Root 'Tests\Fuzz\FuzzTargets.h'
+        Workflow = Join-Path $Root '.github\workflows\fuzz.yml'
+        Script   = Join-Path $Root 'tools\fuzz.ps1'
+    }
+    foreach ($path in $paths.Values) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Write-Output "Fuzz target lists not compared: $path is missing."
+            return
+        }
+    }
+    $table = Get-Content -Raw -LiteralPath $paths.Table
+    $fromTable = @([regex]::Matches($table, '\{\s*"([a-z-]+)",\s*Check') |
+        ForEach-Object { $_.Groups[1].Value })
+    $matrix = [regex]::Match((Get-Content -Raw -LiteralPath $paths.Workflow),
+        '(?m)^\s*target:\s*\[([^\]]*)\]')
+    $fromWorkflow = @($matrix.Groups[1].Value -split ',' |
+        ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    $defaults = [regex]::Match((Get-Content -Raw -LiteralPath $paths.Script),
+        '\$Targets\s*=\s*@\(([^)]*)\)')
+    $fromScript = @([regex]::Matches($defaults.Groups[1].Value, "'([a-z-]+)'") |
+        ForEach-Object { $_.Groups[1].Value })
+
+    $expected = ($fromTable | Sort-Object) -join ', '
+    foreach ($list in @(
+            @{ Name = '.github/workflows/fuzz.yml'; Items = $fromWorkflow },
+            @{ Name = 'tools/fuzz.ps1'; Items = $fromScript })) {
+        if ($fromTable.Count -eq 0 -or (($list.Items | Sort-Object) -join ', ') -ne $expected) {
+            Write-Output ("Fuzz targets in $($list.Name) ($($list.Items -join ', ')) differ " +
+                "from Tests/Fuzz/FuzzTargets.h ($($fromTable -join ', ')).")
+            exit 1
+        }
+    }
 }
 
 switch ($Mode) {
     'Build' {
+        Test-FuzzTargetLists
         Invoke-MSBuildValidation
         Invoke-SolverTests
     }

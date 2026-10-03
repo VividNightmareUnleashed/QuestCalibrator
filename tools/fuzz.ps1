@@ -4,13 +4,14 @@
     AddressSanitizer, and runs each for a while.
 
 .DESCRIPTION
-    One executable per target in Tests/Fuzz/FuzzTargets.h (profile, feed,
-    lighthouse, request), built with MSVC's /fsanitize=fuzzer,address into
-    x64\fuzz\. Each run starts from the target's seeds and the corpus earlier
-    runs grew (x64\fuzz\<target>\corpus), and stops at the time limit or at the
-    first failure: a crash, a sanitizer report, an exception nothing catches, or
-    a property FuzzTargets.h names. The failing input is saved beside the
-    corpus as crash-*; replay it with `x64\fuzz\<target>.exe <file>`.
+    One executable per target in Tests/Fuzz/FuzzTargets.h (profile, settings,
+    feed, lighthouse, request, frame-recovery), built with MSVC's
+    /fsanitize=fuzzer,address into x64\fuzz\. Each run starts from the target's
+    seeds and the corpus earlier runs grew (x64\fuzz\<target>\corpus), and stops
+    at the time limit or at the first failure: a crash, a sanitizer report, an
+    exception nothing catches, or a property FuzzTargets.h names. The failing
+    input is saved beside the corpus as crash-*; replay it with
+    `x64\fuzz\<target>.exe <file>`.
 
     The harness (SolverTests.exe) already replays every target's seeds and
     seeded mutations of them on each run; this is the long, coverage-guided

@@ -27,12 +27,17 @@ jobs:
       # One target's failure leaves the others to finish their search.
       fail-fast: false
       matrix:
-        target: [profile, feed, lighthouse, request, frame-recovery]
+        # The same list as Targets() in Tests/Fuzz/FuzzTargets.h; the
+        # validation build fails when they differ.
+        target: [profile, settings, feed, lighthouse, request, frame-recovery]
 
     steps:
       - name: Check out the source
         uses: actions/checkout@v4
         with:
+          # A scheduled run starts from the default branch, which holds the
+          # last stable release; fuzz alpha, where changes land first.
+          ref: ${{ github.event_name == 'schedule' && 'alpha' || '' }}
           persist-credentials: false
 
       - name: Restore the corpus
