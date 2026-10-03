@@ -203,6 +203,394 @@ void DrawGuideIndicators(ImDrawList *dl, ImVec2 origin, float width, const quest
 	}
 }
 
+static void GuideGetSetStage(const VRState &state, float mw, ImDrawList *mdl, ImVec2 artSize, double now)
+{
+	ImGui::TextColored(Pal::Dim, "%s", Tr("Step 1 of 3"));
+	ImGui::Spacing();
+	ImGui::PushFont(g_fontTitle);
+	ImGui::TextWrapped("%s", Tr(s_guide.anchor ? "Stand where the trackers look misaligned."
+		: s_guide.demo == GuideDemo::HeadsetContact ? "Hold the controller against the visor."
+		: s_guide.demo == GuideDemo::Mounted ? "Keep the tracker fixed to your headset."
+		: "Hold the controller against the wrist tracker."));
+	ImGui::PopFont();
+	const std::string how = s_guide.demo == GuideDemo::HeadsetContact
+		? FormatString("Hold the controller upright, with the trigger side against the front of your headset. Keep it in place as you turn and tilt your head for %.0f seconds.", CalCtx.CollectionSeconds())
+		: s_guide.demo == GuideDemo::Mounted
+		? FormatString("Move your head gently for %.0f seconds, keeping your body relaxed. Keep the tracker sensors uncovered.", CalCtx.CollectionSeconds())
+		: FormatString("Hold the controller against the wrist tracker with your other hand. Move both in a figure eight, gently turning and tilting, for %.0f seconds.", CalCtx.CollectionSeconds());
+	ImGui::TextWrapped("%s", Tr(how.c_str()));
+	ImGui::Spacing();
+	const ImVec2 row = ImGui::GetCursorScreenPos();
+	DrawGuideAnimation(mdl, row, artSize, s_guide.animationTime, s_guide.demo);
+	ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + artSize.y + 12.0f));
+	const ImVec2 readiness = ImGui::GetCursorScreenPos();
+
+	const VRDevice *picks[2] = { nullptr, nullptr };
+	for (const auto &d : state.devices)
+	{
+		if (static_cast<uint32_t>(d.id) == CalCtx.referenceID)
+			picks[0] = &d;
+		if (static_cast<uint32_t>(d.id) == CalCtx.targetID)
+			picks[1] = &d;
+	}
+	bool ready = true;
+	for (int i = 0; i < 2; ++i)
+	{
+		const bool ok = picks[i] && picks[i]->tracking;
+		ready = ready && ok;
+		const std::string who = picks[i] ? DeviceDisplayName(*picks[i])
+			: std::string(i == 0 ? "Reference device" : "Target device");
+		ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + mw - 332.0f);
+		if (ok)
+			ImGui::TextWrapped("%s", Tr(FormatString("%s is tracking", who.c_str())).c_str());
+		else
+			ImGui::TextWrapped("%s", Tr(FormatString("%s isn't tracking. Wake it or bring it into view.", who.c_str())).c_str());
+		ImGui::PopTextWrapPos();
+	}
+	const float readinessBottom = ImGui::GetCursorScreenPos().y;
+	ImGui::SetCursorScreenPos(ImVec2(readiness.x + mw - 312.0f, readiness.y));
+	if (IconButton("motionreplay", "Replay", nullptr, ImVec2(110.0f, 38.0f), BtnKind::Quiet))
+	{
+		s_guide.animationTime = 0.0;
+		s_guide.animate = true;
+	}
+	ImGui::SameLine(0.0f, 12.0f);
+	if (IconButton("motiontoggle", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
+		ImVec2(190.0f, 38.0f), BtnKind::Ghost))
+		s_guide.animate = !s_guide.animate;
+	ImGui::SetCursorScreenPos(ImVec2(row.x, std::max(readinessBottom, readiness.y + 38.0f) + 8.0f));
+
+	if (s_guide.stage == GuideStage::Countdown)
+	{
+		int remain = static_cast<int>(std::ceil(kCountdownSeconds - (now - s_guide.countdownStart)));
+		std::string label = Tr(FormatString("Starting in %d...", remain));
+		ImGui::PushFont(g_fontTitle);
+		ImGui::TextUnformatted(label.c_str());
+		ImGui::PopFont();
+		ImGui::Spacing();
+		if (IconButton("guidecancel", "Cancel", nullptr, ImVec2(mw, 46.0f), BtnKind::Ghost) || EscapePressed())
+		{
+			s_guide.stage = GuideStage::Idle;
+			ImGui::CloseCurrentPopup();
+		}
+	}
+	else
+	{
+		const float cancelW = 180.0f;
+		if (IconButton("guidestart", ready ? "Start" : "Start anyway", IconPlay,
+			ImVec2(mw - cancelW - 12.0f, 46.0f), ready ? BtnKind::Primary : BtnKind::Ghost))
+		{
+			s_guide.stage = GuideStage::Countdown;
+			s_guide.countdownStart = now;
+		}
+		ImGui::SameLine(0.0f, 12.0f);
+		if (IconButton("guidecancel", "Cancel", nullptr, ImVec2(cancelW, 46.0f), BtnKind::Ghost) || EscapePressed())
+		{
+			s_guide.stage = GuideStage::Idle;
+			ImGui::CloseCurrentPopup();
+		}
+	}
+}
+
+static void GuideRunningStage(float mw, ImDrawList *mdl, ImVec2 artSize, double now)
+{
+	using Msg = CalibrationContext::Message;
+	// The run waits in Begin until its devices track and settle
+	// (CalibrationTick): it says what it waits for, and nothing counts
+	// down until it measures.
+	const bool waiting = CalCtx.state == CalibrationState::Begin &&
+		!CalCtx.run.waitInstruction.empty();
+	if (g_uiPreviewMode && !waiting)
+		CalCtx.Progress(static_cast<int>((now - s_guide.countdownStart - kCountdownSeconds) * 100.0),
+			static_cast<int>(CalCtx.CollectionSeconds() * 100.0));
+	ImGui::TextColored(Pal::Dim, "%s", Tr("Step 2 of 3"));
+	ImGui::Spacing();
+	// Live feedback from the run's own buffers, at 5 Hz.
+	if (!g_uiPreviewMode && CalCtx.state == CalibrationState::Collecting &&
+		now - s_guide.lastMetricsTime >= 0.2)
+	{
+		s_guide.lastMetricsTime = now;
+		s_guide.metrics = questcal::ComputeGuideMetrics(
+			CalCtx.run.referenceSamples, CalCtx.run.targetSamples);
+	}
+	if (waiting)
+	{
+		ImGui::PushFont(g_fontTitle);
+		ImGui::TextWrapped("%s", Tr(CalCtx.run.waitInstruction.c_str()));
+		ImGui::PopFont();
+		ImGui::TextWrapped("%s", Tr(CalCtx.run.waitNote.c_str()));
+	}
+	else
+	{
+		for (auto &message : CalCtx.messages)
+		{
+			if (message.kind == Msg::Instruction)
+			{
+				ImGui::PushFont(g_fontTitle);
+				ImGui::TextWrapped("%s", Tr(message.str.c_str()));
+				ImGui::PopFont();
+			}
+			else if (message.kind == Msg::Info)
+				ImGui::TextWrapped("%s", Tr(message.str.c_str()));
+		}
+	}
+	ImGui::Spacing();
+	ImVec2 row = ImGui::GetCursorScreenPos();
+	DrawGuideAnimation(mdl, row, artSize, s_guide.animationTime, s_guide.demo);
+	// Nothing is measured yet while the run waits.
+	if (!waiting)
+		DrawGuideIndicators(mdl, ImVec2(row.x, row.y + artSize.y + 12.0f), mw, s_guide.metrics, s_guide.mountRun);
+	ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + artSize.y + 80.0f));
+	ImGui::Dummy(ImVec2(0, 0));
+	for (auto &message : CalCtx.messages)
+	{
+		if (waiting || message.kind != Msg::Progress)
+			continue;
+		float fraction = (float)message.progress / (float)message.target;
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_FrameBg, Pal::Inset);
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
+		ImGui::ProgressBar(fraction, ImVec2(-1.0f, 10.0f), "");
+		ImGui::PopStyleVar();
+		ImGui::PopStyleColor();
+		// Seconds remaining, not a percentage of an unnamed quantity.
+		// Progress counts hundredths of a second (see CalibrationTick).
+		double secondsLeft = std::max(0.0, (message.target - message.progress) / 100.0);
+		ImGui::PushFont(g_fontSmall);
+		ImGui::TextColored(Pal::Dim, "%s", Tr(FormatString("%.0f s left", std::ceil(secondsLeft))).c_str());
+		ImGui::PopFont();
+	}
+	ImGui::Spacing();
+	if (IconButton("cancelprogress", "Cancel", nullptr, ImVec2(mw - 202.0f, 46.0f), BtnKind::Ghost) || EscapePressed())
+	{
+		if (g_uiPreviewMode)
+		{
+			s_guide.stage = GuideStage::Idle;
+			ImGui::CloseCurrentPopup();
+		}
+		else
+			CancelCalibration();
+	}
+	ImGui::SameLine(0.0f, 12.0f);
+	if (IconButton("runningmotion", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
+		ImVec2(190.0f, 46.0f), BtnKind::Ghost))
+		s_guide.animate = !s_guide.animate;
+}
+
+static void GuideResultStage(float mw)
+{
+	using Msg = CalibrationContext::Message;
+	// The outcome block starts at the last headline; the run's own
+	// instruction and note before it are not part of the result.
+	// Detail lines are shown from anywhere, behind the toggle.
+	size_t outcomeStart = 0;
+	for (size_t i = 0; i < CalCtx.messages.size(); ++i)
+		if (CalCtx.messages[i].kind == Msg::Headline)
+			outcomeStart = i;
+	bool anyDetail = false;
+	for (size_t i = 0; i < CalCtx.messages.size(); ++i)
+	{
+		const auto &message = CalCtx.messages[i];
+		switch (message.kind)
+		{
+		case Msg::Headline:
+			if (i < outcomeStart)
+				break;
+			ImGui::PushFont(g_fontTitle);
+			ImGui::TextWrapped("%s", Tr(message.str.c_str()));
+			ImGui::PopFont();
+			ImGui::Spacing();
+			break;
+		case Msg::Info:
+			if (i > outcomeStart)
+				ImGui::TextWrapped("%s", Tr(message.str.c_str()));
+			break;
+		case Msg::Action:
+			if (i > outcomeStart)
+			{
+				ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
+				ImGui::TextWrapped("%s", Tr(message.str.c_str()));
+				ImGui::PopStyleColor();
+			}
+			break;
+		case Msg::Detail:
+			anyDetail = true;
+			break;
+		default:
+			break;
+		}
+	}
+	// The engineer lines come after the outcome, whatever order they
+	// were logged in: the result is what the modal is for.
+	if (anyDetail && s_modalDetails)
+	{
+		ImGui::Spacing();
+		ImGui::PushFont(g_fontSmall);
+		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Dim);
+		for (const auto &message : CalCtx.messages)
+			if (message.kind == Msg::Detail)
+				ImGui::TextWrapped("%s", message.str.c_str());
+		ImGui::PopStyleColor();
+		ImGui::PopFont();
+	}
+
+	ImGui::Dummy(ImVec2(0, 16.0f));
+
+	ImGui::Spacing();
+	const bool failed = !CalCtx.lastRunPassed;
+	const float detailsW = anyDetail ? 170.0f : 0.0f;
+	if (anyDetail)
+	{
+		if (IconButton("modaldetails", s_modalDetails ? "Hide details" : "Show details", nullptr,
+			ImVec2(detailsW, 46.0f), BtnKind::Quiet))
+			s_modalDetails = !s_modalDetails;
+		ImGui::SameLine(0.0f, 12.0f);
+	}
+	const float remaining = mw - (anyDetail ? detailsW + 12.0f : 0.0f);
+	if (failed)
+	{
+		// Back to get-set and its motion demo, not to a log.
+		const float closeW = 120.0f;
+		if (IconButton("guideretry", "Try again", IconPlay, ImVec2(remaining - closeW - 12.0f, 46.0f), BtnKind::Primary))
+		{
+			CalCtx.ClearMessages();
+			s_guide.stage = GuideStage::GetSet;
+		}
+		ImGui::SameLine(0.0f, 12.0f);
+		if (IconButton("closeprogress", "Close", nullptr, ImVec2(closeW, 46.0f), BtnKind::Ghost) || EscapePressed())
+		{
+			s_guide.stage = GuideStage::Idle;
+			ImGui::CloseCurrentPopup();
+		}
+	}
+	else
+	{
+		ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - 150.0f);
+		if (IconButton("closeprogress", "Done", nullptr, ImVec2(150.0f, 46.0f), BtnKind::Primary) || EscapePressed())
+		{
+			s_guide.stage = GuideStage::Idle;
+			ImGui::CloseCurrentPopup();
+		}
+	}
+}
+
+static void ClearCalibrationModal(const ImGuiIO &io, float modalW)
+{
+	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, 180.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiCond_Always);
+	if (ImGui::BeginPopupModal("Clear calibration?", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		ImGui::PushFont(g_fontTitle);
+		ImGui::TextUnformatted(Tr("Clear this calibration?"));
+		ImGui::PopFont();
+		ImGui::Spacing();
+		ImGui::TextWrapped("%s", Tr("Your trackers won't line up until you calibrate again. "
+			"This also removes the field anchors and the headset tracker setup."));
+		ImGui::Spacing();
+		ImGui::Spacing();
+		float bw = ImGui::GetContentRegionAvail().x;
+		// The safe choice carries the accent and the width; the destructive
+		// one is outlined in the error colour, so a laser pointer that lands
+		// on the big blue button keeps the calibration.
+		float clearW = 210.0f, bgap = 12.0f;
+		if (IconButton("clearkeep", "Keep calibration", nullptr, ImVec2(bw - clearW - bgap, 46.0f), BtnKind::Primary) || EscapePressed())
+			ImGui::CloseCurrentPopup();
+		ImGui::SameLine(0.0f, bgap);
+		if (IconButton("clearconfirm", "Clear calibration", IconTrash, ImVec2(clearW, 46.0f), BtnKind::Danger))
+		{
+			// The write can be refused; a destructive button that did nothing
+			// has to say so instead of leaving the screen unchanged.
+			if (!ClearSavedProfile(CalCtx))
+				CalCtx.ReportError("Couldn't clear the calibration, so it's still saved. Restart QuestCalibrator and try again.\n",
+					CalibrationContext::ErrorSource::ProfilePersistence);
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::EndPopup();
+	}
+}
+
+static void ChaperoneWarningModal(const ImGuiIO &io)
+{
+	const float proseW = 640.0f;
+	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - proseW) * 0.5f, 180.0f), ImGuiCond_Always);
+	ImGui::SetNextWindowSize(ImVec2(proseW, 0.0f), ImGuiCond_Always);
+	if (ImGui::BeginPopupModal("Chaperone Drift Warning", nullptr,
+		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+	{
+		ImGui::PushFont(g_fontTitle);
+		ImGui::TextUnformatted(Tr("Check your room boundaries"));
+		ImGui::PopFont();
+		ImGui::Spacing();
+
+		ImGui::TextWrapped("%s", Tr(
+			"QuestCalibrator saves and restores your SteamVR chaperone. "
+			"Tracking drift can still move the chaperone walls away from your real walls."));
+		ImGui::Spacing();
+		ImGui::TextWrapped("%s", Tr(
+			"Keep the Quest boundary turned on too. A protected chaperone "
+			"doesn't guarantee that your play area is clear or correctly aligned."));
+		ImGui::Spacing();
+		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
+		ImGui::TextWrapped("%s", Tr(
+			"Before playing, check that the chaperone walls match your room and leave "
+			"enough space to move safely, especially when dancing."));
+		ImGui::PopStyleColor();
+		if (!CalCtx.uiError.empty())
+		{
+			ImGui::Spacing();
+			ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
+			ImGui::TextWrapped("%s", Tr(CalCtx.uiError.c_str()));
+			ImGui::PopStyleColor();
+		}
+		ImGui::Spacing();
+		ImGui::Spacing();
+
+		float bw = ImGui::GetContentRegionAvail().x;
+		float cancelW = 210.0f, bgap = 12.0f;
+		int remain = static_cast<int>(std::ceil(5.0 - (ImGui::GetTime() - g_chapWarnOpenedAt)));
+		if (remain > 0)
+		{
+			// Disabled look: ghost chrome, dim countdown label, no hover/click.
+			ImVec2 p = ImGui::GetCursorScreenPos();
+			ImVec2 sz(bw - cancelW - bgap, 46.0f);
+			ImDrawList *mdl = ImGui::GetWindowDrawList();
+			mdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Card), 10.0f);
+			mdl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Border), 10.0f);
+			std::string lbl = Tr(FormatString("Protect chaperone (%d s)", remain));
+			ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
+			mdl->AddText(g_fontBody, g_fontBody->LegacySize,
+				ImVec2(p.x + (sz.x - ts.x) * 0.5f, p.y + sz.y * 0.5f - g_fontBody->LegacySize * 0.5f),
+				Pal::U32(Pal::Dim), lbl.c_str());
+			ImGui::Dummy(sz);
+		}
+		// Named for what it does: accepting the caveat is what saves the
+		// chaperone.
+		else if (IconButton("chapwarnok", "Protect chaperone", nullptr, ImVec2(bw - cancelW - bgap, 46.0f), BtnKind::Primary))
+		{
+			bool previousAck = CalCtx.chaperoneWarningAck;
+			CalCtx.chaperoneWarningAck = true;
+			if (ProtectChaperone())
+				ImGui::CloseCurrentPopup();
+			else
+			{
+				CalCtx.chaperoneWarningAck = previousAck;
+				// A failed capture may have persisted the fail-closed chaperone
+				// state immediately; keep the acknowledgement rollback consistent.
+				if (!SaveSettings(CalCtx))
+				{
+					CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
+				}
+			}
+		}
+		ImGui::SameLine(0.0f, bgap);
+		if (IconButton("chapwarncancel", "Cancel", nullptr, ImVec2(cancelW, 46.0f), BtnKind::Ghost) || EscapePressed())
+			ImGui::CloseCurrentPopup();
+
+		ImGui::EndPopup();
+	}
+}
+
 void BuildMenu(const VRState &state)
 {
 	auto &io = ImGui::GetIO();
@@ -312,7 +700,6 @@ void BuildMenu(const VRState &state)
 	if (ImGui::BeginPopupModal("Calibration Progress", nullptr,
 		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 	{
-		using Msg = CalibrationContext::Message;
 		const float mw = ImGui::GetContentRegionAvail().x;
 		ImDrawList *mdl = ImGui::GetWindowDrawList();
 		if (s_guide.stage == GuideStage::Countdown || s_guide.stage == GuideStage::Running ||
@@ -338,394 +725,27 @@ void BuildMenu(const VRState &state)
 		{
 		case GuideStage::GetSet:
 		case GuideStage::Countdown:
-		{
-			ImGui::TextColored(Pal::Dim, "%s", Tr("Step 1 of 3"));
-			ImGui::Spacing();
-			ImGui::PushFont(g_fontTitle);
-			ImGui::TextWrapped("%s", Tr(s_guide.anchor ? "Stand where the trackers look misaligned."
-				: s_guide.demo == GuideDemo::HeadsetContact ? "Hold the controller against the visor."
-				: s_guide.demo == GuideDemo::Mounted ? "Keep the tracker fixed to your headset."
-				: "Hold the controller against the wrist tracker."));
-			ImGui::PopFont();
-			const std::string how = s_guide.demo == GuideDemo::HeadsetContact
-				? FormatString("Hold the controller upright, with the trigger side against the front of your headset. Keep it in place as you turn and tilt your head for %.0f seconds.", CalCtx.CollectionSeconds())
-				: s_guide.demo == GuideDemo::Mounted
-				? FormatString("Move your head gently for %.0f seconds, keeping your body relaxed. Keep the tracker sensors uncovered.", CalCtx.CollectionSeconds())
-				: FormatString("Hold the controller against the wrist tracker with your other hand. Move both in a figure eight, gently turning and tilting, for %.0f seconds.", CalCtx.CollectionSeconds());
-			ImGui::TextWrapped("%s", Tr(how.c_str()));
-			ImGui::Spacing();
-			const ImVec2 row = ImGui::GetCursorScreenPos();
-			DrawGuideAnimation(mdl, row, artSize, s_guide.animationTime, s_guide.demo);
-			ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + artSize.y + 12.0f));
-			const ImVec2 readiness = ImGui::GetCursorScreenPos();
-
-			const VRDevice *picks[2] = { nullptr, nullptr };
-			for (const auto &d : state.devices)
-			{
-				if (static_cast<uint32_t>(d.id) == CalCtx.referenceID)
-					picks[0] = &d;
-				if (static_cast<uint32_t>(d.id) == CalCtx.targetID)
-					picks[1] = &d;
-			}
-			bool ready = true;
-			for (int i = 0; i < 2; ++i)
-			{
-				const bool ok = picks[i] && picks[i]->tracking;
-				ready = ready && ok;
-				const std::string who = picks[i] ? DeviceDisplayName(*picks[i])
-					: std::string(i == 0 ? "Reference device" : "Target device");
-				ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + mw - 332.0f);
-				if (ok)
-					ImGui::TextWrapped("%s", Tr(FormatString("%s is tracking", who.c_str())).c_str());
-				else
-					ImGui::TextWrapped("%s", Tr(FormatString("%s isn't tracking. Wake it or bring it into view.", who.c_str())).c_str());
-				ImGui::PopTextWrapPos();
-			}
-			const float readinessBottom = ImGui::GetCursorScreenPos().y;
-			ImGui::SetCursorScreenPos(ImVec2(readiness.x + mw - 312.0f, readiness.y));
-			if (IconButton("motionreplay", "Replay", nullptr, ImVec2(110.0f, 38.0f), BtnKind::Quiet))
-			{
-				s_guide.animationTime = 0.0;
-				s_guide.animate = true;
-			}
-			ImGui::SameLine(0.0f, 12.0f);
-			if (IconButton("motiontoggle", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
-				ImVec2(190.0f, 38.0f), BtnKind::Ghost))
-				s_guide.animate = !s_guide.animate;
-			ImGui::SetCursorScreenPos(ImVec2(row.x, std::max(readinessBottom, readiness.y + 38.0f) + 8.0f));
-
-			if (s_guide.stage == GuideStage::Countdown)
-			{
-				int remain = static_cast<int>(std::ceil(kCountdownSeconds - (now - s_guide.countdownStart)));
-				std::string label = Tr(FormatString("Starting in %d...", remain));
-				ImGui::PushFont(g_fontTitle);
-				ImGui::TextUnformatted(label.c_str());
-				ImGui::PopFont();
-				ImGui::Spacing();
-				if (IconButton("guidecancel", "Cancel", nullptr, ImVec2(mw, 46.0f), BtnKind::Ghost) || EscapePressed())
-				{
-					s_guide.stage = GuideStage::Idle;
-					ImGui::CloseCurrentPopup();
-				}
-			}
-			else
-			{
-				const float cancelW = 180.0f;
-				if (IconButton("guidestart", ready ? "Start" : "Start anyway", IconPlay,
-					ImVec2(mw - cancelW - 12.0f, 46.0f), ready ? BtnKind::Primary : BtnKind::Ghost))
-				{
-					s_guide.stage = GuideStage::Countdown;
-					s_guide.countdownStart = now;
-				}
-				ImGui::SameLine(0.0f, 12.0f);
-				if (IconButton("guidecancel", "Cancel", nullptr, ImVec2(cancelW, 46.0f), BtnKind::Ghost) || EscapePressed())
-				{
-					s_guide.stage = GuideStage::Idle;
-					ImGui::CloseCurrentPopup();
-				}
-			}
+			GuideGetSetStage(state, mw, mdl, artSize, now);
 			break;
-		}
 		case GuideStage::Running:
-		{
-			// The run waits in Begin until its devices track and settle
-			// (CalibrationTick): it says what it waits for, and nothing counts
-			// down until it measures.
-			const bool waiting = CalCtx.state == CalibrationState::Begin &&
-				!CalCtx.run.waitInstruction.empty();
-			if (g_uiPreviewMode && !waiting)
-				CalCtx.Progress(static_cast<int>((now - s_guide.countdownStart - kCountdownSeconds) * 100.0),
-					static_cast<int>(CalCtx.CollectionSeconds() * 100.0));
-			ImGui::TextColored(Pal::Dim, "%s", Tr("Step 2 of 3"));
-			ImGui::Spacing();
-			// Live feedback from the run's own buffers, at 5 Hz.
-			if (!g_uiPreviewMode && CalCtx.state == CalibrationState::Collecting &&
-				now - s_guide.lastMetricsTime >= 0.2)
-			{
-				s_guide.lastMetricsTime = now;
-				s_guide.metrics = questcal::ComputeGuideMetrics(
-					CalCtx.run.referenceSamples, CalCtx.run.targetSamples);
-			}
-			if (waiting)
-			{
-				ImGui::PushFont(g_fontTitle);
-				ImGui::TextWrapped("%s", Tr(CalCtx.run.waitInstruction.c_str()));
-				ImGui::PopFont();
-				ImGui::TextWrapped("%s", Tr(CalCtx.run.waitNote.c_str()));
-			}
-			else
-			{
-				for (auto &message : CalCtx.messages)
-				{
-					if (message.kind == Msg::Instruction)
-					{
-						ImGui::PushFont(g_fontTitle);
-						ImGui::TextWrapped("%s", Tr(message.str.c_str()));
-						ImGui::PopFont();
-					}
-					else if (message.kind == Msg::Info)
-						ImGui::TextWrapped("%s", Tr(message.str.c_str()));
-				}
-			}
-			ImGui::Spacing();
-			ImVec2 row = ImGui::GetCursorScreenPos();
-			DrawGuideAnimation(mdl, row, artSize, s_guide.animationTime, s_guide.demo);
-			// Nothing is measured yet while the run waits.
-			if (!waiting)
-				DrawGuideIndicators(mdl, ImVec2(row.x, row.y + artSize.y + 12.0f), mw, s_guide.metrics, s_guide.mountRun);
-			ImGui::SetCursorScreenPos(ImVec2(row.x, row.y + artSize.y + 80.0f));
-			ImGui::Dummy(ImVec2(0, 0));
-			for (auto &message : CalCtx.messages)
-			{
-				if (waiting || message.kind != Msg::Progress)
-					continue;
-				float fraction = (float)message.progress / (float)message.target;
-				ImGui::Spacing();
-				ImGui::PushStyleColor(ImGuiCol_FrameBg, Pal::Inset);
-				ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
-				ImGui::ProgressBar(fraction, ImVec2(-1.0f, 10.0f), "");
-				ImGui::PopStyleVar();
-				ImGui::PopStyleColor();
-				// Seconds remaining, not a percentage of an unnamed quantity.
-				// Progress counts hundredths of a second (see CalibrationTick).
-				double secondsLeft = std::max(0.0, (message.target - message.progress) / 100.0);
-				ImGui::PushFont(g_fontSmall);
-				ImGui::TextColored(Pal::Dim, "%s", Tr(FormatString("%.0f s left", std::ceil(secondsLeft))).c_str());
-				ImGui::PopFont();
-			}
-			ImGui::Spacing();
-			if (IconButton("cancelprogress", "Cancel", nullptr, ImVec2(mw - 202.0f, 46.0f), BtnKind::Ghost) || EscapePressed())
-			{
-				if (g_uiPreviewMode)
-				{
-					s_guide.stage = GuideStage::Idle;
-					ImGui::CloseCurrentPopup();
-				}
-				else
-					CancelCalibration();
-			}
-			ImGui::SameLine(0.0f, 12.0f);
-			if (IconButton("runningmotion", s_guide.animate ? "Pause demo" : "Play demo", nullptr,
-				ImVec2(190.0f, 46.0f), BtnKind::Ghost))
-				s_guide.animate = !s_guide.animate;
+			GuideRunningStage(mw, mdl, artSize, now);
 			break;
-		}
 		case GuideStage::Done:
 		default:
-		{
-			// The outcome block starts at the last headline; the run's own
-			// instruction and note before it are not part of the result.
-			// Detail lines are shown from anywhere, behind the toggle.
-			size_t outcomeStart = 0;
-			for (size_t i = 0; i < CalCtx.messages.size(); ++i)
-				if (CalCtx.messages[i].kind == Msg::Headline)
-					outcomeStart = i;
-			bool anyDetail = false;
-			for (size_t i = 0; i < CalCtx.messages.size(); ++i)
-			{
-				const auto &message = CalCtx.messages[i];
-				switch (message.kind)
-				{
-				case Msg::Headline:
-					if (i < outcomeStart)
-						break;
-					ImGui::PushFont(g_fontTitle);
-					ImGui::TextWrapped("%s", Tr(message.str.c_str()));
-					ImGui::PopFont();
-					ImGui::Spacing();
-					break;
-				case Msg::Info:
-					if (i > outcomeStart)
-						ImGui::TextWrapped("%s", Tr(message.str.c_str()));
-					break;
-				case Msg::Action:
-					if (i > outcomeStart)
-					{
-						ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
-						ImGui::TextWrapped("%s", Tr(message.str.c_str()));
-						ImGui::PopStyleColor();
-					}
-					break;
-				case Msg::Detail:
-					anyDetail = true;
-					break;
-				default:
-					break;
-				}
-			}
-			// The engineer lines come after the outcome, whatever order they
-			// were logged in: the result is what the modal is for.
-			if (anyDetail && s_modalDetails)
-			{
-				ImGui::Spacing();
-				ImGui::PushFont(g_fontSmall);
-				ImGui::PushStyleColor(ImGuiCol_Text, Pal::Dim);
-				for (const auto &message : CalCtx.messages)
-					if (message.kind == Msg::Detail)
-						ImGui::TextWrapped("%s", message.str.c_str());
-				ImGui::PopStyleColor();
-				ImGui::PopFont();
-			}
-
-			ImGui::Dummy(ImVec2(0, 16.0f));
-
-			ImGui::Spacing();
-			const bool failed = !CalCtx.lastRunPassed;
-			const float detailsW = anyDetail ? 170.0f : 0.0f;
-			if (anyDetail)
-			{
-				if (IconButton("modaldetails", s_modalDetails ? "Hide details" : "Show details", nullptr,
-					ImVec2(detailsW, 46.0f), BtnKind::Quiet))
-					s_modalDetails = !s_modalDetails;
-				ImGui::SameLine(0.0f, 12.0f);
-			}
-			const float remaining = mw - (anyDetail ? detailsW + 12.0f : 0.0f);
-			if (failed)
-			{
-				// Back to get-set and its motion demo, not to a log.
-				const float closeW = 120.0f;
-				if (IconButton("guideretry", "Try again", IconPlay, ImVec2(remaining - closeW - 12.0f, 46.0f), BtnKind::Primary))
-				{
-					CalCtx.ClearMessages();
-					s_guide.stage = GuideStage::GetSet;
-				}
-				ImGui::SameLine(0.0f, 12.0f);
-				if (IconButton("closeprogress", "Close", nullptr, ImVec2(closeW, 46.0f), BtnKind::Ghost) || EscapePressed())
-				{
-					s_guide.stage = GuideStage::Idle;
-					ImGui::CloseCurrentPopup();
-				}
-			}
-			else
-			{
-				ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - 150.0f);
-				if (IconButton("closeprogress", "Done", nullptr, ImVec2(150.0f, 46.0f), BtnKind::Primary) || EscapePressed())
-				{
-					s_guide.stage = GuideStage::Idle;
-					ImGui::CloseCurrentPopup();
-				}
-			}
+			GuideResultStage(mw);
 			break;
-		}
 		}
 
 		ImGui::EndPopup();
 	}
 
 	// ---- Clear calibration confirmation ----
-	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - modalW) * 0.5f, 180.0f), ImGuiCond_Always);
-	ImGui::SetNextWindowSize(ImVec2(modalW, 0.0f), ImGuiCond_Always);
-	if (ImGui::BeginPopupModal("Clear calibration?", nullptr,
-		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-	{
-		ImGui::PushFont(g_fontTitle);
-		ImGui::TextUnformatted(Tr("Clear this calibration?"));
-		ImGui::PopFont();
-		ImGui::Spacing();
-		ImGui::TextWrapped("%s", Tr("Your trackers won't line up until you calibrate again. "
-			"This also removes the field anchors and the headset tracker setup."));
-		ImGui::Spacing();
-		ImGui::Spacing();
-		float bw = ImGui::GetContentRegionAvail().x;
-		// The safe choice carries the accent and the width; the destructive
-		// one is outlined in the error colour, so a laser pointer that lands
-		// on the big blue button keeps the calibration.
-		float clearW = 210.0f, bgap = 12.0f;
-		if (IconButton("clearkeep", "Keep calibration", nullptr, ImVec2(bw - clearW - bgap, 46.0f), BtnKind::Primary) || EscapePressed())
-			ImGui::CloseCurrentPopup();
-		ImGui::SameLine(0.0f, bgap);
-		if (IconButton("clearconfirm", "Clear calibration", IconTrash, ImVec2(clearW, 46.0f), BtnKind::Danger))
-		{
-			// The write can be refused; a destructive button that did nothing
-			// has to say so instead of leaving the screen unchanged.
-			if (!ClearSavedProfile(CalCtx))
-				CalCtx.ReportError("Couldn't clear the calibration, so it's still saved. Restart QuestCalibrator and try again.\n",
-					CalibrationContext::ErrorSource::ProfilePersistence);
-			ImGui::CloseCurrentPopup();
-		}
-		ImGui::EndPopup();
-	}
+	ClearCalibrationModal(io, modalW);
 
 	// ---- One-time chaperone drift warning ----
 	// Shown before the first "Protect chaperone" ever runs; the accept button
 	// unlocks after a short countdown so the caveat actually gets read.
 	// Narrower than the other modals: three paragraphs of prose want a
 	// 60-70 character measure, and the buttons should span the text.
-	const float proseW = 640.0f;
-	ImGui::SetNextWindowPos(ImVec2((io.DisplaySize.x - proseW) * 0.5f, 180.0f), ImGuiCond_Always);
-	ImGui::SetNextWindowSize(ImVec2(proseW, 0.0f), ImGuiCond_Always);
-	if (ImGui::BeginPopupModal("Chaperone Drift Warning", nullptr,
-		ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
-	{
-		ImGui::PushFont(g_fontTitle);
-		ImGui::TextUnformatted(Tr("Check your room boundaries"));
-		ImGui::PopFont();
-		ImGui::Spacing();
-
-		ImGui::TextWrapped("%s", Tr(
-			"QuestCalibrator saves and restores your SteamVR chaperone. "
-			"Tracking drift can still move the chaperone walls away from your real walls."));
-		ImGui::Spacing();
-		ImGui::TextWrapped("%s", Tr(
-			"Keep the Quest boundary turned on too. A protected chaperone "
-			"doesn't guarantee that your play area is clear or correctly aligned."));
-		ImGui::Spacing();
-		ImGui::PushStyleColor(ImGuiCol_Text, Pal::Violet);
-		ImGui::TextWrapped("%s", Tr(
-			"Before playing, check that the chaperone walls match your room and leave "
-			"enough space to move safely, especially when dancing."));
-		ImGui::PopStyleColor();
-		if (!CalCtx.uiError.empty())
-		{
-			ImGui::Spacing();
-			ImGui::PushStyleColor(ImGuiCol_Text, Pal::Bad);
-			ImGui::TextWrapped("%s", Tr(CalCtx.uiError.c_str()));
-			ImGui::PopStyleColor();
-		}
-		ImGui::Spacing();
-		ImGui::Spacing();
-
-		float bw = ImGui::GetContentRegionAvail().x;
-		float cancelW = 210.0f, bgap = 12.0f;
-		int remain = static_cast<int>(std::ceil(5.0 - (ImGui::GetTime() - g_chapWarnOpenedAt)));
-		if (remain > 0)
-		{
-			// Disabled look: ghost chrome, dim countdown label, no hover/click.
-			ImVec2 p = ImGui::GetCursorScreenPos();
-			ImVec2 sz(bw - cancelW - bgap, 46.0f);
-			ImDrawList *mdl = ImGui::GetWindowDrawList();
-			mdl->AddRectFilled(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Card), 10.0f);
-			mdl->AddRect(p, ImVec2(p.x + sz.x, p.y + sz.y), Pal::U32(Pal::Border), 10.0f);
-			std::string lbl = Tr(FormatString("Protect chaperone (%d s)", remain));
-			ImVec2 ts = ImGui::CalcTextSize(lbl.c_str());
-			mdl->AddText(g_fontBody, g_fontBody->LegacySize,
-				ImVec2(p.x + (sz.x - ts.x) * 0.5f, p.y + sz.y * 0.5f - g_fontBody->LegacySize * 0.5f),
-				Pal::U32(Pal::Dim), lbl.c_str());
-			ImGui::Dummy(sz);
-		}
-		// Named for what it does: accepting the caveat is what saves the
-		// chaperone.
-		else if (IconButton("chapwarnok", "Protect chaperone", nullptr, ImVec2(bw - cancelW - bgap, 46.0f), BtnKind::Primary))
-		{
-			bool previousAck = CalCtx.chaperoneWarningAck;
-			CalCtx.chaperoneWarningAck = true;
-			if (ProtectChaperone())
-				ImGui::CloseCurrentPopup();
-			else
-			{
-				CalCtx.chaperoneWarningAck = previousAck;
-				// A failed capture may have persisted the fail-closed chaperone
-				// state immediately; keep the acknowledgement rollback consistent.
-				if (!SaveSettings(CalCtx))
-				{
-					CalCtx.persistence.MarkSettings(CalCtx.timeLastTick);
-				}
-			}
-		}
-		ImGui::SameLine(0.0f, bgap);
-		if (IconButton("chapwarncancel", "Cancel", nullptr, ImVec2(cancelW, 46.0f), BtnKind::Ghost) || EscapePressed())
-			ImGui::CloseCurrentPopup();
-
-		ImGui::EndPopup();
-	}
+	ChaperoneWarningModal(io);
 }
