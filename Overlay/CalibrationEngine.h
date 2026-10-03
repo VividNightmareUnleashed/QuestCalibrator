@@ -231,6 +231,12 @@ public:
 	static bool InterpolateAt(const std::vector<PoseSample> &stream, double t,
 	                          double maxGap, PoseSample &out);
 
+	// Shortest-arc axis and angle of the world-frame delta `to * from^-1`;
+	// false below minAngle. The solver pairs and gates on these axes, and the
+	// calibration guide measures the same ones.
+	static bool DeltaAxis(const Eigen::Quaterniond &from, const Eigen::Quaterniond &to,
+	                      double minAngle, Eigen::Vector3d &axisOut, double &angleOut);
+
 	// Solve over pre-aligned pairs (skips alignment; used internally and by tests).
 	static EngineResult SolveAligned(const std::vector<AlignedSample> &samples,
 	                                 const EngineConfig &config);

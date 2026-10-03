@@ -1,3 +1,4 @@
+#include "../Overlay/CalibrationEngine.h"
 #include "../Overlay/PoseMath.h"
 #include "../common/MathConstants.h"
 
@@ -84,6 +85,28 @@ void RunQuaternionMeanScenario(Check check)
 	snprintf(detail, sizeof detail, "mean off by %.2e rad", error);
 	check("pose math: the quaternion mean ignores each quaternion's sign", error < 1e-9, detail);
 }
+
+void RunDeltaAxisFrameScenario(Check check)
+{
+	// The solver's delta axis is the world-frame one, to * from^-1: a device
+	// lying on its side and turned about the vertical turned about +Y, though
+	// in its own frame that is its z axis.
+	const Eigen::Quaterniond lying(Eigen::AngleAxisd(questcal::Pi / 2.0, Eigen::Vector3d::UnitX()));
+	const Eigen::Quaterniond turned =
+		Eigen::Quaterniond(Eigen::AngleAxisd(0.5, Eigen::Vector3d::UnitY())) * lying;
+	Eigen::Vector3d axis = Eigen::Vector3d::Zero();
+	double angle = 0.0;
+	const bool found = questcal::CalibrationEngine::DeltaAxis(lying, turned, 0.4, axis, angle);
+	Eigen::Vector3d small = Eigen::Vector3d::Zero();
+	double smallAngle = 0.0;
+	const bool belowMinimum = questcal::CalibrationEngine::DeltaAxis(lying, turned, 0.6, small, smallAngle);
+	char detail[128];
+	snprintf(detail, sizeof detail, "found %d axis (%.3f, %.3f, %.3f) angle %.4f, below minimum %d",
+		found, axis.x(), axis.y(), axis.z(), angle, belowMinimum);
+	check("solver: delta axes are taken in the world frame",
+		found && std::abs(std::abs(axis.y()) - 1.0) < 1e-12 && std::abs(angle - 0.5) < 1e-12 &&
+		!belowMinimum, detail);
+}
 }
 
 void RunPoseMathScenarios(Check check)
@@ -91,4 +114,5 @@ void RunPoseMathScenarios(Check check)
 	RunSignedYawScenario(check);
 	RunTiltResidualScenario(check);
 	RunQuaternionMeanScenario(check);
+	RunDeltaAxisFrameScenario(check);
 }

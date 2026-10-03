@@ -32,24 +32,37 @@ struct GuideMetrics
 
 struct GuideConfig
 {
-	double minPairAngle = 0.4;     // rad; same band the engine pairs over
-	double maxPairAngle = 2.9;
+	GuideConfig() : GuideConfig(EngineConfig()) {}
+	// The solver's own gates, so the guide fills toward what it will accept.
+	explicit GuideConfig(const EngineConfig &engine)
+		: minPairAngle(engine.minPairAngle), maxPairAngle(engine.maxPairAngle),
+		  fullSpread(15.0 * engine.minAxisSpread),
+		  maxLinearSpeed(engine.maxLinearSpeed), maxAngularSpeed(engine.maxAngularSpeed),
+		  maxInterpolationGap(engine.maxInterpolationGap)
+	{
+	}
+
+	double minPairAngle;           // rad; the band the engine pairs over
+	double maxPairAngle;
 	// Second/first eigenvalue ratio of the delta-axis scatter at which the ring
-	// reads full. The engine refuses below 0.010; this is well above that so a
-	// full ring means a comfortable solve, not a marginal one.
-	double fullSpread = 0.15;
-	double maxLinearSpeed = 1.6;   // m/s; EngineConfig's gates
-	double maxAngularSpeed = 8.0;  // rad/s
+	// reads full: well above the engine's refusal (minAxisSpread), so a full
+	// ring means a comfortable solve, not a marginal one.
+	double fullSpread;
+	double maxLinearSpeed;         // m/s
+	double maxAngularSpeed;        // rad/s
+	double maxInterpolationGap;
 	double windowSeconds = 1.0;    // recent window for speed and rigidity
-	double maxInterpolationGap = 0.06;
 };
 
-// Rotation-axis diversity over the collection so far, mirroring the engine's
-// axis-spread gate: delta rotations between samples a few lags apart, their
-// axes accumulated into a scatter matrix, and the second/first eigenvalue
-// ratio of that matrix. Rotation about one axis alone leaves the ratio near
-// zero however long it goes on; that is exactly the failure this is meant to
-// show before the solve does.
+// Rotation-axis diversity over the collection so far, measured as the
+// engine's axis-spread gate measures it: the world-frame axes of delta
+// rotations between samples a few lags apart (CalibrationEngine::DeltaAxis),
+// accumulated into a scatter matrix, and the second/first eigenvalue ratio of
+// that matrix. Rotation about one axis alone leaves the ratio near zero
+// however long it goes on; that is exactly the failure this is meant to show
+// before the solve does. The ratio does not change when every axis turns by
+// the same rotation, so for a rigid pair the target stream reads as the
+// reference axes the engine gates on.
 //
 // The helpers below take the collection ComputeGuideMetrics has already sized:
 // at least 8 target samples.
@@ -70,14 +83,11 @@ inline double GuideAxisCoverage(const std::vector<PoseSample> &stream,
 	{
 		for (size_t i = lag; i < q.size(); ++i)
 		{
-			Eigen::Quaterniond d = (q[i - lag].conjugate() * q[i]).normalized();
-			if (d.w() < 0.0)
-				d.coeffs() = -d.coeffs();
-			const double angle = 2.0 * std::acos(std::min(1.0, d.w()));
-			if (angle < config.minPairAngle || angle > config.maxPairAngle)
+			Eigen::Vector3d axis;
+			double angle = 0.0;
+			if (!CalibrationEngine::DeltaAxis(q[i - lag], q[i], config.minPairAngle, axis, angle) ||
+				angle > config.maxPairAngle)
 				continue;
-			// |axis| = sin(angle / 2) >= sin(minPairAngle / 2).
-			const Eigen::Vector3d axis = d.vec().normalized();
 			scatter += axis * axis.transpose();
 			++pairs;
 		}

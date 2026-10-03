@@ -71,27 +71,6 @@ bool SolveSymmetric(const Matrix &a, const Vector &b, Vector &x)
 	return x.allFinite();
 }
 
-// Shortest-arc axis/angle of a delta rotation, via quaternions.
-// Quaternion extraction keeps the axis well-conditioned even near 180 degrees,
-// where the matrix off-diagonal method degrades.
-bool DeltaAxis(const Eigen::Quaterniond &from, const Eigen::Quaterniond &to,
-               double minAngle, Eigen::Vector3d &axisOut, double &angleOut)
-{
-	Eigen::Quaterniond dq = to * from.conjugate();
-	dq.normalize();
-	if (dq.w() < 0.0)
-		dq.coeffs() = -dq.coeffs();   // shortest arc
-
-	double sinHalf = dq.vec().norm();
-	double angle = 2.0 * std::atan2(sinHalf, dq.w());
-	if (angle < minAngle)
-		return false;
-
-	axisOut = dq.vec() / sinHalf;   // sinHalf >= sin(minAngle / 2) > 0
-	angleOut = angle;
-	return true;
-}
-
 struct AxisPair
 {
 	Eigen::Vector3d ref;
@@ -500,6 +479,26 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 }
 
 } // namespace
+
+// Quaternion extraction keeps the axis well-conditioned even near 180 degrees,
+// where the matrix off-diagonal method degrades.
+bool CalibrationEngine::DeltaAxis(const Eigen::Quaterniond &from, const Eigen::Quaterniond &to,
+                                  double minAngle, Eigen::Vector3d &axisOut, double &angleOut)
+{
+	Eigen::Quaterniond dq = to * from.conjugate();
+	dq.normalize();
+	if (dq.w() < 0.0)
+		dq.coeffs() = -dq.coeffs();   // shortest arc
+
+	double sinHalf = dq.vec().norm();
+	double angle = 2.0 * std::atan2(sinHalf, dq.w());
+	if (angle < minAngle)
+		return false;
+
+	axisOut = dq.vec() / sinHalf;   // sinHalf >= sin(minAngle / 2) > 0
+	angleOut = angle;
+	return true;
+}
 
 bool CalibrationEngine::InterpolateAt(const std::vector<PoseSample> &stream, double t,
                                       double maxGap, PoseSample &out)
