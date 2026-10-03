@@ -143,7 +143,7 @@ bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 				ringpose::ComposeWithWorldFromDriver(Space.hmd.localPose, Space.hmd.rotation,
 					Space.hmd.translation),
 				ringpose::ComposeWithWorldFromDriver(localPose, parts.wfdRot, parts.wfdTrans));
-		Space.verdict.NoteTransition(sampleTime,
+		Space.verdict.NoteTransition(sample.sampleTimeQpc,
 			{ transition.previousRotation, transition.previousTranslation },
 			{ transition.currentRotation, transition.currentTranslation },
 			transition.composedPoseContinuous);
@@ -686,7 +686,7 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 	}
 	// Both paths: the verdict follows the WFD transition at this sample, also
 	// when an exact rebase could not move a profile that was still behind it.
-	Space.verdict.NoteCompensation(delta.time);
+	Space.verdict.NoteCompensation(delta.sample);
 
 	ctx.jumpsCompensated++;
 	const double yawDegrees = questcal::SignedYawRadians(delta.rotation) * 180.0 / questcal::Pi;
@@ -767,7 +767,7 @@ void ProfileUniverseTick(CalibrationContext &ctx, double now)
 	const questcal::UniverseVerdict::Decision decision = Space.verdict.Evaluate(now,
 		{ ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation },
 		{ Space.hmd.rotation, Space.hmd.translation },
-		[](double time) { return Space.jumps->HasLiveHeadsetCandidate(time); });
+		[](int64_t sample) { return Space.jumps->HasLiveHeadsetCandidate(sample); });
 	if (decision.adopt)
 		AdoptProfileUniverse(ctx, decision.adopted, now);
 	if (!decision.latch)

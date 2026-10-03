@@ -4121,12 +4121,18 @@ void RunJumpScenarios()
 		feedDevice(0, 0.0, 10.0, 1.49);
 		feedDevice(1, 0.0, 10.0, 1.49); // keep the second device active: no solo acceptance
 		feedDevice(0, 1.50, 1.50, 1.72); // ready, waiting for agreement
+		// The waiting headset candidate is known by the sample that raised it,
+		// as the universe verdict asks, and the delta carries that sample.
+		const int64_t jumpSample = rawSample(0, 1.50, true).sampleTimeQpc;
+		const bool liveWhileWaiting = jd.HasLiveHeadsetCandidate(jumpSample) &&
+			!jd.HasLiveHeadsetCandidate(rawSample(0, 1.51, true).sampleTimeQpc);
 		feedDevice(1, 1.50, 1.70, 1.92); // agrees 200 ms later
 		JumpDetector::UniverseDelta delta;
 		bool accepted = jd.PollDelta(delta);
 		Check("jump: device-local candidate clocks", accepted && !delta.exact &&
 			delta.devicesAgreeing == 2 &&
-			std::abs(delta.time - 1.5) < 0.02,
+			std::abs(delta.time - 1.5) < 0.02 && delta.sample == jumpSample && liveWhileWaiting &&
+			!jd.HasLiveHeadsetCandidate(jumpSample),
 			"a delayed agreeing device survives the full fit + agreement window");
 	}
 
@@ -4311,10 +4317,19 @@ void RunJumpScenarios()
 		JumpRun tilted = runWithTilt(6.0 * questcal::Pi / 180.0);
 		JumpRun upright = runWithTilt(0.0);
 
-		snprintf(detail, sizeof detail, "deltas %d  exact %d  yawErr %.3f deg  transErr %.4f m",
-			upright.deltas, upright.last.exact ? 1 : 0, upright.YawErrDeg(jumpYaw), upright.TransErr(D_T));
+		// The delta names the first rebased headset sample, by which the
+		// universe verdict matches it to the transition there (DriveJump's
+		// clock, accumulated the same way).
+		double firstRebased = 0.0;
+		while (firstRebased < tJump)
+			firstRebased += 1.0 / rate;
+		const int64_t rebaseSample = RefSample(hmd, firstRebased).sampleTimeQpc;
+		snprintf(detail, sizeof detail, "deltas %d  exact %d  yawErr %.3f deg  transErr %.4f m  sample %lld (want %lld)",
+			upright.deltas, upright.last.exact ? 1 : 0, upright.YawErrDeg(jumpYaw), upright.TransErr(D_T),
+			static_cast<long long>(upright.last.sample), static_cast<long long>(rebaseSample));
 		Check("jump: wfd rebase", upright.deltas == 1 && upright.last.exact &&
-			upright.YawErrDeg(jumpYaw) < 0.1 && upright.TransErr(D_T) < 0.01, detail);
+			upright.YawErrDeg(jumpYaw) < 0.1 && upright.TransErr(D_T) < 0.01 &&
+			upright.last.sample == rebaseSample, detail);
 
 		// The accepted rotation is built about UnitY: assert the axis exactly.
 		double offAxis = std::max(std::abs(tilted.last.rotation.x()),

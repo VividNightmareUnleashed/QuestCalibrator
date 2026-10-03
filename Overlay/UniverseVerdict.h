@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 
@@ -57,21 +58,21 @@ public:
 		bool latch = false;
 	};
 
-	// A universe delta was applied, exact or heuristic; `time` is the HMD's
-	// jump sample.
-	void NoteCompensation(double time)
+	// A universe delta was applied, exact or heuristic, for the HMD's jump
+	// `sample`, by its capture ticks (JumpDetector::UniverseDelta::sample).
+	void NoteCompensation(int64_t sample)
 	{
-		compensated.push_back(time);
+		compensated.push_back(sample);
 		if (compensated.size() > MaxRemembered)
 			compensated.pop_front();
 	}
 
 	// Space saw the HMD's WFD change between two adjacent samples, the second
-	// at `time`.
-	void NoteTransition(double time, const WorldFromDriver &from,
+	// being `sample`, by its capture ticks.
+	void NoteTransition(int64_t sample, const WorldFromDriver &from,
 		const WorldFromDriver &to, bool composedContinuous)
 	{
-		transitions.push_back({ time, from, to, composedContinuous });
+		transitions.push_back({ sample, from, to, composedContinuous });
 		if (transitions.size() > MaxRemembered)
 			transitions.pop_front();
 	}
@@ -96,11 +97,11 @@ public:
 	}
 
 	// One ProfileUniverseTick past its gates: `observed` is the HMD's newest
-	// WFD; `candidateLiveAt(t)` says whether the jump detector still holds a
-	// headset candidate raised at sample time t.
+	// WFD; `candidateLiveAt(sample)` says whether the jump detector still
+	// holds a headset candidate raised at that sample.
 	Decision Evaluate(double now, const WorldFromDriver &profile,
 		const WorldFromDriver &observed,
-		const std::function<bool(double)> &candidateLiveAt)
+		const std::function<bool(int64_t)> &candidateLiveAt)
 	{
 		Decision decision;
 		if (SameWorldFromDriver(profile, observed))
@@ -118,7 +119,7 @@ public:
 				++it;
 				continue;
 			}
-			if (it->composedContinuous || Compensated(it->time))
+			if (it->composedContinuous || Compensated(it->sample))
 			{
 				reference = it->to;
 				decision.adopt = true;
@@ -126,7 +127,7 @@ public:
 				it = transitions.erase(it);
 				continue;
 			}
-			waiting = candidateLiveAt(it->time);
+			waiting = candidateLiveAt(it->sample);
 			break;
 		}
 
@@ -155,7 +156,7 @@ public:
 private:
 	struct Transition
 	{
-		double time;
+		int64_t sample;
 		WorldFromDriver from;
 		WorldFromDriver to;
 		bool composedContinuous;
@@ -164,10 +165,10 @@ private:
 	static constexpr double NoTime = -1e9;
 	static constexpr std::size_t MaxRemembered = 32;
 
-	bool Compensated(double time) const
+	bool Compensated(int64_t sample) const
 	{
-		for (double t : compensated)
-			if (std::abs(t - time) <= 1e-9)
+		for (int64_t s : compensated)
+			if (s == sample)
 				return true;
 		return false;
 	}
@@ -176,7 +177,7 @@ private:
 	WorldFromDriver timedFrom;
 	bool waiting = false;
 	std::deque<Transition> transitions;
-	std::deque<double> compensated;
+	std::deque<int64_t> compensated;
 };
 
 } // namespace questcal

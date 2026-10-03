@@ -117,6 +117,9 @@ public:
 		Eigen::Quaterniond rotation{ 1, 0, 0, 0 };   // yaw-only
 		Eigen::Vector3d translation{ 0, 0, 0 };
 		double time = 0.0;                 // ring seconds at the jump
+		// The HMD's jump sample, by its capture ticks: what the universe
+		// verdict matches the worldFromDriver transition at it by.
+		int64_t sample = 0;
 		bool exact = false;                // wfd-rebase path vs heuristic
 		int devicesAgreeing = 0;
 		double residualTiltRad = 0.0;      // non-rigid part discarded by the yaw constraint
@@ -192,16 +195,17 @@ public:
 	// stall-sized hole or a driver session boundary in the stream, ...).
 	void Reset();
 
-	// Whether a headset heuristic candidate raised at sample time `time` is
-	// still alive: its fit window is filling, or it waits for a device to
-	// confirm it. The profile-universe verdict does not give up on a
-	// worldFromDriver change such a candidate may yet explain.
-	bool HasLiveHeadsetCandidate(double time) const;
+	// Whether a headset heuristic candidate raised at `sample` (its capture
+	// ticks) is still alive: its fit window is filling, or it waits for a
+	// device to confirm it. The profile-universe verdict does not give up on
+	// a worldFromDriver change such a candidate may yet explain.
+	bool HasLiveHeadsetCandidate(int64_t sample) const;
 
 private:
 	struct Hist
 	{
 		double t;
+		int64_t sample = 0;                // the ring sample's capture ticks: which sample it was
 		Eigen::Vector3d pos;               // composed world position
 		Eigen::Vector3d vel;               // world-rotated velocity
 		double yaw;                        // composed world heading
@@ -230,6 +234,7 @@ private:
 	{
 		uint32_t deviceId = 0;
 		double t = 0.0;
+		int64_t sample = 0;   // the sample at `t` (Hist::sample)
 		Kind kind = Kind::Heuristic;
 		Life life = Life::Pending;
 		Eigen::Quaterniond rot{ 1, 0, 0, 0 };
@@ -305,7 +310,7 @@ private:
 	// while the orientation keeps integrating. Never seen in 6DoF.
 	static bool HeldPositionSignature(const std::vector<Hist> &window);
 
-	void DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
+	void DetectWfdRebase(uint32_t id, DeviceState &dev, double t, int64_t sample,
 	                     const Eigen::Quaterniond &newRot, const Eigen::Vector3d &newTrans);
 	void DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist &incoming);
 	void EvaluatePendingCandidates();
