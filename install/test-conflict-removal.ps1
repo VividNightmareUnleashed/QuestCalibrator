@@ -1,6 +1,8 @@
 # Exercises the installer's actual conflict-removal block with mocked filesystem
 # operations. Does not execute elevation, uninstallers, or any installation step.
 $ErrorActionPreference = 'Stop'
+# The block removes through the shared filesystem policy, as Install.ps1 does.
+. (Join-Path $PSScriptRoot 'FilesystemPolicy.ps1')
 $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
@@ -22,6 +24,9 @@ function Test-Case([string]$name, [int]$failuresBeforeSuccess, [bool]$noop = $fa
         failed = $false
     }
     function Test-Path { param([string]$LiteralPath) return $state.exists }
+    # The mocked folder has no real tree to vet; test-filesystem-policy.ps1
+    # covers the checks themselves.
+    function Assert-QuestcalTree { param([string]$Path, [string]$ExpectedLeaf) }
     function Remove-Item {
         param([string]$LiteralPath, [switch]$Recurse, [switch]$Force, [string]$ErrorAction)
         $state.attempts++
