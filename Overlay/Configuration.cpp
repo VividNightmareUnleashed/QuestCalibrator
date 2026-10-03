@@ -63,14 +63,10 @@ static ChaperoneRecord CaptureChaperoneRecord(
 static SettingsRecord CaptureSettingsRecord(const CalibrationContext &ctx)
 {
 	SettingsRecord record;
-	record.uiAdvanced = ctx.uiAdvanced;
-	record.notifyPoorCalibration = ctx.notifyPoorCalibration;
-	record.chaperoneWarningAck = ctx.chaperoneWarningAck;
+#define QUESTCAL_CAPTURE_SWITCH(member, key, value) record.member = ctx.member;
+	QUESTCAL_SETTINGS_SWITCHES(QUESTCAL_CAPTURE_SWITCH)
+#undef QUESTCAL_CAPTURE_SWITCH
 	record.calibrationSpeed = static_cast<questcal::PersistedCalibrationSpeed>(ctx.calibrationSpeed);
-	record.solveScale = ctx.solveScale;
-	record.applyTimeOffset = ctx.applyTimeOffset;
-	record.detailedLogging = ctx.detailedLogging;
-	record.automaticUpdates = ctx.automaticUpdates;
 	record.language = ctx.language;
 	record.deviceNames = ctx.deviceNames;
 	record.chaperone = CaptureChaperoneRecord(ctx.chaperone);
@@ -140,14 +136,10 @@ static void ApplyChaperoneRecord(CalibrationContext &ctx, ChaperoneRecord record
 
 static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 {
-	ctx.uiAdvanced = record.uiAdvanced;
-	ctx.notifyPoorCalibration = record.notifyPoorCalibration;
-	ctx.chaperoneWarningAck = record.chaperoneWarningAck;
+#define QUESTCAL_APPLY_SWITCH(member, key, value) ctx.member = record.member;
+	QUESTCAL_SETTINGS_SWITCHES(QUESTCAL_APPLY_SWITCH)
+#undef QUESTCAL_APPLY_SWITCH
 	ctx.calibrationSpeed = static_cast<CalibrationContext::Speed>(record.calibrationSpeed);
-	ctx.solveScale = record.solveScale;
-	ctx.applyTimeOffset = record.applyTimeOffset;
-	ctx.detailedLogging = record.detailedLogging;
-	ctx.automaticUpdates = record.automaticUpdates;
 	ctx.language = record.language;
 	ctx.deviceNames = record.deviceNames;
 	ApplyChaperoneRecord(ctx, std::move(record.chaperone));

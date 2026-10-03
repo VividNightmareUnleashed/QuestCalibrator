@@ -27,16 +27,26 @@ struct ChaperoneRecord
 // yet; the first one bumps it and adds a step table as ConfigMigrations.
 constexpr int SettingsSchema = 1;
 
+// The Settings record's switches, each listed once: its member (named as in
+// CalibrationContext), its key and its default. The record's members, the
+// writer, the parser and Configuration.cpp's capture and apply all expand
+// from this list, so adding a switch takes one line here and its member in
+// CalibrationContext.
+#define QUESTCAL_SETTINGS_SWITCHES(X) \
+	X(uiAdvanced, "ui_advanced", false) \
+	X(notifyPoorCalibration, "notify_poor_calibration", true) \
+	X(chaperoneWarningAck, "chaperone_warning_ack", false) \
+	X(solveScale, "solve_scale", false) \
+	X(applyTimeOffset, "apply_time_offset", true) \
+	X(detailedLogging, "detailed_logging", false) \
+	X(automaticUpdates, "automatic_updates", false)
+
 struct SettingsRecord
 {
-	bool uiAdvanced = false;
-	bool notifyPoorCalibration = true;
-	bool chaperoneWarningAck = false;
+#define QUESTCAL_SWITCH_MEMBER(member, key, value) bool member = value;
+	QUESTCAL_SETTINGS_SWITCHES(QUESTCAL_SWITCH_MEMBER)
+#undef QUESTCAL_SWITCH_MEMBER
 	PersistedCalibrationSpeed calibrationSpeed = PersistedCalibrationSpeed::Fast;
-	bool solveScale = false;
-	bool applyTimeOffset = true;
-	bool detailedLogging = false;
-	bool automaticUpdates = false;
 	std::string language;
 	std::map<std::string, std::string> deviceNames;
 	ChaperoneRecord chaperone;
@@ -184,14 +194,10 @@ inline void WriteSettings(const SettingsRecord &record,
 	double persistenceRevision = static_cast<double>(persistenceRevisionValue);
 	settings["persistence_revision"].set<double>(persistenceRevision);
 	settings["settings_version"].set<double>(schema);
-	settings["ui_advanced"].set<bool>(record.uiAdvanced);
-	settings["notify_poor_calibration"].set<bool>(record.notifyPoorCalibration);
-	settings["chaperone_warning_ack"].set<bool>(record.chaperoneWarningAck);
+#define QUESTCAL_WRITE_SWITCH(member, key, value) settings[key].set<bool>(record.member);
+	QUESTCAL_SETTINGS_SWITCHES(QUESTCAL_WRITE_SWITCH)
+#undef QUESTCAL_WRITE_SWITCH
 	settings["calibration_speed"].set<double>(calibrationSpeed);
-	settings["solve_scale"].set<bool>(record.solveScale);
-	settings["apply_time_offset"].set<bool>(record.applyTimeOffset);
-	settings["detailed_logging"].set<bool>(record.detailedLogging);
-	settings["automatic_updates"].set<bool>(record.automaticUpdates);
 	if (!record.language.empty())
 		settings["language"].set<std::string>(record.language);
 	if (!record.deviceNames.empty())
@@ -225,20 +231,11 @@ inline PersistedRevision ParseSettingsUnchecked(SettingsRecord &settings, std::i
 		if (!IsValidSettingsVersion(version))
 			throw std::runtime_error("invalid settings_version");
 	}
-	if (HasTypedValue<bool>(obj, "ui_advanced"))
-		settings.uiAdvanced = obj.at("ui_advanced").get<bool>();
-	if (HasTypedValue<bool>(obj, "notify_poor_calibration"))
-		settings.notifyPoorCalibration = obj.at("notify_poor_calibration").get<bool>();
-	if (HasTypedValue<bool>(obj, "chaperone_warning_ack"))
-		settings.chaperoneWarningAck = obj.at("chaperone_warning_ack").get<bool>();
-	if (HasTypedValue<bool>(obj, "solve_scale"))
-		settings.solveScale = obj.at("solve_scale").get<bool>();
-	if (HasTypedValue<bool>(obj, "apply_time_offset"))
-		settings.applyTimeOffset = obj.at("apply_time_offset").get<bool>();
-	if (HasTypedValue<bool>(obj, "detailed_logging"))
-		settings.detailedLogging = obj.at("detailed_logging").get<bool>();
-	if (HasTypedValue<bool>(obj, "automatic_updates"))
-		settings.automaticUpdates = obj.at("automatic_updates").get<bool>();
+#define QUESTCAL_PARSE_SWITCH(member, key, value) \
+	if (HasTypedValue<bool>(obj, key)) \
+		settings.member = obj.at(key).get<bool>();
+	QUESTCAL_SETTINGS_SWITCHES(QUESTCAL_PARSE_SWITCH)
+#undef QUESTCAL_PARSE_SWITCH
 	// A code this build does not know is dropped, not refused: it reads as
 	// "follow Windows", and the rest of the record still loads.
 	if (HasTypedValue<std::string>(obj, "language"))
