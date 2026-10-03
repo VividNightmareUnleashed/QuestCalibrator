@@ -10,7 +10,7 @@ if ($errors.Count) { throw ($errors | Out-String) }
 $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Expand-VerifiedUpdate' },$true)
 if (-not $function) { throw 'Verified extraction function is missing.' }
 . ([scriptblock]::Create($function.Extent.Text))
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
 $root = Join-Path ([IO.Path]::GetTempPath()) ('questcal-update-test-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $checks = 0

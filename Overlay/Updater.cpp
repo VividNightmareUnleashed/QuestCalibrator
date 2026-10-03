@@ -308,7 +308,9 @@ function Expand-VerifiedUpdate([string]$Path, [string]$ExpectedHash, [string]$De
         $actual = (Get-FileHash -InputStream $package -Algorithm SHA256).Hash
         if ($actual -ine $ExpectedHash) { throw 'The downloaded package no longer matches its verified SHA-256 digest.' }
         $package.Position = 0
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        # ZipArchive's own assembly: Windows PowerShell, which runs this, does
+        # not load it with System.IO.Compression.FileSystem.
+        Add-Type -AssemblyName System.IO.Compression
         $archive = [IO.Compression.ZipArchive]::new($package, [IO.Compression.ZipArchiveMode]::Read, $true)
         try {
             if ($archive.Entries.Count -gt 4096) { throw 'The update archive contains too many entries.' }
