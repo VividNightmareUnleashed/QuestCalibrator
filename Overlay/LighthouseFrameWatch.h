@@ -45,8 +45,8 @@
 // 2026-09-26: never in two hours, then, once a restart had put it in the
 // frame of the station SteamVR kept moving, twelve times in 26 minutes, up to
 // 2.1 deg of tilt and 6 to 12 cm each). A moved tracker's delta is also handed
-// out on its own at once (TakeMoves), for the caller to compensate before
-// anything measures it.
+// out on its own at once (TakeMoves), for the caller to follow in that
+// device's frame correction before anything measures it.
 //
 // A device that cannot vouch for its own move gets one read off the others:
 // one back from a disconnect (SteamVR switched it off after sitting still,
@@ -277,20 +277,6 @@ public:
 			(member ? census.members : census.others)++;
 		}
 		return census;
-	}
-
-	// The left delta D (newCalibration = D o calibration, as
-	// ApplyCalibrationDelta takes it) that keeps every device in a moved
-	// frame where the calibration put it: for C(x) = R (s x) + t and the move
-	// F, D o C o F = C, so D = C o F^-1 o C^-1.
-	static void CompensatingDelta(const Eigen::Quaterniond &calRotation,
-		const Eigen::Vector3d &calTranslation, double calScale, const Move &move,
-		Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
-	{
-		const Eigen::Quaterniond fInv = move.rotation.conjugate().normalized();
-		rotationOut = (calRotation * fInv * calRotation.conjugate()).normalized();
-		translationOut = calTranslation - rotationOut * calTranslation -
-			calScale * (calRotation * (fInv * move.translation));
 	}
 
 	// Reports whose group has closed: a sample arrived more than

@@ -813,40 +813,6 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 				universe && twoApart && none && apart, buf);
 		}
 
-		// The delta the calibration takes for a move keeps every device in the
-		// moved frame where the calibration put it, scale included, and turns
-		// the calibration by the move's own tilt.
-		{
-			Pose cal(rot(-112, 1.5), Eigen::Vector3d(-0.98, 2.0, -1.98));
-			const double scale = 1.03;
-			LighthouseFrameWatch::Move move;
-			move.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(1.66 * deg,
-				Eigen::Vector3d(0.3, 0.2, 0.9).normalized()));
-			move.translation = Eigen::Vector3d(0.07, -0.02, 0.09);
-			Eigen::Quaterniond dR;
-			Eigen::Vector3d dT;
-			LighthouseFrameWatch::CompensatingDelta(cal.first, cal.second, scale, move, dR, dT);
-			const Pose next((dR * cal.first).normalized(), dR * cal.second + dT);
-			double worst = 0.0;
-			const Eigen::Vector3d points[] = { { 0.25, 1001.6, 0.08 }, { -0.5, 0.65, -2.0 },
-				{ 2.0, -1.0, 3.0 }, { 0.0, 0.0, 0.0 } };
-			for (const auto &x : points)
-			{
-				const Eigen::Vector3d before = cal.first * (scale * x) + cal.second;
-				const Eigen::Vector3d moved2 = move.rotation * x + move.translation;
-				const Eigen::Vector3d after = next.first * (scale * moved2) + next.second;
-				worst = std::max(worst, (after - before).norm());
-			}
-			const Eigen::Quaterniond orientation(Eigen::AngleAxisd(0.4, Eigen::Vector3d::UnitZ()));
-			const double orientationError =
-				((next.first * move.rotation * orientation).normalized()).angularDistance(
-					(cal.first * orientation).normalized());
-			char buf[128];
-			snprintf(buf, sizeof buf, "worst %.2e m, orientation %.2e rad", worst, orientationError);
-			check("lighthouse frame: the compensating delta keeps the moved frame's devices in place",
-				worst < 1e-9 && orientationError < 1e-9, buf);
-		}
-
 		// SteamVR switches the headset tracker (9) off at 3 s and re-solves a
 		// station while it is off; the tracker is back at `backAt`, in station
 		// 1's frame or in station 2's. Only the stations publish meanwhile, or

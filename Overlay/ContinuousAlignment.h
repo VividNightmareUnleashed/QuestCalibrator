@@ -318,16 +318,6 @@ public:
 	// leaves the same solution, and its bias, in place.
 	void NoteTargetResolved(double time, bool newSolution = false);
 
-	// The frame the target is reported in moved by (rotation, translation)
-	// (LighthouseFrameWatch::Move: SteamVR moved the base station under it),
-	// and the caller compensated the calibration by exactly that. Every target
-	// pose moved by it, so the window straddling the move is dropped, but the
-	// deviation it measured is unchanged: a freeze and its episode stand, as
-	// through a gap, and the calibration a re-anchor replaced moves with the
-	// frame so an undo still lands where it should.
-	void NoteTargetFrameMoved(const Eigen::Quaterniond &rotation,
-	                          const Eigen::Vector3d &translation, double calScale);
-
 	// True while the target's tracking says its pose is not settled (fewer
 	// than two base stations in view, or moments after a restart). No verdict
 	// is drawn from such a pose: no correction, no freeze, no resume; the

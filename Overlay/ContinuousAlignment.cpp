@@ -1026,7 +1026,7 @@ void ContinuousAlignment::Reset(ResetReason reason)
 {
 	// A break in the target's own tracking is a gap too: the fault a freeze
 	// recorded is not cleared by it, only by fresh evidence afterwards. So is a
-	// compensated move of its frame, which leaves the deviation as it was.
+	// followed move of its frame, which leaves the deviation as it was.
 	const bool gap = reason == ResetReason::StreamGap || reason == ResetReason::TargetResolved ||
 		reason == ResetReason::TargetFrameMoved;
 	const bool keepFrozen = gap && state == State::Frozen;
@@ -1063,27 +1063,6 @@ void ContinuousAlignment::NoteTargetResolved(double time, bool newSolution)
 	lastTargetResolveTime = time;
 	if (newSolution)
 		++targetSolutions;
-}
-
-void ContinuousAlignment::NoteTargetFrameMoved(const Eigen::Quaterniond &rotation,
-                                               const Eigen::Vector3d &translation, double calScale)
-{
-	Reset(ResetReason::TargetFrameMoved);
-	// C o F^-1, as the caller did to the calibration (see
-	// LighthouseFrameWatch::CompensatingDelta): the replaced calibration maps
-	// the moved frame as it mapped the old one, and so does the reading an
-	// episode was blamed on.
-	const Eigen::Quaterniond fInv = rotation.conjugate().normalized();
-	if (replaced)
-	{
-		replaced->trans -= calScale * (replaced->rot * (fInv * translation));
-		replaced->rot = (replaced->rot * fInv).normalized();
-	}
-	if (blamed)
-	{
-		blamed->est.trans -= calScale * (blamed->est.rot * (fInv * translation));
-		blamed->est.rot = (blamed->est.rot * fInv).normalized();
-	}
 }
 
 bool ContinuousAlignment::DeriveMountExtrinsic(const std::vector<PoseSample> &refStream,

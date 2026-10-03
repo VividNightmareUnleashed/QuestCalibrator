@@ -6815,8 +6815,11 @@ void RunContinuousScenarios()
 
 		// SteamVR moves the base station the headset tracker is reported
 		// against (LighthouseFrameWatch.h): every target pose moves by one
-		// exact delta F, so the truth becomes truth o F^-1. The overlay
-		// compensates the calibration by it at once and tells the loop.
+		// exact delta F, so the truth becomes truth o F^-1. The overlay follows
+		// the move in that tracker's frame correction (TrackerFrameCorrections,
+		// tested on its own), so the poses the loop reads, and the truth they
+		// carry, stay where they were; and it drops the loop's window that
+		// straddles the move, as ResetContinuousObservations does.
 		auto frameMoved = [](const GroundTruth &g, const LighthouseFrameWatch::Move &f)
 		{
 			GroundTruth out = g;
@@ -6825,14 +6828,11 @@ void RunContinuousScenarios()
 			out.translation = g.translation - g.scale * (g.rotation * (fInv * f.translation));
 			return out;
 		};
-		auto compensate = [](ContinuousSim &sim, const LighthouseFrameWatch::Move &f)
+		auto unmoved = [&](double) { return baseTruth; };
+		auto follow = [](ContinuousSim &sim)
 		{
-			Eigen::Quaterniond dR;
-			Eigen::Vector3d dT;
-			LighthouseFrameWatch::CompensatingDelta(sim.calRot, sim.calTrans, sim.calScale, f, dR, dT);
-			sim.calRot = (dR * sim.calRot).normalized();
-			sim.calTrans = dR * sim.calTrans + dT;
-			sim.ca.NoteTargetFrameMoved(f.rotation, f.translation, sim.calScale);
+			sim.ca.Reset(ContinuousAlignment::ResetReason::TargetFrameMoved);
+			sim.gate.Clear();
 		};
 		// 00:42:09 on 2026-09-26: yaw 0.34 deg, tilt 1.25 deg, 6.6 cm.
 		LighthouseFrameWatch::Move stationMove;
@@ -6842,7 +6842,7 @@ void RunContinuousScenarios()
 
 		// Alone, the loop freezes on the 6.7 cm the move put at the head and is
 		// still that far off 40 s later, waiting out the re-anchor's confirm;
-		// compensated, nothing is left to correct, tilt included.
+		// followed, nothing is left to correct, tilt included.
 		{
 			auto movedAt30 = [&](double t) { return t >= 30.0 ? frameMoved(baseTruth, stationMove) : baseTruth; };
 			const GroundTruth after = frameMoved(baseTruth, stationMove);
@@ -6858,23 +6858,23 @@ void RunContinuousScenarios()
 			std::mt19937 rng(2511);
 			ContinuousSim sim;
 			makeSim(sim, baseTruth);
-			RunContinuousSegment(sim, scene, 0.0, 30.02, rng, movedAt30, constMount, alwaysVisible);
-			compensate(sim, stationMove);
+			RunContinuousSegment(sim, scene, 0.0, 30.02, rng, unmoved, constMount, alwaysVisible);
+			follow(sim);
 			sim.afterMark = 30.02;
 			sim.maxCorrPosM = 0.0;
 			sim.maxCorrRotDeg = 0.0;
 			double worstTilt = 0.0;
-			RunContinuousSegment(sim, scene, 30.02, 70.0, rng, movedAt30, constMount, alwaysVisible,
+			RunContinuousSegment(sim, scene, 30.02, 70.0, rng, unmoved, constMount, alwaysVisible,
 				nullptr, false,
 				[&](double t)
 				{
 					if (t >= 31.0)
-						worstTilt = std::max(worstTilt, CalTiltDeg(sim, after));
+						worstTilt = std::max(worstTilt, CalTiltDeg(sim, baseTruth));
 				});
 			double yawErr = 0.0, posErr = 0.0;
-			CalError(sim, after, 70.0, yawErr, posErr);
+			CalError(sim, baseTruth, 70.0, yawErr, posErr);
 			snprintf(detail, sizeof detail,
-				"alone: freezes %d, at 70 s %.3f deg tilt, %.3f deg / %.1f mm; compensated: worst tilt %.3f deg, "
+				"alone: freezes %d, at 70 s %.3f deg tilt, %.3f deg / %.1f mm; followed: worst tilt %.3f deg, "
 				"end %.3f deg / %.1f mm, %d corrections after, largest %.1f mm, freezes %d, state %d",
 				alone.freezes, aloneTilt, aloneYaw, alonePos * 1000.0, worstTilt, yawErr, posErr * 1000.0,
 				sim.correctionsAfter, sim.maxCorrPosM * 1000.0, sim.freezes, static_cast<int>(sim.ca.GetState()));
@@ -6885,33 +6885,25 @@ void RunContinuousScenarios()
 				sim.ca.GetState() == ContinuousAlignment::State::Tracking, detail);
 		}
 
-		// The same kind of move twice around the fault above (from 20 s to
-		// 100 s this time): during its freeze at 40 s, which stands and still
-		// re-anchors, and after the re-anchor at 85 s, which the calibration it
-		// replaced moves with, so the undo once the fault clears lands on the
-		// moved frame's truth rather than the old one.
+		// The same kind of move, followed, twice around the fault above (from
+		// 20 s to 100 s this time): during its freeze at 40 s, which stands and
+		// still re-anchors, and after the re-anchor at 85 s, which keeps the
+		// calibration it replaced, so the undo once the fault clears still
+		// lands on the truth.
 		{
-			auto truthAt = [&](double t)
-			{
-				GroundTruth g = t >= 20.0 && t < 100.0 ? faulted : baseTruth;
-				if (t >= 40.0)
-					g = frameMoved(g, stationMove);
-				if (t >= 85.0)
-					g = frameMoved(g, stationMove);
-				return g;
-			};
+			auto truthAt = [&](double t) { return t >= 20.0 && t < 100.0 ? faulted : baseTruth; };
 			const GroundTruth end = truthAt(160.0);
 			std::mt19937 rng(2512);
 			ContinuousSim sim;
 			makeSim(sim, baseTruth);
 			RunContinuousSegment(sim, scene, 0.0, 40.02, rng, truthAt, constMount, alwaysVisible);
 			const bool frozenBefore = sim.ca.GetState() == ContinuousAlignment::State::Frozen;
-			compensate(sim, stationMove);
+			follow(sim);
 			const bool frozenKept = sim.ca.GetState() == ContinuousAlignment::State::Frozen;
 			RunContinuousSegment(sim, scene, 40.02, 85.02, rng, truthAt, constMount, alwaysVisible);
 			const int reanchorsBefore = sim.reanchors;
 			const double reanchorTime = sim.lastReanchorTime;
-			compensate(sim, stationMove);
+			follow(sim);
 			bool noted = false;
 			RunContinuousSegment(sim, scene, 85.02, 160.0, rng, truthAt, constMount, alwaysVisible,
 				nullptr, false,
@@ -6932,7 +6924,7 @@ void RunContinuousScenarios()
 				"%.3f deg tilt, %.1f mm, state %d",
 				frozenBefore, frozenKept, reanchorsBefore, reanchorTime, sim.undos, sim.lastUndoTime,
 				yawErr, tiltErr, posErr * 1000.0, static_cast<int>(sim.ca.GetState()));
-			Check("continuous: a frame move keeps a freeze and moves the calibration a re-anchor replaced",
+			Check("continuous: a followed frame move keeps a freeze and the calibration a re-anchor replaced",
 				frozenBefore && frozenKept && reanchorsBefore == 1 && reanchorTime > 44.0 && reanchorTime < 85.0 &&
 				sim.reanchors == 1 && sim.undos == 1 && sim.lastUndoTime > 110.0 && sim.lastUndoTime < 130.0 &&
 				yawErr < 0.3 && tiltErr < 0.3 && posErr < 0.01 &&
@@ -6947,9 +6939,6 @@ void RunContinuousScenarios()
 		// freeze to the end; with the moves read off the station and followed
 		// as the tracker comes back, there is nothing to freeze on.
 		{
-			LighthouseFrameWatch::Move both = stationMove;
-			both.rotation = (stationMove.rotation * stationMove.rotation).normalized();
-			both.translation = stationMove.rotation * stationMove.translation + stationMove.translation;
 			auto truthAt = [&](double t)
 			{
 				GroundTruth g = baseTruth;
@@ -6982,14 +6971,14 @@ void RunContinuousScenarios()
 			std::mt19937 rng(2513);
 			ContinuousSim sim;
 			makeSim(sim, baseTruth);
-			RunContinuousSegment(sim, scene, 0.0, 200.0, rng, truthAt, constMount, offFrom20To200,
+			RunContinuousSegment(sim, scene, 0.0, 200.0, rng, unmoved, constMount, offFrom20To200,
 				nullptr, false, restartAt200(sim));
-			compensate(sim, both);
-			RunContinuousSegment(sim, scene, 200.0, 500.0, rng, truthAt, constMount, offFrom20To200,
+			follow(sim);
+			RunContinuousSegment(sim, scene, 200.0, 500.0, rng, unmoved, constMount, offFrom20To200,
 				nullptr, false, restartAt200(sim));
 			double yawErr = 0.0, posErr = 0.0;
-			CalError(sim, end, 500.0, yawErr, posErr);
-			const double tiltErr = CalTiltDeg(sim, end);
+			CalError(sim, baseTruth, 500.0, yawErr, posErr);
+			const double tiltErr = CalTiltDeg(sim, baseTruth);
 			snprintf(detail, sizeof detail,
 				"alone: freezes %d (put down to the restart %d), re-anchors %d, state %d, at 500 s %.1f mm off; "
 				"followed: freezes %d, re-anchors %d, %.3f deg / %.3f deg tilt / %.1f mm, state %d",
@@ -7148,23 +7137,14 @@ void RunContinuousScenarios()
 		// As on 2026-09-27, when nearly every new solution of the headset
 		// tracker re-solved the station it started from and SteamVR moved that
 		// station's frame 4 to 6 s in: the move lands at 104 s, while the next
-		// solution settles, and is followed. The reading the freeze was blamed
-		// on moves with the frame, so the solution still reads the same.
-		LighthouseFrameWatch::Move restartMove;   // yaw 0.79 deg and tilt 1.76 deg, as at 20:04:10
-		restartMove.rotation = (Eigen::AngleAxisd(0.79 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()) *
-			Eigen::AngleAxisd(1.76 * questcal::Pi / 180.0, Eigen::Vector3d(0.6, 0.0, 0.8))).normalized();
-		restartMove.translation = Eigen::Vector3d(0.03, -0.01, 0.05);
-		GroundTruth movedSession = session;
-		{
-			const Eigen::Quaterniond fInv = restartMove.rotation.conjugate();
-			movedSession.rotation = (session.rotation * fInv).normalized();
-			movedSession.translation = session.translation -
-				session.scale * (session.rotation * (fInv * restartMove.translation));
-		}
+		// solution settles, and is followed in the tracker's frame correction,
+		// so the truth the loop reads stays put and only its window is dropped
+		// (as ResetContinuousObservations does). The reading the freeze was
+		// blamed on stands through that, so the solution still reads the same.
 		std::mt19937 rng(2604);
 		ContinuousSim sim;
 		makeSim(sim, baseTruth);
-		auto truthAt = [&](double t) { return t >= 104.0 ? movedSession : session; };
+		auto truthAt = [&](double) { return session; };
 		bool first = false, again = false;
 		auto notes = [&](double t)
 		{
@@ -7181,18 +7161,12 @@ void RunContinuousScenarios()
 			sim.ca.SetTargetSettling((t >= 10.3 && t < 20.3) || (t >= 100.3 && t < 110.3));
 		};
 		RunContinuousSegment(sim, scene, 0.0, 104.02, rng, truthAt, constMount, alwaysVisible, nullptr, false, notes);
-		{
-			Eigen::Quaterniond dR;
-			Eigen::Vector3d dT;
-			LighthouseFrameWatch::CompensatingDelta(sim.calRot, sim.calTrans, sim.calScale, restartMove, dR, dT);
-			sim.calRot = (dR * sim.calRot).normalized();
-			sim.calTrans = dR * sim.calTrans + dT;
-			sim.ca.NoteTargetFrameMoved(restartMove.rotation, restartMove.translation, sim.calScale);
-		}
+		sim.ca.Reset(ContinuousAlignment::ResetReason::TargetFrameMoved);
+		sim.gate.Clear();
 		RunContinuousSegment(sim, scene, 104.02, 200.0, rng, truthAt, constMount, alwaysVisible, nullptr, false, notes);
 		double movedYaw = 0.0, movedPos = 0.0;
-		CalError(sim, movedSession, 200.0, movedYaw, movedPos);
-		const double movedTilt = CalTiltDeg(sim, movedSession);
+		CalError(sim, session, 200.0, movedYaw, movedPos);
+		const double movedTilt = CalTiltDeg(sim, session);
 		snprintf(detail, sizeof detail,
 			"freezes %d (attr %d), re-anchors %d (across %d) at %.1f s, %.3f deg / %.3f tilt / %.1f mm, state %d",
 			sim.freezes, sim.resolveFreezes, sim.reanchors, sim.acrossReanchors, sim.lastReanchorTime,
