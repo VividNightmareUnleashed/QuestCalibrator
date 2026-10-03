@@ -89,8 +89,8 @@ void TableIsConsistent(Check check, const char *language, const TableFile &table
 		const int captured = Conversions(e.english);
 		const std::string &t = e.translation;
 		for (size_t i = 0; i + 2 < t.size(); ++i)
-			if (t[i] == '{' && t[i + 1] >= '0' && t[i + 1] <= '9' && t[i + 2] == '}' &&
-				t[i + 1] - '0' >= captured)
+			if (t[i] == '{' && t[i + 1] >= '0' && t[i + 1] <= '9' &&
+				(t[i + 2] == '}' || t[i + 2] == '|') && t[i + 1] - '0' >= captured)
 				placeholders = false;
 	}
 	const std::string prefix = std::string("i18n ") + language;
@@ -139,6 +139,28 @@ void TableFileFormat(Check check)
 		bad.problems.size() == 4;
 	check("i18n file format", read && reported,
 		read ? (reported ? "" : "a mistake went unreported") : "a well-formed sample was misread");
+}
+
+// A translation picks its plural form by the captured count and the
+// language's rule; the English keeps its own suffix, which the translation
+// need not use.
+void PluralForms(Check check)
+{
+	const std::vector<Entry> italian = { { "Dropped out %u time%s", "Interrotto {0} {0|volta|volte}" } };
+	const std::vector<Entry> japanese = { { "Dropped out %u time%s", "{0} {0|回}中断" } };
+	auto in = [](const std::vector<Entry> &entries, Language language, const char *english)
+	{
+		const auto translated = TranslateWithEntriesForTest(entries, language, english);
+		return translated ? *translated : std::string();
+	};
+	const bool italianForms =
+		in(italian, Language::Italian, "Dropped out 1 time") == "Interrotto 1 volta" &&
+		in(italian, Language::Italian, "Dropped out 3 times") == "Interrotto 3 volte" &&
+		in(italian, Language::Italian, "Dropped out 0 times") == "Interrotto 0 volte";
+	const bool japaneseForm = in(japanese, Language::Japanese, "Dropped out 3 times") == "3 回中断";
+	check("i18n plural forms", italianForms && japaneseForm,
+		italianForms ? (japaneseForm ? "" : "the single Japanese form was not used") :
+			"Italian picked the wrong form");
 }
 
 // ---- Every literal the overlay shows has a translation ----
@@ -450,6 +472,7 @@ void RunLocalizationScenarios(Check check)
 	TableIsConsistent(check, "it", ItalianTable());
 	TablesCoverTheSameText(check);
 	TableFileFormat(check);
+	PluralForms(check);
 	EveryShownLiteralIsTranslated(check);
 	EnglishPassesThrough(check);
 	JapaneseLookups(check);

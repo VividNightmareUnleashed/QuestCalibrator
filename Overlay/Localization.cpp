@@ -40,6 +40,21 @@ struct Pattern
 	size_t literalChars = 0;   // how specific the key is; see BuildTable
 };
 
+// Which of a translation's plural forms ({0|one|other}) a count takes.
+using PluralRule = size_t (*)(unsigned long long count);
+
+// Japanese has a single form; Italian, like English, one for 1 and another
+// for every other count.
+size_t SingleForm(unsigned long long)
+{
+	return 0;
+}
+
+size_t OneOrOther(unsigned long long count)
+{
+	return count == 1 ? 0 : 1;
+}
+
 struct Table
 {
 	std::unordered_map<std::string, std::string> exact;
@@ -47,6 +62,7 @@ struct Table
 	// How the language joins what the English joined with ". " and ": ".
 	std::string sentenceGap;
 	std::string colon;
+	PluralRule plural = SingleForm;
 };
 
 bool IsConversion(char c)
@@ -156,11 +172,13 @@ TableFile LoadBuiltInTable(const wchar_t *resource, std::string_view languageCod
 	return ParseTableFile(text, languageCode);
 }
 
-Table BuildTable(const std::vector<Entry> &entries, const char *sentenceGap, const char *colon)
+Table BuildTable(const std::vector<Entry> &entries, const char *sentenceGap, const char *colon,
+	PluralRule plural)
 {
 	Table table;
 	table.sentenceGap = sentenceGap;
 	table.colon = colon;
+	table.plural = plural;
 	for (size_t i = 0; i < entries.size(); ++i)
 	{
 		const std::string &key = entries[i].english;
@@ -197,12 +215,12 @@ const Table *TableFor(Language language)
 	case Language::Japanese:
 	{
 		// Japanese runs sentences together and uses the full-width colon.
-		static const Table japanese = BuildTable(JapaneseTable().entries, "", "\xEF\xBC\x9A");
+		static const Table japanese = BuildTable(JapaneseTable().entries, "", "\xEF\xBC\x9A", SingleForm);
 		return &japanese;
 	}
 	case Language::Italian:
 	{
-		static const Table italian = BuildTable(ItalianTable().entries, " ", ": ");
+		static const Table italian = BuildTable(ItalianTable().entries, " ", ": ", OneOrOther);
 		return &italian;
 	}
 	default:
@@ -235,6 +253,28 @@ std::string TranslateCapture(const Table &table, const std::string &value, int d
 	return translated ? *translated : value;
 }
 
+// The form `{N|one|other...}` picks for the count captured as value N. A
+// value that is not a count takes the last form, as "other" does.
+std::string PluralForm(const Table &table, std::string_view forms, const std::string &value)
+{
+	std::vector<std::string_view> options;
+	for (size_t start = 0;;)
+	{
+		const size_t bar = forms.find('|', start);
+		options.push_back(forms.substr(start, bar == std::string_view::npos ? std::string_view::npos : bar - start));
+		if (bar == std::string_view::npos)
+			break;
+		start = bar + 1;
+	}
+	size_t digits = 0;
+	while (digits < value.size() && value[digits] >= '0' && value[digits] <= '9')
+		++digits;
+	const size_t form = digits == 0 || digits != value.size() || digits > 18
+		? options.size() - 1
+		: (std::min)(table.plural(std::stoull(value)), options.size() - 1);
+	return std::string(options[form]);
+}
+
 std::optional<std::string> MatchPattern(const Table &table, const std::string &text, int depth)
 {
 	std::smatch m;
@@ -246,12 +286,22 @@ std::optional<std::string> MatchPattern(const Table &table, const std::string &t
 		const std::string &t = pattern.translation;
 		for (size_t i = 0; i < t.size(); ++i)
 		{
-			if (t[i] == '{' && i + 2 < t.size() && t[i + 1] >= '0' && t[i + 1] <= '9' && t[i + 2] == '}')
+			if (t[i] == '{' && i + 2 < t.size() && t[i + 1] >= '0' && t[i + 1] <= '9')
 			{
 				const size_t group = static_cast<size_t>(t[i + 1] - '0') + 1;
-				out += TranslateCapture(table, m[group].str(), depth);
-				i += 2;
-				continue;
+				if (t[i + 2] == '}')
+				{
+					out += TranslateCapture(table, m[group].str(), depth);
+					i += 2;
+					continue;
+				}
+				const size_t close = t.find('}', i);
+				if (t[i + 2] == '|' && close != std::string::npos)
+				{
+					out += PluralForm(table, std::string_view(t).substr(i + 3, close - i - 3), m[group].str());
+					i = close;
+					continue;
+				}
 			}
 			out += t[i];
 		}
@@ -448,6 +498,18 @@ const TableFile &ItalianTable()
 	static const TableFile table = LoadBuiltInTable(L"TRANSLATIONS_IT", "it");
 	return table;
 }
+
+#ifdef QUESTCAL_LOCALIZATION_TEST_SEAM
+std::optional<std::string> TranslateWithEntriesForTest(const std::vector<Entry> &entries,
+	Language language, const std::string &english)
+{
+	const Table table = language == Language::Japanese
+		? BuildTable(entries, "", "\xEF\xBC\x9A", SingleForm)
+		: BuildTable(entries, " ", ": ", OneOrOther);
+	bool complete = true;
+	return Translate(table, english, 0, complete);
+}
+#endif
 
 bool HasTranslation(Language language, const std::string &english)
 {

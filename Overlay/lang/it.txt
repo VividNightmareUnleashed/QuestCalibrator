@@ -1,12 +1,13 @@
 # Italian translations for QuestCalibrator.
 #
-# Format: an "en:" line holds a key, the English exactly as the overlay
-# builds it, and the line after it holds the translation, starting with the
-# language code. A key holding printf conversions (%s, %d...) is a pattern,
-# and its translation names the values {0}, {1}... in key order. "\n" is a
-# line break and "\\" a backslash. Lines starting with "#" are comments, and
-# blank lines are ignored. The file is UTF-8 and is built into the overlay
-# (Overlay/Translations.rc).
+# Format: an "en:" line holds a key, the English exactly as the overlay builds
+# it, and the line after it holds the translation, starting with the language
+# code. A key holding printf conversions (%s, %d...) is a pattern, and its
+# translation names the values {0}, {1}... in key order; {0|one|other} picks a
+# form by the count in value 0. Italian takes the first form for 1 and the
+# second for any other count. "\n" is a line break and "\\" a backslash. Lines
+# starting with "#" are comments, and blank lines are ignored. The file is
+# UTF-8 and is built into the overlay (Overlay/Translations.rc).
 #
 # Glossary, so a term reads the same everywhere:
 #   calibration            calibrazione              recalibrate      ricalibra
@@ -17,7 +18,8 @@
 #   reference / target     riferimento / destinazione tracking delay ritardo di tracciamento
 #
 # The player is addressed as "tu", as SteamVR's Italian interface does.
-# Counts are written as "label: N" so no key needs a singular/plural pair.
+# Counts are mostly written as "label: N", which needs no plural; where a
+# sentence reads better with the number in it, {N|volta|volte} picks the form.
 
 name: Italiano
 

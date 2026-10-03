@@ -1,12 +1,13 @@
 # Japanese translations for QuestCalibrator.
 #
-# Format: an "en:" line holds a key, the English exactly as the overlay
-# builds it, and the line after it holds the translation, starting with the
-# language code. A key holding printf conversions (%s, %d...) is a pattern,
-# and its translation names the values {0}, {1}... in key order. "\n" is a
-# line break and "\\" a backslash. Lines starting with "#" are comments, and
-# blank lines are ignored. The file is UTF-8 and is built into the overlay
-# (Overlay/Translations.rc).
+# Format: an "en:" line holds a key, the English exactly as the overlay builds
+# it, and the line after it holds the translation, starting with the language
+# code. A key holding printf conversions (%s, %d...) is a pattern, and its
+# translation names the values {0}, {1}... in key order; {0|one|other} picks a
+# form by the count in value 0. Japanese has a single form, so the first is
+# always taken. "\n" is a line break and "\\" a backslash. Lines starting with
+# "#" are comments, and blank lines are ignored. The file is UTF-8 and is
+# built into the overlay (Overlay/Translations.rc).
 #
 # Glossary, so a term reads the same everywhere:
 #   calibration           キャリブレーション     recalibrate      再キャリブレーション
