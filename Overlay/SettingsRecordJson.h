@@ -103,12 +103,8 @@ inline void ParseChaperone(SettingsRecord &settings, const picojson::object &obj
 		if (rotation.size() != 4 || translation.size() != 3)
 			throw std::runtime_error("malformed chaperone worldFromDriver baseline");
 
-		Eigen::Quaterniond baselineRotation(
-			GetDouble(rotation[0]), GetDouble(rotation[1]),
-			GetDouble(rotation[2]), GetDouble(rotation[3]));
-		Eigen::Vector3d baselineTranslation(
-			GetDouble(translation[0]), GetDouble(translation[1]),
-			GetDouble(translation[2]));
+		Eigen::Quaterniond baselineRotation = QuatFromArray(rotation);
+		Eigen::Vector3d baselineTranslation = Vec3FromArray(translation);
 		// Before normalizing: normalized() of a degenerate quaternion is NaN.
 		if (!questcal::IsValidUniverseBaseline(baselineRotation, baselineTranslation))
 			throw std::runtime_error("invalid chaperone worldFromDriver baseline");
@@ -163,20 +159,10 @@ inline void WriteChaperone(const SettingsRecord &settings, picojson::object &obj
 	chaperone["owner_hmd_serial"].set<std::string>(snapshot.ownerHmdSerial);
 	if (snapshot.worldFromDriverValid)
 	{
-		picojson::array rotation;
-		rotation.reserve(4);
-		rotation.push_back(picojson::value(snapshot.worldFromDriverRotation.w()));
-		rotation.push_back(picojson::value(snapshot.worldFromDriverRotation.x()));
-		rotation.push_back(picojson::value(snapshot.worldFromDriverRotation.y()));
-		rotation.push_back(picojson::value(snapshot.worldFromDriverRotation.z()));
-		chaperone["world_from_driver_rotation_quat"].set<picojson::array>(std::move(rotation));
-
-		picojson::array translation;
-		translation.reserve(3);
-		for (int axis = 0; axis < 3; ++axis)
-			translation.push_back(picojson::value(
-				snapshot.worldFromDriverTranslation(axis)));
-		chaperone["world_from_driver_translation_meters"].set<picojson::array>(std::move(translation));
+		chaperone["world_from_driver_rotation_quat"].set<picojson::array>(
+			QuatArray(snapshot.worldFromDriverRotation));
+		chaperone["world_from_driver_translation_meters"].set<picojson::array>(
+			Vec3Array(snapshot.worldFromDriverTranslation));
 	}
 	chaperone["play_space_size"].set<picojson::array>(FloatArray(snapshot.playSpaceSize.v, 2));
 	chaperone["standing_center"].set<picojson::array>(FloatArray(

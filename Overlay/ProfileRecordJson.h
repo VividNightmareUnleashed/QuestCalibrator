@@ -76,6 +76,35 @@ inline void LoadFloatArray(const picojson::value &obj, float *buf, size_t numFlo
 	}
 }
 
+// A quaternion is stored as [w, x, y, z], a vector as [x, y, z].
+inline picojson::array QuatArray(const Eigen::Quaterniond &q)
+{
+	return { picojson::value(q.w()), picojson::value(q.x()),
+		picojson::value(q.y()), picojson::value(q.z()) };
+}
+
+inline picojson::array Vec3Array(const Eigen::Vector3d &v)
+{
+	return { picojson::value(v.x()), picojson::value(v.y()), picojson::value(v.z()) };
+}
+
+// Callers check the lengths first, to say which field is malformed; the
+// check here only keeps a read inside the array.
+inline Eigen::Quaterniond QuatFromArray(const picojson::array &arr)
+{
+	if (arr.size() != 4)
+		throw std::runtime_error("wrong buffer size");
+	return Eigen::Quaterniond(GetDouble(arr[0]), GetDouble(arr[1]),
+		GetDouble(arr[2]), GetDouble(arr[3]));
+}
+
+inline Eigen::Vector3d Vec3FromArray(const picojson::array &arr)
+{
+	if (arr.size() != 3)
+		throw std::runtime_error("wrong buffer size");
+	return Eigen::Vector3d(GetDouble(arr[0]), GetDouble(arr[1]), GetDouble(arr[2]));
+}
+
 inline PersistedRevision ReadPersistenceRevision(const picojson::object &obj)
 {
 	PersistedRevision revision;
@@ -223,15 +252,8 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 	if (quatArr.size() != 4 || transArr.size() != 3)
 		throw std::runtime_error("malformed rotation_quat/translation_meters");
 
-	Eigen::Quaterniond rotation(
-		GetDouble(quatArr[0]),   // w
-		GetDouble(quatArr[1]),   // x
-		GetDouble(quatArr[2]),   // y
-		GetDouble(quatArr[3]));  // z
-	Eigen::Vector3d translationMeters(
-		GetDouble(transArr[0]),
-		GetDouble(transArr[1]),
-		GetDouble(transArr[2]));
+	Eigen::Quaterniond rotation = QuatFromArray(quatArr);
+	Eigen::Vector3d translationMeters = Vec3FromArray(transArr);
 
 	double scale = HasTypedValue<double>(obj, "scale") ? GetDouble(obj.at("scale")) : 1.0;
 	// Before normalizing: normalized() of a degenerate quaternion is NaN.
@@ -297,12 +319,8 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 			universeTranslation.size() != 3)
 			throw std::runtime_error("malformed profile reference-universe baseline");
 
-		Eigen::Quaterniond baselineRotation(
-			GetDouble(universeRotation[0]), GetDouble(universeRotation[1]),
-			GetDouble(universeRotation[2]), GetDouble(universeRotation[3]));
-		Eigen::Vector3d baselineTranslation(
-			GetDouble(universeTranslation[0]), GetDouble(universeTranslation[1]),
-			GetDouble(universeTranslation[2]));
+		Eigen::Quaterniond baselineRotation = QuatFromArray(universeRotation);
+		Eigen::Vector3d baselineTranslation = Vec3FromArray(universeTranslation);
 		if (!IsValidUniverseBaseline(baselineRotation, baselineTranslation))
 			throw std::runtime_error("invalid profile reference-universe baseline");
 
@@ -395,11 +413,8 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 		if (rotArr.size() != 4 || traArr.size() != 3)
 			throw std::runtime_error("malformed mount_extrinsic");
 
-		Eigen::Quaterniond mountRotation(
-			GetDouble(rotArr[0]), GetDouble(rotArr[1]),
-			GetDouble(rotArr[2]), GetDouble(rotArr[3]));
-		Eigen::Vector3d mountPosition(
-			GetDouble(traArr[0]), GetDouble(traArr[1]), GetDouble(traArr[2]));
+		Eigen::Quaterniond mountRotation = QuatFromArray(rotArr);
+		Eigen::Vector3d mountPosition = Vec3FromArray(traArr);
 		if (!IsValidRotation(mountRotation) ||
 			!IsBoundedVector(mountPosition, protocol::limits::MaxAbsAnchorDeltaMeters))
 			throw std::runtime_error("invalid mount_extrinsic");
@@ -442,10 +457,9 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 				throw std::runtime_error("malformed field anchor");
 
 			PersistedFieldAnchor anchor;
-			anchor.position = Eigen::Vector3d(GetDouble(posArr[0]), GetDouble(posArr[1]), GetDouble(posArr[2]));
-			Eigen::Quaterniond anchorRotation(GetDouble(rotArr[0]), GetDouble(rotArr[1]),
-				GetDouble(rotArr[2]), GetDouble(rotArr[3]));
-			anchor.translationMeters = Eigen::Vector3d(GetDouble(traArr[0]), GetDouble(traArr[1]), GetDouble(traArr[2]));
+			anchor.position = Vec3FromArray(posArr);
+			Eigen::Quaterniond anchorRotation = QuatFromArray(rotArr);
+			anchor.translationMeters = Vec3FromArray(traArr);
 			if (!IsValidFieldAnchor(anchor.position, anchorRotation,
 				anchor.translationMeters, profile.rotation, profile.translationMeters))
 				throw std::runtime_error("invalid field anchor");
@@ -493,21 +507,8 @@ inline void WriteProfile(const ProfileRecord &record,
 	profile["reference_tracking_system"].set<std::string>(record.referenceTrackingSystem);
 	profile["target_tracking_system"].set<std::string>(record.targetTrackingSystem);
 
-	picojson::array quat;
-	quat.reserve(4);
-	quat.push_back(picojson::value(record.rotation.w()));
-	quat.push_back(picojson::value(record.rotation.x()));
-	quat.push_back(picojson::value(record.rotation.y()));
-	quat.push_back(picojson::value(record.rotation.z()));
-	profile["rotation_quat"].set<picojson::array>(std::move(quat));
-
-	picojson::array trans;
-	trans.reserve(3);
-	trans.push_back(picojson::value(record.translationMeters(0)));
-	trans.push_back(picojson::value(record.translationMeters(1)));
-	trans.push_back(picojson::value(record.translationMeters(2)));
-	profile["translation_meters"].set<picojson::array>(std::move(trans));
-
+	profile["rotation_quat"].set<picojson::array>(QuatArray(record.rotation));
+	profile["translation_meters"].set<picojson::array>(Vec3Array(record.translationMeters));
 	profile["scale"].set<double>(record.scale);
 	profile["time_offset"].set<double>(record.timeOffset);
 	profile["calibration_time"].set<double>(record.calibrationUnixTime);
@@ -517,22 +518,10 @@ inline void WriteProfile(const ProfileRecord &record,
 	if (record.universeValid)
 	{
 		profile["universe_hmd_serial"].set<std::string>(record.universeHmdSerial);
-
-		picojson::array universeRotation;
-		universeRotation.reserve(4);
-		universeRotation.push_back(picojson::value(record.universeRotation.w()));
-		universeRotation.push_back(picojson::value(record.universeRotation.x()));
-		universeRotation.push_back(picojson::value(record.universeRotation.y()));
-		universeRotation.push_back(picojson::value(record.universeRotation.z()));
 		profile["universe_world_from_driver_rotation_quat"].set<picojson::array>(
-			std::move(universeRotation));
-
-		picojson::array universeTranslation;
-		universeTranslation.reserve(3);
-		for (int axis = 0; axis < 3; ++axis)
-			universeTranslation.push_back(picojson::value(record.universeTranslation(axis)));
+			QuatArray(record.universeRotation));
 		profile["universe_world_from_driver_translation_meters"].set<picojson::array>(
-			std::move(universeTranslation));
+			Vec3Array(record.universeTranslation));
 	}
 	// What ConfigMigrations brings every record to, so none re-runs.
 	double schema = ConfigSchema;
@@ -548,19 +537,10 @@ inline void WriteProfile(const ProfileRecord &record,
 	if (record.mountExtrinsic.valid)
 	{
 		picojson::object extrinsic;
-
-		picojson::array rot, tra;
-		rot.reserve(4);
-		tra.reserve(3);
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.w()));
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.x()));
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.y()));
-		rot.push_back(picojson::value(record.mountExtrinsic.rotation.z()));
-		for (int k = 0; k < 3; ++k)
-			tra.push_back(picojson::value(record.mountExtrinsic.translationMeters(k)));
-
-		extrinsic["rotation_quat"].set<picojson::array>(std::move(rot));
-		extrinsic["translation_meters"].set<picojson::array>(std::move(tra));
+		extrinsic["rotation_quat"].set<picojson::array>(
+			QuatArray(record.mountExtrinsic.rotation));
+		extrinsic["translation_meters"].set<picojson::array>(
+			Vec3Array(record.mountExtrinsic.translationMeters));
 		extrinsic["rot_rms_deg"].set<double>(record.mountExtrinsic.rotationRmsDeg);
 		extrinsic["pos_rms_m"].set<double>(record.mountExtrinsic.translationRmsM);
 
@@ -575,24 +555,9 @@ inline void WriteProfile(const ProfileRecord &record,
 		for (const auto &a : record.fieldAnchors)
 		{
 			picojson::object anchorObj;
-
-			picojson::array pos, rot, tra;
-			pos.reserve(3);
-			rot.reserve(4);
-			tra.reserve(3);
-			for (int k = 0; k < 3; ++k)
-			{
-				pos.push_back(picojson::value(a.position(k)));
-				tra.push_back(picojson::value(a.translationMeters(k)));
-			}
-			rot.push_back(picojson::value(a.rotation.w()));
-			rot.push_back(picojson::value(a.rotation.x()));
-			rot.push_back(picojson::value(a.rotation.y()));
-			rot.push_back(picojson::value(a.rotation.z()));
-
-			anchorObj["position"].set<picojson::array>(std::move(pos));
-			anchorObj["rotation_quat"].set<picojson::array>(std::move(rot));
-			anchorObj["translation_meters"].set<picojson::array>(std::move(tra));
+			anchorObj["position"].set<picojson::array>(Vec3Array(a.position));
+			anchorObj["rotation_quat"].set<picojson::array>(QuatArray(a.rotation));
+			anchorObj["translation_meters"].set<picojson::array>(Vec3Array(a.translationMeters));
 
 			picojson::value anchorV;
 			anchorV.set<picojson::object>(std::move(anchorObj));
