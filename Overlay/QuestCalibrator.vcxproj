@@ -393,14 +393,6 @@
     <ClCompile Include="Localization.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="LocalizationJa.cpp">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
-    <ClCompile Include="LocalizationIt.cpp">
-      <PrecompiledHeader>NotUsing</PrecompiledHeader>
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-    </ClCompile>
     <ClCompile Include="Updater.cpp" />
     <ClCompile Include="CalibrationEngine.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -449,6 +441,11 @@
   <ItemGroup>
     <ResourceCompile Include="QuestCalibrator.rc" />
     <ResourceCompile Include="Guidance.rc" />
+    <ResourceCompile Include="Translations.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Text Include="lang\ja.txt" />
+    <Text Include="lang\it.txt" />
   </ItemGroup>
   <!-- First-party code builds at /W4 with warnings as errors. The vendored
        sources under lib\ keep the level they were written for. -->

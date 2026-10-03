@@ -1,0 +1,3 @@
+// The translation tables (lang/*.txt), built in as their UTF-8 text.
+TRANSLATIONS_JA RCDATA "lang\\ja.txt"
+TRANSLATIONS_IT RCDATA "lang\\it.txt"

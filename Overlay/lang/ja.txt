@@ -1,0 +1,1034 @@
+# Japanese translations for QuestCalibrator.
+#
+# Format: an "en:" line holds a key, the English exactly as the overlay
+# builds it, and the line after it holds the translation, starting with the
+# language code. A key holding printf conversions (%s, %d...) is a pattern,
+# and its translation names the values {0}, {1}... in key order. "\n" is a
+# line break and "\\" a backslash. Lines starting with "#" are comments, and
+# blank lines are ignored. The file is UTF-8 and is built into the overlay
+# (Overlay/Translations.rc).
+#
+# Glossary, so a term reads the same everywhere:
+#   calibration           キャリブレーション     recalibrate      再キャリブレーション
+#   continuous calibration 連続キャリブレーション  headset tracker  ヘッドセットトラッカー
+#   chaperone             シャペロン             protect (it)     保護
+#   Quest boundary        Quest の境界線          base station     ベースステーション
+#   field anchor          フィールドアンカー       alignment        位置合わせ
+#   reference / target    基準 / 対象             tracking delay   トラッキング遅延
+
+name: 日本語
+
+en: Continuous calibration paused after the headset tracker restarted. It resumes if tracking recovers; another tracker restart may be needed.
+ja: ヘッドセットトラッカーの再起動後、連続キャリブレーションは一時停止中です。トラッキングが回復すると再開します。トラッカーの再起動がもう一度必要な場合があります。
+en: QuestCalibrator: tracking has not recovered after the headset tracker restarted. Wait, or turn that tracker off and on in view of its base stations.
+ja: QuestCalibrator: ヘッドセットトラッカーの再起動後、トラッキングが回復していません。待つか、ベースステーションから見える場所でトラッカーの電源を入れ直してください。
+en: Restart the headset tracker in view of its base stations. If stable tracking stays misaligned, recalibrate.
+ja: ベースステーションから見える場所で、ヘッドセットトラッカーの電源を入れ直してください。トラッキングが安定しても位置がずれる場合は、再キャリブレーションしてください。
+en: Continuous calibration is paused after a tracker restart. Recovery may need another tracker restart.
+ja: トラッカーの再起動後、連続キャリブレーションは一時停止中です。回復にはトラッカーの再起動がもう一度必要な場合があります。
+
+# ---- Window, tabs, footer ----
+en: Calibration
+ja: キャリブレーション
+en: Lighthouse
+ja: Lighthouse
+en: Smoothing
+ja: スムージング
+en: Lighthouse module is currently not installed. Select it during installation.
+ja: Lighthouse モジュールはインストールされていません。インストール時に選択してください。
+en: Work in progress
+ja: 開発中
+en: Arrow keys to move · Enter to select
+ja: 矢印キーで移動・Enter で決定
+en: Close the SteamVR dashboard to use the mouse
+ja: マウスを使うには SteamVR ダッシュボードを閉じてください
+en: Dismiss
+ja: 閉じる
+
+# ---- Continuous calibration state ----
+en: Off
+ja: オフ
+en: Needs a tracker
+ja: トラッカーが必要
+en: Needs setup
+ja: 要セットアップ
+en: Waiting
+ja: 待機中
+en: Active
+ja: 動作中
+en: Paused
+ja: 一時停止
+en: Warming up
+ja: 準備中
+en: Tracker off
+ja: トラッカーがオフ
+en: Continuous calibration is off.
+ja: 連続キャリブレーションはオフです。
+en: Continuous calibration needs a headset tracker. Pick one in Settings.
+ja: 連続キャリブレーションにはヘッドセットトラッカーが必要です。設定で選択してください。
+en: Continuous calibration needs the headset tracker set up. Do it in Settings.
+ja: 連続キャリブレーションにはヘッドセットトラッカーのセットアップが必要です。設定から行ってください。
+en: Continuous calibration is waiting. It resumes when tracking is available.
+ja: 連続キャリブレーションは待機中です。トラッキングが使えるようになると再開します。
+en: Continuous calibration is active.
+ja: 連続キャリブレーションは動作中です。
+en: Continuous calibration is waiting. The headset tracker isn't being seen.
+ja: 連続キャリブレーションは待機中です。ヘッドセットトラッカーが検出されていません。
+en: Continuous calibration is waiting. The headset isn't tracking.
+ja: 連続キャリブレーションは待機中です。ヘッドセットがトラッキングされていません。
+en: Continuous calibration is waiting. The headset tracker is off; turn it back on.
+ja: 連続キャリブレーションは待機中です。ヘッドセットトラッカーの電源が切れています。電源を入れ直してください。
+en: Continuous calibration is paused. Readings drifted too far to correct.
+ja: 連続キャリブレーションは一時停止中です。ずれが大きすぎて補正できません。
+en: Continuous calibration is waiting. It resumes when tracking settles.
+ja: 連続キャリブレーションは待機中です。トラッキングが安定すると再開します。
+en: Continuous calibration is warming up.
+ja: 連続キャリブレーションは準備中です。
+
+# ---- Status band ----
+en: Alignment:
+ja: 位置合わせ：
+en: Good
+ja: 良好
+en: Usable
+ja: 使用可
+en: Rough
+ja: やや不正確
+en: Bad
+ja: 不良
+en: Not measured
+ja: 未測定
+en: Your trackers won't line up like this. Recalibrate.
+ja: このままではトラッカーの位置が合いません。再キャリブレーションしてください。
+en: Recalibrate to tighten the alignment.
+ja: 位置合わせの精度を上げるには再キャリブレーションしてください。
+en: time is in the future
+ja: 時刻が未来になっています
+en: just now
+ja: たった今
+en: %d min ago
+ja: {0} 分前
+en: %.1f h ago
+ja: {0} 時間前
+en: %.0f days ago
+ja: {0} 日前
+en: adjusted %s
+ja: 調整：{0}
+en: calibrated %s
+ja: キャリブレーション：{0}
+en: last adjusted %s
+ja: 最終調整：{0}
+en: maintained continuously
+ja: 連続して維持中
+en: calibration time unknown
+ja: キャリブレーション時刻不明
+en: Continuous calibration paused
+ja: 連続キャリブレーションを一時停止しました
+en: Tracking no longer matches the saved alignment. Recalibrate with the headset tracker.
+ja: トラッキングが保存された位置合わせと一致しなくなりました。ヘッドセットトラッカーで再キャリブレーションしてください。
+en: Recalibrate
+ja: 再キャリブレーション
+en: Turn off continuous calibration
+ja: 連続キャリブレーションをオフ
+en: Not calibrated yet. Pick a device on each side and press Start calibration.
+ja: まだキャリブレーションされていません。左右それぞれでデバイスを選び、「キャリブレーション開始」を押してください。
+
+# Advanced-mode numbers under the verdict.
+en: Difference: %.1f deg yaw, %.1f deg tilt, %.1f cm position
+ja: 差：ヨー {0}°、傾き {1}°、位置 {2} cm
+en: Solve: %.2f deg / %.1f cm, %+.1f ms%s
+ja: 解：{0}° / {1} cm、{2} ms{3}
+en: , scaled
+ja: 、スケールあり
+en: Scale: %s (condition %.4f, uncertainty %.4f)
+ja: スケール：{0}（条件数 {1}、不確かさ {2}）
+en: identifiable
+ja: 推定可能
+en: insufficient
+ja: 不十分
+en: Jumps: %u compensated%s
+ja: ジャンプ：{0} 回補正{1}
+en:  (tracking gaps seen; recalibrate if alignment looks off)
+ja: （トラッキングの途切れあり。ずれて見える場合は再キャリブレーション）
+en: stale
+ja: 要更新
+en: aging
+ja: やや古い
+en: fresh
+ja: 良好
+en: Drift: %s
+ja: ドリフト：{0}
+en: Drift: %s; %u slip%s up to %.1f cm while standing still
+ja: ドリフト：{0}、静止中のずれ {1} 回（最大 {3} cm）
+en: Drift: %s; %u tracking dropout%s with a position change
+ja: ドリフト：{0}、位置が変わるトラッキング途切れ {1} 回
+en: Drift: %s; %u slip%s up to %.1f cm while standing still; %u tracking dropout%s with a position change
+ja: ドリフト：{0}、静止中のずれ {1} 回（最大 {3} cm）、位置が変わるトラッキング途切れ {4} 回
+en: Upkeep: scatter %.2f deg / %.1f cm, deviation %.2f deg / %.1f cm, %u corrections
+ja: 維持：ばらつき {0}° / {1} cm、偏差 {2}° / {3} cm、補正 {4} 回
+en: Upkeep: %u corrections
+ja: 維持：補正 {0} 回
+
+# Warnings above the buttons.
+en: %s headset isn't connected. Calibration is off until it's back.
+ja: {0} ヘッドセットが接続されていません。再接続されるまでキャリブレーションはオフです。
+en: SteamVR isn't accepting the calibration. Restart SteamVR.
+ja: SteamVR がキャリブレーションを受け付けていません。SteamVR を再起動してください。
+en: The saved calibration doesn't match the connected hardware. Recalibrate.
+ja: 保存されたキャリブレーションが接続中の機器と一致しません。再キャリブレーションしてください。
+en: The saved calibration is damaged. Recalibrate.
+ja: 保存されたキャリブレーションが破損しています。再キャリブレーションしてください。
+en: The headset re-centered while QuestCalibrator wasn't watching, so the saved alignment is off. Recalibrate.
+ja: QuestCalibrator が見ていない間にヘッドセットが再センタリングされたため、保存された位置合わせがずれています。再キャリブレーションしてください。
+en: SteamVR moved the base stations more often than QuestCalibrator could follow, so the saved alignment may be off. Recalibrate.
+ja: QuestCalibrator が追従できない頻度で SteamVR がベースステーションの位置を変えたため、保存された位置合わせがずれている可能性があります。再キャリブレーションしてください。
+en: Calibration disabled. Restart SteamVR or recalibrate.
+ja: キャリブレーションは無効です。SteamVR を再起動するか、再キャリブレーションしてください。
+en: QuestCalibrator isn't getting tracking data from SteamVR, so it can't watch for drift. Restart SteamVR.
+ja: QuestCalibrator が SteamVR からトラッキングデータを受け取れていないため、ドリフトを監視できません。SteamVR を再起動してください。
+en: (host hooks: 005 %s, 006 %s)
+ja: （ホストフック：005 {0}、006 {1}）
+en: active
+ja: 有効
+en: missing
+ja: なし
+en: QuestCalibrator %s is ready. Open Settings to install it.
+ja: QuestCalibrator {0} の準備ができました。設定からインストールしてください。
+
+# ---- Main screen buttons ----
+en: Start calibration
+ja: キャリブレーション開始
+en: Finish the current calibration and pick two different available devices before starting.
+ja: 現在のキャリブレーションを終えてから、使用できる別々のデバイスを 2 つ選んで開始してください。
+en: %d s
+ja: {0} 秒
+en: How long calibration collects tracking data. Longer can be more accurate.\nMove gently at every setting.
+ja: キャリブレーションでトラッキングデータを集める時間です。長いほど精度が上がることがあります。\nどの設定でもゆっくり動かしてください。
+en: Clear calibration
+ja: キャリブレーションを消去
+en: Clear this calibration?
+ja: このキャリブレーションを消去しますか？
+en: Your trackers won't line up until you calibrate again. This also removes the field anchors and the headset tracker setup.
+ja: もう一度キャリブレーションするまでトラッカーの位置は合いません。フィールドアンカーとヘッドセットトラッカーのセットアップも削除されます。
+en: Keep calibration
+ja: キャリブレーションを残す
+en: Identify selected devices
+ja: 選択中のデバイスを確認
+en: Vibrates or blinks the two selected devices so you can tell which is which.
+ja: 選択中の 2 台のデバイスを振動・点滅させ、どれがどれか分かるようにします。
+en: Update protected chaperone
+ja: 保護したシャペロンを更新
+en: Protect chaperone
+ja: シャペロンを保護
+en: Saves your current chaperone (SteamVR's walls) and puts it\nback automatically if SteamVR or the headset ever loses it.\nRedrew your chaperone? Press again to protect the new one.\nPrefer the Quest boundary imported fresh each session? Don't use this.
+ja: 現在のシャペロン（SteamVR の壁）を保存し、\nSteamVR やヘッドセットが失ったときに自動で戻します。\nシャペロンを描き直したら、もう一度押して新しいものを保護してください。\nQuest の境界線を毎回取り込みたい場合は使わないでください。
+en: Add field anchor
+ja: フィールドアンカーを追加
+en: Aligned in one spot but slightly off in another?\nStand at the bad spot, press this, and do a quick calibration there.\nThat spot gets its own correction, blended in as you walk around.
+ja: ある場所では合っているのに、別の場所では少しずれていますか？\nずれている場所に立ってこれを押し、その場で短いキャリブレーションを行ってください。\nその場所専用の補正が作られ、歩き回ると滑らかに切り替わります。
+en: Recent activity
+ja: 最近のアクティビティ
+
+# ---- Device panes ----
+en: REFERENCE SYSTEM
+ja: 基準システム
+en: TARGET SYSTEM
+ja: 対象システム
+en: Low battery
+ja: バッテリー残量低下
+en: Rename this device
+ja: このデバイスの名前を変更
+en: Vibrate or blink this device
+ja: このデバイスを振動・点滅させる
+en: Hip, Left foot, Chest...
+ja: 腰、左足、胸…
+en: No devices connected
+ja: 接続されたデバイスはありません
+en: No tracked devices found
+ja: トラッキング中のデバイスが見つかりません
+en: No trackers found. Turn on a tracker and make sure SteamVR sees it.
+ja: トラッカーが見つかりません。トラッカーの電源を入れ、SteamVR に認識されているか確認してください。
+en: Calibration takes %.0f seconds. The next screen shows how to move.
+ja: キャリブレーションは {0} 秒かかります。動かし方は次の画面で説明します。
+
+# ---- Settings ----
+en: Language
+ja: 言語
+en: English
+ja: English
+en: This translation may not be accurate.
+ja: この翻訳は正確でない場合があります。
+en: Japanese needs a Japanese font, and Windows doesn't have one installed. Add the Japanese Supplemental Fonts in Windows Settings > System > Optional features.
+ja: 日本語の表示には日本語フォントが必要ですが、Windows にインストールされていません。Windows の設定 > システム > オプション機能 から「日本語の補助フォント」を追加してください。
+en: Feel free to send any feedback:
+ja: ご意見・ご指摘はお気軽にお寄せください：
+en: Report on GitHub
+ja: GitHub で報告
+en: Advanced mode
+ja: 詳細モード
+en: Shows calibration measurements, drift readings and extra settings.
+ja: キャリブレーションの測定値、ドリフトの数値、追加の設定を表示します。
+en: Alignment notifications in VR
+ja: VR 内の位置合わせ通知
+en: A SteamVR notification when the calibration looks off or continuous calibration pauses.
+ja: キャリブレーションのずれや連続キャリブレーションの一時停止を、SteamVR の通知で知らせます。
+en: Field anchors
+ja: フィールドアンカー
+en: Corrects the alignment in the spots where you added an anchor.
+ja: アンカーを追加した場所で位置合わせを補正します。
+en: Clear anchors
+ja: アンカーを消去
+en: Keep anchors
+ja: アンカーを残す
+en: Clear 1 field anchor?
+ja: フィールドアンカーを 1 件消去しますか？
+en: Clear %zu field anchors?
+ja: フィールドアンカーを {0} 件消去しますか？
+en: That spot goes back to the main calibration. The calibration itself is kept.
+ja: その場所はメインのキャリブレーションに戻ります。キャリブレーション自体は残ります。
+en: Those spots go back to the main calibration. The calibration itself is kept.
+ja: それらの場所はメインのキャリブレーションに戻ります。キャリブレーション自体は残ります。
+en: %zu anchor%s saved
+ja: {0} 件のアンカーを保存済み
+en: Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base
+ja: アンカー {0}（{1}, {2}）：基準から {3} cm / {4}°
+en: Solve playspace scale (experimental)
+ja: プレイスペースのスケールを推定（実験的）
+en: Measures whether the two systems disagree on distances. Leave off unless you know you need it.
+ja: 2 つのシステムで距離の測り方が違うかどうかを測定します。必要な場合以外はオフのままにしてください。
+en: Correct for tracking delay
+ja: トラッキング遅延を補正
+en: Uses the delay between the two systems measured during calibration.
+ja: キャリブレーション中に測定した、2 つのシステム間の遅延を使います。
+en: Manual tracking delay override (debug)
+ja: トラッキング遅延を手動で指定（デバッグ）
+en: Continuous calibration
+ja: 連続キャリブレーション
+en: Keeps devices aligned while you play, using a tracker strapped to your headset.
+ja: ヘッドセットに固定したトラッカーを使い、プレイ中もデバイスの位置を合わせ続けます。
+en: Headset tracker
+ja: ヘッドセットトラッカー
+en: Method
+ja: 方式
+en: Standard
+ja: 標準
+en: Legacy
+ja: レガシー
+en: Standard pauses when the readings move away from the calibration\nand resumes once they come back or hold steady. Legacy never pauses:\nlike OpenVR-SpaceCalibrator, it follows every change the headset tracker\nreports, so a bad base station fix moves your body trackers until it clears.
+ja: 標準方式は、測定値がキャリブレーションから離れると一時停止し、\n戻るか安定すると再開します。レガシーは一時停止しません。\nOpenVR-SpaceCalibrator と同じように、ヘッドセットトラッカーが報告する変化に\nすべて追従するため、ベースステーション測位が乱れると、回復するまでボディトラッカーもずれます。
+en: Hide the headset tracker from games
+ja: ヘッドセットトラッカーをゲームから隠す
+en: Moves it far out of reach in games so full-body setups never\nmistake it for a body tracker. Calibration still sees it.
+ja: ゲーム内では遠くへ移動させ、フルボディ設定で\n体のトラッカーと間違われないようにします。キャリブレーションからは見えたままです。
+en: Keep tracking delay up to date
+ja: トラッキング遅延を常に更新
+en: Re-measures the delay between the two systems during play, using\nthe headset tracker. Off keeps the value from calibration.
+ja: プレイ中もヘッドセットトラッカーを使って、2 つのシステム間の遅延を\n測り直します。オフにするとキャリブレーション時の値を使います。
+en: Ask before applying each correction
+ja: 補正ごとに確認する
+en: Each correction waits until you pull a controller trigger.\nRecent activity on the main screen lists each one.
+ja: 補正はコントローラーのトリガーを引くまで適用されません。\nメイン画面の「最近のアクティビティ」に表示されます。
+en: Strap a tracker to your headset and pick it above.
+ja: ヘッドセットにトラッカーを固定し、上で選択してください。
+en: Recalibrate with the headset tracker (%.0f s)
+ja: ヘッドセットトラッカーで再キャリブレーション（{0} 秒）
+en: Set up headset tracker (%.0f s)
+ja: ヘッドセットトラッカーをセットアップ（{0} 秒）
+en: Turn off to let the Quest boundary import win each session;\nthe protected chaperone then only applies when you press Restore.
+ja: オフにすると、毎回 Quest の境界線の取り込みが優先されます。\n保護したシャペロンは「復元」を押したときだけ適用されます。
+en: Restore protected chaperone automatically
+ja: 保護したシャペロンを自動で復元
+en: Only the play area center was saved (no walls), so there's nothing to restore automatically.
+ja: プレイエリアの中心だけが保存されている（壁なし）ため、自動で復元するものはありません。
+en: %zu wall%s, %.1f x %.1f m, protected %s
+ja: 壁 {0} 面、{2} × {3} m、保護：{4}
+en: age unknown
+ja: 時期不明
+en: Restore chaperone now
+ja: 今すぐシャペロンを復元
+en: Automatic updates
+ja: 自動アップデート
+en: Downloads verified updates. Close Steam before installing them.
+ja: 検証済みのアップデートをダウンロードします。インストール前に Steam を終了してください。
+en: Checking for updates...
+ja: アップデートを確認中…
+en: Downloading %s  %u%%
+ja: {0} をダウンロード中  {1}%
+en: You're up to date (%s)
+ja: 最新版です（{0}）
+en: Version %s is downloaded and verified
+ja: バージョン {0} をダウンロードして検証しました
+en: Update check failed
+ja: アップデートの確認に失敗しました
+en: Update check failed: %s
+ja: アップデートの確認に失敗しました：{0}
+en: %s is a test build and doesn't update itself
+ja: {0} はテスト版のため自動更新されません
+en: Not checked yet
+ja: 未確認
+en: Install %s
+ja: {0} をインストール
+en: Check again
+ja: 再確認
+en: Detailed calibration logging
+ja: 詳細なキャリブレーションログ
+en: Records extra tracking and calibration details. Saved diagnostics remove your name and folder paths.
+ja: トラッキングとキャリブレーションの詳細を記録します。保存した診断ファイルからは名前とフォルダーのパスが除かれます。
+en: Save diagnostics file
+ja: 診断ファイルを保存
+en: Diagnostics saved to %s
+ja: 診断ファイルを保存しました：{0}
+en: Motion demo credits
+ja: モーションデモのクレジット
+en: Edit calibration (advanced)
+ja: キャリブレーションを編集（上級者向け）
+
+# Calibration editor.
+en: ROTATION (DEGREES)
+ja: 回転（度）
+en: Yaw
+ja: ヨー
+en: Pitch
+ja: ピッチ
+en: Roll
+ja: ロール
+en: TRANSLATION (CENTIMETERS)
+ja: 移動（cm）
+en: SCALE
+ja: スケール
+en: These values can't be applied. Use plain numbers within range. The saved calibration is unchanged.
+ja: この値は適用できません。範囲内の数値を入力してください。保存されたキャリブレーションは変更されていません。
+en: Save calibration
+ja: キャリブレーションを保存
+en: Close
+ja: 閉じる
+
+# ---- Guided calibration ----
+en: Step 1 of 3
+ja: ステップ 1/3
+en: Step 2 of 3
+ja: ステップ 2/3
+en: Stand where the trackers look misaligned.
+ja: トラッカーがずれて見える場所に立ってください。
+en: Hold the controller against the visor.
+ja: コントローラーをバイザーに当ててください。
+en: Keep the tracker fixed to your headset.
+ja: トラッカーをヘッドセットに固定したままにしてください。
+en: Hold the controller against the wrist tracker.
+ja: コントローラーを手首のトラッカーに当ててください。
+en: Hold the controller upright, with the trigger side against the front of your headset. Keep it in place as you turn and tilt your head for %.0f seconds.
+ja: コントローラーを立てて、トリガー側をヘッドセットの前面に当ててください。そのまま {0} 秒間、頭をひねったり傾けたりしてください。
+en: Move your head gently for %.0f seconds, keeping your body relaxed. Keep the tracker sensors uncovered.
+ja: 体の力を抜いて、{0} 秒間ゆっくり頭を動かしてください。トラッカーのセンサーを覆わないでください。
+en: Hold the controller against the wrist tracker with your other hand. Move both in a figure eight, gently turning and tilting, for %.0f seconds.
+ja: もう一方の手でコントローラーを手首のトラッカーに当ててください。{0} 秒間、両方を 8の字に動かしながら、ゆっくりひねったり傾けたりしてください。
+en: Look left and right
+ja: 左右を見る
+en: Look up and down
+ja: 上下を見る
+en: Tilt side to side
+ja: 左右に傾ける
+en: Bring the controller to the wrist tracker
+ja: コントローラーを手首のトラッカーに当てる
+en: Turn and tilt as you move in a figure eight
+ja: 8の字に動かしながらひねって傾ける
+en: Rest the controller against the visor
+ja: コントローラーをバイザーに当てる
+en: Motion demos couldn't load. Reinstall QuestCalibrator to restore them.
+ja: モーションデモを読み込めませんでした。QuestCalibrator を再インストールしてください。
+en: Reference device
+ja: 基準デバイス
+en: Target device
+ja: 対象デバイス
+en: %s is tracking
+ja: {0}：トラッキング中
+en: %s isn't tracking. Wake it or bring it into view.
+ja: {0} がトラッキングされていません。スリープを解除するか、見える位置に移動してください。
+en: Replay
+ja: もう一度再生
+en: Pause demo
+ja: デモを一時停止
+en: Play demo
+ja: デモを再生
+en: Start
+ja: 開始
+en: Start anyway
+ja: このまま開始
+en: Cancel
+ja: キャンセル
+en: Starting in %d...
+ja: {0} 秒後に開始…
+en: Look around slowly.
+ja: ゆっくり周りを見回してください。
+en: Look left and right, then up and down. Gently tilt your head to each side. Keep the tracker in view of the base stations.
+ja: 左右、次に上下を見てください。頭を左右にゆっくり傾けてください。トラッカーがベースステーションから見える状態を保ってください。
+en: Keep both devices firmly together.
+ja: 2 つのデバイスをしっかり合わせたままにしてください。
+en: Move both devices in a figure eight, gently turning and tilting as you go. Keep them firmly together and in view of their tracking cameras or base stations.
+ja: 2 つのデバイスを 8の字に動かしながら、ゆっくりひねったり傾けたりしてください。しっかり合わせたまま、トラッキングカメラやベースステーションから見える位置に保ってください。
+en: Motion variety
+ja: 動きの多様さ
+en: Movement speed
+ja: 動く速さ
+en: Tracker stability
+ja: トラッカーの安定性
+en: Device stability
+ja: デバイスの安定性
+en: Measuring...
+ja: 測定中…
+en: Enough variety
+ja: 十分です
+en: Keep turning and tilting
+ja: ひねりと傾けを続けてください
+en: Good pace
+ja: ちょうどよい速さ
+en: Move more slowly
+ja: もっとゆっくり動かしてください
+en: Moving together
+ja: 一緒に動いています
+en: Tracker is shifting on the headset
+ja: トラッカーがヘッドセット上でずれています
+en: Hold them tighter together
+ja: もっとしっかり合わせてください
+en: %.0f s left
+ja: 残り {0} 秒
+en: Calibrating...
+ja: キャリブレーション中…
+en: Hide details
+ja: 詳細を隠す
+en: Show details
+ja: 詳細を表示
+en: Try again
+ja: もう一度
+en: Done
+ja: 完了
+
+# ---- Run outcomes ----
+en: Calibration complete
+ja: キャリブレーション完了
+en: Calibration failed
+ja: キャリブレーションに失敗しました
+en: Calibration stopped
+ja: キャリブレーションを中止しました
+en: Calibration cancelled
+ja: キャリブレーションをキャンセルしました
+en: Done, but the headset tracker wasn't set up
+ja: 完了しましたが、ヘッドセットトラッカーはセットアップされませんでした
+en: Check that the tracker positions line up in VR.
+ja: VR 内でトラッカーの位置が合っているか確認してください。
+en: The alignment is rough.
+ja: 位置合わせの精度が低めです。
+en: The alignment may need another pass.
+ja: 位置合わせをもう一度行う必要があるかもしれません。
+en: Try again with slower motion, turning and tilting in different directions.
+ja: もっとゆっくり、いろいろな方向にひねったり傾けたりして、もう一度お試しください。
+en: Check the tracker positions in VR. Try again if they look off.
+ja: VR 内でトラッカーの位置を確認し、ずれていればもう一度お試しください。
+en: Applied for this session, but it couldn't be saved. Recalibrate after restarting.
+ja: このセッションには適用しましたが、保存できませんでした。再起動後に再キャリブレーションしてください。
+en: Headset tracker set up, so continuous calibration can keep it that way.
+ja: ヘッドセットトラッカーをセットアップしました。連続キャリブレーションで位置合わせを維持できます。
+en: Headset tracker set up.
+ja: ヘッドセットトラッカーをセットアップしました。
+en: Turn on continuous calibration in Settings to use it.
+ja: 使うには設定で連続キャリブレーションをオンにしてください。
+en: The headset tracker's identity couldn't be verified, so its previous setup is kept.
+ja: ヘッドセットトラッカーを識別できなかったため、以前のセットアップを残しました。
+en: Try again. If it repeats, restart SteamVR.
+ja: もう一度お試しください。繰り返す場合は SteamVR を再起動してください。
+en: The headset tracker's position couldn't be measured consistently, so its previous setup is kept.
+ja: ヘッドセットトラッカーの位置を安定して測定できなかったため、以前のセットアップを残しました。
+en: The headset tracker's position couldn't be measured consistently.
+ja: ヘッドセットトラッカーの位置を安定して測定できませんでした。
+en: Recalibrate with the headset tracker and look around more slowly.
+ja: ヘッドセットトラッカーで再キャリブレーションし、もっとゆっくり見回してください。
+
+# Why a solve was refused.
+en: The devices didn't rotate far enough.
+ja: デバイスの回転が足りませんでした。
+en: Use wider turns while keeping both devices fixed together.
+ja: 2 つのデバイスを固定したまま、もっと大きく回してください。
+en: The devices only rotated in one direction.
+ja: デバイスが 1 方向にしか回転しませんでした。
+en: The devices didn't rotate in enough directions.
+ja: デバイスを回した方向が足りませんでした。
+en: Turn and tilt both devices together in different directions.
+ja: 2 つのデバイスを一緒に、いろいろな方向へひねったり傾けたりしてください。
+en: Turn and tilt both devices together, then try again.
+ja: 2 つのデバイスを一緒にひねったり傾けたりしてから、もう一度お試しください。
+en: The devices' rotation readings didn't match closely enough.
+ja: 2 つのデバイスの回転の測定値が十分に一致しませんでした。
+en: Hold them firmly together and try again.
+ja: しっかり合わせて、もう一度お試しください。
+en: The devices' position readings didn't match closely enough.
+ja: 2 つのデバイスの位置の測定値が十分に一致しませんでした。
+en: Move slowly and keep both devices in clear view, then try again.
+ja: ゆっくり動かし、両方のデバイスがよく見える状態を保って、もう一度お試しください。
+en: Couldn't measure the tracking delay between the devices.
+ja: デバイス間のトラッキング遅延を測定できませんでした。
+en: Keep turning both devices together until the timer finishes.
+ja: タイマーが終わるまで、2 つのデバイスを一緒に回し続けてください。
+en: Almost no tracking data arrived.
+ja: トラッキングデータがほとんど届きませんでした。
+en: Check that both devices are tracking, then try again.
+ja: 両方のデバイスがトラッキングされているか確認して、もう一度お試しください。
+en: Some tracking data was corrupt.
+ja: 一部のトラッキングデータが壊れていました。
+en: Try again; restart SteamVR if it repeats.
+ja: もう一度お試しください。繰り返す場合は SteamVR を再起動してください。
+en: Playspace scale couldn't be determined from this motion.
+ja: この動きからはプレイスペースのスケールを求められませんでした。
+en: Cover a larger area, or turn off Solve playspace scale in Settings.
+ja: もっと広い範囲を動かすか、設定で「プレイスペースのスケールを推定」をオフにしてください。
+en: The calibration result wasn't usable.
+ja: キャリブレーション結果が使用できませんでした。
+en: Try again with smooth motion around the room.
+ja: 部屋の中でなめらかに動かして、もう一度お試しください。
+
+# Why a run stopped.
+en: Some tracking data was dropped: the PC couldn't keep up.
+ja: トラッキングデータの一部が失われました。PC の処理が追いつきませんでした。
+en: Try again; close capture or recording software if it repeats.
+ja: もう一度お試しください。繰り返す場合は、キャプチャーや録画のソフトを閉じてください。
+en: %s's tracking reset during the measurement.
+ja: 計測中に {0} のトラッキングがリセットされました。
+en: %s's tracking is settling.
+ja: {0} のトラッキングが安定するのを待っています。
+en: %s isn't tracking yet.
+ja: {0} はまだトラッキングされていません。
+en: The calibration starts on its own in a few seconds. Keep it in view of its base stations.
+ja: 数秒後にキャリブレーションが自動で始まります。ベースステーションから見える位置に保ってください。
+en: The calibration starts on its own once it tracks. Wake it and keep it in view.
+ja: トラッキングされるとキャリブレーションが自動で始まります。デバイスを起動して、見える位置に保ってください。
+en: %s's base station tracking restarted during the measurement.
+ja: 計測中に {0} のベースステーションによるトラッキングが再開されました。
+en: Let tracking settle for a few seconds, then start again.
+ja: 数秒待ってトラッキングが安定してから、もう一度開始してください。
+en: The reference device
+ja: 基準デバイス
+en: The target device
+ja: 対象デバイス
+en: QuestCalibrator can't talk to SteamVR.
+ja: QuestCalibrator が SteamVR と通信できません。
+en: Restart SteamVR. If it repeats, re-run the installer.
+ja: SteamVR を再起動してください。繰り返す場合はインストーラーを再実行してください。
+en: No reference device is selected.
+ja: 基準デバイスが選択されていません。
+en: No target device is selected.
+ja: 対象デバイスが選択されていません。
+en: Pick a device that's switched on.
+ja: 電源の入っているデバイスを選んでください。
+en: %s isn't tracking.
+ja: {0} がトラッキングされていません。
+en: Check it's awake and in view of its tracking cameras or base stations, then try again.
+ja: スリープしていないこと、トラッキングカメラやベースステーションから見えることを確認して、もう一度お試しください。
+en: Check it's awake and visible to its base stations, then try again.
+ja: スリープしていないこと、ベースステーションから見えることを確認して、もう一度お試しください。
+en: A device changed tracking system as the run started.
+ja: 開始時にデバイスのトラッキングシステムが変わりました。
+en: Re-pick both devices and start again.
+ja: 両方のデバイスを選び直して、もう一度開始してください。
+en: SteamVR stopped reporting one of the devices.
+ja: SteamVR がデバイスの 1 つを報告しなくなりました。
+en: Wake or reconnect it, then try again.
+ja: スリープを解除するか再接続して、もう一度お試しください。
+en: The reference device must be on the headset's tracking system.
+ja: 基準デバイスはヘッドセットと同じトラッキングシステムである必要があります。
+en: Pick the headset or one of its controllers as the reference.
+ja: ヘッドセットか、そのコントローラーを基準に選んでください。
+en: Lost contact with SteamVR mid-run.
+ja: 実行中に SteamVR との接続が切れました。
+en: Restart SteamVR and try again.
+ja: SteamVR を再起動して、もう一度お試しください。
+en: %s was replaced by another device during the measurement.
+ja: 計測中に {0} が別のデバイスに置き換わりました。
+en: Could not verify the identity of %s during the measurement.
+ja: 計測中に {0} を識別できませんでした。
+en: Keep both devices powered and try again.
+ja: 両方のデバイスの電源を入れたまま、もう一度お試しください。
+en: %s stopped tracking mid-run.
+ja: 実行中に {0} のトラッキングが止まりました。
+en: Keep it tracking for the whole countdown.
+ja: カウントダウンが終わるまでトラッキングを保ってください。
+en: Keep it in view of its base stations for the whole countdown.
+ja: カウントダウンが終わるまで、ベースステーションから見える状態を保ってください。
+en: Pick a reference and a target from two different tracking systems.
+ja: 基準と対象は、異なる 2 つのトラッキングシステムから選んでください。
+en: Anchors need the same reference and target systems as the current calibration. Pick those devices first.
+ja: アンカーには現在のキャリブレーションと同じ基準・対象システムが必要です。先にそのデバイスを選んでください。
+en: The headset isn't showing up in SteamVR, so the tracker position can't be measured yet.
+ja: ヘッドセットが SteamVR に表示されていないため、まだトラッカーの位置を測定できません。
+en: The headset tracker isn't connected. Switch it on, then try again.
+ja: ヘッドセットトラッカーが接続されていません。電源を入れてからもう一度お試しください。
+
+# Field anchors.
+en: Anchor not added
+ja: アンカーを追加できませんでした
+en: Anchor added
+ja: アンカーを追加しました
+en: This spot is too far off from your calibration for a small correction.
+ja: この場所はキャリブレーションからのずれが大きく、小さな補正では対応できません。
+en: Run a full calibration instead.
+ja: 代わりに通常のキャリブレーションを行ってください。
+en: You already have 8 anchors.
+ja: アンカーはすでに 8 件あります。
+en: Add this one within 1 m of an existing anchor to replace it, or clear the anchors in Settings.
+ja: 既存のアンカーから 1 m 以内で追加すると置き換えられます。または設定でアンカーを消去してください。
+en: It couldn't be saved.
+ja: 保存できませんでした。
+en: Restart QuestCalibrator and try again.
+ja: QuestCalibrator を再起動して、もう一度お試しください。
+en: This spot now has its own correction, blended in as you walk around.
+ja: この場所専用の補正ができました。歩き回ると滑らかに切り替わります。
+
+# ---- Runtime monitors (activity feed and VR notifications) ----
+en: Your calibration looks off. Recalibrate.
+ja: キャリブレーションがずれているようです。再キャリブレーションしてください。
+en: QuestCalibrator: your calibration looks off. Recalibrate.
+ja: QuestCalibrator：キャリブレーションがずれているようです。再キャリブレーションしてください。
+en: A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.
+ja: 補正量が大きすぎて安全でないため、スキップしました。繰り返し起きる場合は再キャリブレーションしてください。
+en: Correction ready. Pull a trigger to apply it.
+ja: 補正の準備ができました。トリガーを引くと適用されます。
+en: Trigger pulled; applying the correction.
+ja: トリガーを確認しました。補正を適用します。
+en: Continuous calibration paused: readings moved too far from the calibration. It re-aligns on its own if they hold steady.
+ja: 連続キャリブレーションを一時停止しました：測定値がキャリブレーションから大きくずれました。ずれが安定すれば自動的に合わせ直します。
+en: QuestCalibrator: continuous calibration paused; readings moved too far from the calibration. It re-aligns on its own if they hold steady, or recalibrate with the headset tracker.
+ja: QuestCalibrator：連続キャリブレーションを一時停止しました。測定値がキャリブレーションから大きくずれました。ずれが安定すれば自動的に合わせ直します。または、ヘッドセットトラッカーで再キャリブレーションしてください。
+en: Continuous calibration paused: readings drifted too far from the calibration to correct safely.
+ja: 連続キャリブレーションを一時停止しました：測定値がキャリブレーションから大きくずれ、安全に補正できません。
+en: QuestCalibrator: continuous calibration paused; readings drifted too far to correct safely. Recalibrate with the headset tracker to resume.
+ja: QuestCalibrator：連続キャリブレーションを一時停止しました。ずれが大きすぎて安全に補正できません。再開するにはヘッドセットトラッカーで再キャリブレーションしてください。
+en: Continuous calibration re-aligned your trackers after the tracking spaces moved apart.
+ja: トラッキング空間どうしがずれたため、連続キャリブレーションがトラッカーを合わせ直しました。
+en: Continuous calibration went back to the alignment it had before it last re-aligned your trackers.
+ja: 連続キャリブレーションが、直前にトラッカーを合わせ直す前の位置合わせに戻しました。
+en: Continuous calibration paused: the headset tracker's base station tracking restarted and doesn't match the headset yet. It resumes on its own once that settles.
+ja: 連続キャリブレーションを一時停止しました：ヘッドセットトラッカーのベースステーションによるトラッキングが再開され、まだヘッドセットと一致していません。安定すると自動で再開します。
+en: QuestCalibrator: continuous calibration paused while the headset tracker's base station tracking settles. It resumes on its own, so don't recalibrate yet.
+ja: QuestCalibrator：ヘッドセットトラッカーのベースステーションによるトラッキングが安定するまで、連続キャリブレーションを一時停止しています。自動で再開するので、まだ再キャリブレーションしないでください。
+en: Tracking is noisy here; continuous calibration is waiting and resumes on its own.
+ja: この場所ではトラッキングが不安定なため、連続キャリブレーションは待機中です。自動で再開します。
+en: QuestCalibrator: tracking is noisy here. Continuous calibration is waiting and resumes on its own.
+ja: QuestCalibrator：この場所ではトラッキングが不安定です。連続キャリブレーションは待機中で、自動で再開します。
+en: Continuous calibration resumed.
+ja: 連続キャリブレーションを再開しました。
+en: Headset tracker not tracking; continuous calibration waiting.
+ja: ヘッドセットトラッカーがトラッキングされていないため、連続キャリブレーションは待機中です。
+en: Headset tracker back; continuous calibration warming up.
+ja: ヘッドセットトラッカーが戻りました。連続キャリブレーションを準備中です。
+en: Headset not tracking; continuous calibration waiting.
+ja: ヘッドセットがトラッキングされていないため、連続キャリブレーションは待機中です。
+en: Headset back; continuous calibration warming up.
+ja: ヘッドセットが戻りました。連続キャリブレーションを準備中です。
+en: Headset and headset tracker not tracking; continuous calibration waiting.
+ja: ヘッドセットとヘッドセットトラッカーがトラッキングされていないため、連続キャリブレーションは待機中です。
+en: Headset and headset tracker back; continuous calibration warming up.
+ja: ヘッドセットとヘッドセットトラッカーが戻りました。連続キャリブレーションを準備中です。
+en: No usable readings from the headset and its tracker; continuous calibration waiting.
+ja: ヘッドセットとトラッカーから使える計測値が得られないため、連続キャリブレーションは待機中です。
+en: Readings back; continuous calibration warming up.
+ja: 計測値が戻りました。連続キャリブレーションを準備中です。
+en: SteamVR switched the headset tracker off after it sat still for %d minutes. Turn it back on to resume continuous calibration.
+ja: ヘッドセットトラッカーが {0} 分間動かなかったため、SteamVR が電源を切りました。電源を入れ直すと連続キャリブレーションが再開します。
+en: SteamVR switched the headset tracker off after it sat still. Turn it back on to resume continuous calibration.
+ja: ヘッドセットトラッカーが動かなかったため、SteamVR が電源を切りました。電源を入れ直すと連続キャリブレーションが再開します。
+en: The headset tracker switched off or lost its connection. Turn it back on to resume continuous calibration.
+ja: ヘッドセットトラッカーの電源が切れたか、接続が切れました。電源を入れ直すと連続キャリブレーションが再開します。
+en: To keep SteamVR from doing this, set "Turn off controllers after" to Never in SteamVR's Startup / Shutdown settings.
+ja: こうならないようにするには、SteamVR の設定の「スタートアップ／シャットダウン」で「次の時間経過後にコントローラの電源を切る」を「なし」にしてください。
+en: QuestCalibrator: the headset tracker is off. Turn it back on to resume continuous calibration.
+ja: QuestCalibrator：ヘッドセットトラッカーの電源が切れています。電源を入れ直すと連続キャリブレーションが再開します。
+
+# ---- Chaperone ----
+en: Check your room boundaries
+ja: 部屋の境界を確認してください
+en: QuestCalibrator saves and restores your SteamVR chaperone. Tracking drift can still move the chaperone walls away from your real walls.
+ja: QuestCalibrator は SteamVR のシャペロンを保存・復元します。それでもトラッキングのドリフトで、シャペロンの壁が実際の壁からずれることがあります。
+en: Keep the Quest boundary turned on too. A protected chaperone doesn't guarantee that your play area is clear or correctly aligned.
+ja: Quest の境界線もオンのままにしてください。シャペロンを保護しても、プレイエリアに障害物がないことや位置が正しいことは保証されません。
+en: Before playing, check that the chaperone walls match your room and leave enough space to move safely, especially when dancing.
+ja: プレイ前に、シャペロンの壁が部屋と合っていて、安全に動ける十分なスペースがあるか確認してください。ダンスをするときは特に注意してください。
+en: Protect chaperone (%d s)
+ja: シャペロンを保護（{0} 秒）
+en: Chaperone saved without walls, so auto-restore stays off until Room Setup adds some.
+ja: 壁なしでシャペロンを保存したため、ルームセットアップで壁を追加するまで自動復元はオフのままです。
+en: Chaperone saved: %u wall%s, %.1f x %.1f m.
+ja: シャペロンを保存しました：壁 {0} 面、{2} × {3} m。
+en: Chaperone restored.
+ja: シャペロンを復元しました。
+en: Couldn't check the protected chaperone: SteamVR's chaperone setup isn't available right now.
+ja: 保護したシャペロンを確認できませんでした：現在 SteamVR のシャペロン設定を使用できません。
+en: Couldn't read the current chaperone, so the protected one wasn't changed.
+ja: 現在のシャペロンを読み取れなかったため、保護したシャペロンは変更していません。
+en: The protected chaperone was saved for a different headset, so it was switched off. Press Protect chaperone again on the main screen.
+ja: 保護したシャペロンは別のヘッドセット用に保存されていたため、オフにしました。メイン画面で「シャペロンを保護」をもう一度押してください。
+en: The headset re-centered, so the protected chaperone no longer lines up and was turned off. Protect it again from the main screen.
+ja: ヘッドセットが再センタリングされ、保護したシャペロンの位置が合わなくなったため、オフにしました。メイン画面からもう一度保護してください。
+en: The headset re-centered while QuestCalibrator couldn't follow it, so the protected chaperone was switched off. Press Protect chaperone again on the main screen.
+ja: QuestCalibrator が追跡できない間にヘッドセットが再センタリングされたため、保護したシャペロンをオフにしました。メイン画面で「シャペロンを保護」をもう一度押してください。
+en: The protected chaperone belonged to the previous calibration and was turned off. Protect it again from the main screen.
+ja: 保護したシャペロンは以前のキャリブレーションのものだったため、オフにしました。メイン画面からもう一度保護してください。
+en: A headset re-center was too large to compensate safely. Recalibrate before continuing.
+ja: ヘッドセットの再センタリングが大きすぎて、安全に補正できません。続ける前に再キャリブレーションしてください。
+en: The headset re-centered while QuestCalibrator couldn't follow it. The calibration and the protected chaperone are off until you recalibrate.
+ja: QuestCalibrator が追跡できない間にヘッドセットが再センタリングされました。再キャリブレーションするまで、キャリブレーションと保護したシャペロンはオフです。
+en: The headset re-centered while QuestCalibrator couldn't follow it. The calibration is off until you recalibrate.
+ja: QuestCalibrator が追跡できない間にヘッドセットが再センタリングされました。再キャリブレーションするまで、キャリブレーションはオフです。
+en: SteamVR moved the base stations more often than QuestCalibrator could follow. The calibration is off until you recalibrate.
+ja: QuestCalibrator が追従できない頻度で SteamVR がベースステーションの位置を変えました。再キャリブレーションするまで、キャリブレーションはオフです。
+en: Couldn't protect the chaperone. The headset re-centered since the last calibration. Recalibrate first.
+ja: シャペロンを保護できませんでした。前回のキャリブレーション以降にヘッドセットが再センタリングされています。先に再キャリブレーションしてください。
+en: Couldn't protect the chaperone because SteamVR's chaperone isn't available. Restart SteamVR and try again.
+ja: SteamVR のシャペロンを使用できないため、シャペロンを保護できませんでした。SteamVR を再起動して、もう一度お試しください。
+en: Couldn't protect the chaperone because the headset isn't showing up in SteamVR. Try again once it's connected.
+ja: ヘッドセットが SteamVR に表示されていないため、シャペロンを保護できませんでした。接続してからもう一度お試しください。
+en: Couldn't protect the chaperone. The calibration was made with a different headset system. Recalibrate first.
+ja: シャペロンを保護できませんでした。キャリブレーションが別のヘッドセットシステムで行われています。先に再キャリブレーションしてください。
+en: Couldn't protect the chaperone because the headset isn't tracking yet. Put it on and try again.
+ja: ヘッドセットがまだトラッキングされていないため、シャペロンを保護できませんでした。装着してもう一度お試しください。
+en: Couldn't read the chaperone walls from SteamVR. Try again.
+ja: SteamVR からシャペロンの壁を読み取れませんでした。もう一度お試しください。
+en: The chaperone changed while it was being saved. Try again.
+ja: 保存中にシャペロンが変更されました。もう一度お試しください。
+en: Couldn't protect the chaperone because SteamVR has no usable play area. Set up your room in SteamVR, then try again.
+ja: SteamVR に使用できるプレイエリアがないため、シャペロンを保護できませんでした。SteamVR でルームをセットアップしてから、もう一度お試しください。
+en: Couldn't protect the chaperone because the PC clock looks wrong. Check the date and time, then try again.
+ja: PC の時計が正しくないようなので、シャペロンを保護できませんでした。日付と時刻を確認して、もう一度お試しください。
+en: Couldn't protect the chaperone because the previous one couldn't be switched off first, so nothing was changed.
+ja: 以前のシャペロンを先にオフにできなかったため、シャペロンを保護できませんでした。何も変更していません。
+en: Couldn't restore the chaperone: the protected chaperone is damaged. Protect it again.
+ja: シャペロンを復元できませんでした：保護したシャペロンが破損しています。もう一度保護してください。
+en: Couldn't restore the chaperone: the headset isn't reporting to SteamVR yet.
+ja: シャペロンを復元できませんでした：ヘッドセットがまだ SteamVR に認識されていません。
+en: Couldn't restore the chaperone yet: the headset hasn't been tracked this session. Put it on and try again.
+ja: まだシャペロンを復元できません：このセッションでヘッドセットがトラッキングされていません。装着してもう一度お試しください。
+en: Couldn't restore the chaperone: SteamVR's chaperone setup isn't available right now.
+ja: シャペロンを復元できませんでした：現在 SteamVR のシャペロン設定を使用できません。
+en: Couldn't restore the chaperone: SteamVR rejected the update.
+ja: シャペロンを復元できませんでした：SteamVR が更新を拒否しました。
+en: Couldn't verify the restored chaperone. Check it in SteamVR Room Setup before relying on it.
+ja: 復元したシャペロンを確認できませんでした。使う前に SteamVR のルームセットアップで確認してください。
+en: The calibration profile and protected chaperone were saved at different revisions. Chaperone auto-restore is disabled until you capture it again.
+ja: キャリブレーションと保護したシャペロンが別々のタイミングで保存されていました。もう一度保護するまで、シャペロンの自動復元は無効です。
+en: The protected chaperone has no complete headset/universe baseline. It has been disarmed; capture it again before enabling auto-restore.
+ja: 保護したシャペロンにヘッドセットの基準情報が揃っていないため、無効にしました。自動復元を有効にする前に、もう一度保護してください。
+en: The protected chaperone belongs to a different reference tracking system. It has been disarmed; capture it again for this profile.
+ja: 保護したシャペロンは別の基準トラッキングシステムのものです。無効にしたので、このプロファイル用にもう一度保護してください。
+
+# ---- Saving and loading ----
+en: Couldn't clear the calibration, so it's still saved. Restart QuestCalibrator and try again.
+ja: キャリブレーションを消去できなかったため、保存されたままです。QuestCalibrator を再起動して、もう一度お試しください。
+en: Couldn't read the saved calibration, so it was left as it is. Restart QuestCalibrator. If this repeats, save a diagnostics file in Settings and report it.
+ja: 保存されたキャリブレーションを読み取れなかったため、そのままにしています。QuestCalibrator を再起動してください。繰り返す場合は、設定で診断ファイルを保存して報告してください。
+en: Couldn't read QuestCalibrator's settings, so they were left as they are. Restart QuestCalibrator. If this repeats, save a diagnostics file in Settings and report it.
+ja: QuestCalibrator の設定を読み取れなかったため、そのままにしています。QuestCalibrator を再起動してください。繰り返す場合は、設定で診断ファイルを保存して報告してください。
+en: Couldn't save the calibration because the saved one couldn't be read. It was left untouched so it can be recovered.
+ja: 保存済みのキャリブレーションを読み取れないため、保存できませんでした。復旧できるよう、そのままにしています。
+en: Couldn't save the calibration because QuestCalibrator's settings couldn't be read. They were left untouched so they can be recovered.
+ja: QuestCalibrator の設定を読み取れないため、キャリブレーションを保存できませんでした。復旧できるよう、設定はそのままにしています。
+en: Couldn't save the calibration because settings from an older version haven't been moved over safely yet. Restart QuestCalibrator and try again.
+ja: 以前のバージョンの設定がまだ安全に移行されていないため、キャリブレーションを保存できませんでした。QuestCalibrator を再起動して、もう一度お試しください。
+en: Couldn't save the calibration because it failed a safety check. Recalibrate.
+ja: 安全チェックに通らなかったため、キャリブレーションを保存できませんでした。再キャリブレーションしてください。
+en: Couldn't save the calibration. It will be lost when QuestCalibrator closes.
+ja: キャリブレーションを保存できませんでした。QuestCalibrator を閉じると失われます。
+en: Couldn't save QuestCalibrator's settings because the saved calibration couldn't be read. Nothing was changed, so both can still be recovered.
+ja: 保存されたキャリブレーションを読み取れないため、設定を保存できませんでした。何も変更していないので、どちらも復旧できます。
+en: Couldn't save QuestCalibrator's settings because the saved ones couldn't be read. They were left untouched so they can be recovered.
+ja: 保存済みの設定を読み取れないため、設定を保存できませんでした。復旧できるよう、そのままにしています。
+en: Couldn't save QuestCalibrator's settings because the protected chaperone failed a safety check. Protect it again.
+ja: 保護したシャペロンが安全チェックに通らなかったため、設定を保存できませんでした。もう一度保護してください。
+en: Couldn't save QuestCalibrator's settings. Changes will be lost when it closes.
+ja: 設定を保存できませんでした。閉じると変更は失われます。
+en: Error loading calibration profile: %s
+ja: キャリブレーションの読み込みエラー：{0}
+en: Error loading application settings: %s
+ja: 設定の読み込みエラー：{0}
+en: The profile is preserved, not overwritten.
+ja: プロファイルは上書きされず、そのまま残っています。
+en: Settings changes will not save until this is fixed.
+ja: これが直るまで、設定の変更は保存されません。
+en: To start over, delete the Config value under %s
+ja: 最初からやり直すには、{0} の Config 値を削除してください
+en: To start over, delete the Settings value under %s
+ja: 最初からやり直すには、{0} の Settings 値を削除してください
+en: The live profile has invalid tracking-system identities and was disabled before sending it to the driver
+ja: 現在のプロファイルのトラッキングシステム情報が無効なため、ドライバーに送る前に無効化しました
+en: The live calibration contains invalid numeric values and was disabled before sending it to the driver
+ja: 現在のキャリブレーションに無効な数値が含まれていたため、ドライバーに送る前に無効化しました
+en: Couldn't find the local application data folder.
+ja: ローカルのアプリケーションデータフォルダーが見つかりませんでした。
+en: Couldn't create the diagnostics file in %s.
+ja: {0} に診断ファイルを作成できませんでした。
+en: Couldn't finish writing the diagnostics file.
+ja: 診断ファイルの書き込みを完了できませんでした。
+
+# ---- Updates ----
+en: QuestCalibrator %s is a prerelease. Automatic updates follow stable releases only, so this build will not update itself. Install a stable release by hand to rejoin them.
+ja: QuestCalibrator {0} はプレリリース版です。自動アップデートは安定版のみが対象のため、このビルドは自動更新されません。安定版を手動でインストールすると自動アップデートに戻れます。
+en: Checking GitHub for updates
+ja: GitHub でアップデートを確認中
+en: QuestCalibrator is up to date
+ja: QuestCalibrator は最新です
+en: Downloading QuestCalibrator %s
+ja: QuestCalibrator {0} をダウンロード中
+en: QuestCalibrator %s is ready to install
+ja: QuestCalibrator {0} をインストールできます
+en: The update check could not start.
+ja: アップデートの確認を開始できませんでした。
+en: Update check cancelled.
+ja: アップデートの確認をキャンセルしました。
+en: Update download cancelled.
+ja: アップデートのダウンロードをキャンセルしました。
+en: %s failed (Windows error %s).
+ja: {0}に失敗しました（Windows エラー {1}）。
+en: Opening the update connection
+ja: アップデート用の接続
+en: Setting update timeouts
+ja: タイムアウトの設定
+en: Connecting to GitHub
+ja: GitHub への接続
+en: Creating the GitHub request
+ja: GitHub へのリクエスト作成
+en: Securing GitHub redirects
+ja: GitHub リダイレクトの保護
+en: Requesting the update
+ja: アップデートの要求
+en: Reading the update response
+ja: 応答の読み取り
+en: Downloading the update package
+ja: パッケージのダウンロード
+en: Starting the update helper
+ja: アップデートヘルパーの起動
+en: GitHub returned HTTP %d.
+ja: GitHub が HTTP {0} を返しました。
+en: GitHub returned an invalid release list.
+ja: GitHub から無効なリリース一覧が返されました。
+en: GitHub returned an unexpectedly large release list.
+ja: GitHub から想定外に大きいリリース一覧が返されました。
+en: Windows did not provide a local app-data folder.
+ja: Windows がローカルアプリデータフォルダーを返しませんでした。
+en: Windows PowerShell could not be located.
+ja: Windows PowerShell が見つかりませんでした。
+en: The release package URL is invalid.
+ja: リリースパッケージの URL が無効です。
+en: The update package could not be saved.
+ja: アップデートパッケージを保存できませんでした。
+en: The update package is larger than GitHub reported.
+ja: アップデートパッケージが GitHub の報告より大きいです。
+en: The update package download was incomplete.
+ja: アップデートパッケージのダウンロードが不完全です。
+en: The update folder could not be created (system error %d).
+ja: アップデートフォルダーを作成できませんでした（システムエラー {0}）。
+en: The downloaded package failed SHA-256 verification.
+ja: ダウンロードしたパッケージが SHA-256 検証に失敗しました。
+en: The verified update package could not be saved (system error %d).
+ja: 検証済みのアップデートパッケージを保存できませんでした（システムエラー {0}）。
+en: No verified update is ready to install.
+ja: インストールできる検証済みのアップデートがありません。
+en: The downloaded update no longer passes SHA-256 verification.
+ja: ダウンロードしたアップデートが SHA-256 検証に通らなくなりました。
+en: The update helper could not be created.
+ja: アップデートヘルパーを作成できませんでした。
+en: The newest release has no trusted release page.
+ja: 最新リリースに信頼できるリリースページがありません。
+en: The newest release points outside the QuestCalibrator repository.
+ja: 最新リリースが QuestCalibrator のリポジトリ外を指しています。
+en: The newest release has no install package.
+ja: 最新リリースにインストールパッケージがありません。
+en: The newest release contains duplicate install packages.
+ja: 最新リリースのインストールパッケージが重複しています。
+en: The newest release does not contain %s.
+ja: 最新リリースに {0} が含まれていません。
+en: The newest release package has invalid metadata.
+ja: 最新リリースのパッケージ情報が無効です。
+en: The newest release package has no valid SHA-256 digest.
+ja: 最新リリースのパッケージに有効な SHA-256 ダイジェストがありません。
+en: The newest release package points outside the QuestCalibrator repository.
+ja: 最新リリースのパッケージが QuestCalibrator のリポジトリ外を指しています。
+
+# ---- Lighthouse tab ----
+en: No Lighthouse devices
+ja: Lighthouse デバイスがありません
+en: Turn on a tracker or controller that uses base stations.
+ja: ベースステーションを使うトラッカーかコントローラーの電源を入れてください。
+en: Waiting for SteamVR's log
+ja: SteamVR のログを待っています
+en: Base stations appear here once SteamVR has written %s
+ja: SteamVR が {0} を書き込むと、ここにベースステーションが表示されます
+en: its vrserver log.
+ja: vrserver のログ
+en: BASE STATIONS
+ja: ベースステーション
+en: None named yet. Each base station appears as SteamVR reports it.
+ja: まだありません。SteamVR が報告すると、ベースステーションが表示されます。
+en: id not logged yet
+ja: ID 未記録
+en: No reports yet
+ja: 報告なし
+en: Seen by %d of %d
+ja: {1} 台中 {0} 台から見えています
+en: No dropouts this session
+ja: このセッションで途切れなし
+en: Dropped out %u time%s
+ja: 途切れ {0} 回
+en: Dropped out %u time%s · the last one left %u time%s
+ja: 途切れ {0} 回・最後の 1 基として {2} 回
+en: IN VIEW OF EACH DEVICE
+ja: デバイスごとの見通し
+en: Not in the log yet
+ja: ログにまだありません
+en: %d of %d in view
+ja: {0}/{1} 基が見える
+en: no dropouts
+ja: 途切れなし
+en: %u dropout%s
+ja: 途切れ {0} 回
+en: %u dropout%s, %u full loss%s
+ja: 途切れ {0} 回、完全喪失 {2} 回
+en: In view: no base station
+ja: 見えている：ベースステーションなし
+en: In view: %s
+ja: 見えている：{0}
+en: Last change: %s
+ja: 最後の変化：{0}
+en: Tracking restarted %u time%s
+ja: トラッキング再開始 {0} 回
+
+# What last happened to a device, from LighthouseVisibility.
+en: tracking again from %s
+ja: {0} からトラッキング再開
+en: back to %d stations with %s
+ja: {1} が戻り {0} 基に復帰
+en: lost its last station %s
+ja: 最後の {0} を失った
+en: down to one station %s after losing %s
+ja: {1} を失い {0} の 1 基のみ
+en: sees no base station
+ja: ベースステーションが見えない
+en: started a new solution from %s
+ja: {0} から新たにトラッキングを開始
+en: could not start tracking from %s
+ja: {0} からトラッキングを開始できなかった
+en: Japanese
+ja: 日本語
+en: Italiano
+ja: Italiano
+
+# Names shown as they are.
+en: VividNightmareUnleashed
+ja: VividNightmareUnleashed
+en: Jinxxy
+ja: Jinxxy
+en: OpenVR-SpaceCalibrator
+ja: OpenVR-SpaceCalibrator
+en: 1 drift check this session was skipped because a base station had just changed.
+ja: ベースステーションが変化した直後だったため、このセッションでドリフト確認を 1 回スキップしました。
+en: %u drift checks this session were skipped because a base station had just changed.
+ja: ベースステーションが変化した直後だったため、このセッションでドリフト確認を {0} 回スキップしました。
+en: Base station changes haven't affected drift checks this session.
+ja: このセッションでは、ベースステーションの変化はドリフト確認に影響していません。
+en: Read from %s
+ja: 読み込み元：{0}

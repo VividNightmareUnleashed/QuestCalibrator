@@ -26,8 +26,8 @@ void BuildSettingsScreen(const VRState &state)
 
 			// Without a Japanese font its name would draw as boxes.
 			const Language order[] = { Language::English, Language::Italian, Language::Japanese };
-			const char *languages[] = { "English", questcal::i18n::kItalianNativeName,
-				japaneseFont ? questcal::i18n::kJapaneseNativeName : "Japanese" };
+			const char *languages[] = { "English", questcal::i18n::ItalianTable().nativeName.c_str(),
+				japaneseFont ? questcal::i18n::JapaneseTable().nativeName.c_str() : "Japanese" };
 			const int count = 3;
 			const float segItemW = 130.0f, segH = 34.0f;
 			ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - (segItemW * count + 8.0f), p.y + 9.0f));

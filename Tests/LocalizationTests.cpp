@@ -5,45 +5,52 @@
 #include "../Overlay/Localization.h"
 #include "../Overlay/LocalizationTables.h"
 
-#include <cstring>
+#include <windows.h>
+
+#include <algorithm>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <set>
+#include <sstream>
 #include <string>
+#include <vector>
 
 namespace
 {
 using Check = void (*)(const char *, bool, const char *);
 using namespace questcal::i18n;
 
-const char *Lookup(const Entry *table, size_t count, const char *english)
+const char *Lookup(const TableFile &table, const char *english)
 {
-	for (size_t i = 0; i < count; ++i)
-		if (std::strcmp(table[i].english, english) == 0)
-			return table[i].translation;
+	for (const Entry &entry : table.entries)
+		if (entry.english == english)
+			return entry.translation.c_str();
 	return nullptr;
 }
 
 const char *Japanese(const char *english)
 {
-	return Lookup(kJapanese, kJapaneseCount, english);
+	return Lookup(JapaneseTable(), english);
 }
 
 const char *Italian(const char *english)
 {
-	return Lookup(kItalian, kItalianCount, english);
+	return Lookup(ItalianTable(), english);
 }
 
 // Conversions in a key, "%%" not counted: the number of values a pattern
 // captures.
-int Conversions(const char *key)
+int Conversions(const std::string &key)
 {
 	int n = 0;
-	for (const char *p = key; *p; ++p)
+	for (size_t i = 0; i < key.size(); ++i)
 	{
-		if (*p != '%')
+		if (key[i] != '%')
 			continue;
-		if (p[1] == '%')
+		if (i + 1 < key.size() && key[i + 1] == '%')
 		{
-			++p;
+			++i;
 			continue;
 		}
 		++n;
@@ -63,29 +70,34 @@ std::string Fill(const char *translation, const std::string &a, const std::strin
 	return out;
 }
 
-std::set<std::string> Keys(const Entry *table, size_t count)
+std::set<std::string> Keys(const TableFile &table)
 {
 	std::set<std::string> keys;
-	for (size_t i = 0; i < count; ++i)
-		keys.insert(table[i].english);
+	for (const Entry &entry : table.entries)
+		keys.insert(entry.english);
 	return keys;
 }
 
-void TableIsConsistent(Check check, const char *language, const Entry *table, size_t count)
+void TableIsConsistent(Check check, const char *language, const TableFile &table)
 {
 	std::set<std::string> keys;
 	bool unique = true, placeholders = true, nonEmpty = true;
-	for (size_t i = 0; i < count; ++i)
+	for (const Entry &e : table.entries)
 	{
-		const Entry &e = table[i];
 		unique = keys.insert(e.english).second && unique;
-		nonEmpty = nonEmpty && *e.english && *e.translation;
+		nonEmpty = nonEmpty && !e.english.empty() && !e.translation.empty();
 		const int captured = Conversions(e.english);
-		for (const char *p = e.translation; *p; ++p)
-			if (p[0] == '{' && p[1] >= '0' && p[1] <= '9' && p[2] == '}' && p[1] - '0' >= captured)
+		const std::string &t = e.translation;
+		for (size_t i = 0; i + 2 < t.size(); ++i)
+			if (t[i] == '{' && t[i + 1] >= '0' && t[i + 1] <= '9' && t[i + 2] == '}' &&
+				t[i + 1] - '0' >= captured)
 				placeholders = false;
 	}
 	const std::string prefix = std::string("i18n ") + language;
+	check((prefix + " file reads cleanly").c_str(),
+		table.problems.empty() && !table.entries.empty() && !table.nativeName.empty(),
+		table.problems.empty() ? "every line is a key, a translation, a name or a comment"
+			: table.problems.front().c_str());
 	check((prefix + " keys unique").c_str(), unique, "every English key appears once");
 	check((prefix + " non-empty").c_str(), nonEmpty, "no blank key or translation");
 	check((prefix + " placeholders").c_str(), placeholders, "every {n} names a value its key captures");
@@ -95,9 +107,247 @@ void TableIsConsistent(Check check, const char *language, const Entry *table, si
 // forgotten in another would show that language's player English.
 void TablesCoverTheSameText(Check check)
 {
-	check("i18n tables match",
-		Keys(kJapanese, kJapaneseCount) == Keys(kItalian, kItalianCount),
+	check("i18n tables match", Keys(JapaneseTable()) == Keys(ItalianTable()),
 		"Japanese and Italian have the same keys");
+}
+
+// The file format, on a sample with every kind of line and the mistakes a
+// hand edit makes.
+void TableFileFormat(Check check)
+{
+	const TableFile good = ParseTableFile(
+		"\xEF\xBB\xBF# A comment\r\n"
+		"name: Sample\r\n"
+		"\r\n"
+		"en: Two\\nlines and a \\\\ backslash\r\n"
+		"xx: Due\\nrighe\r\n"
+		"en: Read from %s\n"
+		"xx: Letto da {0}\n", "xx");
+	const bool read = good.problems.empty() && good.nativeName == "Sample" &&
+		good.entries.size() == 2 &&
+		good.entries[0].english == "Two\nlines and a \\ backslash" &&
+		good.entries[0].translation == "Due\nrighe" &&
+		good.entries[1].english == "Read from %s" && good.entries[1].translation == "Letto da {0}";
+	const TableFile bad = ParseTableFile(
+		"en: No translation\n"
+		"en: Second key\n"
+		"yy: Wrong language\n"
+		"xx: Seconda\n"
+		"xx: Orphan\n"
+		"en: Last key\n", "xx");
+	const bool reported = bad.entries.size() == 1 && bad.entries[0].english == "Second key" &&
+		bad.problems.size() == 4;
+	check("i18n file format", read && reported,
+		read ? (reported ? "" : "a mistake went unreported") : "a well-formed sample was misread");
+}
+
+// ---- Every literal the overlay shows has a translation ----
+
+// What reaches the player, by call and the arguments that are player text:
+// Tr itself, the context's messages and toasts, and the shared widgets that
+// translate their labels (UiInternal.h). Log and detail lines stay English.
+struct ShownCall
+{
+	const char *name;
+	bool member;   // reached through an object, as ctx.Tell
+	std::vector<size_t> positions;
+};
+
+const std::vector<ShownCall> &ShownCalls()
+{
+	static const std::vector<ShownCall> calls = {
+		{ "Tr", false, { 0 } },
+		{ "Tell", true, { 0 } },
+		{ "ReportError", true, { 0 } },
+		{ "Instruct", true, { 0 } },
+		{ "Note", true, { 0 } },
+		{ "Outcome", true, { 0, 1, 2 } },
+		{ "NotifyOnce", false, { 2, 4 } },
+		{ "LinkText", false, { 0 } },
+		{ "SectionLabel", false, { 0 } },
+		{ "IconButton", false, { 1 } },
+		{ "ButtonWidthFor", false, { 0 } },
+		{ "RowIconLabel", false, { 2 } },
+		{ "RowSubLine", false, { 1 } },
+		{ "ToggleRow", false, { 2, 4 } },
+		{ "ShowTip", false, { 0 } },
+		{ "NestedToggle", false, { 3, 5 } },
+	};
+	return calls;
+}
+
+// Comments out, string and character literals untouched.
+std::string StripComments(const std::string &text)
+{
+	std::string out;
+	out.reserve(text.size());
+	for (size_t i = 0; i < text.size();)
+	{
+		const char c = text[i];
+		if (c == '"' || c == '\'')
+		{
+			size_t j = i + 1;
+			while (j < text.size() && text[j] != c)
+				j += text[j] == '\\' ? 2 : 1;
+			out.append(text, i, (std::min)(j + 1, text.size()) - i);
+			i = j + 1;
+		}
+		else if (text.compare(i, 2, "//") == 0)
+			i = (std::min)(text.find('\n', i), text.size());
+		else if (text.compare(i, 2, "/*") == 0)
+		{
+			const size_t end = text.find("*/", i + 2);
+			i = end == std::string::npos ? text.size() : end + 2;
+		}
+		else
+			out += text[i++];
+	}
+	return out;
+}
+
+// The top-level arguments of the call whose '(' is at `open`.
+std::vector<std::string> ArgumentsOf(const std::string &text, size_t open)
+{
+	std::vector<std::string> args;
+	int depth = 0;
+	size_t start = open + 1;
+	for (size_t i = open; i < text.size(); ++i)
+	{
+		const char c = text[i];
+		if (c == '"' || c == '\'')
+		{
+			size_t j = i + 1;
+			while (j < text.size() && text[j] != c)
+				j += text[j] == '\\' ? 2 : 1;
+			i = j;
+		}
+		else if (c == '(' || c == '[' || c == '{')
+			++depth;
+		else if (c == ')' || c == ']' || c == '}')
+		{
+			if (--depth == 0)
+			{
+				args.push_back(text.substr(start, i - start));
+				return args;
+			}
+		}
+		else if (c == ',' && depth == 1)
+		{
+			args.push_back(text.substr(start, i - start));
+			start = i + 1;
+		}
+	}
+	return args;
+}
+
+// An argument that is nothing but string literals, joined and unescaped.
+bool LiteralValue(const std::string &arg, std::string &value)
+{
+	value.clear();
+	size_t i = 0;
+	bool any = false;
+	while (true)
+	{
+		while (i < arg.size() && isspace(static_cast<unsigned char>(arg[i])))
+			++i;
+		if (i == arg.size())
+			return any;
+		if (arg[i] != '"')
+			return false;
+		for (++i; i < arg.size() && arg[i] != '"'; ++i)
+		{
+			if (arg[i] != '\\' || i + 1 >= arg.size())
+			{
+				value += arg[i];
+				continue;
+			}
+			const char e = arg[++i];
+			if (e == 'n') value += '\n';
+			else if (e == 't') value += '\t';
+			else if (e == 'x' && i + 2 < arg.size())
+			{
+				value += static_cast<char>(std::stoi(arg.substr(i + 1, 2), nullptr, 16));
+				i += 2;
+			}
+			else value += e;   // \" \\ \'
+		}
+		++i;
+		any = true;
+	}
+}
+
+bool IsIdentifierChar(char c)
+{
+	return isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+// The Overlay sources, found from the harness binary (x64/<config>/).
+std::filesystem::path OverlaySources()
+{
+	wchar_t exe[MAX_PATH] = {};
+	GetModuleFileNameW(nullptr, exe, MAX_PATH);
+	std::filesystem::path dir = std::filesystem::path(exe).parent_path();
+	for (int up = 0; up < 5 && !dir.empty(); ++up, dir = dir.parent_path())
+		if (std::filesystem::exists(dir / "Overlay" / "Localization.h"))
+			return dir / "Overlay";
+	return {};
+}
+
+// A literal a reworded or new string left without an entry would show its
+// English in every other language; this finds it from the sources, by the
+// lookup Tr uses. A literal followed by more text ("Saved to " + path) is
+// only the start of a message, and its pattern is checked where it is built.
+void EveryShownLiteralIsTranslated(Check check)
+{
+	const std::filesystem::path overlay = OverlaySources();
+	if (overlay.empty())
+	{
+		check("i18n every shown literal is translated", false, "the Overlay sources were not found");
+		return;
+	}
+	size_t literals = 0;
+	std::vector<std::string> missing;
+	for (const auto &item : std::filesystem::directory_iterator(overlay))
+	{
+		const std::filesystem::path &path = item.path();
+		const std::string name = path.filename().string();
+		if ((path.extension() != ".cpp" && path.extension() != ".h") || name.rfind("Localization", 0) == 0)
+			continue;
+		std::ifstream file(path, std::ios::binary);
+		std::stringstream buffer;
+		buffer << file.rdbuf();
+		const std::string text = StripComments(buffer.str());
+		for (const ShownCall &call : ShownCalls())
+		{
+			const std::string token = std::string(call.name) + "(";
+			for (size_t at = text.find(token); at != std::string::npos; at = text.find(token, at + 1))
+			{
+				const char before = at > 0 ? text[at - 1] : ' ';
+				if (call.member ? (before != '.' && before != '>') : IsIdentifierChar(before))
+					continue;
+				const std::vector<std::string> args = ArgumentsOf(text, at + token.size() - 1);
+				for (size_t position : call.positions)
+				{
+					std::string value;
+					if (position >= args.size() || !LiteralValue(args[position], value))
+						continue;
+					bool letters = false;
+					for (unsigned char c : value)
+						letters = letters || isalpha(c);
+					if (!letters)
+						continue;
+					++literals;
+					if (!HasTranslation(Language::Japanese, value) || !HasTranslation(Language::Italian, value))
+						missing.push_back(name + ": " + value);
+				}
+			}
+		}
+	}
+	std::string detail = std::to_string(literals) + " literals";
+	if (!missing.empty())
+		detail += ", untranslated: " + missing.front() +
+			(missing.size() > 1 ? " (+" + std::to_string(missing.size() - 1) + " more)" : "");
+	check("i18n every shown literal is translated", literals > 100 && missing.empty(), detail.c_str());
 }
 
 void EnglishPassesThrough(Check check)
@@ -196,9 +446,11 @@ void ItalianLookups(Check check)
 
 void RunLocalizationScenarios(Check check)
 {
-	TableIsConsistent(check, "ja", kJapanese, kJapaneseCount);
-	TableIsConsistent(check, "it", kItalian, kItalianCount);
+	TableIsConsistent(check, "ja", JapaneseTable());
+	TableIsConsistent(check, "it", ItalianTable());
 	TablesCoverTheSameText(check);
+	TableFileFormat(check);
+	EveryShownLiteralIsTranslated(check);
 	EnglishPassesThrough(check);
 	JapaneseLookups(check);
 	ItalianLookups(check);

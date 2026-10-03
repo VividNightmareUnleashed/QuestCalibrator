@@ -51,6 +51,10 @@ namespace questcal::i18n
 	const char *Tr(const char *english);
 	std::string Tr(const std::string &english);
 
+	// Whether the language translates all of `english`, by the lookup Tr uses:
+	// Tr also answers with a partial translation, sentence by sentence.
+	bool HasTranslation(Language language, const std::string &english);
+
 	// Debug aid for translators: English strings that reached Tr without a
 	// translation this session, one per line.
 	bool WriteMissing(const std::wstring &path);

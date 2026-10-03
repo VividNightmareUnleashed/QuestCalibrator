@@ -9,6 +9,7 @@
 #include <optional>
 #include <regex>
 #include <set>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -105,14 +106,64 @@ std::optional<std::string> KeyToRegex(const std::string &key)
 	return out;
 }
 
-Table BuildTable(const Entry *entries, size_t count, const char *sentenceGap, const char *colon)
+// "\n" is a line break and "\\" a backslash; any other backslash is text.
+std::string Unescape(std::string_view text)
+{
+	std::string out;
+	out.reserve(text.size());
+	for (size_t i = 0; i < text.size(); ++i)
+	{
+		if (text[i] == '\\' && i + 1 < text.size() && (text[i + 1] == 'n' || text[i + 1] == '\\'))
+		{
+			out += text[i + 1] == 'n' ? '\n' : '\\';
+			++i;
+			continue;
+		}
+		out += text[i];
+	}
+	return out;
+}
+
+bool StartsWith(std::string_view text, std::string_view prefix)
+{
+	return text.substr(0, prefix.size()) == prefix;
+}
+
+// RT_RCDATA resources are file bytes; the tables are UTF-8 text.
+std::string_view BuiltInFile(const wchar_t *name)
+{
+	const HMODULE module = GetModuleHandleW(nullptr);
+	const HRSRC resource = FindResourceW(module, name, MAKEINTRESOURCEW(10));
+	if (!resource)
+		return {};
+	const HGLOBAL loaded = LoadResource(module, resource);
+	const DWORD size = SizeofResource(module, resource);
+	const void *bytes = loaded ? LockResource(loaded) : nullptr;
+	if (!bytes || size == 0)
+		return {};
+	return std::string_view(static_cast<const char *>(bytes), size);
+}
+
+TableFile LoadBuiltInTable(const wchar_t *resource, std::string_view languageCode)
+{
+	const std::string_view text = BuiltInFile(resource);
+	if (text.empty())
+	{
+		TableFile missing;
+		missing.problems.push_back("the built-in table is missing");
+		return missing;
+	}
+	return ParseTableFile(text, languageCode);
+}
+
+Table BuildTable(const std::vector<Entry> &entries, const char *sentenceGap, const char *colon)
 {
 	Table table;
 	table.sentenceGap = sentenceGap;
 	table.colon = colon;
-	for (size_t i = 0; i < count; ++i)
+	for (size_t i = 0; i < entries.size(); ++i)
 	{
-		const std::string key = entries[i].english;
+		const std::string &key = entries[i].english;
 		if (auto re = KeyToRegex(key))
 		{
 			size_t literal = 0;
@@ -146,12 +197,12 @@ const Table *TableFor(Language language)
 	case Language::Japanese:
 	{
 		// Japanese runs sentences together and uses the full-width colon.
-		static const Table japanese = BuildTable(kJapanese, kJapaneseCount, "", "\xEF\xBC\x9A");
+		static const Table japanese = BuildTable(JapaneseTable().entries, "", "\xEF\xBC\x9A");
 		return &japanese;
 	}
 	case Language::Italian:
 	{
-		static const Table italian = BuildTable(kItalian, kItalianCount, " ", ": ");
+		static const Table italian = BuildTable(ItalianTable().entries, " ", ": ");
 		return &italian;
 	}
 	default:
@@ -167,7 +218,11 @@ bool HasLetters(const std::string &s)
 	return false;
 }
 
-std::optional<std::string> Translate(const Table &table, const std::string &text, int depth);
+// `complete` turns false when any part of the text stays English: Translate
+// still answers with what it could translate, as the UI wants, and
+// HasTranslation asks for all of it.
+std::optional<std::string> Translate(const Table &table, const std::string &text, int depth,
+	bool &complete);
 
 // A captured value: numbers and names stay as they are, text that has its
 // own entry ("3 min ago") is translated.
@@ -175,7 +230,8 @@ std::string TranslateCapture(const Table &table, const std::string &value, int d
 {
 	if (!HasLetters(value) || depth > 3)
 		return value;
-	auto translated = Translate(table, value, depth + 1);
+	bool complete = true;
+	auto translated = Translate(table, value, depth + 1, complete);
 	return translated ? *translated : value;
 }
 
@@ -231,7 +287,8 @@ std::vector<std::string> SplitSentences(const std::string &text)
 	return pieces;
 }
 
-std::optional<std::string> TranslateSentence(const Table &table, const std::string &text, int depth)
+std::optional<std::string> TranslateSentence(const Table &table, const std::string &text, int depth,
+	bool &complete)
 {
 	auto exact = table.exact.find(text);
 	if (exact != table.exact.end())
@@ -242,16 +299,21 @@ std::optional<std::string> TranslateSentence(const Table &table, const std::stri
 	const size_t colon = text.find(": ");
 	if (colon != std::string::npos && depth < 3)
 	{
-		auto head = Translate(table, text.substr(0, colon), depth + 1);
-		auto tail = Translate(table, text.substr(colon + 2), depth + 1);
+		auto head = Translate(table, text.substr(0, colon), depth + 1, complete);
+		auto tail = Translate(table, text.substr(colon + 2), depth + 1, complete);
 		if (head || tail)
+		{
+			if (!head || !tail)
+				complete = false;
 			return (head ? *head : text.substr(0, colon)) + table.colon +
 				(tail ? *tail : text.substr(colon + 2));
+		}
 	}
 	return std::nullopt;
 }
 
-std::optional<std::string> Translate(const Table &table, const std::string &text, int depth)
+std::optional<std::string> Translate(const Table &table, const std::string &text, int depth,
+	bool &complete)
 {
 	// Trailing newlines and spaces are formatting, not wording.
 	size_t end = text.size();
@@ -262,7 +324,7 @@ std::optional<std::string> Translate(const Table &table, const std::string &text
 	if (core.empty())
 		return std::nullopt;
 
-	if (auto whole = TranslateSentence(table, core, depth))
+	if (auto whole = TranslateSentence(table, core, depth, complete))
 		return *whole + tail;
 
 	const std::vector<std::string> pieces = SplitSentences(core);
@@ -286,7 +348,9 @@ std::optional<std::string> Translate(const Table &table, const std::string &text
 			previousEnglish = false;
 			continue;
 		}
-		auto translated = TranslateSentence(table, piece, depth);
+		auto translated = TranslateSentence(table, piece, depth, complete);
+		if (!translated)
+			complete = false;
 		// The language's own sentence gap; English left untranslated keeps
 		// the space it had.
 		if (spacePending)
@@ -317,6 +381,82 @@ Language WindowsUiLanguage()
 }
 
 } // namespace
+
+TableFile ParseTableFile(std::string_view text, std::string_view languageCode)
+{
+	TableFile file;
+	const std::string translationPrefix = std::string(languageCode) + ": ";
+	auto problem = [&file](size_t line, const char *why)
+	{
+		file.problems.push_back("line " + std::to_string(line) + ": " + why);
+	};
+	if (StartsWith(text, "\xEF\xBB\xBF"))
+		text.remove_prefix(3);   // a byte order mark is not part of the first line
+
+	std::string key;
+	size_t keyLine = 0;   // 0: no key waiting for its translation
+	size_t lineNumber = 0;
+	size_t start = 0;
+	while (start <= text.size())
+	{
+		size_t end = text.find('\n', start);
+		if (end == std::string_view::npos)
+			end = text.size();
+		std::string_view line = text.substr(start, end - start);
+		start = end + 1;
+		++lineNumber;
+		if (!line.empty() && line.back() == '\r')
+			line.remove_suffix(1);
+		if (line.empty() || line.front() == '#')
+			continue;
+		if (StartsWith(line, "name: "))
+			file.nativeName = Unescape(line.substr(6));
+		else if (StartsWith(line, "en: "))
+		{
+			if (keyLine != 0)
+				problem(keyLine, "a key with no translation");
+			key = Unescape(line.substr(4));
+			keyLine = lineNumber;
+		}
+		else if (StartsWith(line, translationPrefix))
+		{
+			if (keyLine == 0)
+			{
+				problem(lineNumber, "a translation with no key before it");
+				continue;
+			}
+			file.entries.push_back({ std::move(key), Unescape(line.substr(translationPrefix.size())) });
+			key.clear();
+			keyLine = 0;
+		}
+		else
+			problem(lineNumber, "not a key, a translation, a name or a comment");
+	}
+	if (keyLine != 0)
+		problem(keyLine, "a key with no translation");
+	return file;
+}
+
+const TableFile &JapaneseTable()
+{
+	static const TableFile table = LoadBuiltInTable(L"TRANSLATIONS_JA", "ja");
+	return table;
+}
+
+const TableFile &ItalianTable()
+{
+	static const TableFile table = LoadBuiltInTable(L"TRANSLATIONS_IT", "it");
+	return table;
+}
+
+bool HasTranslation(Language language, const std::string &english)
+{
+	const Table *table = TableFor(language);
+	if (!table)
+		return true;   // English is the source
+	bool complete = true;
+	return Translate(*table, english, 0, complete).has_value() && complete;
+}
 
 Language LanguageFromCode(const std::string &code)
 {
@@ -386,7 +526,8 @@ const char *Tr(const char *english)
 		return cached->second.c_str();
 
 	std::string key(english);
-	auto translated = Translate(*table, key, 0);
+	bool complete = true;
+	auto translated = Translate(*table, key, 0, complete);
 	if (!translated && HasLetters(key) && g_missing.size() < kMissingMax)
 		g_missing.insert(key);
 	auto inserted = g_cache.emplace(std::move(key), translated ? *translated : std::string(english));

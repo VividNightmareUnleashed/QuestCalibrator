@@ -102,11 +102,17 @@ one to one. `BuildHeader` in `Overlay/UserInterface.cpp` is the example to copy.
 Player-facing text is written in English in the code and translated as it is
 drawn (`Overlay/Localization.h`). The shared widgets call `Tr` themselves; text
 drawn directly with ImGui or the draw list needs `Tr`. A new or reworded string
-needs its entry in every table (`Overlay/LocalizationJa.cpp`,
-`Overlay/LocalizationIt.cpp`): printf keys become patterns, and their values use
-`{0}`, `{1}` and so on. The harness fails when the tables' keys differ; check a
-screen with `-lang <code> -i18n-missing <file>`. Log and diagnostics lines stay
-in English.
+needs its entry in every table, one UTF-8 text file per language
+(`Overlay/lang/ja.txt`, `Overlay/lang/it.txt`, built in by
+`Overlay/Translations.rc`). Each entry is an `en:` line with the English and a
+line with the translation; the format is described at the top of each file.
+printf keys become patterns, and their values use `{0}`, `{1}` and so on.
+
+The harness fails when the tables' keys differ, when a file has a line it cannot
+read, and when a literal the overlay shows has no translation: it reads the
+`Overlay` sources for the strings passed to `Tr`, to the context's messages and
+to the shared widgets that translate their labels. To check a screen, run with
+`-lang <code> -i18n-missing <file>`. Log and diagnostics lines stay in English.
 
 ## Guidance art
 
