@@ -137,7 +137,9 @@ function Compare-Tree([string]$name, [hashtable]$expected, [hashtable]$actual) {
 
 function Assert-Installed([string]$packageDir) {
     $expectedApp = Get-Tree (Join-Path $packageDir 'app')
-    $besideApp = @('Uninstall.ps1', 'README-INSTALL.txt', 'LICENSE')
+    # Uninstall.ps1 loads FilesystemPolicy.ps1 from beside it; packages from
+    # before the policy ship neither the file nor a copy of it.
+    $besideApp = @('Uninstall.ps1', 'FilesystemPolicy.ps1', 'README-INSTALL.txt', 'LICENSE')
     # Installers from before the notices were installed beside the app ship
     # them in the package without copying them.
     $installsNotices = Select-String -Quiet -SimpleMatch 'THIRD-PARTY-NOTICES' -LiteralPath (Join-Path $packageDir 'Install.ps1')
