@@ -515,7 +515,6 @@ struct CalibrationContext : CalibrationProfileState
 		TwoAxes,          // rotation about a single axis
 		HoldTogether,     // the pair did not move as one
 		SlowDown,         // motion too fast for the sample rate
-		KeepTracking,     // latency could not be measured
 		TrackingLost,     // a device stopped tracking
 		WrongPick,        // the reference must be on the headset's system
 		WaitForTracking,  // the headset re-centred mid-run

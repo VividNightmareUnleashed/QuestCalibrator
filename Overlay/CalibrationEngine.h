@@ -66,7 +66,6 @@ struct EngineConfig
 	// A weak correlation used to refuse the whole calibration: three of five
 	// attempts in the 2026-09-25 tester session, where the one success had a
 	// correlation of 0.75 and a peak 0.0017 above the next lag.
-	bool   useFallbackTimeOffset = false;
 	double fallbackTimeOffset = 0.0;   // seconds; positive = target stream lags reference
 	double timeOffsetRange = 0.06;     // seconds searched on each side of zero
 	// Coarse lag grid, refined parabolically. The correlator resamples at a
@@ -74,7 +73,7 @@ struct EngineConfig
 	// every lag is an exact slot shift of one shared resampling.
 	double timeOffsetStep = 0.002;
 	// A lag is taken only when its correlation reaches this; below it the
-	// estimate is refused (and the fallback, if any, used).
+	// estimate is refused and the fallback used.
 	double minTimeOffsetCorrelation = 0.25;
 
 	// --- sample gating ---
@@ -171,7 +170,6 @@ enum class EngineFailure
 	TranslationUnobservable, // not enough varied rotation to pin the position
 	RotationResidual,        // the two devices did not move as one rigid body
 	PositionResidual,        // jittery tracking or motion too fast
-	TimeOffset,              // latency could not be measured
 	ScaleNotIdentifiable,
 	InvalidConfiguration,
 	ResourceLimit,

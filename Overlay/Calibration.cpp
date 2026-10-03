@@ -1725,11 +1725,6 @@ static StopReason DescribeSolveFailure(const questcal::EngineResult &result)
 		reason.action = "Move slowly and keep both devices in clear view, then try again.";
 		reason.hint = Hint::SlowDown;
 		break;
-	case EngineFailure::TimeOffset:
-		reason.body = "Couldn't measure the tracking delay between the devices.";
-		reason.action = "Keep turning both devices together until the timer finishes.";
-		reason.hint = Hint::KeepTracking;
-		break;
 	case EngineFailure::NotEnoughSamples:
 		reason.body = "Almost no tracking data arrived.";
 		reason.action = "Check that both devices are tracking, then try again.";
@@ -1846,7 +1841,6 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// one (continuous re-estimation refines it), or zero before any: the
 	// residual gates still judge the solve. Both measured on this setup were
 	// within 3.5 ms of zero, a third of a degree at a brisk head turn.
-	config.useFallbackTimeOffset = true;
 	config.fallbackTimeOffset = ctx.validProfile ? ctx.transform.timeOffset : 0.0;
 	if (asAnchor && ctx.transform.scale != 1.0)
 	{

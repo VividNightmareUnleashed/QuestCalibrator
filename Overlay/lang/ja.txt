@@ -571,10 +571,6 @@ en: The devices' position readings didn't match closely enough.
 ja: 2 つのデバイスの位置の測定値が十分に一致しませんでした。
 en: Move slowly and keep both devices in clear view, then try again.
 ja: ゆっくり動かし、両方のデバイスがよく見える状態を保って、もう一度お試しください。
-en: Couldn't measure the tracking delay between the devices.
-ja: デバイス間のトラッキング遅延を測定できませんでした。
-en: Keep turning both devices together until the timer finishes.
-ja: タイマーが終わるまで、2 つのデバイスを一緒に回し続けてください。
 en: Almost no tracking data arrived.
 ja: トラッキングデータがほとんど届きませんでした。
 en: Check that both devices are tracking, then try again.

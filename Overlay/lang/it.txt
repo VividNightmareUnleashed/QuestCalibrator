@@ -579,10 +579,6 @@ en: The devices' position readings didn't match closely enough.
 it: Le misure di posizione dei dispositivi non coincidevano abbastanza.
 en: Move slowly and keep both devices in clear view, then try again.
 it: Muoviti lentamente e tieni entrambi i dispositivi ben in vista, poi riprova.
-en: Couldn't measure the tracking delay between the devices.
-it: Impossibile misurare il ritardo di tracciamento tra i dispositivi.
-en: Keep turning both devices together until the timer finishes.
-it: Continua a girare insieme i due dispositivi fino alla fine del timer.
 en: Almost no tracking data arrived.
 it: Non sono arrivati quasi dati di tracciamento.
 en: Check that both devices are tracking, then try again.

@@ -1289,19 +1289,10 @@ EngineResult CalibrationEngine::Solve(const std::vector<PoseSample> &refStream,
 	{
 		offsetKnown = EstimateTimeOffset(refStream, targetStream, config, offset,
 			&offsetScore, &offsetPeakMargin, &offsetFailure);
-		if (!offsetKnown && config.useFallbackTimeOffset)
+		if (!offsetKnown)
 		{
 			offset = config.fallbackTimeOffset;
 			offsetFellBack = true;
-		}
-		else if (!offsetKnown)
-		{
-			failure.failure = EngineFailure::TimeOffset;
-			failure.timeOffsetFailure = offsetFailure;
-			failure.timeOffsetScore = offsetScore;
-			failure.timeOffsetPeakMargin = offsetPeakMargin;
-			failure.message = "Time offset could not be measured reliably. Keep both devices visible and rotate them together with varied motion.";
-			return failure;
 		}
 	}
 

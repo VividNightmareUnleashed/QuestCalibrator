@@ -3232,9 +3232,8 @@ void RunSolverPrimitiveScenarios()
 	// The latency fallback (live 2026-09-25: three of five calibrations were
 	// refused on the latency alone). A head turning at one constant speed
 	// about a wandering axis gives the solve every axis it needs and the
-	// speed correlation nothing to lock onto: without a fallback the solve is
-	// refused and says why, with one it proceeds on the fallback offset and
-	// the residual gates judge it.
+	// speed correlation nothing to lock onto: the solve says why the estimate
+	// failed, proceeds on the fallback offset, and the residual gates judge it.
 	{
 		GroundTruth truth;
 		truth.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(0.9, Eigen::Vector3d::UnitY()));
@@ -3278,19 +3277,18 @@ void RunSolverPrimitiveScenarios()
 
 		EngineConfig cfg;
 		cfg.solveScale = false;
-		const EngineResult refused = CalibrationEngine::Solve(ref, target, cfg);
-		cfg.useFallbackTimeOffset = true;
-		cfg.fallbackTimeOffset = 0.0;
 		const EngineResult fellBack = CalibrationEngine::Solve(ref, target, cfg);
+		cfg.fallbackTimeOffset = 0.004;
+		const EngineResult previous = CalibrationEngine::Solve(ref, target, cfg);
 		const double rotErr = fellBack.rotation.angularDistance(truth.rotation) * 180.0 / questcal::Pi;
 		const double posErr = (fellBack.translation - truth.translation).norm();
-		snprintf(detail, sizeof detail, "without: failure %d (%s); with: valid %d, fell back %d, %.3f deg, %.1f mm",
-			static_cast<int>(refused.failure), refused.timeOffsetFailure.c_str(),
-			fellBack.valid, fellBack.timeOffsetFellBack, rotErr, posErr * 1000.0);
+		snprintf(detail, sizeof detail, "valid %d, fell back %d (%s), %.3f deg, %.1f mm; given 4 ms: valid %d, fell back %d, %.1f ms",
+			fellBack.valid, fellBack.timeOffsetFellBack, fellBack.timeOffsetFailure.c_str(), rotErr, posErr * 1000.0,
+			previous.valid, previous.timeOffsetFellBack, previous.timeOffset * 1000.0);
 		Check("solver: an unmeasurable latency falls back instead of failing",
-			!refused.valid && refused.failure == EngineFailure::TimeOffset && !refused.timeOffsetFailure.empty() &&
 			fellBack.valid && fellBack.timeOffsetFellBack && !fellBack.timeOffsetValid &&
-			fellBack.timeOffset == 0.0 && rotErr < 0.3 && posErr < 0.005, detail);
+			!fellBack.timeOffsetFailure.empty() && fellBack.timeOffset == 0.0 && rotErr < 0.3 && posErr < 0.005 &&
+			previous.valid && previous.timeOffsetFellBack && previous.timeOffset == 0.004, detail);
 	}
 
 	// The same recovery on the reported-velocity path, pinned to a tenth of the
