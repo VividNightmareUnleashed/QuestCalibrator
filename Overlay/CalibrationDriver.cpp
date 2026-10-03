@@ -233,7 +233,10 @@ void SynchronizeCalibrationDriver(CalibrationContext &ctx)
 	{
 		std::string hmdTrackingSystem;
 		std::string hmdSerial;
-		if (vr::VRSystem()->GetTrackedDeviceClass(vr::k_unTrackedDeviceIndex_Hmd) !=
+		// No runtime reads like an empty headset slot.
+		const auto system = vr::VRSystem();
+		if (!system ||
+			system->GetTrackedDeviceClass(vr::k_unTrackedDeviceIndex_Hmd) !=
 				vr::TrackedDeviceClass_HMD ||
 			!ReadCurrentHmdIdentity(hmdTrackingSystem, hmdSerial) ||
 			hmdTrackingSystem != ctx.referenceTrackingSystem ||
