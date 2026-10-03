@@ -224,8 +224,6 @@ struct StopReason
 	std::string body;
 	std::string action;
 	std::string detail;
-	// The picture the modal shows with it; None for environmental stops.
-	CalibrationContext::GuideHint hint = CalibrationContext::GuideHint::None;
 };
 
 static void AbortCalibration(CalibrationContext &ctx, const StopReason &reason);
@@ -495,8 +493,7 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 				AbortCalibration(ctx, {
 					name + "'s tracking reset during the measurement.",
 					"Let tracking settle for a few seconds, then start again.",
-					std::string(reference ? "Reference" : "Target") + " world-from-driver changed during collection",
-					CalibrationContext::GuideHint::WaitForTracking });
+					std::string(reference ? "Reference" : "Target") + " world-from-driver changed during collection" });
 				return false;
 			}
 		}
@@ -1658,7 +1655,7 @@ static bool EndCalibrationRun(CalibrationContext &ctx)
 // Called only from within CalibrationTick, after its VRSystem() check.
 static void AbortCalibration(CalibrationContext &ctx, const StopReason &reason)
 {
-	ctx.lastRunHint = reason.hint;
+	ctx.lastRunPassed = false;
 	ctx.Outcome("Calibration stopped", reason.body, reason.action, reason.detail,
 		CalibrationContext::Tone::Warn);
 	if (EndCalibrationRun(ctx))
@@ -1699,7 +1696,6 @@ static constexpr double CalibrationWaitSeconds = 30.0;
 static StopReason DescribeSolveFailure(const questcal::EngineResult &result)
 {
 	using questcal::EngineFailure;
-	using Hint = CalibrationContext::GuideHint;
 	StopReason reason;
 	reason.detail = result.message;
 	switch (result.failure)
@@ -1707,23 +1703,19 @@ static StopReason DescribeSolveFailure(const questcal::EngineResult &result)
 	case EngineFailure::NotEnoughRotation:
 		reason.body = "The devices didn't rotate far enough.";
 		reason.action = "Use wider turns while keeping both devices fixed together.";
-		reason.hint = Hint::RotateMore;
 		break;
 	case EngineFailure::SingleAxis:
 	case EngineFailure::TranslationUnobservable:
 		reason.body = "The devices only rotated in one direction.";
 		reason.action = "Turn and tilt both devices together in different directions.";
-		reason.hint = Hint::TwoAxes;
 		break;
 	case EngineFailure::RotationResidual:
 		reason.body = "The devices' rotation readings didn't match closely enough.";
 		reason.action = "Hold them firmly together and try again.";
-		reason.hint = Hint::HoldTogether;
 		break;
 	case EngineFailure::PositionResidual:
 		reason.body = "The devices' position readings didn't match closely enough.";
 		reason.action = "Move slowly and keep both devices in clear view, then try again.";
-		reason.hint = Hint::SlowDown;
 		break;
 	case EngineFailure::NotEnoughSamples:
 		reason.body = "Almost no tracking data arrived.";
@@ -1871,8 +1863,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 				: DeviceName(ctx, run.targetModel, run.targetSerial, false)) +
 				"'s base station tracking restarted during the measurement.",
 			"Keep it in view of its base stations for the whole countdown.",
-			"Lighthouse solution restarted during collection",
-			CalibrationContext::GuideHint::WaitForTracking });
+			"Lighthouse solution restarted during collection" });
 		return;
 	}
 	if (run.toleratedGaps > 0)
@@ -1964,7 +1955,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 	if (!result.valid)
 	{
 		const StopReason reason = DescribeSolveFailure(result);
-		ctx.lastRunHint = reason.hint;
+		ctx.lastRunPassed = false;
 		ctx.Outcome("Calibration failed", reason.body, reason.action, reason.detail,
 			CalibrationContext::Tone::Warn);
 		if (EndCalibrationRun(ctx))
@@ -2033,7 +2024,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		// next idle scan.
 		if (EndCalibrationRun(ctx))
 			SynchronizeCalibrationDriver(ctx);
-		ctx.lastRunHint = CalibrationContext::GuideHint::Success;
+		ctx.lastRunPassed = true;
 		StoreFieldAnchor(ctx, result, targetCentroid);
 		return;
 	}
@@ -2077,8 +2068,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 			AbortCalibration(ctx, {
 				DeviceName(ctx, run.targetModel, run.targetSerial, false) + "'s tracking reset during the measurement.",
 				"Let tracking settle for a few seconds, then start again.",
-				"The target's frame correction did not follow every frame move of the measurement",
-				CalibrationContext::GuideHint::WaitForTracking });
+				"The target's frame correction did not follow every frame move of the measurement" });
 			return;
 		}
 		if (!run.normalizationCaptured || !questcal::TrackerFrameCorrections::ExpressCalibration(run.targetNormalizationRotation,
@@ -2182,7 +2172,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 
 	// One plain sentence on the quality band the rating uses; the residuals
 	// behind it went to the detail lines above.
-	ctx.lastRunHint = CalibrationContext::GuideHint::Success;
+	ctx.lastRunPassed = true;
 	const questcal::SolveQuality band =
 		questcal::JudgeSolveQuality(result.rotationRmsDeg, result.translationRmsMeters);
 	const bool good = band == questcal::SolveQuality::Good;
@@ -2202,7 +2192,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 		else
 		{
 			if (mount.tooFast)
-				ctx.lastRunHint = CalibrationContext::GuideHint::SlowDown;
+				ctx.lastRunPassed = false;
 			ctx.Outcome("Done, but the headset tracker wasn't set up",
 				quality + " " + mount.note, mount.action, "", CalibrationContext::Tone::Warn);
 		}
@@ -2430,8 +2420,7 @@ void CalibrationTick(double time)
 			AbortCalibration(ctx, {
 				"No reference device is selected.",
 				"Pick a device that's switched on.",
-				"Missing reference device",
-				CalibrationContext::GuideHint::WrongPick });
+				"Missing reference device" });
 			return;
 		}
 		if (run.targetId >= vr::k_unMaxTrackedDeviceCount)
@@ -2439,8 +2428,7 @@ void CalibrationTick(double time)
 			AbortCalibration(ctx, {
 				"No target device is selected.",
 				"Pick a device that's switched on.",
-				"Missing target device",
-				CalibrationContext::GuideHint::WrongPick });
+				"Missing target device" });
 			return;
 		}
 		// A lighthouse solution measured before it settles puts its settling
@@ -2494,8 +2482,7 @@ void CalibrationTick(double time)
 					AbortCalibration(ctx, {
 						DeviceName(ctx, run.referenceModel, run.referenceSerial, true) + " isn't tracking.",
 						"Check it's awake and in view of its tracking cameras or base stations, then try again.",
-						"Reference device is not Running_OK",
-						CalibrationContext::GuideHint::TrackingLost });
+						"Reference device is not Running_OK" });
 					return;
 				}
 				if (!targetTracking)
@@ -2503,8 +2490,7 @@ void CalibrationTick(double time)
 					AbortCalibration(ctx, {
 						DeviceName(ctx, run.targetModel, run.targetSerial, false) + " isn't tracking.",
 						"Check it's awake and visible to its base stations, then try again.",
-						"Target device is not Running_OK",
-						CalibrationContext::GuideHint::TrackingLost });
+						"Target device is not Running_OK" });
 					return;
 				}
 				char waited[160];
@@ -2555,8 +2541,7 @@ void CalibrationTick(double time)
 			AbortCalibration(ctx, {
 				"The reference device must be on the headset's tracking system.",
 				"Pick the headset or one of its controllers as the reference.",
-				"Could not verify that the current HMD owns the selected reference tracking system",
-				CalibrationContext::GuideHint::WrongPick });
+				"Could not verify that the current HMD owns the selected reference tracking system" });
 			return;
 		}
 
@@ -2661,8 +2646,7 @@ void CalibrationTick(double time)
 			DeviceName(ctx, run.referenceModel, run.referenceSerial, true) + " stopped tracking mid-run.",
 			"Keep it tracking for the whole countdown.",
 			run.usesPoseRing ? "No trusted Running_OK raw poses arrived for the reference device"
-				: "Reference device stopped reporting Running_OK runtime poses",
-			CalibrationContext::GuideHint::TrackingLost });
+				: "Reference device stopped reporting Running_OK runtime poses" });
 		return;
 	}
 	if (time - run.lastTargetSample > 2.0)
@@ -2671,8 +2655,7 @@ void CalibrationTick(double time)
 			DeviceName(ctx, run.targetModel, run.targetSerial, false) + " stopped tracking mid-run.",
 			"Keep it in view of its base stations for the whole countdown.",
 			run.usesPoseRing ? "No trusted Running_OK raw poses arrived for the target device"
-				: "Target device stopped reporting Running_OK runtime poses",
-			CalibrationContext::GuideHint::TrackingLost });
+				: "Target device stopped reporting Running_OK runtime poses" });
 		return;
 	}
 
@@ -2690,7 +2673,7 @@ void CancelCalibration()
 	if (ctx.state != CalibrationState::Begin && ctx.state != CalibrationState::Neutralizing &&
 		ctx.state != CalibrationState::Collecting)
 		return;
-	ctx.lastRunHint = CalibrationContext::GuideHint::None;
+	ctx.lastRunPassed = false;
 	ctx.Outcome("Calibration cancelled", "", "", "");
 	if (EndCalibrationRun(ctx) && vr::VRSystem())
 		SynchronizeCalibrationDriver(ctx);

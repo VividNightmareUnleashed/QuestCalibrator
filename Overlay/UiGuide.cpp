@@ -293,14 +293,14 @@ void BuildMenu(const VRState &state)
 		// refused solve under -uipreview-failed and a success otherwise.
 		if (g_uiPreviewScenario == PreviewScenario::Failed)
 		{
-			CalCtx.lastRunHint = CalibrationContext::GuideHint::RotateMore;
+			CalCtx.lastRunPassed = false;
 			CalCtx.Outcome("Calibration failed", "The devices didn't rotate in enough directions.",
 				"Turn and tilt both devices together, then try again.",
 				"Rotation coverage 0.21 of 1.00 (need 0.60)", CalibrationContext::Tone::Warn);
 		}
 		else
 		{
-			CalCtx.lastRunHint = CalibrationContext::GuideHint::Success;
+			CalCtx.lastRunPassed = true;
 			CalCtx.Outcome("Calibration complete", "Check that the tracker positions line up in VR.", "", "", CalibrationContext::Tone::Good);
 		}
 		s_guide.stage = GuideStage::Done;
@@ -567,11 +567,10 @@ void BuildMenu(const VRState &state)
 				ImGui::PopFont();
 			}
 
-			const auto hint = CalCtx.lastRunHint;
 			ImGui::Dummy(ImVec2(0, 16.0f));
 
 			ImGui::Spacing();
-			const bool failed = hint != CalibrationContext::GuideHint::Success;
+			const bool failed = !CalCtx.lastRunPassed;
 			const float detailsW = anyDetail ? 170.0f : 0.0f;
 			if (anyDetail)
 			{
@@ -583,7 +582,7 @@ void BuildMenu(const VRState &state)
 			const float remaining = mw - (anyDetail ? detailsW + 12.0f : 0.0f);
 			if (failed)
 			{
-				// Back to get-set with the picture still in mind, not to a log.
+				// Back to get-set and its motion demo, not to a log.
 				const float closeW = 120.0f;
 				if (IconButton("guideretry", "Try again", IconPlay, ImVec2(remaining - closeW - 12.0f, 46.0f), BtnKind::Primary))
 				{

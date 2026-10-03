@@ -248,7 +248,7 @@ void SetupPreviewState()
 		}
 		if (g_uiPreviewScenario == PreviewScenario::Result)
 		{
-			CalCtx.lastRunHint = CalibrationContext::GuideHint::Success;
+			CalCtx.lastRunPassed = true;
 			CalCtx.Outcome("Calibration complete", "Check that the tracker positions line up in VR.",
 				"", "Rotation RMS 2.53 degrees; position RMS 1.0 cm", CalibrationContext::Tone::Good);
 			s_guide.stage = GuideStage::Done;

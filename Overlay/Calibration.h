@@ -504,22 +504,11 @@ struct CalibrationContext : CalibrationProfileState
 	static constexpr size_t ActivityMax = 6;
 	std::deque<ActivityEntry> activity;
 
-	// What the modal should show a picture of after a run: the user error the
-	// refused solve or the stop reason points at, or success. None for
-	// environmental stops and cancellations, which get no picture.
-	enum class GuideHint
-	{
-		None,
-		Success,
-		RotateMore,       // not enough rotation
-		TwoAxes,          // rotation about a single axis
-		HoldTogether,     // the pair did not move as one
-		SlowDown,         // motion too fast for the sample rate
-		TrackingLost,     // a device stopped tracking
-		WrongPick,        // the reference must be on the headset's system
-		WaitForTracking,  // the headset re-centred mid-run
-	};
-	GuideHint lastRunHint = GuideHint::None;
+	// Whether the last run's result stands, which the modal answers with its
+	// closing buttons. Otherwise it offers another try: after a refused solve,
+	// a stop, a cancellation, or a headset tracker that moved too fast to
+	// measure.
+	bool lastRunPassed = false;
 	// The pane keeps recent history for bug reports, bounded because a driver
 	// that rebases at pose rate grows it at MB/minute. Entries are capped too,
 	// so no single string grows unboundedly for ImGui::TextWrapped to re-wrap
