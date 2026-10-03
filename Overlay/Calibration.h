@@ -20,7 +20,6 @@
 #include <ctime>
 #include <deque>
 #include <functional>
-#include <iostream>
 #include <map>
 #include <string>
 #include <utility>
@@ -557,7 +556,6 @@ struct CalibrationContext : CalibrationProfileState
 		TrimPane();
 
 		AppendSessionLog(msg);
-		std::cerr << msg;
 	}
 
 	// A sentence for the player: its own pane entry, the activity feed on the
@@ -567,7 +565,6 @@ struct CalibrationContext : CalibrationProfileState
 		PushEntry(Message::Info, msg);
 		PushActivity(msg, tone);
 		AppendSessionLog(msg);
-		std::cerr << msg;
 	}
 
 	// What to do right now (rendered large in the modal).
@@ -607,7 +604,6 @@ struct CalibrationContext : CalibrationProfileState
 		if (!detail.empty())
 			line += " [" + detail + "]";
 		AppendSessionLog(line);
-		std::cerr << line << "\n";
 	}
 
 	void PushActivity(const std::string &text, Tone tone)

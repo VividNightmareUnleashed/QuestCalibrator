@@ -9,7 +9,6 @@
 #include <picojson.h>
 
 #include <string>
-#include <iostream>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -374,7 +373,7 @@ void LoadProfile(CalibrationContext &ctx)
 	}
 	else if (profileRead.status == RegistryReadStatus::Missing || profileRead.value.empty())
 	{
-		std::cout << "Profile is empty" << std::endl;
+		AppendSessionLog("no saved calibration profile");
 		ctx.Clear();
 	}
 	else
@@ -404,7 +403,7 @@ void LoadProfile(CalibrationContext &ctx)
 				}
 			}
 			ctx.ClearError(CalibrationContext::ErrorSource::ProfilePersistence);
-			std::cout << "Loaded profile" << std::endl;
+			AppendSessionLog("calibration profile loaded");
 		}
 		catch (const std::exception &e)
 		{
@@ -591,8 +590,6 @@ static bool WriteConfigRecord(CalibrationContext &ctx, const ProfileRecord &reco
 			CalibrationContext::ErrorSource::ProfilePersistence);
 		return false;
 	}
-
-	std::cout << "Saving profile to registry" << std::endl;
 
 	std::stringstream profile;
 	questcal::WriteProfile(record, ctx.persistence.revision, profile);

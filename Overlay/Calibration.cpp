@@ -25,7 +25,6 @@
 #include <ctime>
 #include <fstream>
 #include <functional>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <string>

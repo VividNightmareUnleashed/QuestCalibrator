@@ -437,11 +437,8 @@ void ActivateMultipleDrivers()
 			throw std::runtime_error(err);
 		}
 
-		std::cerr << "Enabled \"" << vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool << "\" setting" << std::endl;
-	}
-	else
-	{
-		std::cerr << "\"" << vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool << "\" setting previously enabled" << std::endl;
+		AppendSessionLog("turned on SteamVR's \"" +
+			std::string(vr::k_pch_SteamVR_ActivateMultipleDrivers_Bool) + "\" setting");
 	}
 }
 
@@ -907,7 +904,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 
 	if (!fatal.empty())
 	{
-		std::cerr << fatal << std::endl;
 		AppendSessionLog(fatal);
 		wchar_t message[1024];
 		swprintf(message, 1024, L"%hs", fatal.c_str());
