@@ -385,30 +385,10 @@ std::string PathForLog(const std::string &utf8Path)
 	return ShortenUserPath(utf8Path, Utf8(EnvW(L"LOCALAPPDATA")), Utf8(EnvW(L"USERPROFILE")));
 }
 
-bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, std::string &error,
-	vr::IVRSystem *system, const DiagnosticCapture &capture)
-{
-	std::wstring localAppData = EnvW(L"LOCALAPPDATA");
-	if (localAppData.empty())
-	{
-		error = "Couldn't find the local application data folder.";
-		return false;
-	}
-	std::wstring appDir = localAppData + L"\\QuestCalibrator";
-	std::wstring dir = appDir + L"\\diagnostics";
-	CreateDirectoryW(appDir.c_str(), nullptr);
-	CreateDirectoryW(dir.c_str(), nullptr);
+namespace {
 
-	// Acquire runtime positions before executable hashing can delay the export.
-	std::ostringstream runtimePoses;
-	runtimePoses << std::setprecision(10);
-	DescribeRuntimePoses(runtimePoses, ctx, system);
-	std::ostringstream out;
-	out << "QuestCalibrator " << QUESTCAL_VERSION_STRING << " diagnostics, written " << Stamp("%Y-%m-%d %H:%M:%S") << "\n";
-	out << "format: questcal-diagnostics/2\n";
-	out << "Personal folders and the account name are shown as <user>, the computer name as <pc>.\n";
-	out << "Device serial numbers are kept: they identify hardware, not people.\n\n";
-	out << std::setprecision(10);
+void DescribeBuild(std::ostream &out, const DiagnosticCapture &capture)
+{
 	out << "[build]\n";
 	DescribeModule(out, "overlay executable", nullptr);
 	if (const auto module = GetModuleHandleW(L"openvr_api.dll"))
@@ -424,7 +404,10 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	else
 		out << "unavailable (read error " << static_cast<int>(capture.worldScaleError) << ")";
 	out << "\n\n";
+}
 
+void DescribeSettings(std::ostream &out, const CalibrationContext &ctx)
+{
 	out << "[settings]\n";
 	out << "calibration duration: " << ctx.CollectionSeconds() << " s\n";
 	out << "advanced mode: " << OnOff(ctx.uiAdvanced) << "\n";
@@ -438,7 +421,10 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 		<< ", hide headset tracker: " << OnOff(ctx.hideMountedTracker) << "\n";
 	out << "detailed logging: " << OnOff(ctx.detailedLogging) << "\n";
 	out << "language: " << (ctx.language.empty() ? "follow Windows" : ctx.language) << "\n\n";
+}
 
+void DescribeProfile(std::ostream &out, const CalibrationContext &ctx)
+{
 	out << "[profile]\n";
 	out << "valid: " << OnOff(ctx.validProfile) << ", enabled: " << OnOff(ctx.enabled) << "\n";
 	out << "disable reason: " << EnumName(ctx.disableReason, DisableReasonNames)
@@ -482,11 +468,17 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 		out << ", " << ctx.chaperone.geometry.size() << " walls, "
 			<< ctx.chaperone.playSpaceSize.v[0] << " x " << ctx.chaperone.playSpaceSize.v[1] << " m";
 	out << "\n\n";
+}
 
+void DescribeModules(std::ostream &out, const CalibrationContext &ctx)
+{
 	out << "[modules]\n";
 	out << "lighthouse: " << questcal::ModuleStatusName(ctx.modules.lighthouse) << "\n";
 	out << "smoothing: " << questcal::ModuleStatusName(ctx.modules.smoothing) << "\n\n";
+}
 
+void DescribeBaseStations(std::ostream &out, const CalibrationContext &ctx, const DiagnosticCapture &capture)
+{
 	out << "[base stations]\n";
 	out << "lighthouse log " << (ctx.lighthouseLogAvailable ? "read from " : "not readable at ")
 		<< ctx.lighthouseLogPath << "\n";
@@ -541,7 +533,10 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	if (!ctx.lastFrameMoveInSetup.empty())
 		out << " (last: " << ctx.lastFrameMoveInSetup << ")";
 	out << "\n\n";
+}
 
+void DescribeTrackerFrames(std::ostream &out, const CalibrationContext &ctx)
+{
 	out << "[tracker frame corrections]\n";
 	out << "session epoch: " << ctx.trackerFrameEpoch << "\n";
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
@@ -556,14 +551,20 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			<< frame.translation.v[1] << " " << frame.translation.v[2] << "\n";
 	}
 	out << "\n";
+}
 
+void DescribeDriverSync(std::ostream &out, const CalibrationContext &ctx, const DiagnosticCapture &capture)
+{
 	out << "[driver synchronization]\n";
 	const auto &sync = capture.driverSync;
 	out << "submitted sequence: " << sync.latestSequence << ", state change sequence: " << sync.latestStateChangeSequence
 		<< ", last verdict sequence: " << sync.lastAcceptedVerdictSequence << ", refused " << OnOff(sync.lastVerdictRefused)
 		<< ", changed since verdict " << OnOff(sync.stateChangedSinceVerdict) << "\n";
 	out << "overlay error source: " << EnumName(ctx.uiErrorSource, ErrorSourceNames) << ", error: " << ctx.uiError << "\n\n";
+}
 
+void DescribeContinuousCalibration(std::ostream &out, const CalibrationContext &ctx)
+{
 	out << "[continuous calibration]\n";
 	out << "enabled: " << OnOff(ctx.continuousEnabled)
 		<< ", method: " << (ctx.continuousNoPause ? "legacy" : "standard") << "\n";
@@ -593,19 +594,18 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 		<< ctx.discontinuousLossEvents << " tracking dropouts with a position change, "
 		<< ctx.jumpsCompensated << " universe jumps compensated\n";
 	out << "pose channel: " << (ctx.poseRingOpen ? "open" : "closed") << "\n\n";
-	LARGE_INTEGER frequency{};
-	QueryPerformanceFrequency(&frequency);
-	const double qpcNow = capture.sampleClock;
-	out << DescribeContinuousDiagnostics(ctx, qpcNow) << "\n";
-	DescribeRawPoses(out, capture.poseStream, qpcNow,
-		1.0 / static_cast<double>(frequency.QuadPart));
-	out << runtimePoses.str();
+}
 
+void DescribeRecent(std::ostream &out, const CalibrationContext &ctx)
+{
 	out << "[recent]\n";
 	for (const auto &entry : ctx.activity)
 		out << Clock(entry.unixTime) << "  " << entry.text << "\n";
 	out << "\n";
+}
 
+void DescribeLogs(std::ostream &out, const DiagnosticCapture &capture, const std::wstring &appDir)
+{
 	std::string driverLog;
 	if (!capture.steamVrRuntimePath.empty())
 		driverLog = ReadFileTail(Wide(capture.steamVrRuntimePath) + L"\\drivers\\01questcalibrator\\bin\\win64\\quest_calibrator_driver.log");
@@ -614,6 +614,60 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	out << "[driver log tail, newest 256 KiB; may include earlier sessions]\n" << driverLog << "\n";
 	out << "[session log]\n" << ReadWholeFile(appDir + L"\\QuestCalibrator.log") << "\n";
 	out << "[previous session log]\n" << ReadWholeFile(appDir + L"\\QuestCalibrator.prev.log") << "\n";
+}
+
+} // namespace
+
+bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, std::string &error,
+	vr::IVRSystem *system, const DiagnosticCapture &capture)
+{
+	std::wstring localAppData = EnvW(L"LOCALAPPDATA");
+	if (localAppData.empty())
+	{
+		error = "Couldn't find the local application data folder.";
+		return false;
+	}
+	std::wstring appDir = localAppData + L"\\QuestCalibrator";
+	std::wstring dir = appDir + L"\\diagnostics";
+	CreateDirectoryW(appDir.c_str(), nullptr);
+	CreateDirectoryW(dir.c_str(), nullptr);
+
+	// Acquire runtime positions before executable hashing can delay the export.
+	std::ostringstream runtimePoses;
+	runtimePoses << std::setprecision(10);
+	DescribeRuntimePoses(runtimePoses, ctx, system);
+	std::ostringstream out;
+	out << "QuestCalibrator " << QUESTCAL_VERSION_STRING << " diagnostics, written " << Stamp("%Y-%m-%d %H:%M:%S") << "\n";
+	out << "format: questcal-diagnostics/2\n";
+	out << "Personal folders and the account name are shown as <user>, the computer name as <pc>.\n";
+	out << "Device serial numbers are kept: they identify hardware, not people.\n\n";
+	out << std::setprecision(10);
+	DescribeBuild(out, capture);
+
+	DescribeSettings(out, ctx);
+
+	DescribeProfile(out, ctx);
+
+	DescribeModules(out, ctx);
+
+	DescribeBaseStations(out, ctx, capture);
+
+	DescribeTrackerFrames(out, ctx);
+
+	DescribeDriverSync(out, ctx, capture);
+
+	DescribeContinuousCalibration(out, ctx);
+	LARGE_INTEGER frequency{};
+	QueryPerformanceFrequency(&frequency);
+	const double qpcNow = capture.sampleClock;
+	out << DescribeContinuousDiagnostics(ctx, qpcNow) << "\n";
+	DescribeRawPoses(out, capture.poseStream, qpcNow,
+		1.0 / static_cast<double>(frequency.QuadPart));
+	out << runtimePoses.str();
+
+	DescribeRecent(out, ctx);
+
+	DescribeLogs(out, capture, appDir);
 
 	std::string text = AnonymiseDiagnosticsText(out.str(),
 		Utf8(EnvW(L"USERPROFILE")), Utf8(EnvW(L"USERNAME")), Utf8(EnvW(L"COMPUTERNAME")));
