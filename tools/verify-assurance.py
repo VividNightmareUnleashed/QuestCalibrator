@@ -99,7 +99,7 @@ NOW_MUTANTS = {
 # Each compiling mutation must reach its intended contract assertion. An exit
 # code and arbitrary nonempty exception text do not establish that obligation.
 INVENTORY_MUTANTS = {
-    "P06": ("Driver/HookLifecyclePolicy.h", "Quiescence decision"),
+    "P06": ("Driver/HookLifecyclePolicy.h", "Teardown released a callback still inside"),
     "P07": ("common/PoseRingCounters.h", "Modular sequence ordering"),
     "P08": ("Driver/AlignmentField.cpp", "Actual angular cap, including large arcs"),
     "S01": ("Overlay/DriverSyncTracker.h", "Only a submitted current-state verdict is accepted"),
