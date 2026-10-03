@@ -32,7 +32,7 @@
 //
 // The caller feeds only devices that anchor a universe, and only samples that
 // passed TryComposeRingSample, in increasing time per device (see the feed in
-// Calibration.cpp). Events feed the staleness score; nothing here corrects.
+// CalibrationMonitor.cpp). Events feed the staleness score; nothing here corrects.
 class DriftMonitor
 {
 public:

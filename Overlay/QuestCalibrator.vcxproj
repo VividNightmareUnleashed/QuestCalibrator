@@ -108,6 +108,7 @@
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\common\Version.h" />
     <ClInclude Include="Calibration.h" />
+    <ClInclude Include="CalibrationInternal.h" />
     <ClInclude Include="CalibrationDriver.h" />
     <ClInclude Include="CalibrationSpace.h" />
     <ClInclude Include="CalibrationEngine.h" />
@@ -396,6 +397,9 @@
       <ObjectFileName>$(IntDir)yoga_%(Filename).obj</ObjectFileName>
     </ClCompile>
     <ClCompile Include="Calibration.cpp" />
+    <ClCompile Include="CalibrationContinuous.cpp" />
+    <ClCompile Include="CalibrationMonitor.cpp" />
+    <ClCompile Include="CalibrationSolve.cpp" />
     <ClCompile Include="CalibrationDriver.cpp" />
     <ClCompile Include="CalibrationSpace.cpp" />
     <ClCompile Include="Diagnostics.cpp" />

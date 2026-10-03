@@ -5890,7 +5890,7 @@ void RunContinuousScenarios()
 	// window yields no estimate at all.
 	//
 	// The shipped EWMA (blend, step and absolute clamps, resync threshold) lives
-	// in ContinuousTick in Calibration.cpp, which SolverTests does not compile,
+	// in ContinuousTick in CalibrationContinuous.cpp, which SolverTests does not compile,
 	// so it is NOT pinned here: `applyEwma` only drives the offset so it moves.
 	// What is pinned is ContinuousAlignment's side: PollTimeOffset's cadence,
 	// its tracking of a moving latency, its silence when the opt-in is off, and
