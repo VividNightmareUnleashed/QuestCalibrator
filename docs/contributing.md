@@ -93,6 +93,13 @@ saved settings. Each flag opens one screen in a realistic state:
 - `-shot <file.png>` writes the 1200x800 overlay texture to a PNG and exits after
   thirty frames (`-frames N` to change that).
 
+`tools\check-screens.ps1 -Out <folder>` draws every screen in each language and
+fails on one that crashes, hangs, writes no picture or draws an empty frame. CI
+runs it on every push through Mesa's software OpenGL (`-OpenGL <folder>`), whose
+pictures match a GPU's pixel for pixel, and keeps them with the run. A new
+preview flag goes into the script's list too; validation fails when the list and
+the flags in `Overlay/QuestCalibrator.cpp` differ.
+
 ## Layout
 
 Layout comes from Yoga, through `Overlay/UiLayout.h` (`FlexLayout`,

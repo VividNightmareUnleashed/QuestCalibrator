@@ -481,9 +481,36 @@ function Test-FuzzTargetLists {
     }
 }
 
+function Test-ScreenList {
+    # tools\check-screens.ps1 draws every preview screen in CI, from its own
+    # list; a -uipreview flag added to the overlay alone is a screen no run
+    # ever draws.
+    $paths = @{
+        Overlay = Join-Path $Root 'Overlay\QuestCalibrator.cpp'
+        Script  = Join-Path $Root 'tools\check-screens.ps1'
+    }
+    foreach ($path in $paths.Values) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Write-Output "Preview screen lists not compared: $path is missing."
+            return
+        }
+    }
+    $fromOverlay = @([regex]::Matches((Get-Content -Raw -LiteralPath $paths.Overlay), 'L"(-uipreview[a-z-]*)"') |
+        ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $list = [regex]::Match((Get-Content -Raw -LiteralPath $paths.Script), '\$Screens\s*=\s*@\(([^)]*)\)')
+    $fromScript = @([regex]::Matches($list.Groups[1].Value, "'(-uipreview[a-z-]*)'") |
+        ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    if ($fromOverlay.Count -eq 0 -or ($fromOverlay -join ', ') -ne ($fromScript -join ', ')) {
+        Write-Output ("Preview screens in tools/check-screens.ps1 ($($fromScript -join ', ')) differ " +
+            "from the -uipreview flags in Overlay/QuestCalibrator.cpp ($($fromOverlay -join ', ')).")
+        exit 1
+    }
+}
+
 switch ($Mode) {
     'Build' {
         Test-FuzzTargetLists
+        Test-ScreenList
         Invoke-MSBuildValidation
         Invoke-SolverTests
     }
