@@ -99,16 +99,14 @@ static ProfileRecord CaptureProfileRecord(const CalibrationContext &ctx)
 	record.universeHmdSerial = ctx.profileHmdSerial;
 	record.universeRotation = ctx.profileWorldFromDriverRotation;
 	record.universeTranslation = ctx.profileWorldFromDriverTranslation;
-	record.fieldEnabled = ctx.fieldEnabled;
+#define QUESTCAL_CAPTURE_SWITCH(member, key, value) record.member = ctx.member;
+	QUESTCAL_PROFILE_SWITCHES(QUESTCAL_CAPTURE_SWITCH)
+#undef QUESTCAL_CAPTURE_SWITCH
 	record.fieldAnchors.reserve(ctx.fieldAnchors.size());
 	for (const auto &anchor : ctx.fieldAnchors)
 		record.fieldAnchors.push_back(PersistedAnchor(anchor));
-	record.continuousEnabled = ctx.continuousEnabled;
 	record.continuousTrackerSerial = ctx.continuousTrackerSerial;
-	record.continuousLatencyReestimation = ctx.continuousLatencyReestimation;
-	record.continuousRequireTrigger = ctx.continuousRequireTrigger;
 	record.continuousNoPause = ctx.continuousNoPause;
-	record.hideMountedTracker = ctx.hideMountedTracker;
 	record.mountExtrinsic.valid = ctx.mountExtrinsic.valid;
 	record.mountExtrinsic.rotation = ctx.mountExtrinsic.rot;
 	record.mountExtrinsic.translationMeters = ctx.mountExtrinsic.pos;
@@ -151,7 +149,9 @@ static void ApplySettingsRecord(CalibrationContext &ctx, SettingsRecord record)
 static void ApplyProfilePreferences(
 	CalibrationContext &ctx, const ProfileRecord &record)
 {
-	ctx.fieldEnabled = record.fieldEnabled;
+#define QUESTCAL_APPLY_SWITCH(member, key, value) ctx.member = record.member;
+	QUESTCAL_PROFILE_SWITCHES(QUESTCAL_APPLY_SWITCH)
+#undef QUESTCAL_APPLY_SWITCH
 	ctx.fieldAnchors.clear();
 	ctx.fieldAnchors.reserve(record.fieldAnchors.size());
 	for (const auto &persisted : record.fieldAnchors)
@@ -162,12 +162,8 @@ static void ApplyProfilePreferences(
 		anchor.translationMeters = persisted.translationMeters;
 		ctx.fieldAnchors.push_back(anchor);
 	}
-	ctx.continuousEnabled = record.continuousEnabled;
 	ctx.continuousTrackerSerial = record.continuousTrackerSerial;
-	ctx.continuousLatencyReestimation = record.continuousLatencyReestimation;
-	ctx.continuousRequireTrigger = record.continuousRequireTrigger;
 	ctx.continuousNoPause = record.continuousNoPause;
-	ctx.hideMountedTracker = record.hideMountedTracker;
 	// Only the persisted members: MountExtrinsic::pairs is a runtime statistic
 	// that the load path resets and a preference edit must keep.
 	ctx.mountExtrinsic.valid = record.mountExtrinsic.valid;

@@ -369,26 +369,17 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 		legacy.calibrationSpeed = static_cast<int>(speed);
 	}
 
-	if (HasTypedValue<bool>(obj, "field_enabled"))
-		profile.fieldEnabled = obj.at("field_enabled").get<bool>();
-
-	// Continuous calibration (all optional: older profiles load unchanged).
-	if (HasTypedValue<bool>(obj, "continuous_enabled"))
-		profile.continuousEnabled = obj.at("continuous_enabled").get<bool>();
+	// The switches and the continuous pick are optional: older profiles load
+	// unchanged.
+#define QUESTCAL_PARSE_SWITCH(member, key, value) \
+	if (HasTypedValue<bool>(obj, key)) \
+		profile.member = obj.at(key).get<bool>();
+	QUESTCAL_PROFILE_SWITCHES(QUESTCAL_PARSE_SWITCH)
+#undef QUESTCAL_PARSE_SWITCH
 
 	if (HasTypedValue<std::string>(obj, "continuous_tracker_serial"))
 		profile.continuousTrackerSerial =
 			obj.at("continuous_tracker_serial").get<std::string>();
-
-	if (HasTypedValue<bool>(obj, "continuous_latency_reestimation"))
-		profile.continuousLatencyReestimation =
-			obj.at("continuous_latency_reestimation").get<bool>();
-	if (HasTypedValue<bool>(obj, "continuous_require_trigger"))
-		profile.continuousRequireTrigger =
-			obj.at("continuous_require_trigger").get<bool>();
-
-	if (HasTypedValue<bool>(obj, "hide_mounted_tracker"))
-		profile.hideMountedTracker = obj.at("hide_mounted_tracker").get<bool>();
 	// A name rather than a flag, so a hand-edited profile reads and an unknown
 	// value is the default. "no_pause" is the Legacy method; "legacy" is what
 	// the old Legacy solver saved, and players picked it to stop the pausing.
@@ -526,12 +517,11 @@ inline void WriteProfile(const ProfileRecord &record,
 	// What ConfigMigrations brings every record to, so none re-runs.
 	double schema = ConfigSchema;
 	profile["settings_version"].set<double>(schema);
-	profile["continuous_enabled"].set<bool>(record.continuousEnabled);
+#define QUESTCAL_WRITE_SWITCH(member, key, value) profile[key].set<bool>(record.member);
+	QUESTCAL_PROFILE_SWITCHES(QUESTCAL_WRITE_SWITCH)
+#undef QUESTCAL_WRITE_SWITCH
 	if (!record.continuousTrackerSerial.empty())
 		profile["continuous_tracker_serial"].set<std::string>(record.continuousTrackerSerial);
-	profile["continuous_latency_reestimation"].set<bool>(record.continuousLatencyReestimation);
-	profile["continuous_require_trigger"].set<bool>(record.continuousRequireTrigger);
-	profile["hide_mounted_tracker"].set<bool>(record.hideMountedTracker);
 	profile["continuous_mode"].set<std::string>(record.continuousNoPause ? "no_pause" : "questcalibrator");
 
 	if (record.mountExtrinsic.valid)
@@ -547,7 +537,6 @@ inline void WriteProfile(const ProfileRecord &record,
 		profile["mount_extrinsic"].set<picojson::object>(std::move(extrinsic));
 	}
 
-	profile["field_enabled"].set<bool>(record.fieldEnabled);
 	if (!record.fieldAnchors.empty())
 	{
 		picojson::array anchors;

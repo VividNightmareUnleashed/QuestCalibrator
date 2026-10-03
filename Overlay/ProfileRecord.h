@@ -149,6 +149,19 @@ struct MountExtrinsicRecord
 	double translationRmsM = 0.0;
 };
 
+// The profile's switches, each listed once as the Settings record's are:
+// its member (named as in CalibrationContext), its key and its default.
+// The record's members, the Config writer and parser, Configuration.cpp's
+// capture and apply and the tests' record comparisons expand from this
+// list. continuousNoPause is not one; it is saved as the continuous_mode
+// name.
+#define QUESTCAL_PROFILE_SWITCHES(X) \
+	X(fieldEnabled, "field_enabled", true) \
+	X(continuousEnabled, "continuous_enabled", false) \
+	X(continuousLatencyReestimation, "continuous_latency_reestimation", false) \
+	X(continuousRequireTrigger, "continuous_require_trigger", false) \
+	X(hideMountedTracker, "hide_mounted_tracker", true)
+
 struct ProfileRecord
 {
 	bool valid = false;
@@ -167,13 +180,11 @@ struct ProfileRecord
 	std::string universeHmdSerial;
 	Eigen::Quaterniond universeRotation{ 1, 0, 0, 0 };
 	Eigen::Vector3d universeTranslation{ 0, 0, 0 };
-	bool fieldEnabled = true;
+#define QUESTCAL_SWITCH_MEMBER(member, key, value) bool member = value;
+	QUESTCAL_PROFILE_SWITCHES(QUESTCAL_SWITCH_MEMBER)
+#undef QUESTCAL_SWITCH_MEMBER
 	std::vector<PersistedFieldAnchor> fieldAnchors;
-	bool continuousEnabled = false;
 	std::string continuousTrackerSerial;
-	bool continuousLatencyReestimation = false;
-	bool continuousRequireTrigger = false;
-	bool hideMountedTracker = true;
 	bool continuousNoPause = false;
 	MountExtrinsicRecord mountExtrinsic;
 };

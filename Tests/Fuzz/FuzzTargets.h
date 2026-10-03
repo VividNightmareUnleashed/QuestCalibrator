@@ -98,13 +98,11 @@ inline std::string ProfileDifference(const questcal::ProfileRecord &a, const que
 	if (a.universeValid && b.universeValid &&
 		(!QuatNear(a.universeRotation, b.universeRotation) || a.universeTranslation != b.universeTranslation))
 		note("universeBaseline");
-	if (a.fieldEnabled != b.fieldEnabled) note("fieldEnabled");
-	if (a.continuousEnabled != b.continuousEnabled) note("continuousEnabled");
+#define QUESTCAL_DIFF_SWITCH(member, key, value) if (a.member != b.member) note(#member);
+	QUESTCAL_PROFILE_SWITCHES(QUESTCAL_DIFF_SWITCH)
+#undef QUESTCAL_DIFF_SWITCH
 	if (a.continuousTrackerSerial != b.continuousTrackerSerial) note("continuousSerial");
-	if (a.continuousLatencyReestimation != b.continuousLatencyReestimation) note("continuousLatency");
-	if (a.continuousRequireTrigger != b.continuousRequireTrigger) note("continuousTrigger");
 	if (a.continuousNoPause != b.continuousNoPause) note("continuousNoPause");
-	if (a.hideMountedTracker != b.hideMountedTracker) note("hideMountedTracker");
 	if (a.mountExtrinsic.valid != b.mountExtrinsic.valid) note("mount.valid");
 	else if (a.mountExtrinsic.valid &&
 		(!QuatNear(a.mountExtrinsic.rotation, b.mountExtrinsic.rotation) ||

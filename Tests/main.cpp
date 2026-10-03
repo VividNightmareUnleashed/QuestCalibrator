@@ -7243,6 +7243,7 @@ ProfileRecord PersistGoodRecord()
 	r.continuousLatencyReestimation = true;
 	r.continuousRequireTrigger = true;
 	r.hideMountedTracker = false;
+	r.continuousNoPause = true;
 	r.mountExtrinsic.valid = true;
 	r.mountExtrinsic.rotation = Eigen::Quaterniond(0.9, 0.1, -0.25, 0.35).normalized();
 	r.mountExtrinsic.translationMeters = Eigen::Vector3d(0.05, -0.125, 0.25);
@@ -7308,12 +7309,11 @@ std::string PersistProfileDiff(const ProfileRecord &a, const ProfileRecord &b)
 		if (!PersistQuatEq(a.universeRotation, b.universeRotation)) note("universeRotation");
 		if (!PersistVecEq(a.universeTranslation, b.universeTranslation)) note("universeTranslation");
 	}
-	if (a.fieldEnabled != b.fieldEnabled) note("fieldEnabled");
-	if (a.continuousEnabled != b.continuousEnabled) note("continuousEnabled");
+#define QUESTCAL_DIFF_SWITCH(member, key, value) if (a.member != b.member) note(#member);
+	QUESTCAL_PROFILE_SWITCHES(QUESTCAL_DIFF_SWITCH)
+#undef QUESTCAL_DIFF_SWITCH
 	if (a.continuousTrackerSerial != b.continuousTrackerSerial) note("continuousSerial");
-	if (a.continuousLatencyReestimation != b.continuousLatencyReestimation) note("continuousLatency");
-	if (a.continuousRequireTrigger != b.continuousRequireTrigger) note("continuousTrigger");
-	if (a.hideMountedTracker != b.hideMountedTracker) note("hideMountedTracker");
+	if (a.continuousNoPause != b.continuousNoPause) note("continuousNoPause");
 	if (a.mountExtrinsic.valid != b.mountExtrinsic.valid) note("mount.valid");
 	else if (a.mountExtrinsic.valid)
 	{
