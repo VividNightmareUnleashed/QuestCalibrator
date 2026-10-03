@@ -1416,81 +1416,42 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 	diagnostics.lastUpdateTime = ringNow;
 	diagnostics.engine = Continuous->GetDiagnostics();
 
-	// A re-anchor (or its undoing) replaces a calibration that is already off
-	// by more than a freeze, so it is applied at once and snapped, without the
-	// per-correction trigger. The lighthouse side moved, not the headset's
-	// space, so the protected chaperone stays where it is.
-	questcal::ContinuousAlignment::Correction reanchor;
-	bool reanchorApplied = false;
-	if (Continuous->PollReanchor(reanchor))
+	// A re-anchor and a correction both move only the lighthouse side, not the
+	// headset's space, so the protected chaperone stays where it is.
+	auto applyDelta = [&](const questcal::ContinuousAlignment::Correction &delta, bool snap)
 	{
-		ctx.continuousCorrectionGate.Clear();
-		if (questcal::ApplyCalibrationDelta(ctx, reanchor.rotation, reanchor.translation,
-			/*snap=*/true, now, /*moveChaperone=*/false))
-		{
-			reanchorApplied = true;
-			ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
-			ctx.driftSlideEvents = 0;
-			ctx.driftMaxSlideM = 0.0;
-			ctx.discontinuousLossEvents = 0;
-		}
-		else
+		if (!snap && ctx.continuousRequireTrigger)
+			ctx.Tell("Trigger pulled; applying the correction.\n");
+		if (!questcal::ApplyCalibrationDelta(ctx, delta.rotation, delta.translation,
+			snap, now, /*moveChaperone=*/false))
 		{
 			ctx.ReportError("A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.\n");
+			return false;
 		}
-	}
-
-	questcal::ContinuousAlignment::Correction corr;
-	bool hadPendingCorrection = ctx.continuousCorrectionGate.HasPending();
-	bool receivedCorrection = false;
-	while (Continuous->PollCorrection(corr))
-		receivedCorrection = true;
-	if (!Continuous->CorrectionEligible())
-	{
-		ctx.continuousCorrectionGate.Clear();
-		hadPendingCorrection = false;
-		receivedCorrection = false;
-	}
-
-	bool triggerPressed = ctx.continuousRequireTrigger &&
-		(hadPendingCorrection || receivedCorrection) && AnyControllerTriggerPressed();
-	if (receivedCorrection)
-		ctx.continuousCorrectionGate.Offer(corr, triggerPressed);
-
-	if (ctx.continuousCorrectionGate.HasPending())
-	{
-		if (!ctx.continuousCorrectionGate.Take(
-			ctx.continuousRequireTrigger, triggerPressed, corr))
+		ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
+		// The drift evidence was just acted on; the monitor windows stay
+		// valid because a correction never moves raw poses.
+		ctx.driftSlideEvents = 0;
+		ctx.driftMaxSlideM = 0.0;
+		ctx.discontinuousLossEvents = 0;
+		if (!snap)
 		{
-			if (!hadPendingCorrection)
-				ctx.Tell("Correction ready. Pull a trigger to apply it.\n");
+			ctx.autoCorrectionsApplied++;
+			char buf[128];
+			snprintf(buf, sizeof buf, "correction applied: yaw %.3f deg, position %.1f mm",
+				2.0 * std::asin(std::min(1.0, std::abs(delta.rotation.y()))) * 180.0 / questcal::Pi,
+				delta.translation.norm() * 1000.0);
+			ctx.Diag(buf);
 		}
-		else
-		{
-			if (ctx.continuousRequireTrigger)
-				ctx.Tell("Trigger pulled; applying the correction.\n");
-			if (!questcal::ApplyCalibrationDelta(ctx, corr.rotation, corr.translation,
-				/*snap=*/false, now, /*moveChaperone=*/false))
-			{
-				ctx.ReportError("A correction was too large to be safe and was skipped. If this keeps happening, recalibrate.\n");
-			}
-			else
-			{
-				ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
-				ctx.autoCorrectionsApplied++;
-				// The drift evidence was just acted on; the monitor windows stay
-				// valid because a correction never moves raw poses.
-				ctx.driftSlideEvents = 0;
-				ctx.driftMaxSlideM = 0.0;
-				ctx.discontinuousLossEvents = 0;
-				char buf[128];
-				snprintf(buf, sizeof buf, "correction applied: yaw %.3f deg, position %.1f mm",
-					2.0 * std::asin(std::min(1.0, std::abs(corr.rotation.y()))) * 180.0 / questcal::Pi,
-					corr.translation.norm() * 1000.0);
-				ctx.Diag(buf);
-			}
-		}
-	}
+		return true;
+	};
+	const auto handled = questcal::HandleContinuousOutput(*Continuous,
+		ctx.continuousCorrectionGate, ctx.continuousRequireTrigger, applyDelta,
+		AnyControllerTriggerPressed);
+	const bool reanchorApplied =
+		handled.reanchor == questcal::ContinuousOutputHandling::Outcome::Applied;
+	if (handled.correctionReady)
+		ctx.Tell("Correction ready. Pull a trigger to apply it.\n");
 
 	ctx.continuousState = Continuous->GetState();
 	if (ctx.continuousState != questcal::ContinuousAlignment::State::Frozen)

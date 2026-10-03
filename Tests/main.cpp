@@ -5201,6 +5201,7 @@ struct ContinuousSim
 	ContinuousSim() { ca.SetTargetRestartsVisible(true); }
 
 	ContinuousAlignment ca;
+	ContinuousCorrectionGate gate;   // as the overlay's, with no trigger to wait for
 	ContinuousAlignment::ExpectedCalibrationAt expectedAt;
 	Eigen::Quaterniond calRot{ 1, 0, 0, 0 };
 	Eigen::Vector3d calTrans{ 0, 0, 0 };
@@ -5252,9 +5253,9 @@ double CalTiltDeg(const ContinuousSim &sim, const GroundTruth &truth)
 	return yaw.angularDistance(dR) * 180.0 / questcal::Pi;
 }
 
-// One closed-loop segment: generate both streams, tick Update at 50 Hz, apply
-// polled corrections back onto the sim's calibration (exactly what the
-// overlay's ApplyCalibrationDelta will do), and tally events.
+// One closed-loop segment: generate both streams, tick Update at 50 Hz, hand
+// the engine's output to HandleContinuousOutput as the overlay does, compose
+// each delta it applies onto the sim's calibration, and tally events.
 void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t0, double t1,
 	std::mt19937 &rng,
 	const std::function<GroundTruth(double)> &truthAt,
@@ -5307,29 +5308,28 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 			sim.ca.Update(t, sim.calRot, sim.calTrans, sim.calScale,
 				sim.solvedOffset, sim.expectedAt);
 
-			ContinuousAlignment::Correction c;
-			while (sim.ca.PollCorrection(c))
-			{
-				double corrDeg = c.rotation.angularDistance(Eigen::Quaterniond::Identity()) * 180.0 / questcal::Pi;
-				sim.maxCorrRotDeg = std::max(sim.maxCorrRotDeg, corrDeg);
-				Eigen::Vector3d hp = PositionAt(t);
-				sim.maxCorrPosM = std::max(sim.maxCorrPosM, (c.rotation * hp + c.translation - hp).norm());
-				sim.maxCorrOffAxis = std::max(sim.maxCorrOffAxis,
-					std::max(std::abs(c.rotation.x()), std::abs(c.rotation.z())));
-
-				sim.calRot = (c.rotation * sim.calRot).normalized();
-				sim.calTrans = c.rotation * sim.calTrans + c.translation;
-				sim.corrections++;
-				if (t >= sim.afterMark)
-					sim.correctionsAfter++;
-			}
-			// A re-anchor, or its undoing, snaps the whole delta, as the overlay
-			// applies it; the event says which it was.
-			while (sim.ca.PollReanchor(c))
-			{
-				sim.calRot = (c.rotation * sim.calRot).normalized();
-				sim.calTrans = c.rotation * sim.calTrans + c.translation;
-			}
+			// The composition is ApplyCalibrationDelta's, which has its own
+			// tests; a re-anchor (snap) or its undoing applies the whole delta.
+			HandleContinuousOutput(sim.ca, sim.gate, false,
+				[&](const ContinuousAlignment::Correction &c, bool snap)
+				{
+					if (!snap)
+					{
+						double corrDeg = c.rotation.angularDistance(Eigen::Quaterniond::Identity()) * 180.0 / questcal::Pi;
+						sim.maxCorrRotDeg = std::max(sim.maxCorrRotDeg, corrDeg);
+						Eigen::Vector3d hp = PositionAt(t);
+						sim.maxCorrPosM = std::max(sim.maxCorrPosM, (c.rotation * hp + c.translation - hp).norm());
+						sim.maxCorrOffAxis = std::max(sim.maxCorrOffAxis,
+							std::max(std::abs(c.rotation.x()), std::abs(c.rotation.z())));
+						sim.corrections++;
+						if (t >= sim.afterMark)
+							sim.correctionsAfter++;
+					}
+					sim.calRot = (c.rotation * sim.calRot).normalized();
+					sim.calTrans = c.rotation * sim.calTrans + c.translation;
+					return true;
+				},
+				[] { return false; });
 
 			ContinuousAlignment::Event e;
 			while (sim.ca.PollEvent(e))
