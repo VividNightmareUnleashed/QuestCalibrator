@@ -153,14 +153,16 @@ with `openvr_api.dll`, `manifest.vrmanifest` and `icon.png` beside it.
 
 More for contributors:
 
+- [docs/contributing.md](docs/contributing.md) covers the test harness, fuzzing,
+  checking screens without a headset, translations and the private submodule.
 - `tools\validate-cpp.ps1 -Mode Duplicates` scans for copied code, and
   `-Mode Analyze -All` rebuilds everything under Clang-Tidy. Settings live in
   `cpp-validation.json`.
 - `tools\fuzz.ps1` runs the libFuzzer and AddressSanitizer targets for every untrusted
   input, defined in `Tests/Fuzz/FuzzTargets.h`.
-- GitHub Actions builds and tests every push to `alpha` and `stable` and every pull
-  request, fuzzes weekly, and builds releases from tags
-  ([docs/releasing.md](docs/releasing.md)).
+- GitHub Actions builds and tests every push to `alpha` and `stable`, and every pull
+  request into them, that changes more than documentation; it also fuzzes weekly and
+  builds releases from tags ([docs/releasing.md](docs/releasing.md)).
 - [docs/vendored-dependencies.md](docs/vendored-dependencies.md) lists everything in
   `lib/` and its license.
 - `compile_flags.txt` is for clangd only; don't add machine-specific paths to it.
