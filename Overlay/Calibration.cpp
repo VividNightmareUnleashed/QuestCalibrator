@@ -1398,7 +1398,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
 	{
 		// Looked up at the tracker's base-calibrated position, with the width
-		// SendAlignmentField puts on the wire.
+		// BuildAlignmentField puts on the wire.
 		Eigen::Vector3d basePos = ringpose::BaseCalibratedPosition(
 			ctx.transform.rotation, ctx.transform.translationMeters, ctx.transform.scale,
 			targetRawPos);

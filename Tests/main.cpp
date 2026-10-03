@@ -4470,7 +4470,7 @@ FieldTransform Compose(const FieldTransform &a, const FieldTransform &b)   // a 
 	return { (a.R * b.R).normalized(), a.R * b.T + a.T };
 }
 
-// The overlay's delta derivation (SendAlignmentField's spec):
+// The overlay's delta derivation (BuildAlignmentField's spec):
 // delta_i = anchor_i o base^-1.
 protocol::SetAlignmentField BuildField(const FieldTransform &base,
                                        const std::vector<FieldTransform> &anchors,
@@ -5170,7 +5170,7 @@ double CalTiltDeg(const ContinuousSim &sim, const GroundTruth &truth)
 
 // One closed-loop segment: generate both streams, tick Update at 50 Hz, apply
 // polled corrections back onto the sim's calibration (exactly what the
-// overlay's ApplyAlignmentDelta will do), and tally events.
+// overlay's ApplyCalibrationDelta will do), and tally events.
 void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t0, double t1,
 	std::mt19937 &rng,
 	const std::function<GroundTruth(double)> &truthAt,

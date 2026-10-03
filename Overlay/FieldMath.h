@@ -27,7 +27,7 @@ constexpr double FieldBlendIdentityFloor = 0.05;
 
 // The per-anchor delta the driver blends: delta_i = anchor_i o base^-1, the
 // correction that, applied after the base calibration, reproduces the absolute
-// solve at that anchor's spot. The single source for SendAlignmentField,
+// solve at that anchor's spot. The single source for BuildAlignmentField,
 // BlendedFieldCalibration and the harness, which must agree bit for bit.
 inline void AnchorDelta(const Eigen::Quaterniond &anchorRot,
                         const Eigen::Vector3d &anchorTrans,
@@ -43,7 +43,7 @@ inline void AnchorDelta(const Eigen::Quaterniond &anchorRot,
 // absolute per-spot solves (.position in reference space, .rotation /
 // .translationMeters the absolute transform). With zero anchors the result is
 // the base calibration itself. sigmaMeters must be the width
-// SendAlignmentField put on the wire, which the driver blends with.
+// BuildAlignmentField put on the wire, which the driver blends with.
 template <class AnchorVec>
 inline void BlendedFieldCalibration(const AnchorVec &anchors,
                                     const Eigen::Quaterniond &baseRot,
