@@ -33,8 +33,8 @@ std::string TestPipeName(const char *purpose)
 IPCServer::RequestSink AcceptingSink()
 {
 	IPCServer::RequestSink sink;
-	sink.setDeviceTransform = [](const protocol::SetDeviceTransform &) { return true; };
-	sink.setRuntimeState = [](const protocol::SetRuntimeState &) { return true; };
+	sink.setDeviceTransform = [](const protocol::SetDeviceTransform &) { return protocol::RejectReason::None; };
+	sink.setRuntimeState = [](const protocol::SetRuntimeState &) { return protocol::RejectReason::None; };
 	sink.poseHookMask = []() { return 0u; };
 	return sink;
 }

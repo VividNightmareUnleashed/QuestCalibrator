@@ -444,6 +444,8 @@ inline std::string CheckDriverRequest(const uint8_t *data, size_t size)
 	{
 		if (response.type != protocol::ResponseInvalid)
 			return "a refused request is not answered as invalid";
+		if (response.rejectReason == protocol::RejectReason::None)
+			return "a refused request carries no reason";
 		return "";
 	}
 	if (!handshaken || request.protocol.version != protocol::Version ||

@@ -55,11 +55,15 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 	IPCServer::RequestSink sink;
 	sink.setDeviceTransform = [this](const protocol::SetDeviceTransform &transform)
 	{
-		return TrySetDeviceTransform(transform);
+		protocol::RejectReason reason = protocol::RejectReason::None;
+		TrySetDeviceTransform(transform, &reason);
+		return reason;
 	};
 	sink.setRuntimeState = [this](const protocol::SetRuntimeState &state)
 	{
-		return TrySetRuntimeState(state);
+		protocol::RejectReason reason = protocol::RejectReason::None;
+		TrySetRuntimeState(state, &reason);
+		return reason;
 	};
 	sink.poseHookMask = [] { return PoseUpdateHookMask(); };
 	sink.getRuntimeState = [this](protocol::Response &response) { GetRuntimeState(response); };
@@ -148,15 +152,20 @@ void ServerTrackedDeviceProvider::FlushFrameLog()
 	}
 }
 
-bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform)
+bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform,
+	protocol::RejectReason *reason)
 {
 	FlushFrameLog();
 	protocol::SetDeviceTransform sanitized;
 	if (!questcal::driverinput::ValidateAndSanitize(newTransform, sanitized))
 	{
 		LOG("SetDeviceTransform: rejected invalid transform for device id %u", newTransform.openVRID);
+		if (reason)
+			*reason = protocol::RejectReason::InvalidValues;
 		return false;
 	}
+	if (reason)
+		*reason = protocol::RejectReason::None;
 
 	auto &slot = transforms[sanitized.openVRID];
 	// The IPC thread is the single writer. Odd means a coherent generation is
@@ -167,13 +176,18 @@ bool ServerTrackedDeviceProvider::TrySetDeviceTransform(const protocol::SetDevic
 	return true;
 }
 
-bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeState &newState)
+bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeState &newState,
+	protocol::RejectReason *reason)
 {
 	// The overlay sends its complete state about once a second, so a frame
 	// change reaches the log within about that.
 	FlushFrameLog();
 	if (newState.expectedSessionId != 0 && newState.expectedSessionId != driverSessionId)
+	{
+		if (reason)
+			*reason = protocol::RejectReason::StaleSession;
 		return false;
+	}
 	protocol::SetRuntimeState sanitized;
 	if (!questcal::driverinput::ValidateAndSanitize(newState, sanitized))
 	{
@@ -181,8 +195,12 @@ bool ServerTrackedDeviceProvider::TrySetRuntimeState(const protocol::SetRuntimeS
 			static_cast<unsigned long long>(newState.enabledMask),
 			static_cast<unsigned long long>(newState.hiddenMask),
 			newState.field.anchorCount);
+		if (reason)
+			*reason = protocol::RejectReason::InvalidValues;
 		return false;
 	}
+	if (reason)
+		*reason = protocol::RejectReason::None;
 
 	if (sanitized.enabledMask != 0 && sanitized.frameProfileKey != 0)
 		recoveryState = sanitized;

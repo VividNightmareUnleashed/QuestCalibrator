@@ -720,7 +720,8 @@ void RunDriverProtocolValidationScenarios()
 	protocol::Response response;
 	protocol::Request mutation(protocol::RequestSetDeviceTransform);
 	bool preHandshake = questcal::ipc::PrepareRequest(mutation, connection, response);
-	bool preHandshakeRejected = !preHandshake && response.type == protocol::ResponseInvalid;
+	bool preHandshakeRejected = !preHandshake && response.type == protocol::ResponseInvalid &&
+		response.rejectReason == protocol::RejectReason::NoHandshake;
 
 	protocol::Request wrongHandshake(protocol::RequestHandshake);
 	wrongHandshake.protocol.version = protocol::Version - 1;
@@ -736,11 +737,17 @@ void RunDriverProtocolValidationScenarios()
 	bool mutationAccepted = questcal::ipc::PrepareRequest(mutation, connection, response);
 	mutation.protocol.version = protocol::Version - 1;
 	bool staleMutation = questcal::ipc::PrepareRequest(mutation, connection, response);
+	const bool staleReason = response.rejectReason == protocol::RejectReason::NoHandshake;
+	protocol::Request unknown(static_cast<protocol::RequestType>(99));
+	const bool unknownRefused = !questcal::ipc::PrepareRequest(unknown, connection, response) &&
+		response.type == protocol::ResponseInvalid &&
+		response.rejectReason == protocol::RejectReason::UnknownRequest;
 
 	Check("driver: per-connection protocol gate",
 		preHandshakeRejected &&
-		wrongRejected && handshakeAccepted && mutationAccepted && !staleMutation,
-		"pre-handshake/wrong-handshake/current/stale mutation matrix");
+		wrongRejected && handshakeAccepted && mutationAccepted && !staleMutation &&
+			staleReason && unknownRefused,
+		"pre-handshake/wrong-handshake/current/stale mutation matrix, with each refusal's reason");
 
 	// A late wrong-version handshake revokes the connection instead of leaving
 	// it authorized by the earlier good one.
@@ -764,12 +771,12 @@ void RunDriverProtocolValidationScenarios()
 	sink.setDeviceTransform = [&](const protocol::SetDeviceTransform &)
 	{
 		++transformCalls;
-		return setterAccepts;
+		return setterAccepts ? protocol::RejectReason::None : protocol::RejectReason::InvalidValues;
 	};
 	sink.setRuntimeState = [&](const protocol::SetRuntimeState &)
 	{
 		++fieldCalls;
-		return setterAccepts;
+		return setterAccepts ? protocol::RejectReason::None : protocol::RejectReason::StaleSession;
 	};
 	sink.poseHookMask = [] { return protocol::PoseHook006; };
 	server.SetSinkForTest(sink);
@@ -800,11 +807,16 @@ void RunDriverProtocolValidationScenarios()
 		dispatched.type == protocol::ResponseSuccess;
 
 	// A setter that refuses its values reports failure rather than reporting
-	// success and dropping them.
+	// success and dropping them, and its reason reaches the wire.
 	setterAccepts = false;
 	server.DispatchForTest(transformReq, dispatched, dispatchConn);
 	bool refusalReported =
-		transformCalls == 2 && dispatched.type == protocol::ResponseInvalid;
+		transformCalls == 2 && dispatched.type == protocol::ResponseInvalid &&
+		dispatched.rejectReason == protocol::RejectReason::InvalidValues;
+	server.DispatchForTest(fieldReq, dispatched, dispatchConn);
+	refusalReported = refusalReported && fieldCalls == 2 &&
+		dispatched.type == protocol::ResponseInvalid &&
+		dispatched.rejectReason == protocol::RejectReason::StaleSession;
 
 	char dispatchDetail[128];
 	snprintf(dispatchDetail, sizeof dispatchDetail,
@@ -934,6 +946,7 @@ enum class LinkFault
 	Throw,       // the send and IPCClient's reconnect-and-replay both failed
 	Reconnect,   // accepted, but by a new pipe: only the generation shows it
 	Mismatch,    // the connection found a driver from another release
+	RefuseValues,   // the driver answered that the values failed its checks
 };
 
 // A scripted driver connection: records every request and answers each from a
@@ -963,10 +976,13 @@ struct FakeDriverLink
 				return result;
 			}
 			result.completed = true;
+			const bool refused = fault == LinkFault::Refuse || fault == LinkFault::RefuseValues;
 			result.response = protocol::Response(
-				fault == LinkFault::Refuse ? protocol::ResponseInvalid :
+				refused ? protocol::ResponseInvalid :
 				request.type == protocol::RequestHandshake ? protocol::ResponseHandshake :
 				protocol::ResponseSuccess);
+			if (fault == LinkFault::RefuseValues)
+				result.response.rejectReason = protocol::RejectReason::InvalidValues;
 			return result;
 		};
 	}
@@ -1025,6 +1041,7 @@ struct SessionFixture
 	questcal::DriverSession session;
 	int errors = 0;
 	int clears = 0;
+	std::string lastError;
 
 	SessionFixture()
 	{
@@ -1035,7 +1052,7 @@ struct SessionFixture
 				return id < vr::k_unMaxTrackedDeviceCount
 					? table.devices[id] : questcal::SyncDevice();
 			});
-		session.SetErrorSink([this](const std::string &) { ++errors; },
+		session.SetErrorSink([this](const std::string &message) { ++errors; lastError = message; },
 			[this]() { ++clears; });
 	}
 
@@ -1245,6 +1262,32 @@ void RunDriverSessionScenarios()
 				mismatched.cause == questcal::DriverDisableCause::DriverVersionMismatch &&
 				fx.errors >= 1 && dead.cause == questcal::DriverDisableCause::DriverUnreachable &&
 				live.synchronized && live.cause == questcal::DriverDisableCause::None,
+			detail);
+	}
+
+	// 7. A refusal carries its reason into the report, and refused values get
+	// their own cause, which asks for a recalibration; a refusal for any other
+	// reason reads as an unreachable driver.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		fx.table.Place(1, questcal::SyncDeviceClass::Other, "oculus");
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
+
+		fx.link.script = FaultState(LinkFault::RefuseValues);
+		questcal::DriverApplyResult values = fx.session.Apply(request, 0.0);
+		const bool named = fx.lastError.find(
+			protocol::RejectReasonText(protocol::RejectReason::InvalidValues)) != std::string::npos;
+		fx.link.script = FaultState(LinkFault::Refuse);
+		questcal::DriverApplyResult other = fx.session.Apply(request, 1.0);
+
+		char detail[96];
+		snprintf(detail, sizeof detail, "causes %d, %d; reason named %d",
+			static_cast<int>(values.cause), static_cast<int>(other.cause), named);
+		Check("driver session: refused values have their own cause",
+			!values.synchronized && !values.enabled &&
+				values.cause == questcal::DriverDisableCause::DriverRefusedValues && named &&
+				!other.synchronized && other.cause == questcal::DriverDisableCause::DriverUnreachable,
 			detail);
 	}
 }

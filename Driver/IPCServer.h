@@ -18,11 +18,12 @@ class IPCServer
 {
 public:
 	// What the transport may call into, so it names no driver type and tests can
-	// run it against a recording sink. Only getRuntimeState is optional.
+	// run it against a recording sink. Only getRuntimeState is optional. A setter
+	// returns why it refused, or RejectReason::None once it applied the request.
 	struct RequestSink
 	{
-		std::function<bool(const protocol::SetDeviceTransform &)> setDeviceTransform;
-		std::function<bool(const protocol::SetRuntimeState &)> setRuntimeState;
+		std::function<protocol::RejectReason(const protocol::SetDeviceTransform &)> setDeviceTransform;
+		std::function<protocol::RejectReason(const protocol::SetRuntimeState &)> setRuntimeState;
 		std::function<uint32_t()> poseHookMask;
 		std::function<void(protocol::Response &)> getRuntimeState;
 	};

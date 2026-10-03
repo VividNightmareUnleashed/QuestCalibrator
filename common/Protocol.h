@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #ifndef _OPENVR_API
@@ -17,7 +18,8 @@ namespace protocol
 	// The handshake requires exact version equality, so every bump costs users a
 	// driver reinstall and a SteamVR restart. v11 starts every connection with
 	// the version probe (VersionProbe.h), so the two ends of a partial update
-	// report a version mismatch instead of a frame of the wrong size.
+	// report a version mismatch instead of a frame of the wrong size, and says
+	// why a request was refused.
 	const uint32_t Version = 11;
 	const uint32_t PoseHook005 = 1u << 0;
 	const uint32_t PoseHook006 = 1u << 1;
@@ -38,6 +40,41 @@ namespace protocol
 		ResponseSuccess,
 		ResponseRuntimeState,
 	};
+
+	// Why a request was answered with ResponseInvalid.
+	enum class RejectReason : uint32_t
+	{
+		None,
+		// The connection has no same-version handshake.
+		NoHandshake,
+		// The driver does not handle this request type.
+		UnknownRequest,
+		// The values failed the driver's trust boundary.
+		InvalidValues,
+		// The state was built for another driver session
+		// (SetRuntimeState::expectedSessionId).
+		StaleSession,
+	};
+
+	// For logs and error messages. The value may come off the wire from a
+	// peer that has more reasons.
+	inline const char *RejectReasonText(RejectReason reason)
+	{
+		switch (reason)
+		{
+		case RejectReason::None:
+			return "no reason given";
+		case RejectReason::NoHandshake:
+			return "the connection has no same-version handshake";
+		case RejectReason::UnknownRequest:
+			return "the driver does not handle this request";
+		case RejectReason::InvalidValues:
+			return "its values failed the driver's trust boundary";
+		case RejectReason::StaleSession:
+			return "it was built for another driver session";
+		}
+		return "a reason this release does not know";
+	}
 
 	struct Protocol
 	{
@@ -199,6 +236,7 @@ namespace protocol
 		ResponseType type = ResponseInvalid;
 		Protocol protocol;
 		uint32_t poseHookMask = 0;
+		RejectReason rejectReason = RejectReason::None;
 		uint64_t driverSessionId = 0;
 		SetRuntimeState runtimeState;
 
@@ -218,6 +256,12 @@ namespace protocol
 	static_assert(sizeof(SetRuntimeState) == 4880, "SetRuntimeState wire layout changed");
 	static_assert(sizeof(Request) == 4976, "Request wire layout changed");
 	static_assert(sizeof(Response) == 4904, "Response wire layout changed");
+	// The fields each message starts with.
+	static_assert(offsetof(Request, protocol) == 0 && offsetof(Request, type) == 4,
+		"Request header layout changed");
+	static_assert(offsetof(Response, type) == 0 && offsetof(Response, protocol) == 4 &&
+		offsetof(Response, poseHookMask) == 8 && offsetof(Response, rejectReason) == 12 &&
+		offsetof(Response, driverSessionId) == 16, "Response header layout changed");
 	// Crosses the shared-memory ring: bump PoseRing::LayoutVersion instead.
 	static_assert(sizeof(DevicePoseSample) == 192, "DevicePoseSample layout changed");
 }

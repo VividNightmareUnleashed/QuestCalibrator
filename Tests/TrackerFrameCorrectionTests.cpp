@@ -512,7 +512,9 @@ void RestartRecovery(Check check)
 	request.driverSessionId = 41;
 	f.driver->SetSessionForTest(42);
 	pass &= !session.Apply(request, 31).synchronized && writes == 2;
-	pass &= !f.driver->TrySetRuntimeState(f.state);
+	protocol::RejectReason reason = protocol::RejectReason::None;
+	pass &= !f.driver->TrySetRuntimeState(f.state, &reason) &&
+		reason == protocol::RejectReason::StaleSession;
 	check("frame lifecycle: a SteamVR restart or profile change cannot import old corrections", pass, "");
 	serials = request.frameSerialKeys;
 	snapshot.runtimeState.frames[9].translation.v[0] = std::numeric_limits<double>::quiet_NaN();
@@ -525,8 +527,8 @@ void RecoveryProtocolGate(Check check)
 	IPCServer server;
 	int reads = 0, writes = 0;
 	IPCServer::RequestSink sink;
-	sink.setDeviceTransform = [&](const protocol::SetDeviceTransform &) { ++writes; return true; };
-	sink.setRuntimeState = [&](const protocol::SetRuntimeState &) { ++writes; return true; };
+	sink.setDeviceTransform = [&](const protocol::SetDeviceTransform &) { ++writes; return protocol::RejectReason::None; };
+	sink.setRuntimeState = [&](const protocol::SetRuntimeState &) { ++writes; return protocol::RejectReason::None; };
 	sink.poseHookMask = [] { return uint32_t{7}; };
 	sink.getRuntimeState = [&](protocol::Response &response) {
 		++reads;

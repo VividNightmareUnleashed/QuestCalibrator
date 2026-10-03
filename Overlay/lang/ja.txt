@@ -177,6 +177,8 @@ en: SteamVR isn't accepting the calibration. Restart SteamVR.
 ja: SteamVR がキャリブレーションを受け付けていません。SteamVR を再起動してください。
 en: The app and its SteamVR driver are from different releases. Reinstall QuestCalibrator, then restart SteamVR.
 ja: アプリと SteamVR ドライバーのリリースが異なります。QuestCalibrator を再インストールしてから、SteamVR を再起動してください。
+en: The SteamVR driver refused the calibration's values. Recalibrate.
+ja: SteamVR ドライバーがキャリブレーションの値を拒否しました。再キャリブレーションしてください。
 en: The saved calibration doesn't match the connected hardware. Recalibrate.
 ja: 保存されたキャリブレーションが接続中の機器と一致しません。再キャリブレーションしてください。
 en: The saved calibration is damaged. Recalibrate.

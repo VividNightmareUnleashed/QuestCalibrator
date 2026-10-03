@@ -41,8 +41,11 @@ public:
 
 	////// End vr::IServerTrackedDeviceProvider functions
 
-	bool TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform);
-	bool TrySetRuntimeState(const protocol::SetRuntimeState &newState);
+	// False when the request is refused, and then `reason` (if given) says why.
+	bool TrySetDeviceTransform(const protocol::SetDeviceTransform &newTransform,
+		protocol::RejectReason *reason = nullptr);
+	bool TrySetRuntimeState(const protocol::SetRuntimeState &newState,
+		protocol::RejectReason *reason = nullptr);
 	void HandleDevicePoseUpdated(uint32_t openVRID, vr::DriverPose_t &pose);
 	// IPC-thread owned checkpoint, separate from temporary slot neutralization.
 	void GetRuntimeState(protocol::Response &response) const

@@ -12,16 +12,15 @@
 namespace
 {
 
-// ResponseInvalid is the only rejection the wire carries, so a gate refusal and
-// a value rejection look the same to the overlay; the driver log is where the
-// two causes are told apart.
-protocol::ResponseType SetterResult(bool accepted, const char *operation)
+// The reason travels with the refusal; the log names it too, for a driver log
+// read without the overlay's.
+protocol::ResponseType SetterResult(protocol::RejectReason reason, const char *operation)
 {
-	if (accepted)
+	if (reason == protocol::RejectReason::None)
 		return protocol::ResponseSuccess;
 
-	LOG("IPC %s rejected: the request cleared the protocol gate, so it was its "
-		"values that failed the driver trust boundary", operation);
+	LOG("IPC %s rejected after the protocol gate: %s", operation,
+		protocol::RejectReasonText(reason));
 	return protocol::ResponseInvalid;
 }
 
@@ -79,16 +78,18 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 			sink.getRuntimeState(response);
 			response.type = protocol::ResponseRuntimeState;
 		}
+		else
+			response.rejectReason = protocol::RejectReason::UnknownRequest;
 		return;
 	}
 
 	// All mutations pass the same connection gate.
-	if (request.type == protocol::RequestSetDeviceTransform)
-		response.type = SetterResult(
-			sink.setDeviceTransform(request.setDeviceTransform), "SetDeviceTransform");
-	else
-		response.type = SetterResult(
-			sink.setRuntimeState(request.setRuntimeState), "SetRuntimeState");
+	const bool transform = request.type == protocol::RequestSetDeviceTransform;
+	response.rejectReason = transform
+		? sink.setDeviceTransform(request.setDeviceTransform)
+		: sink.setRuntimeState(request.setRuntimeState);
+	response.type = SetterResult(response.rejectReason,
+		transform ? "SetDeviceTransform" : "SetRuntimeState");
 }
 
 IPCServer::~IPCServer()

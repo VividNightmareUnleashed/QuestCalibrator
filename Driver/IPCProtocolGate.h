@@ -31,8 +31,17 @@ inline bool PrepareRequest(const protocol::Request &request,
 	bool dispatchable = request.type == protocol::RequestSetDeviceTransform ||
 		request.type == protocol::RequestSetRuntimeState ||
 		request.type == protocol::RequestGetRuntimeState;
-	return dispatchable && state.handshakeComplete &&
-		request.protocol.version == protocol::Version;
+	if (!dispatchable)
+	{
+		response.rejectReason = protocol::RejectReason::UnknownRequest;
+		return false;
+	}
+	if (!state.handshakeComplete || request.protocol.version != protocol::Version)
+	{
+		response.rejectReason = protocol::RejectReason::NoHandshake;
+		return false;
+	}
+	return true;
 }
 
 } // namespace ipc

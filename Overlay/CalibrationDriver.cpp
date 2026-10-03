@@ -146,15 +146,21 @@ void ApplyCompletion(CalibrationContext &ctx,
 	case DriverDisableCause::DriverVersionMismatch:
 		ctx.disableReason = CalibrationContext::DisableReason::DriverVersionMismatch;
 		break;
+	case DriverDisableCause::DriverRefusedValues:
+		ctx.disableReason = CalibrationContext::DisableReason::DriverRefusedValues;
+		break;
 	case DriverDisableCause::None:
 		if (result.enabled)
 			ctx.disableReason = CalibrationContext::DisableReason::None;
 		break;
 	}
 	if (!result.synchronized)
-		HeldRefusalReason = result.cause == DriverDisableCause::DriverVersionMismatch
-			? CalibrationContext::DisableReason::DriverVersionMismatch
-			: CalibrationContext::DisableReason::DriverUnreachable;
+		HeldRefusalReason =
+			result.cause == DriverDisableCause::DriverVersionMismatch
+				? CalibrationContext::DisableReason::DriverVersionMismatch
+			: result.cause == DriverDisableCause::DriverRefusedValues
+				? CalibrationContext::DisableReason::DriverRefusedValues
+				: CalibrationContext::DisableReason::DriverUnreachable;
 	AssignDeviceIdentities(ctx, result.continuousTrackerId,
 		result.referenceDeviceMask, result.targetDeviceMask);
 }
