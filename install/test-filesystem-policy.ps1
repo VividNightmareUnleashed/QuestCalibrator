@@ -20,7 +20,9 @@ try {
     New-Item -ItemType SymbolicLink -Path $link -Target $foreign | Out-Null
     Refuses { Remove-QuestcalTree $owned 'QuestCalibrator' } 'Linked tree accepted for recursive removal'
     Require (Test-Path -LiteralPath (Join-Path $foreign 'keep.txt')) 'Foreign tree changed'
-    Remove-Item -LiteralPath $link -Force
+    # Windows PowerShell's Remove-Item throws on a directory link; this removes
+    # the link alone, never what it points to.
+    [IO.Directory]::Delete($link)
     function Remove-Item { param($LiteralPath,[switch]$Recurse,[switch]$Force,$ErrorAction) }
     Refuses { Remove-QuestcalTree $owned 'QuestCalibrator' } 'No-op removal reported success'
     Microsoft.PowerShell.Management\Remove-Item Function:Remove-Item -Force -ErrorAction SilentlyContinue
