@@ -868,9 +868,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 			CalCtx.modules = questcal::ReadInstalledModules();
 			questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 		}
-		if (!g_langOverride.empty())
-			CalCtx.language = g_langOverride;
-		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(CalCtx.language));
+		// The override changes only the language drawn, never the saved one.
+		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(
+			g_langOverride.empty() ? CalCtx.language : g_langOverride));
 		RunLoop();
 	}
 	catch (const std::exception &e)

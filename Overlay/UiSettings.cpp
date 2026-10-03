@@ -18,7 +18,8 @@ void BuildSettingsScreen(const VRState &state)
 		{
 			using questcal::i18n::Language;
 			const bool japaneseFont = questcal::i18n::FontAvailable(Language::Japanese);
-			const Language chosen = questcal::i18n::LanguageFromCode(CalCtx.language);
+			// The language drawn, which -lang may set apart from the saved one.
+			const Language chosen = questcal::i18n::CurrentLanguage();
 			const bool translated = chosen != Language::English;
 			RowCard row(kRowHeight + (translated ? kRowSubLineH + 26.0f : 0.0f));
 			const ImVec2 p = row.pos;
