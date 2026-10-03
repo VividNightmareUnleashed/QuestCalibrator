@@ -12,7 +12,13 @@ name: Validation
 # private VirtualQuest repository) the harness also builds the simulated
 # headset's scenarios and the formal-model links, and the pose hub traces are
 # replayed through their TLA+ model. Without it the run says so and tests the
-# public suite only; pull requests from forks never get the secret.
+# public suite only.
+#
+# Pull requests from forks never get the secret, and neither does a fork's own
+# copy of this workflow. Those runs skip every job below that needs
+# VirtualQuest (the job-level if: below names the case), so the checks list
+# shows them as skipped rather than as passed with nothing checked. In this
+# repository a missing secret is a mistake, and those jobs fail on it.
 #
 # The input-validation job needs the same key. On Linux, since windows-2022
 # cannot run Linux containers, it runs VirtualQuest's bounded model checks of
@@ -145,6 +151,7 @@ jobs:
 
   input-validation:
     name: input-validation (${{ matrix.shard }}/6)
+    if: github.repository == 'VividNightmareUnleashed/QuestCalibrator' && github.event.pull_request.head.repo.fork != true
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -152,8 +159,6 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
-    env:
-      HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
 
     steps:
       - name: Check out the source
@@ -161,14 +166,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Note a missing VirtualQuest key
-        if: env.HAS_VIRTUALQUEST != 'true'
-        run: |
-          echo '::warning::VIRTUALQUEST_DEPLOY_KEY is not set: the input-validation model checks are not run.'
-
       # The runner image ships PowerShell; this covers an image that stops doing so.
       - name: Install PowerShell if missing
-        if: env.HAS_VIRTUALQUEST == 'true'
         timeout-minutes: 5
         run: |
           if command -v pwsh > /dev/null; then pwsh --version; exit 0; fi
@@ -180,7 +179,6 @@ jobs:
           sudo apt-get install -y powershell
 
       - name: Check out VirtualQuest
-        if: env.HAS_VIRTUALQUEST == 'true'
         timeout-minutes: 5
         shell: pwsh
         env:
@@ -192,14 +190,12 @@ jobs:
       # still leaves the image for the next run.
       - name: Restore the ESBMC image
         id: esbmc-cache
-        if: env.HAS_VIRTUALQUEST == 'true'
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/questcal-esbmc.tar
           key: questcal-esbmc-${{ hashFiles('VirtualQuest/formal/input-validation/Dockerfile') }}
 
       - name: Load or build the ESBMC image
-        if: env.HAS_VIRTUALQUEST == 'true'
         timeout-minutes: 20
         run: |
           if [ '${{ steps.esbmc-cache.outputs.cache-hit }}' = 'true' ]; then
@@ -210,7 +206,7 @@ jobs:
           fi
 
       - name: Save the ESBMC image
-        if: env.HAS_VIRTUALQUEST == 'true' && steps.esbmc-cache.outputs.cache-hit != 'true'
+        if: steps.esbmc-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/questcal-esbmc.tar
@@ -221,7 +217,6 @@ jobs:
       # SKIP test also catches sources check.ps1 cannot find, and a share that
       # ran nothing fails too.
       - name: Check the input validation (ESBMC and Gappa)
-        if: env.HAS_VIRTUALQUEST == 'true'
         timeout-minutes: 45
         shell: pwsh
         run: |
@@ -231,14 +226,14 @@ jobs:
           if (-not ($lines | Where-Object { "$_" -match '^ok ' })) { throw 'This share ran no input-validation check.' }
 
   private-core:
-    if: github.event.pull_request.head.repo.fork != true
+    if: github.repository == 'VividNightmareUnleashed/QuestCalibrator' && github.event.pull_request.head.repo.fork != true
     uses: ./.github/workflows/formal-assurance.yml
     with:
       evidence: ${{ inputs.evidence == true }}
     secrets: inherit
 
   now-contracts:
-    if: github.event.pull_request.head.repo.fork != true
+    if: github.repository == 'VividNightmareUnleashed/QuestCalibrator' && github.event.pull_request.head.repo.fork != true
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -280,7 +275,7 @@ jobs:
           retention-days: 90
 
   inventory-extension:
-    if: github.event.pull_request.head.repo.fork != true
+    if: github.repository == 'VividNightmareUnleashed/QuestCalibrator' && github.event.pull_request.head.repo.fork != true
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
