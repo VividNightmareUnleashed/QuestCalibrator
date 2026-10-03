@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Clocks.h"
 #include "PoseMath.h"
 #include "RingPoseMath.h"
 
@@ -27,7 +28,7 @@
 // gravity). The exact path reports the discarded tilt as residualTiltRad; the
 // heuristic path regresses heading only and leaves it 0. Both residuals are
 // diagnostics only. Times are ring-sample seconds (QPC * QpcToSeconds), not
-// UI time.
+// UI time, and a RingTime where they are handed out.
 class JumpDetector
 {
 public:
@@ -116,7 +117,7 @@ public:
 	{
 		Eigen::Quaterniond rotation{ 1, 0, 0, 0 };   // yaw-only
 		Eigen::Vector3d translation{ 0, 0, 0 };
-		double time = 0.0;                 // ring seconds at the jump
+		questcal::RingTime time;           // at the jump
 		// The HMD's jump sample, by its capture ticks: what the universe
 		// verdict matches the worldFromDriver transition at it by.
 		int64_t sample = 0;
@@ -148,7 +149,7 @@ public:
 	{
 		uint32_t deviceId = 0;
 		double duration = 0.0;             // seconds without valid reference samples
-		double time = 0.0;
+		questcal::RingTime time;           // the sample that ended it
 	};
 
 	explicit JumpDetector(double qpcToSeconds) : qpcToSeconds(qpcToSeconds) { }

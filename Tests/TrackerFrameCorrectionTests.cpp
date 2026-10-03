@@ -578,7 +578,7 @@ void ContinuousSpace(Check check)
 		reference.time = time;
 		engine.PushReference(reference);
 		engine.PushTarget(target);
-		engine.Update(time, Q::Identity(), V::Zero(), 1.0, 0.0);
+		engine.Update(questcal::RingTime(time), Q::Identity(), V::Zero(), 1.0, 0.0);
 	}
 	questcal::ContinuousAlignment::Correction correction;
 	const auto diagnostics = engine.GetDiagnostics();

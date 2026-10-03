@@ -63,6 +63,9 @@
     <ClInclude Include="CalibrationRun.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="Clocks.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="CollectionSource.h">
       <Filter>Header Files</Filter>
     </ClInclude>

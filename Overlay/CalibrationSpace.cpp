@@ -764,7 +764,7 @@ void ProfileUniverseTick(CalibrationContext &ctx, double now)
 			return;
 	}
 
-	const questcal::UniverseVerdict::Decision decision = Space.verdict.Evaluate(now,
+	const questcal::UniverseVerdict::Decision decision = Space.verdict.Evaluate(questcal::UiTime(now),
 		{ ctx.profileWorldFromDriverRotation, ctx.profileWorldFromDriverTranslation },
 		{ Space.hmd.rotation, Space.hmd.translation },
 		[](int64_t sample) { return Space.jumps->HasLiveHeadsetCandidate(sample); });

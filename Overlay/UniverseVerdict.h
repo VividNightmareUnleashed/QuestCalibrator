@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ChaperoneMath.h"
+#include "Clocks.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <optional>
 
 // The profile-universe verdict, kept free of OpenVR and CalibrationContext so
 // the harness can drive it: whether the headset's worldFromDriver (WFD) still
@@ -87,10 +89,10 @@ public:
 	}
 
 	// A mismatch is being timed, or waits for a held headset candidate.
-	bool Pending() const noexcept { return mismatchSince >= 0.0 || waiting; }
+	bool Pending() const noexcept { return mismatchSince.has_value() || waiting; }
 	void Clear()
 	{
-		mismatchSince = NoTime;
+		mismatchSince.reset();
 		waiting = false;
 		transitions.clear();
 		compensated.clear();
@@ -99,7 +101,7 @@ public:
 	// One ProfileUniverseTick past its gates: `observed` is the HMD's newest
 	// WFD; `candidateLiveAt(sample)` says whether the jump detector still
 	// holds a headset candidate raised at that sample.
-	Decision Evaluate(double now, const WorldFromDriver &profile,
+	Decision Evaluate(UiTime now, const WorldFromDriver &profile,
 		const WorldFromDriver &observed,
 		const std::function<bool(int64_t)> &candidateLiveAt)
 	{
@@ -138,15 +140,15 @@ public:
 		}
 		if (waiting)
 		{
-			mismatchSince = NoTime;
+			mismatchSince.reset();
 			return decision;
 		}
-		if (mismatchSince < 0.0 || !SameWorldFromDriver(timedFrom, reference))
+		if (!mismatchSince || !SameWorldFromDriver(timedFrom, reference))
 		{
 			mismatchSince = now;
 			timedFrom = reference;
 		}
-		if (now - mismatchSince < GraceSeconds)
+		if (now - *mismatchSince < GraceSeconds)
 			return decision;
 		Clear();
 		decision.latch = true;
@@ -162,7 +164,6 @@ private:
 		bool composedContinuous;
 	};
 
-	static constexpr double NoTime = -1e9;
 	static constexpr std::size_t MaxRemembered = 32;
 
 	bool Compensated(int64_t sample) const
@@ -173,7 +174,8 @@ private:
 		return false;
 	}
 
-	double mismatchSince = NoTime;
+	// When the profile's current WFD first mismatched, while that is timed.
+	std::optional<UiTime> mismatchSince;
 	WorldFromDriver timedFrom;
 	bool waiting = false;
 	std::deque<Transition> transitions;

@@ -171,7 +171,7 @@ bool ContinuousWindowDiagnosticsScenario()
 		sample.time = time;
 		engine.PushReference(sample);
 		engine.PushTarget(sample);
-		engine.Update(time, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
+		engine.Update(questcal::RingTime(time), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
 	};
 	// Repeated loss prevents warmup; its evidence must survive the same resets.
 	for (int interval = 0; interval < 3; ++interval)
@@ -204,7 +204,7 @@ bool ContinuousPairingDiagnosticsScenario()
 	questcal::PoseSample sample;
 	sample.time = 10.0;
 	engine.PushTarget(sample);
-	engine.Update(10.0, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
+	engine.Update(questcal::RingTime(10.0), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
 	if (engine.GetDiagnostics().referenceWaitUpdates != 1 || engine.GetDiagnostics().pendingTargets != 1)
 		return false;
 	sample.time = 9.99;
@@ -212,12 +212,12 @@ bool ContinuousPairingDiagnosticsScenario()
 	sample.time = 10.01;
 	engine.PushReference(sample);
 	engine.PushReference(sample);
-	engine.Update(10.01, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
+	engine.Update(questcal::RingTime(10.01), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
 	sample.time = 10.02;
 	sample.vel.x() = 10.0;
 	engine.PushTarget(sample);
 	engine.PushTarget(sample);
-	engine.Update(10.02, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
+	engine.Update(questcal::RingTime(10.02), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
 	const auto result = engine.GetDiagnostics();
 	return result.observationsFormed == 1 && result.observationsKept == 1 &&
 		result.referenceOutOfOrder == 1 && result.targetOutOfOrder == 1 &&

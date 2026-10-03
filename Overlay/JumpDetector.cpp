@@ -135,7 +135,7 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	bool resumed = dev.lastValidTime < 0.0;
 	if (dev.lastValidTime >= 0.0 && t - dev.lastValidTime > config.gapSeconds)
 	{
-		gaps.push_back({ s.deviceId, t - dev.lastValidTime, t });
+		gaps.push_back({ s.deviceId, t - dev.lastValidTime, questcal::RingTime(t) });
 		// Broken exactly like an observed bad frame, but this sample is still
 		// processed.
 		breakObservationContinuity(!detailed ? std::string() :
@@ -478,7 +478,7 @@ void JumpDetector::TryAccept()
 		UniverseDelta d;
 		d.rotation = c.rot;
 		d.translation = c.trans;
-		d.time = c.t;
+		d.time = questcal::RingTime(c.t);
 		d.sample = c.sample;
 		d.exact = true;
 		d.devicesAgreeing = 1;
@@ -578,7 +578,7 @@ void JumpDetector::TryAccept()
 		if (agree.size() >= 2 || bigSolo || settledSolo)
 		{
 			UniverseDelta d;
-			d.time = c0.t;
+			d.time = questcal::RingTime(c0.t);
 			d.sample = c0.sample;
 			d.exact = false;
 			d.devicesAgreeing = static_cast<int>(agree.size());

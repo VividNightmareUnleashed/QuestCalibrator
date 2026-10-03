@@ -48,7 +48,7 @@ struct Rig
 	{
 		if (latchedAt >= 0.0)
 			return;
-		auto decision = verdict.Evaluate(now, profile, observed, live);
+		auto decision = verdict.Evaluate(questcal::UiTime(now), profile, observed, live);
 		if (decision.adopt)
 		{
 			profile = decision.adopted;

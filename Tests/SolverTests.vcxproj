@@ -181,6 +181,7 @@
     <ClInclude Include="..\Overlay\CalibrationDriver.h" />
     <ClInclude Include="..\Overlay\CalibrationGuide.h" />
     <ClInclude Include="..\Overlay\CalibrationRun.h" />
+    <ClInclude Include="..\Overlay\Clocks.h" />
     <ClInclude Include="..\Overlay\CollectionSource.h" />
     <ClInclude Include="..\Overlay\ChaperoneMath.h" />
     <ClInclude Include="..\Overlay\FieldMath.h" />

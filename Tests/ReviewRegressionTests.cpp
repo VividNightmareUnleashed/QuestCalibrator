@@ -99,7 +99,7 @@ void CorrectionWithdrawalScenarios(Check check)
 			b.pos = Eigen::Vector3d(0, 1.6, 0);
 			engine.PushReference(a);
 			engine.PushTarget(b);
-			engine.Update(a.time, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1, 0);
+			engine.Update(questcal::RingTime(a.time), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1, 0);
 			ContinuousAlignment::Correction correction;
 			bool received = engine.PollCorrection(correction);
 			if (!engine.CorrectionEligible())
@@ -143,7 +143,7 @@ bool ObserveCorrection(const Eigen::Vector3d &head, double yawDegrees,
 		t.rot = desired.conjugate();
 		engine.PushReference(h);
 		engine.PushTarget(t);
-		engine.Update(h.time, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1, 0);
+		engine.Update(questcal::RingTime(h.time), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1, 0);
 		if (engine.PollCorrection(correction))
 			return true;
 	}
@@ -612,7 +612,7 @@ void FrozenRecoveryBoundaryScenario(Check check)
 		h.pos = t.pos + Eigen::Vector3d(time < 20 ? 0.08 : 0.03, 0, 0);
 		engine.PushReference(h);
 		engine.PushTarget(t);
-		engine.Update(h.time, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1, 0);
+		engine.Update(questcal::RingTime(h.time), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1, 0);
 		ContinuousAlignment::Correction correction;
 		bool emitted = engine.PollCorrection(correction);
 		if (time > 15 && time < 20)

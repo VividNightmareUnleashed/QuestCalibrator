@@ -37,6 +37,7 @@
 // DriftMonitor).
 
 #include "CalibrationEngine.h"
+#include "Clocks.h"
 
 #include <array>
 #include <cstdint>
@@ -274,7 +275,7 @@ public:
 	// against the caller-owned truth, including our own applied corrections.
 	// When supplied, expectedAt evaluates the local field calibration for every
 	// retained observation rather than only for the latest tracker position.
-	void Update(double now, const Eigen::Quaterniond &calRotation,
+	void Update(RingTime now, const Eigen::Quaterniond &calRotation,
 	            const Eigen::Vector3d &calTranslationMeters,
 	            double calScale, double calTimeOffset,
 	            const ExpectedCalibrationAt &expectedAt = ExpectedCalibrationAt());
@@ -316,7 +317,7 @@ public:
 	// scratch (a bootstrap): only a solution of its own is a second opinion on
 	// a deviation the last one was blamed for; a station coming or going
 	// leaves the same solution, and its bias, in place.
-	void NoteTargetResolved(double time, bool newSolution = false);
+	void NoteTargetResolved(RingTime time, bool newSolution = false);
 
 	// True while the target's tracking says its pose is not settled (fewer
 	// than two base stations in view, or moments after a restart). No verdict

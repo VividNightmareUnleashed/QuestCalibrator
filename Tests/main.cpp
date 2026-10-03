@@ -4131,7 +4131,7 @@ void RunJumpScenarios()
 		bool accepted = jd.PollDelta(delta);
 		Check("jump: device-local candidate clocks", accepted && !delta.exact &&
 			delta.devicesAgreeing == 2 &&
-			std::abs(delta.time - 1.5) < 0.02 && delta.sample == jumpSample && liveWhileWaiting &&
+			std::abs(delta.time.seconds - 1.5) < 0.02 && delta.sample == jumpSample && liveWhileWaiting &&
 			!jd.HasLiveHeadsetCandidate(jumpSample),
 			"a delayed agreeing device survives the full fit + agreement window");
 	}
@@ -5471,7 +5471,7 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 		}
 		else
 		{
-			sim.ca.Update(t, sim.calRot, sim.calTrans, sim.calScale,
+			sim.ca.Update(RingTime(t), sim.calRot, sim.calTrans, sim.calScale,
 				sim.solvedOffset, sim.expectedAt);
 
 			// The composition is ApplyCalibrationDelta's, which has its own
@@ -6151,7 +6151,7 @@ void RunContinuousScenarios()
 			other.PushReference(reference);
 			other.PushTarget(target);
 
-			good.Update(t, sweepBase.R, sweepBase.T, calScale, 0.0, faithful);
+			good.Update(RingTime(t), sweepBase.R, sweepBase.T, calScale, 0.0, faithful);
 			updateOther(other, t, localRot, localTrans);
 
 			ContinuousAlignment::Correction correction;
@@ -6177,7 +6177,7 @@ void RunContinuousScenarios()
 			[](ContinuousAlignment &latestOnly, double t,
 				const Eigen::Quaterniond &localRot, const Eigen::Vector3d &localTrans)
 			{
-				latestOnly.Update(t, localRot, localTrans, 1.0, 0.0);
+				latestOnly.Update(RingTime(t), localRot, localTrans, 1.0, 0.0);
 			});
 		snprintf(detail, sizeof detail,
 			"per-observation %d corrections / state %d; latest-only %d, max %.1f mm",
@@ -6250,7 +6250,7 @@ void RunContinuousScenarios()
 			PoseSample target;
 			target.time = time;
 			alignment.PushTarget(target);
-			alignment.Update(time, Eigen::Quaterniond::Identity(),
+			alignment.Update(RingTime(time), Eigen::Quaterniond::Identity(),
 				Eigen::Vector3d::Zero(), 1.0, 0.0);
 		};
 
@@ -6386,7 +6386,7 @@ void RunContinuousScenarios()
 			[&](ContinuousAlignment &unscaled, double t,
 				const Eigen::Quaterniond &, const Eigen::Vector3d &)
 			{
-				unscaled.Update(t, sweepBase.R, sweepBase.T, calScale, 0.0,
+				unscaled.Update(RingTime(t), sweepBase.R, sweepBase.T, calScale, 0.0,
 					[&](const Eigen::Vector3d &targetRawPos,
 						Eigen::Quaterniond &rotationOut, Eigen::Vector3d &translationOut)
 					{
@@ -6546,12 +6546,12 @@ void RunContinuousScenarios()
 				if (!firstNoted && t >= 20.3)
 				{
 					firstNoted = true;
-					sim.ca.NoteTargetResolved(t, true);
+					sim.ca.NoteTargetResolved(RingTime(t), true);
 				}
 				if (!secondNoted && t >= 50.3)
 				{
 					secondNoted = true;
-					sim.ca.NoteTargetResolved(t, true);
+					sim.ca.NoteTargetResolved(RingTime(t), true);
 				}
 				const bool settling = (t >= 20.3 && t < 30.3) || (t >= 50.3 && t < 60.3);
 				if (settling)
@@ -6700,7 +6700,7 @@ void RunContinuousScenarios()
 					if (restart && !noted && t >= 20.3)
 					{
 						noted = true;
-						sim.ca.NoteTargetResolved(t, true);
+						sim.ca.NoteTargetResolved(RingTime(t), true);
 					}
 					sim.ca.SetTargetSettling(restart && t >= 20.3 && t < 30.3);
 				});
@@ -6808,7 +6808,7 @@ void RunContinuousScenarios()
 					if (!noted && t >= 70.3)
 					{
 						noted = true;
-						sim.ca.NoteTargetResolved(t, true);
+						sim.ca.NoteTargetResolved(RingTime(t), true);
 					}
 					sim.ca.SetTargetSettling(t >= 70.3 && t < 80.3);
 					if (t >= 60.0 && t < 70.0)
@@ -6927,7 +6927,7 @@ void RunContinuousScenarios()
 					if (!noted && t >= 100.3)
 					{
 						noted = true;
-						sim.ca.NoteTargetResolved(t, true);
+						sim.ca.NoteTargetResolved(RingTime(t), true);
 					}
 					sim.ca.SetTargetSettling(t >= 100.3 && t < 110.3);
 				});
@@ -6970,7 +6970,7 @@ void RunContinuousScenarios()
 				return [&s](double t)
 				{
 					if (t >= 200.3 && t < 200.32)
-						s.ca.NoteTargetResolved(t, true);
+						s.ca.NoteTargetResolved(RingTime(t), true);
 					s.ca.SetTargetSettling(t >= 200.3 && t < 210.3);
 				};
 			};
@@ -7034,12 +7034,12 @@ void RunContinuousScenarios()
 					if (!first && t >= 10.3)
 					{
 						first = true;
-						sim.ca.NoteTargetResolved(t, true);
+						sim.ca.NoteTargetResolved(RingTime(t), true);
 					}
 					if (!second && t >= 170.3)
 					{
 						second = true;
-						sim.ca.NoteTargetResolved(t, true);
+						sim.ca.NoteTargetResolved(RingTime(t), true);
 					}
 					sim.ca.SetTargetSettling((t >= 10.3 && t < 20.3) || (t >= 170.3 && t < 180.3));
 				});
@@ -7109,12 +7109,12 @@ void RunContinuousScenarios()
 					if (!first && t >= 10.3)
 					{
 						first = true;
-						sim.ca.NoteTargetResolved(t, true);
+						sim.ca.NoteTargetResolved(RingTime(t), true);
 					}
 					if (!again && t >= 100.3)
 					{
 						again = true;
-						sim.ca.NoteTargetResolved(t, secondIsSolution);
+						sim.ca.NoteTargetResolved(RingTime(t), secondIsSolution);
 					}
 					sim.ca.SetTargetSettling((t >= 10.3 && t < 20.3) || (t >= 100.3 && t < 110.3));
 				});
@@ -7166,12 +7166,12 @@ void RunContinuousScenarios()
 			if (!first && t >= 10.3)
 			{
 				first = true;
-				sim.ca.NoteTargetResolved(t, true);
+				sim.ca.NoteTargetResolved(RingTime(t), true);
 			}
 			if (!again && t >= 100.3)
 			{
 				again = true;
-				sim.ca.NoteTargetResolved(t, true);
+				sim.ca.NoteTargetResolved(RingTime(t), true);
 			}
 			sim.ca.SetTargetSettling((t >= 10.3 && t < 20.3) || (t >= 100.3 && t < 110.3));
 		};

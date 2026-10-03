@@ -156,7 +156,7 @@ void Pair(questcal::ContinuousAlignment &aligner, double time, double offset)
 	h.pos.x() = offset;
 	aligner.PushReference(h);
 	aligner.PushTarget(t);
-	aligner.Update(time, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
+	aligner.Update(questcal::RingTime(time), Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(), 1.0, 0.0);
 }
 
 void Warm(questcal::ContinuousAlignment &aligner, double offset)
@@ -276,7 +276,7 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 	// controllers stay continuous.
 	r = Replay([](int f, uint32_t id) { return f >= (id == 0 ? 150 : 1350) ? .4 : 0.; }, {0, 1}, 3500);
 	check("recovery: controller follows a headset map switch 12 s later",
-		r.count == 1 && std::abs(r.last.translation.x() - .4) < 1e-8 && std::abs(r.last.time - 2.5) < 1e-6 &&
+		r.count == 1 && std::abs(r.last.translation.x() - .4) < 1e-8 && std::abs(r.last.time.seconds - 2.5) < 1e-6 &&
 		std::abs(r.last.confirmationLagSeconds - 12.0) < 1e-6 && r.last.devicesAgreeing == 2,
 		"held HMD candidate confirmed by the late controller step; delta keeps the HMD jump time");
 	check("recovery: headset step no controller follows expires",
@@ -308,7 +308,7 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 	r = Replay([](int f, uint32_t id) { return f >= (id == 0 ? 450 : 150) ? .4 : 0.; }, {0, 1}, 900, true);
 	check("recovery: controller step 3 s ahead confirms the headset step",
 		r.count == 1 && std::abs(r.last.translation.x() - .4) < 1e-8 &&
-		std::abs(r.last.time - 5.5) < 1e-6 && std::abs(r.last.confirmationLagSeconds + 3.0) < 1e-6,
+		std::abs(r.last.time.seconds - 5.5) < 1e-6 && std::abs(r.last.confirmationLagSeconds + 3.0) < 1e-6,
 		"delta keeps the HMD jump time; lag reported as -3.0 s");
 	check("recovery: controller step 6 s ahead does not confirm",
 		Replay([](int f, uint32_t id) { return f >= (id == 0 ? 750 : 150) ? .4 : 0.; }, {0, 1}, 1200, true).count == 0,

@@ -1354,7 +1354,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		{
 			// A new server session starts the counts over, and its first line
 			// for the tracker need not be a bootstrap.
-			Continuous->NoteTargetResolved(trackerSeen->lastDisturbance,
+			Continuous->NoteTargetResolved(questcal::RingTime(trackerSeen->lastDisturbance),
 				trackerSeen->liveBootstraps != ContinuousLighthouseBootstraps && trackerSeen->liveBootstraps > 0);
 			ctx.continuousCorrectionGate.Clear();
 			ctx.Diag("continuous: window restarted, headset tracker " + trackerSeen->lastDisturbanceText);
@@ -1385,7 +1385,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			ctx.transform.translationMeters, basePos, rotationOut, translationOut,
 			questcal::FieldBlendSigmaMeters);
 	};
-	Continuous->Update(ringNow, ctx.transform.rotation, ctx.transform.translationMeters,
+	Continuous->Update(questcal::RingTime(ringNow), ctx.transform.rotation, ctx.transform.translationMeters,
 		ctx.transform.scale, ctx.transform.timeOffset, expectedAt);
 	diagnostics.lastUpdateTime = ringNow;
 	diagnostics.engine = Continuous->GetDiagnostics();

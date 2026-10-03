@@ -888,11 +888,13 @@ void ContinuousAlignment::ClearConfirmMarks()
 	undoSince = -1.0;
 }
 
-void ContinuousAlignment::Update(double now, const Eigen::Quaterniond &calRotation,
+void ContinuousAlignment::Update(RingTime at, const Eigen::Quaterniond &calRotation,
                                  const Eigen::Vector3d &calTranslationMeters,
                                  double calScale, double calTimeOffset,
                                  const ExpectedCalibrationAt &expectedAt)
 {
+	// Everything below runs on this one clock, the samples'.
+	const double now = at.seconds;
 	if (!extrinsic.valid)
 	{
 		EnterState(State::Inactive);
@@ -1057,10 +1059,10 @@ void ContinuousAlignment::Reset(ResetReason reason)
 	EnterState(keepFrozen ? State::Frozen : keepCoasting ? State::Coasting : State::Inactive);
 }
 
-void ContinuousAlignment::NoteTargetResolved(double time, bool newSolution)
+void ContinuousAlignment::NoteTargetResolved(RingTime time, bool newSolution)
 {
 	Reset(ResetReason::TargetResolved);
-	lastTargetResolveTime = time;
+	lastTargetResolveTime = time.seconds;
 	if (newSolution)
 		++targetSolutions;
 }
