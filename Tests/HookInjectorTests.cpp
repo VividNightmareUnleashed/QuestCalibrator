@@ -115,6 +115,20 @@ bool CalibrateDeviceZero(ServerTrackedDeviceProvider &provider)
 	return provider.TrySetRuntimeState(state);
 }
 
+// At most five seconds, so a seam that is never reached fails the scenario
+// instead of hanging the harness.
+bool AwaitFlag(const std::atomic<bool> &flag)
+{
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (!flag.load())
+	{
+		if (std::chrono::steady_clock::now() >= deadline)
+			return false;
+		std::this_thread::yield();
+	}
+	return true;
+}
+
 std::atomic<bool> ParkArmed{ false };
 std::atomic<bool> Parked{ false };
 
@@ -154,8 +168,7 @@ void HookReadyFlagTeardownRaceScenario(Check check)
 	ParkArmed.store(true);
 	TryInstallAfterAcceptCheckForTest = &ParkUntilReadyCleared;
 	std::thread request(&RequestHostInterface);
-	while (!Parked.load())
-		std::this_thread::yield();
+	const bool parked = AwaitFlag(Parked);
 	const bool released = DisableHooks();
 	request.join();
 	TryInstallAfterAcceptCheckForTest = nullptr;
@@ -163,10 +176,10 @@ void HookReadyFlagTeardownRaceScenario(Check check)
 
 	char detail[160];
 	std::snprintf(detail, sizeof detail,
-		"mask after install %u (host origin x %.3f), after teardown %u, released %d",
-		installed, firstOrigin, after, released ? 1 : 0);
+		"mask after install %u (host origin x %.3f), parked %d, after teardown %u, released %d",
+		installed, firstOrigin, parked ? 1 : 0, after, released ? 1 : 0);
 	check(name, calibrated && installed == protocol::PoseHook006 && firstOrigin != 0.0 &&
-		after == 0 && released, detail);
+		parked && after == 0 && released, detail);
 
 	// The next Init in the same process installs the hook afresh: a pose sent
 	// through the host reaches it calibrated.
@@ -188,31 +201,17 @@ std::atomic<bool> InsideDriver{ false };
 std::atomic<bool> LeaveDriver{ false };
 std::atomic<bool> TeardownWaiting{ false };
 
-// Holds a pose callback inside the driver until the scenario lets it go.
+// Holds a pose callback inside the driver until the scenario lets it go, or
+// AwaitFlag's deadline passes.
 void HoldInsideDriver()
 {
 	InsideDriver.store(true);
-	while (!LeaveDriver.load())
-		std::this_thread::yield();
+	AwaitFlag(LeaveDriver);
 }
 
 void NoteTeardownWaiting()
 {
 	TeardownWaiting.store(true);
-}
-
-// At most five seconds, so a seam that is never reached fails the scenario
-// instead of hanging the harness.
-bool AwaitFlag(const std::atomic<bool> &flag)
-{
-	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-	while (!flag.load())
-	{
-		if (std::chrono::steady_clock::now() >= deadline)
-			return false;
-		std::this_thread::yield();
-	}
-	return true;
 }
 
 // Teardown waits for a pose callback that has found the driver, since it may

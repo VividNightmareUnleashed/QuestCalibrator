@@ -361,6 +361,11 @@ std::string DefaultLogPath()
 		RRF_RT_REG_SZ, nullptr, buf, &len) == ERROR_SUCCESS && buf[0] != '\0')
 		steam = buf;
 #endif
+	return LogPathUnder(steam);
+}
+
+std::string LogPathUnder(std::string steam)
+{
 	if (steam.empty())
 		steam = "C:\\Program Files (x86)\\Steam";
 	for (char &c : steam)

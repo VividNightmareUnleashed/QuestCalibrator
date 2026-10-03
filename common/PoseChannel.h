@@ -290,6 +290,10 @@ namespace protocol
 		}
 
 #ifdef QUESTCAL_POSE_CHANNEL_TEST_SEAM
+		// Called just before a writer blocks on another writer's reset mutex, so a
+		// test can see a contender wait instead of sleeping and hoping.
+		static inline void (*BeforeResetMutexWaitForTest)() = nullptr;
+
 		// Returns an owned named-mutex handle after marking a retained mapping as
 		// mid-reset. A test worker deliberately closes this handle without calling
 		// ReleaseMutex and then exits while a contender is waiting, reproducing the
@@ -422,6 +426,10 @@ namespace protocol
 			HANDLE mutex = CreateWriterResetMutex(mappingName);
 			if (mutex == nullptr)
 				return nullptr;
+#ifdef QUESTCAL_POSE_CHANNEL_TEST_SEAM
+			if (waitMs != 0 && BeforeResetMutexWaitForTest)
+				BeforeResetMutexWaitForTest();
+#endif
 			DWORD waitResult = WaitForSingleObject(mutex, waitMs);
 			if (waitResult == WAIT_OBJECT_0 || waitResult == WAIT_ABANDONED)
 				return mutex;

@@ -266,6 +266,14 @@ void TailerScenarios(Check check)
 	check("lighthouse tail: the default path is SteamVR's server log",
 		logPath.size() > suffix.size() + 2 &&
 		logPath.compare(logPath.size() - suffix.size(), suffix.size(), suffix) == 0, logPath.c_str());
+
+	// Both ways the folder is found, whether or not this machine has Steam.
+	const std::string found = lighthouselog::LogPathUnder("D:/Games/Steam/");
+	const std::string fallback = lighthouselog::LogPathUnder("");
+	const std::string paths = found + " | " + fallback;
+	check("lighthouse tail: the server log sits in the Steam folder or the default one",
+		found == "D:\\Games\\Steam\\logs\\vrserver.txt" &&
+		fallback == "C:\\Program Files (x86)\\Steam\\logs\\vrserver.txt", paths.c_str());
 }
 
 Event Made(Event::Kind kind, const char *serial, int channel, std::vector<int> visible,

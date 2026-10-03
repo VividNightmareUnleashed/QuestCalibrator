@@ -45,6 +45,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -352,14 +353,19 @@ struct Expectation
 
 int failures = 0;
 int checksRun = 0;
+// The last scenario to report and how many have, for the watchdog in main().
+char LastScenario[96] = "none";
+std::atomic<int> ScenariosReported{ 0 };
 
 // Every result funnels through here; the reported count exposes a skipped
 // group, which the exit code (failures only) cannot.
-void RecordResult(bool pass)
+void RecordResult(const char *name, bool pass)
 {
 	checksRun++;
 	if (!pass)
 		failures++;
+	std::snprintf(LastScenario, sizeof LastScenario, "%s", name);
+	ScenariosReported.store(checksRun, std::memory_order_release);
 }
 
 void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &truth,
@@ -409,7 +415,7 @@ void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &
 		r.scale, r.axisSpread, r.transEigRatio, r.pairsUsed,
 		why.empty() ? "" : "  <-", why.c_str());
 
-	RecordResult(pass);
+	RecordResult(name, pass);
 	if (!pass)
 		printf("%-28s      message: %s\n", "", r.message.c_str());
 }
@@ -546,7 +552,7 @@ void RefTrajectory(double t, uint32_t id, Eigen::Quaterniond &rot, Eigen::Vector
 void Check(const char *name, bool pass, const char *detail)
 {
 	printf("%-28s %s%s%s\n", name, pass ? "PASS" : "FAIL", detail[0] ? "  " : "", detail);
-	RecordResult(pass);
+	RecordResult(name, pass);
 }
 
 // Passes when every named flag holds; the detail lists each as name=0/1.
@@ -1361,8 +1367,15 @@ void RunDriverWorkerScenario()
 	const bool gotNeutralization = AwaitCompletion(worker, neutralization, completion, 1000, 1) &&
 		completion.kind == questcal::DriverWorkKind::Neutralize && completion.succeeded;
 	const int stateCountWhileHeld = stateRequests.load();
-	std::this_thread::sleep_for(std::chrono::milliseconds(20));
-	const bool stateStayedHeld = stateRequests.load() == stateCountWhileHeld;
+	// The worker has seen the state and gone back to sleep behind the hold.
+	bool parkedBehindHold = false;
+	for (int attempt = 0; attempt < 5000 && !parkedBehindHold; ++attempt)
+	{
+		parkedBehindHold = worker.HeldStateWaits() > 0;
+		if (!parkedBehindHold)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	const bool stateStayedHeld = parkedBehindHold && stateRequests.load() == stateCountWhileHeld;
 
 	worker.ReleaseNeutralization();
 	const bool gotReleasedState = AwaitCompletion(worker, heldState.sequence, completion, 1000, 1) &&
@@ -1926,6 +1939,7 @@ void RunPoseRingConcurrentScenario()
 	std::atomic<int> received{ 0 };
 	std::atomic<int> corrupt{ 0 };
 	std::atomic<int> publishRetries{ 0 };
+	std::atomic<int> abandoned{ 0 };
 
 	std::thread consumer([&]()
 	{
@@ -1975,11 +1989,21 @@ void RunPoseRingConcurrentScenario()
 				sample.deviceIsConnected = true;
 				sample.position[1] = static_cast<double>(-token);
 				// Integrity, not the fail-fast policy tested elsewhere: retry a
-				// contention drop so a preempted producer cannot make this flaky.
-				while (!writer.Publish(sample))
+				// contention drop so a preempted producer cannot make this flaky,
+				// but not forever, or a ring that never takes a sample would hang
+				// the harness instead of failing this scenario.
+				const ULONGLONG giveUp = GetTickCount64() + 5000;
+				bool published = writer.Publish(sample);
+				while (!published && GetTickCount64() < giveUp)
 				{
 					publishRetries.fetch_add(1, std::memory_order_relaxed);
 					Sleep(0);
+					published = writer.Publish(sample);
+				}
+				if (!published)
+				{
+					abandoned.fetch_add(1, std::memory_order_relaxed);
+					break;
 				}
 			}
 			producersDone.fetch_add(1, std::memory_order_release);
@@ -2001,10 +2025,12 @@ void RunPoseRingConcurrentScenario()
 
 	char detail[192];
 	snprintf(detail, sizeof detail,
-		"received %d/%d missing %d duplicate %d corrupt %d retries %d",
-		received.load(), total, missing, duplicate, corrupt.load(), publishRetries.load());
+		"received %d/%d missing %d duplicate %d corrupt %d retries %d, producers that gave up %d",
+		received.load(), total, missing, duplicate, corrupt.load(), publishRetries.load(),
+		abandoned.load());
 	Check("pose ring: concurrent integrity",
-		received.load() == total && missing == 0 && duplicate == 0 && corrupt.load() == 0,
+		received.load() == total && missing == 0 && duplicate == 0 && corrupt.load() == 0 &&
+			abandoned.load() == 0,
 		detail);
 }
 
@@ -2342,6 +2368,13 @@ void RunPoseRingAbandonedWriterScenario()
 		detail);
 }
 
+std::atomic<bool> ResetContenderWaiting{ false };
+
+void NoteResetContenderWaiting()
+{
+	ResetContenderWaiting.store(true);
+}
+
 void RunPoseRingAbandonedResetOwnerScenario()
 {
 	// A retained mapping can also outlive a writer that dies midway through the
@@ -2391,6 +2424,8 @@ void RunPoseRingAbandonedResetOwnerScenario()
 	std::atomic<bool> resetContenderDone{ false };
 	bool resetCrashReplacementOpened = false;
 	std::thread resetContender;
+	ResetContenderWaiting.store(false);
+	protocol::PoseRingWriter::BeforeResetMutexWaitForTest = &NoteResetContenderWaiting;
 	if (liveResetOwnerObserved)
 	{
 		resetContender = std::thread([&]()
@@ -2402,15 +2437,17 @@ void RunPoseRingAbandonedResetOwnerScenario()
 		});
 		WaitFor([&] { return resetContenderStarted.load(std::memory_order_acquire); }, 0);
 	}
-	Sleep(20);
-	bool resetContenderSerialized = liveResetOwnerObserved &&
-		resetContenderStarted.load(std::memory_order_acquire) &&
+	// The contender reached the live owner's reset mutex and is still behind it.
+	const bool contenderWaiting = liveResetOwnerObserved &&
+		WaitFor([] { return ResetContenderWaiting.load(); }, 0);
+	bool resetContenderSerialized = contenderWaiting &&
 		!resetContenderDone.load(std::memory_order_acquire);
 	releaseResetOwner.store(true, std::memory_order_release);
 	if (resetOwner.joinable())
 		resetOwner.join();
 	if (resetContender.joinable())
 		resetContender.join();
+	protocol::PoseRingWriter::BeforeResetMutexWaitForTest = nullptr;
 
 	uint64_t resetCrashNewEpoch = resetCrashReader.SessionEpoch();
 	protocol::PoseRingWriter resetCrashLiveContender;
@@ -8584,6 +8621,34 @@ int main(int argc, char **argv)
 		}
 	}
 
+	// A hung scenario would otherwise wait out CI's step timeout without a word
+	// of where it is. Past five minutes without a result (longer for a larger
+	// property run), name the last scenario that finished and fail the run.
+	std::thread([limit = std::chrono::minutes(5) * (std::max)(1, propertyTrials / 64)]()
+	{
+		int seen = -1;
+		auto since = std::chrono::steady_clock::now();
+		for (;;)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			const int reported = ScenariosReported.load(std::memory_order_acquire);
+			const auto now = std::chrono::steady_clock::now();
+			if (reported != seen)
+			{
+				seen = reported;
+				since = now;
+			}
+			else if (now - since >= limit)
+			{
+				printf("\nNo scenario finished in %lld minutes; the last to finish was \"%s\", "
+					"%d in. Stopping.\n",
+					static_cast<long long>(std::chrono::duration_cast<std::chrono::minutes>(limit).count()),
+					LastScenario, reported);
+				std::_Exit(3);
+			}
+		}
+	}).detach();
+
 	GroundTruth truth;
 	truth.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(1.9, Eigen::Vector3d::UnitY()));   // yaw-only truth
 	truth.translation = Eigen::Vector3d(1.2, 0.03, -0.7);
@@ -8865,7 +8930,7 @@ int main(int argc, char **argv)
 		printf("%-28s %s  applied %d  trans %.4f -> %.4f m  rot %.4f -> %.4f deg\n",
 			"joint refinement", pass ? "PASS" : "FAIL",
 			joint.refinementApplied, seqErr, jointErr, seqRot, jointRot);
-		RecordResult(pass);
+		RecordResult("joint refinement", pass);
 	}
 
 	// 7c. Scale-artifact discriminator: validates the live-diagnosis advice
@@ -8933,7 +8998,7 @@ int main(int argc, char **argv)
 			bFast.scale, bSlow.scale,
 			bFast.motionGainLow, bFast.motionGainHigh,
 			aRaw.valid, aFast.valid, aSlow.valid, bFast.valid, bSlow.valid);
-		RecordResult(pass);
+		RecordResult("scale discriminator", pass);
 		if (!pass)
 		{
 			for (const EngineResult *r : { &aRaw, &aFast, &aSlow, &bFast, &bSlow })
@@ -8968,7 +9033,7 @@ int main(int argc, char **argv)
 			"scale guard fail-closed", guardPass ? "PASS" : "FAIL",
 			aRaw.translationRmsMeters, aRaw.scale, pinnedFit.translationRmsMeters, gate,
 			guarded.valid, guarded.message.c_str());
-		RecordResult(guardPass);
+		RecordResult("scale guard fail-closed", guardPass);
 	}
 
 	// 7d. Scale diagnostic branch coverage: a short otherwise-valid session
@@ -9054,7 +9119,7 @@ int main(int argc, char **argv)
 			static_cast<int>(shortResult.scaleGuard),
 			cleanGrossSeen, cleanGross.scale, opposite.motionGainLow,
 			opposite.motionGainHigh, static_cast<int>(opposite.scaleGuard), confidenceGated);
-		RecordResult(pass);
+		RecordResult("scale diagnostic branches", pass);
 	}
 
 	// 8. Runtime application of the solved offset: sign and asymmetric clamp.

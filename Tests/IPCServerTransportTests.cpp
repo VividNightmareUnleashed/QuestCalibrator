@@ -75,13 +75,15 @@ bool Handshake(HANDLE pipe)
 // runs after its response is written, and reads the clock on every pass of its
 // loop before it blocks. Once the clock has gone unread for a while, every
 // completion has run and the server is blocked in its wait, so advancing the
-// clock cannot land between a response and its stamp.
+// clock cannot land between a response and its stamp. The window is long
+// enough that a server thread merely descheduled on a busy machine is not
+// taken for a blocked one.
 bool WaitForServerQuiet(const std::atomic<int> &clockReads)
 {
-	for (int attempt = 0; attempt < 100; ++attempt)
+	for (int attempt = 0; attempt < 50; ++attempt)
 	{
 		const int before = clockReads.load();
-		Sleep(50);
+		Sleep(200);
 		if (clockReads.load() == before)
 			return true;
 	}

@@ -115,6 +115,9 @@ bool ParseTimestamp(const std::string &line, double &unixTime);
 // <Steam>\logs\vrserver.txt, with the Steam folder from the registry and
 // the default install location as the fallback.
 std::string DefaultLogPath();
+// The same for a given Steam folder, which may use either slash and end in
+// one; empty means the default install location.
+std::string LogPathUnder(std::string steamFolder);
 
 // Follows a growing log file by re-opening it on every poll, so no handle
 // is held between polls and SteamVR can rename the file at its next start.

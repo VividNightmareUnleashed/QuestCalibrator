@@ -122,6 +122,15 @@ public:
 		return true;
 	}
 
+	// How often the worker found a state waiting behind a held neutralization
+	// and went back to sleep, so a test can see the hold take effect rather
+	// than sleep and hope.
+	uint64_t HeldStateWaits()
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		return heldStateWaits;
+	}
+
 private:
 	struct SequencedState
 	{
@@ -146,8 +155,11 @@ private:
 				std::unique_lock<std::mutex> lock(mutex);
 				wake.wait(lock, [this]
 				{
-					return stopping || pendingNeutralization ||
+					const bool ready = stopping || pendingNeutralization ||
 						(pendingState && !neutralizationHeld);
+					if (!ready && pendingState)
+						++heldStateWaits;
+					return ready;
 				});
 
 				if (pendingNeutralization)
@@ -212,6 +224,7 @@ private:
 	bool stopping = true; // submissions before Start/after Stop are refused with sequence 0
 	bool neutralizationHeld = false;
 	uint64_t nextSequence = 0;
+	uint64_t heldStateWaits = 0;
 	std::optional<SequencedState> pendingState;
 	std::optional<Neutralization> pendingNeutralization;
 	std::optional<DriverStateJob> lastSubmission;
