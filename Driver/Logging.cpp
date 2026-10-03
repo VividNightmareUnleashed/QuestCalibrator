@@ -35,20 +35,37 @@ static std::string LogFilePath()
 	return dir.substr(0, slash + 1) + "quest_calibrator_driver.log";
 }
 
+// A log past this size is set aside as quest_calibrator_driver.old.log when
+// the driver next loads, replacing the previous one, so the two stay bounded.
+static constexpr unsigned long long MaxLogBytes = 4ull * 1024 * 1024;
+
+static FILE *OpenRotatedLog(const std::string &path)
+{
+	WIN32_FILE_ATTRIBUTE_DATA attributes;
+	if (GetFileAttributesExA(path.c_str(), GetFileExInfoStandard, &attributes) &&
+		((static_cast<unsigned long long>(attributes.nFileSizeHigh) << 32) |
+			attributes.nFileSizeLow) > MaxLogBytes)
+	{
+		const std::string previous = path.substr(0, path.size() - 4) + ".old.log";
+		MoveFileExA(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
+	}
+	return fopen(path.c_str(), "a");
+}
+
 void OpenLogFile()
 {
 	LogFile = nullptr;
 
 	std::string path = LogFilePath();
 	if (!path.empty())
-		LogFile = fopen(path.c_str(), "a");
+		LogFile = OpenRotatedLog(path);
 
 	if (LogFile == nullptr)
 	{
 		char tempDir[MAX_PATH];
 		DWORD len = GetTempPathA(MAX_PATH, tempDir);
 		if (len > 0 && len < MAX_PATH)
-			LogFile = fopen((std::string(tempDir) + "quest_calibrator_driver.log").c_str(), "a");
+			LogFile = OpenRotatedLog(std::string(tempDir) + "quest_calibrator_driver.log");
 	}
 
 	if (LogFile == nullptr)
