@@ -6,6 +6,7 @@
 // identity. SettingsRecordJson.h shares these guarded primitives with the
 // settings and chaperone codecs.
 
+#include "JsonNesting.h"
 #include "ProfileValidation.h"
 #include "RecordBounds.h"
 
@@ -88,40 +89,6 @@ inline PersistedRevision ReadPersistenceRevision(const picojson::object &obj)
 	revision.present = true;
 	revision.value = static_cast<uint32_t>(value);
 	return revision;
-}
-
-// picojson recurses with no depth limit, and a stack overflow is an SEH
-// exception no catch sees: a deeply nested registry value would crash at
-// startup with no log. Reject that shape so it lands in Unreadable. Both
-// schemas nest at most three levels; brackets inside strings do not count.
-inline void RejectExcessiveJsonNesting(const std::string &text)
-{
-	int depth = 0;
-	bool inString = false;
-	bool escaped = false;
-	for (char c : text)
-	{
-		if (inString)
-		{
-			if (escaped)
-				escaped = false;
-			else if (c == '\\')
-				escaped = true;
-			else if (c == '"')
-				inString = false;
-			continue;
-		}
-
-		if (c == '"')
-			inString = true;
-		else if (c == '[' || c == '{')
-		{
-			if (!IsValidJsonDepth(++depth))
-				throw std::runtime_error("record nesting is too deep");
-		}
-		else if (c == ']' || c == '}')
-			--depth;
-	}
 }
 
 // Global preferences that Config-only releases stored inside the profile

@@ -2,6 +2,7 @@
 
 #include "../common/Version.h"
 #include "../lib/picojson.h"
+#include "JsonNesting.h"
 
 #include <array>
 #include <cmath>
@@ -198,12 +199,17 @@ inline bool SelectReleaseCandidate(const std::string &json,
 	std::string parseError;
 	try
 	{
+		RejectExcessiveJsonNesting(json);
 		parseError = picojson::parse(root, json);
 	}
 	catch (const std::overflow_error &)
 	{
 		// picojson throws, rather than reports, a number past a double's range.
 		parseError = "number out of range";
+	}
+	catch (const std::runtime_error &)
+	{
+		parseError = "nesting too deep";
 	}
 	if (!parseError.empty() || !root.is<picojson::array>())
 	{

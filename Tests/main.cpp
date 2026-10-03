@@ -8329,6 +8329,16 @@ void RunUpdatePolicyScenarios()
 		UpdateVersion(1, 1, 0), candidate, available, error);
 	Check("updates: duplicate canonical packages fail closed",
 		!acceptedDuplicate && available && !error.empty(), error.c_str());
+
+	// picojson recurses once per bracket; a feed this deep would overflow the
+	// stack, which no catch sees, instead of failing like any bad feed.
+	available = true;
+	error.clear();
+	const bool acceptedDeep = SelectReleaseCandidate(std::string(200000, '['),
+		UpdateVersion(1, 1, 0), candidate, available, error);
+	Check("updates: a deeply nested feed fails closed",
+		!acceptedDeep && !available && error == "GitHub returned an invalid release list.",
+		error.c_str());
 }
 
 int main(int argc, char **argv)

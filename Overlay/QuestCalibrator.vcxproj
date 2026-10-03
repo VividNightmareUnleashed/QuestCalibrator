@@ -133,6 +133,7 @@
     <ClInclude Include="EmbeddedFiles.h" />
     <ClInclude Include="FieldMath.h" />
     <ClInclude Include="IPCClient.h" />
+    <ClInclude Include="JsonNesting.h" />
     <ClInclude Include="JumpDetector.h" />
     <ClInclude Include="PoseStreamHub.h" />
     <ClInclude Include="stdafx.h" />

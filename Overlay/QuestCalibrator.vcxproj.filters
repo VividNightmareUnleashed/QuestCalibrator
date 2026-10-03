@@ -132,6 +132,9 @@
     <ClInclude Include="FieldMath.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="JsonNesting.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="JumpDetector.h">
       <Filter>Header Files</Filter>
     </ClInclude>
