@@ -26,16 +26,14 @@ ContinuousStatus ContinuousStatusNow()
 	if (!CalCtx.ContinuousArmed())
 		return ContinuousStatus::NeedsMount;
 
-	// The rest of ContinuousTick's shouldRun conjunction. The tracker id is
-	// re-resolved by the driver sync and reset to invalid whenever that batch
-	// fails, so a sleeping tracker or a dropped pipe lands here rather than
-	// looking like a loop that is still warming up. Preview mode has no driver
-	// at all and so can satisfy none of these (see PoseChannelDown).
-	bool running = g_uiPreviewMode ||
-		(CalCtx.state == CalibrationState::None &&
-			CalCtx.enabled && CalCtx.validProfile && CalCtx.poseRingOpen &&
-			CalCtx.continuousTrackerId < vr::k_unMaxTrackedDeviceCount &&
-			CalCtx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd]);
+	// The rest of ContinuousTick's shouldRun conjunction, asked of the same
+	// predicate ContinuousTick gates on so the two cannot drift apart (a copy
+	// here once missed a pending frame recovery). The tracker id is re-resolved
+	// by the driver sync and reset to invalid whenever that batch fails, so a
+	// sleeping tracker or a dropped pipe lands here rather than looking like a
+	// loop that is still warming up. Preview mode has no driver at all and so
+	// can satisfy none of these (see PoseChannelDown).
+	bool running = g_uiPreviewMode || CalCtx.ContinuousShouldRun();
 	if (!running)
 		return ContinuousStatus::NotRunning;
 
