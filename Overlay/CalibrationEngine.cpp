@@ -57,6 +57,19 @@ bool IsValidStream(const std::vector<PoseSample> &stream)
 	return true;
 }
 
+// Solves the symmetric system `a x = b`. False when the factorization fails
+// or the solution is not finite; the caller then takes its own fail-closed
+// path rather than using whatever the solve returned.
+template <typename Matrix, typename Vector>
+bool SolveSymmetric(const Matrix &a, const Vector &b, Vector &x)
+{
+	const Eigen::LDLT<Matrix> factor(a);
+	if (factor.info() != Eigen::Success)
+		return false;
+	x = factor.solve(b);
+	return x.allFinite();
+}
+
 // Shortest-arc axis/angle of a delta rotation, via quaternions.
 // Quaternion extraction keeps the axis well-conditioned even near 180 degrees,
 // where the matrix off-diagonal method degrades.
@@ -453,9 +466,10 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 		// step (the conditioning gate has already rejected true degeneracy).
 		H.diagonal().array() += 1e-6 * H.diagonal().maxCoeff() + 1e-12;
 
-		Eigen::VectorXd delta = -H.ldlt().solve(g);
-		if (!delta.allFinite())
+		Eigen::VectorXd delta;
+		if (!SolveSymmetric(H, g, delta))
 			return false;
+		delta = -delta;
 
 		// The polish corrects sub-degree Kabsch error; a large rotation ask
 		// means an outlier regime this linearization should not chase.
@@ -969,7 +983,12 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 				ata += r.weight * r.dQtdQ;
 				atb += r.weight * (r.dQ.transpose() * rhs);
 			}
-			tOut = ata.ldlt().solve(atb);
+			if (!SolveSymmetric(ata, atb, tOut))
+			{
+				// Reaches the non-finite gate at the end of the solve.
+				tOut.setConstant(std::numeric_limits<double>::quiet_NaN());
+				break;
+			}
 
 			if (iter == config.irlsIterations)
 				break;
@@ -1028,7 +1047,13 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			Eigen::Matrix4d ata;
 			Eigen::Vector4d atb;
 			jointNormalEquations(0, 0, ata, atb);
-			Eigen::Vector4d solved = ata.ldlt().solve(atb);
+			Eigen::Vector4d solved;
+			if (!SolveSymmetric(ata, atb, solved))
+			{
+				// Keep the last iterate for the gates below to judge.
+				transRms = weightedRms(translation, scale);
+				break;
+			}
 			translation = solved.head<3>();
 			scale = std::min(1.0 + config.scaleSearchRange,
 				std::max(1.0 - config.scaleSearchRange, solved(3)));
@@ -1089,9 +1114,12 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			weightedSquaredError += r.weight * residual * residual;
 			weightSum += r.weight;
 		}
-		double conditionalInformation = scaleInformation - coupling.dot(
-			translationInformation.ldlt().solve(coupling));
-		conditionalInformation = std::max(0.0, conditionalInformation);
+		// A failed solve leaves nothing known about the scale.
+		Eigen::Vector3d conditioned;
+		const double conditionalInformation =
+			SolveSymmetric(translationInformation, coupling, conditioned)
+				? std::max(0.0, scaleInformation - coupling.dot(conditioned))
+				: 0.0;
 		result.scaleCondition = conditionalInformation /
 			std::max(1e-12, scaleInformation);
 		double variance = weightedSquaredError /
