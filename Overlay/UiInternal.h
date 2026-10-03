@@ -135,22 +135,34 @@ enum class BtnKind { Primary, Ghost, Quiet, Danger };
 
 static const float kRowHeight = 52.0f;
 static const float kRowInsetX = 16.0f;
-static const float kRowControlY = 14.0f;
 
 ImVec2 BeginRowCard(float height);
 void EndRowCard(ImVec2 p, float height);
 
+// Where a settings row's leading items go: the control at the row's inset,
+// then the icon and the label, each centred on the row's first line
+// (kRowHeight tall), and the sub-line under the label. The label and
+// sub-line rectangles start where their text is drawn.
+struct RowSlots
+{
+	FlexRect control, icon, label, subLine;
+};
+RowSlots LayOutRowSlots(ImVec2 rowPos);
+
 // Remembers the height it opened with, so the end call cannot disagree with
-// the begin call and silently overlap the next row.
+// the begin call and silently overlap the next row. Its slots are laid out
+// as it opens.
 struct RowCard
 {
-	explicit RowCard(float rowHeight) : pos(BeginRowCard(rowHeight)), height(rowHeight) {}
+	explicit RowCard(float rowHeight)
+		: pos(BeginRowCard(rowHeight)), height(rowHeight), slots(LayOutRowSlots(pos)) {}
 	RowCard(const RowCard &) = delete;
 	RowCard &operator=(const RowCard &) = delete;
 	~RowCard() { EndRowCard(pos, height); }
 
 	ImVec2 pos;
 	float height;
+	RowSlots slots;
 };
 
 // The one-sentence explanation under a row's label: a permanent line rather
@@ -258,8 +270,8 @@ bool IconButton(const char *id, const char *label, IconFn icon, ImVec2 size, Btn
 // less than the English layout's width.
 float ButtonWidthFor(const char *english, bool withIcon, float minWidth);
 bool QCCheckbox(const char *id, bool *v);
-void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label);
-void RowSubLine(ImVec2 rowPos, const char *text);
+void RowIconLabel(const RowCard &row, IconFn icon, const char *label);
+void RowSubLine(const RowCard &row, const char *text);
 bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, const char *subline = nullptr);
 bool EscapePressed();
 void ShowTip(const char *text, bool leftOfCursor = false);

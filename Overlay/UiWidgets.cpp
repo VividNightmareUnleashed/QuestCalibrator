@@ -586,9 +586,12 @@ float ButtonWidthFor(const char *english, bool withIcon, float minWidth)
 	return std::max(minWidth, text + (withIcon ? 28.0f : 0.0f) + 36.0f);
 }
 
+// The settings rows lay out a control slot this size for it.
+static const float kCheckboxSize = 24.0f;
+
 bool QCCheckbox(const char *id, bool *v)
 {
-	const float sz = 24.0f;
+	const float sz = kCheckboxSize;
 	ImVec2 p = ImGui::GetCursorScreenPos();
 	bool pressed = ImGui::InvisibleButton(id, ImVec2(sz, sz), ImGuiButtonFlags_EnableNav);
 	if (pressed)
@@ -633,20 +636,62 @@ void EndRowCard(ImVec2 p, float height)
 	ImGui::Dummy(ImVec2(0, 0));
 }
 
-void RowIconLabel(ImVec2 rowPos, IconFn icon, const char *label)
+// One flex row: the inset, the checkbox, the 18 px icon and the text column,
+// 17 px apart. The checkbox and the icon sit centred in a box the height of
+// the first line; the text column holds the label, centred on that line
+// the same way, and the sub-line, tucked 6 px up into it.
+RowSlots LayOutRowSlots(ImVec2 rowPos)
+{
+	FlexLayout fl;
+	YGNodeRef row = fl.Root();
+	YGNodeStyleSetPadding(row, YGEdgeLeft, kRowInsetX);
+	YGNodeStyleSetGap(row, YGGutterColumn, 17.0f);
+
+	auto firstLine = [&fl](YGNodeRef parent) {
+		YGNodeRef line = fl.Add(parent);
+		YGNodeStyleSetHeight(line, kRowHeight);
+		YGNodeStyleSetAlignItems(line, YGAlignCenter);
+		return line;
+	};
+	auto square = [&fl](YGNodeRef parent, float size) {
+		YGNodeRef node = fl.Add(parent);
+		YGNodeStyleSetWidth(node, size);
+		YGNodeStyleSetHeight(node, size);
+		return node;
+	};
+	// Rounded as text, so its top floors to a whole pixel as ImGui places
+	// text: the 21 px label centred on the 52 px line starts 15 px down.
+	auto textLine = [&fl](YGNodeRef parent, ImFont *font) {
+		YGNodeRef node = fl.Add(parent);
+		YGNodeSetNodeType(node, YGNodeTypeText);
+		YGNodeStyleSetHeight(node, font->LegacySize);
+		return node;
+	};
+
+	YGNodeRef control = square(firstLine(row), kCheckboxSize);
+	YGNodeRef icon = square(firstLine(row), 18.0f);
+	YGNodeRef text = fl.Add(row);
+	YGNodeStyleSetFlexDirection(text, YGFlexDirectionColumn);
+	YGNodeRef label = textLine(firstLine(text), g_fontBody);
+	YGNodeRef subLine = textLine(text, g_fontSmall);
+	YGNodeStyleSetMargin(subLine, YGEdgeTop, -6.0f);
+
+	fl.Compute(rowPos, YGUndefined, YGUndefined);
+	return { fl.Rect(control), fl.Rect(icon), fl.Rect(label), fl.Rect(subLine) };
+}
+
+void RowIconLabel(const RowCard &row, IconFn icon, const char *label)
 {
 	ImDrawList *dl = ImGui::GetWindowDrawList();
-	ImVec2 iconC = ImVec2(rowPos.x + 66.0f, rowPos.y + 26.0f);
-	icon(dl, iconC, 9.0f, Pal::U32(Pal::Dim));
-	dl->AddText(g_fontBody, g_fontBody->LegacySize,
-		ImVec2(rowPos.x + 92.0f, rowPos.y + 26.0f - g_fontBody->LegacySize * 0.5f),
+	icon(dl, row.slots.icon.Center(), row.slots.icon.W() * 0.5f, Pal::U32(Pal::Dim));
+	dl->AddText(g_fontBody, g_fontBody->LegacySize, row.slots.label.min,
 		Pal::U32(Pal::Text), Tr(label));
 }
 
-void RowSubLine(ImVec2 rowPos, const char *text)
+void RowSubLine(const RowCard &row, const char *text)
 {
 	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
-		ImVec2(rowPos.x + 92.0f, rowPos.y + kRowHeight - 6.0f), Pal::U32(Pal::Dim), Tr(text));
+		row.slots.subLine.min, Pal::U32(Pal::Dim), Tr(text));
 }
 
 // A whole settings toggle row: card, checkbox, icon + label, optional
@@ -654,11 +699,11 @@ void RowSubLine(ImVec2 rowPos, const char *text)
 bool ToggleRow(const char *id, IconFn icon, const char *label, bool &value, const char *subline)
 {
 	RowCard row(kRowHeight + (subline ? kRowSubLineH : 0.0f));
-	ImGui::SetCursorScreenPos(ImVec2(row.pos.x + kRowInsetX, row.pos.y + kRowControlY));
+	ImGui::SetCursorScreenPos(row.slots.control.min);
 	bool changed = QCCheckbox(id, &value);
-	RowIconLabel(row.pos, icon, label);
+	RowIconLabel(row, icon, label);
 	if (subline)
-		RowSubLine(row.pos, subline);
+		RowSubLine(row, subline);
 	return changed;
 }
 

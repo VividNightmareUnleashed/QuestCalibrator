@@ -96,6 +96,9 @@ Layout comes from Yoga, through `Overlay/UiLayout.h` (`FlexLayout`,
 named after the CSS properties, compute it, then place ImGui items and draw-list
 calls at `Rect(node)`. Web defaults are on, so the CSS of a reference design maps
 one to one. `BuildHeader` in `Overlay/UserInterface.cpp` is the example to copy.
+`LayOutRowSlots` in `Overlay/UiWidgets.cpp` lays out the settings rows the same
+way; it marks the nodes that only place text as `YGNodeTypeText`, so they round
+down to a whole pixel as ImGui does when it draws text.
 
 ## Translations
 

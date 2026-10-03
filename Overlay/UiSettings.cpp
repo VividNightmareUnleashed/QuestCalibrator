@@ -14,7 +14,7 @@ static void LanguageRow(float cw)
 	const bool translated = chosen != Language::English;
 	RowCard row(kRowHeight + (translated ? kRowSubLineH + 26.0f : 0.0f));
 	const ImVec2 p = row.pos;
-	RowIconLabel(p, IconGlobe, "Language");
+	RowIconLabel(row, IconGlobe, "Language");
 
 	// Without a Japanese font its name would draw as boxes.
 	const Language order[] = { Language::English, Language::Italian, Language::Japanese };
@@ -46,8 +46,8 @@ static void LanguageRow(float cw)
 
 	if (translated)
 	{
-		RowSubLine(p, "This translation may not be accurate.");
-		ImGui::SetCursorScreenPos(ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH - 4.0f));
+		RowSubLine(row, "This translation may not be accurate.");
+		ImGui::SetCursorScreenPos(ImVec2(row.slots.label.min.x, p.y + kRowHeight + kRowSubLineH - 4.0f));
 		ImGui::PushFont(g_fontSmall);
 		ImGui::TextColored(Pal::Dim, "%s", Tr("Feel free to send any feedback:"));
 		ImGui::SameLine(0.0f, 8.0f);
@@ -64,7 +64,7 @@ static void FieldAnchorRows(float cw)
 	RowCard row(kRowHeight + kRowSubLineH + (anchorLines > 0 ? anchorLines * 24.0f + 6.0f : 0.0f));
 	const ImVec2 p = row.pos;
 
-	ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
+	ImGui::SetCursorScreenPos(row.slots.control.min);
 	// Toggled through a local: the live member changes only after the
 	// transaction has persisted the candidate that carries this value.
 	bool fieldEnabled = CalCtx.fieldEnabled;
@@ -77,8 +77,8 @@ static void FieldAnchorRows(float cw)
 			true))
 			ResyncDriverState();
 	}
-	RowIconLabel(p, IconField, "Field anchors");
-	RowSubLine(p, "Corrects the alignment in the spots where you added an anchor.");
+	RowIconLabel(row, IconField, "Field anchors");
+	RowSubLine(row, "Corrects the alignment in the spots where you added an anchor.");
 
 	if (anchorCount > 0)
 	{
@@ -127,7 +127,7 @@ static void FieldAnchorRows(float cw)
 		{
 			std::string line = FormatString("%zu anchor%s saved", anchorCount, anchorCount == 1 ? "" : "s");
 			dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-				ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH), Pal::U32(Pal::Dim), Tr(line.c_str()));
+				ImVec2(row.slots.label.min.x, p.y + kRowHeight + kRowSubLineH), Pal::U32(Pal::Dim), Tr(line.c_str()));
 		}
 		for (size_t i = 0; CalCtx.uiAdvanced && i < CalCtx.fieldAnchors.size(); ++i)
 		{
@@ -140,7 +140,7 @@ static void FieldAnchorRows(float cw)
 			std::string line = FormatString("Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base",
 				i + 1, a.position.x(), a.position.z(), posDeltaCm, rotDeltaDeg);
 			dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-				ImVec2(p.x + 92.0f, p.y + kRowHeight + kRowSubLineH + i * 24.0f), Pal::U32(Pal::Dim), Tr(line.c_str()));
+				ImVec2(row.slots.label.min.x, p.y + kRowHeight + kRowSubLineH + i * 24.0f), Pal::U32(Pal::Dim), Tr(line.c_str()));
 		}
 	}
 }
@@ -151,12 +151,12 @@ static void TimeOffsetRow(float cw)
 	const ImVec2 p = row.pos;
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 
-	ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
+	ImGui::SetCursorScreenPos(row.slots.control.min);
 	bool previous = CalCtx.applyTimeOffset;
 	if (QCCheckbox("##applyTimeOffset", &CalCtx.applyTimeOffset))
 		SaveSettingOrRestore(CalCtx.applyTimeOffset, previous);
-	RowIconLabel(p, IconClock, "Correct for tracking delay");
-	RowSubLine(p, "Uses the delay between the two systems measured during calibration.");
+	RowIconLabel(row, IconClock, "Correct for tracking delay");
+	RowSubLine(row, "Uses the delay between the two systems measured during calibration.");
 
 	// The number is for the advanced reader; the switch is the setting.
 	if (CalCtx.uiAdvanced && CalCtx.validProfile && CalCtx.applyTimeOffset)
@@ -181,15 +181,15 @@ static void ContinuousRows(float cw, const VRState &state)
 	const ImVec2 p = row.pos;
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 
-	ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
+	ImGui::SetCursorScreenPos(row.slots.control.min);
 	bool continuousEnabled = CalCtx.continuousEnabled;
 	if (QCCheckbox("##continuousEnabled", &continuousEnabled))
 		SaveProfileFieldEdit(CalCtx,
 			[&](questcal::ProfileRecord &candidate) {
 				candidate.continuousEnabled = continuousEnabled;
 			});
-	RowIconLabel(p, IconCrosshair, "Continuous calibration");
-	RowSubLine(p, "Keeps devices aligned while you play, using a tracker strapped to your headset.");
+	RowIconLabel(row, IconCrosshair, "Continuous calibration");
+	RowSubLine(row, "Keeps devices aligned while you play, using a tracker strapped to your headset.");
 
 	if (CalCtx.continuousEnabled)
 	{
@@ -361,7 +361,7 @@ static void ChaperoneRow(float cw)
 {
 	RowCard row(76.0f);
 	const ImVec2 p = row.pos;
-	ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
+	ImGui::SetCursorScreenPos(row.slots.control.min);
 	if (QCCheckbox("##chapAuto", &CalCtx.chaperone.autoApply))
 	{
 		// Disarming is fail-closed: a failed write must never roll the
@@ -379,7 +379,7 @@ static void ChaperoneRow(float cw)
 			"Turn off to let the Quest boundary import win each session;\n"
 			"the protected chaperone then only applies when you press Restore.");
 	}
-	RowIconLabel(p, IconCopy, "Restore protected chaperone automatically");
+	RowIconLabel(row, IconCopy, "Restore protected chaperone automatically");
 
 	std::string info;
 	if (CalCtx.chaperone.geometry.empty())
@@ -396,7 +396,7 @@ static void ChaperoneRow(float cw)
 			copied ? copied->c_str() : "age unknown");
 	}
 	ImGui::GetWindowDrawList()->AddText(g_fontSmall, g_fontSmall->LegacySize,
-		ImVec2(p.x + 92.0f, p.y + 46.0f), Pal::U32(Pal::Dim), Tr(info.c_str()));
+		row.slots.subLine.min, Pal::U32(Pal::Dim), Tr(info.c_str()));
 
 	float btnW = ButtonWidthFor("Restore chaperone now", true, 224.0f);
 	ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + 9.0f));
@@ -412,7 +412,7 @@ static void UpdateRows(float cw)
 	const ImVec2 p = row.pos;
 	ImDrawList *dl = ImGui::GetWindowDrawList();
 
-	ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
+	ImGui::SetCursorScreenPos(row.slots.control.min);
 	const bool previous = CalCtx.automaticUpdates;
 	if (QCCheckbox("##automaticUpdates", &CalCtx.automaticUpdates))
 	{
@@ -420,8 +420,8 @@ static void UpdateRows(float cw)
 		if (CalCtx.automaticUpdates != previous && !g_uiPreviewMode)
 			questcal::update::AppUpdater.SetEnabled(CalCtx.automaticUpdates);
 	}
-	RowIconLabel(p, IconDownload, "Automatic updates");
-	RowSubLine(p, "Downloads verified updates. Close Steam before installing them.");
+	RowIconLabel(row, IconDownload, "Automatic updates");
+	RowSubLine(row, "Downloads verified updates. Close Steam before installing them.");
 
 	if (expanded)
 	{
@@ -462,7 +462,7 @@ static void UpdateRows(float cw)
 			break;
 		}
 		dl->AddText(g_fontSmall, g_fontSmall->LegacySize,
-			ImVec2(p.x + 92.0f, actionY + 10.0f), Pal::U32(color), Tr(status.c_str()));
+			ImVec2(row.slots.label.min.x, actionY + 10.0f), Pal::U32(color), Tr(status.c_str()));
 
 		const bool installReady = update.state == questcal::update::State::Ready;
 		const bool canRetry = update.state == questcal::update::State::Failed ||
@@ -504,12 +504,12 @@ static void BugReportRow(float cw)
 {
 	RowCard row(kRowHeight + kRowSubLineH);
 	const ImVec2 p = row.pos;
-	ImGui::SetCursorScreenPos(ImVec2(p.x + kRowInsetX, p.y + kRowControlY));
+	ImGui::SetCursorScreenPos(row.slots.control.min);
 	bool previous = CalCtx.detailedLogging;
 	if (QCCheckbox("##detailedLogging", &CalCtx.detailedLogging))
 		SaveSettingOrRestore(CalCtx.detailedLogging, previous);
-	RowIconLabel(p, IconInfo, "Detailed calibration logging");
-	RowSubLine(p, "Records extra tracking and calibration details. Saved diagnostics remove your name and folder paths.");
+	RowIconLabel(row, IconInfo, "Detailed calibration logging");
+	RowSubLine(row, "Records extra tracking and calibration details. Saved diagnostics remove your name and folder paths.");
 
 	const float btnW = ButtonWidthFor("Save diagnostics file", true, 210.0f);
 	ImGui::SetCursorScreenPos(ImVec2(p.x + cw - kRowInsetX - btnW, p.y + kRowHeight * 0.5f - 17.0f));
