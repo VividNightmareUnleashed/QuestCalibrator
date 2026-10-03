@@ -10,6 +10,21 @@ Releases are published in this repository,
 Installed copies look for updates there, so it must keep that exact name and stay
 public.
 
+## Branches
+
+Work lands on `alpha`, and prereleases are tagged there. `stable` is the default
+branch and holds the last stable release, so visitors and anything that reads the
+default branch get released code. It moves only when a stable release is
+published, by a fast-forward to that release's tag, and nothing is committed to it
+directly; protect it on GitHub so only those fast-forwards land:
+
+```powershell
+git push origin "questcalibrator-vMAJOR.MINOR.PATCH^{commit}:refs/heads/stable"
+```
+
+Scheduled workflows start from the default branch; the weekly fuzz run checks out
+`alpha` so it searches the code still changing.
+
 Pushing a `questcalibrator-v*` tag runs `.github/workflows/release.yml`. It stops at
 once in any other repository (a fork, or this one under another name). Otherwise, on
 a clean Windows runner, it checks out the tag and the VirtualQuest commit it pins,
@@ -210,6 +225,9 @@ inputs to this workflow and must not be committed.
   and record the final GitHub Release URL.
 - Download the ZIP from the published release and verify its SHA-256 against the
   release notes once more.
+- On `alpha`, point the README's VirusTotal badge at the new zip's report (its row
+  in the release's VirusTotal table) and put the new version in its label.
+- For a stable release, fast-forward `stable` to the release tag (Branches, above).
 
 ### Automatic-update contract
 

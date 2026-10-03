@@ -6,8 +6,9 @@ How to build, test and check QuestCalibrator while working on it.
 
 ## Branches
 
-Work happens on `alpha`. `stable` is the default branch and the release
-branch.
+Work happens on `alpha`, and prereleases are tagged there. `stable` is the
+default branch and holds the last stable release; it moves only when one is
+published ([releasing](releasing.md#branches)).
 
 ## Build and test
 
