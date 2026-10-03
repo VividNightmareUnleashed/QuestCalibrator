@@ -11,6 +11,7 @@
 #include "ProfileValidation.h"
 #include "RingPoseMath.h"
 #include "UniverseVerdict.h"
+#include "../common/MathConstants.h"
 #include "../common/PoseChannel.h"
 
 #include <algorithm>
@@ -708,7 +709,7 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 
 	ctx.jumpsCompensated++;
 	const double yawDegrees = 2.0 *
-		std::atan2(delta.rotation.y(), delta.rotation.w()) * 180.0 / EIGEN_PI;
+		std::atan2(delta.rotation.y(), delta.rotation.w()) * 180.0 / questcal::Pi;
 	// A jump seconds after the reference stream came back is the headset's
 	// wake sequence as often as a moved universe (see recentResumeSeconds),
 	// so the log line carries the age for whoever reads it later.

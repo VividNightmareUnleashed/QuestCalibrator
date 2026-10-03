@@ -2,6 +2,7 @@
 #include "../Overlay/JumpDetector.h"
 #include "../Overlay/TrackingStreamDigest.h"
 #include "../Overlay/LighthouseFrameWatch.h"
+#include "../common/MathConstants.h"
 
 #include <cmath>
 #include <cstdio>
@@ -136,7 +137,7 @@ bool Has(const std::vector<std::string> &lines, const char *text)
 
 double YawDegrees(const Eigen::Quaterniond &q)
 {
-	return 2.0 * std::atan2(q.y(), q.w()) * 180.0 / EIGEN_PI;
+	return 2.0 * std::atan2(q.y(), q.w()) * 180.0 / questcal::Pi;
 }
 
 questcal::ContinuousAlignment Aligner()
@@ -259,7 +260,7 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 		"different trajectories plus millimetre tracking noise");
 	r = Drive({0, 1}, 300, [](int i, uint32_t id)
 	{
-		double angle = i >= 150 ? 3 * EIGEN_PI / 180 : 0;
+		double angle = i >= 150 ? 3 * questcal::Pi / 180 : 0;
 		auto s = Sample(id, 1 + i * .01, 0);
 		s.rotation = {std::cos(angle / 2), 0, std::sin(angle / 2), 0};
 		s.position[2] = -std::sin(angle) * s.position[0];
@@ -365,7 +366,7 @@ void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *
 
 		// A frame change turns about the map's points, so the head moves
 		// with the heading: 3 deg about a point 57 cm away moves it 3 cm.
-		auto lateTurn = [](int f) { return f >= 9000 ? 3.0 * EIGEN_PI / 180.0 : 0.; };
+		auto lateTurn = [](int f) { return f >= 9000 ? 3.0 * questcal::Pi / 180.0 : 0.; };
 		count = ReplaySolo(9200, [](int f) { return f >= 9000 ? .03 : 0.; }, lateTurn, false, -1, -1, nullptr, &delta);
 		check("headset-only: 3 deg yaw step alone applies after steady tracking",
 			count == 1 && std::abs(YawDegrees(delta.rotation) - 3.0) < 0.05, "3 deg with the head moved 3 cm, above the 2 deg floor");

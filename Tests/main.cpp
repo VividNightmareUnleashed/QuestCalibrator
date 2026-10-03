@@ -39,6 +39,7 @@
 #include "../Overlay/ProfileRecordJson.h"
 #include "../Overlay/RingPoseMath.h"
 #include "../Overlay/PoseStreamHub.h"
+#include "../common/MathConstants.h"
 #include "../common/PoseChannel.h"
 #include "../common/Version.h"
 
@@ -133,7 +134,7 @@ Eigen::Quaterniond RotationAt(double t, const SceneConfig &scene)
 	double envelope = 0.0;
 	if (t >= scene.offAxisBurstT0 && t <= scene.offAxisBurstT1)
 	{
-		double u = std::sin(EIGEN_PI * (t - scene.offAxisBurstT0)
+		double u = std::sin(questcal::Pi * (t - scene.offAxisBurstT0)
 			/ (scene.offAxisBurstT1 - scene.offAxisBurstT0));
 		envelope = u * u;
 	}
@@ -215,7 +216,7 @@ PoseSample MakeSample(double stamp, double poseTime, const SceneConfig &scene,
 	// asserts); the stand-in is never sampled, since every draw is gated.
 	std::normal_distribution<double> pn(0.0, scene.posNoise > 0.0 ? scene.posNoise : 1.0);
 	std::normal_distribution<double> rn(0.0,
-		scene.rotNoiseDeg > 0.0 ? scene.rotNoiseDeg * EIGEN_PI / 180.0 : 1.0);
+		scene.rotNoiseDeg > 0.0 ? scene.rotNoiseDeg * questcal::Pi / 180.0 : 1.0);
 	std::uniform_real_distribution<double> u(0.0, 1.0);
 	std::uniform_real_distribution<double> axisPick(-1.0, 1.0);
 
@@ -365,7 +366,7 @@ void RunScenario(const char *name, const SceneConfig &scene, const GroundTruth &
 
 	EngineResult r = CalibrationEngine::Solve(refStream, targetStream, config);
 
-	double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+	double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 	double transErr = (r.translation - truth.translation).norm();
 	double offsetErr = std::abs(r.timeOffset - truth.latency);
 	double scaleErr = std::abs(r.scale - truth.scale);
@@ -557,7 +558,7 @@ void CheckFlags(const char *name, std::initializer_list<std::pair<const char *, 
 	Check(name, pass, detail.c_str());
 }
 
-Eigen::Quaterniond RandomQuaternion(std::mt19937 &rng, double maxAngle = EIGEN_PI)
+Eigen::Quaterniond RandomQuaternion(std::mt19937 &rng, double maxAngle = questcal::Pi)
 {
 	std::uniform_real_distribution<double> u(-1.0, 1.0);
 	std::uniform_real_distribution<double> angle(-maxAngle, maxAngle);
@@ -1505,8 +1506,8 @@ void RunPoseSampleScenarios()
 		const Eigen::Vector3d stationATrans(-2.6, 2.2, -0.3);
 		const Eigen::Quaterniond stationB(Eigen::AngleAxisd(-2.1, Eigen::Vector3d(0.1, 1.0, 0.3).normalized()));
 		const Eigen::Vector3d stationBTrans(1.4, 2.3, -3.9);
-		const Eigen::Quaterniond moveRot = (Eigen::AngleAxisd(0.5 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()) *
-			Eigen::AngleAxisd(1.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX())).normalized();
+		const Eigen::Quaterniond moveRot = (Eigen::AngleAxisd(0.5 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(1.3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitX())).normalized();
 		const Eigen::Vector3d moveTrans(0.09, 0.01, -0.05);
 		const Eigen::Vector3d walk(0.2, 0.0, 0.1);
 		// World (start frame) pose along the walk.
@@ -1640,9 +1641,9 @@ void RunPoseSampleScenarios()
 	// the timestamp. Expectations are literals, not the expression re-evaluated.
 	{
 		const Eigen::Quaterniond wfdRot(
-			Eigen::AngleAxisd(EIGEN_PI / 2.0, Eigen::Vector3d::UnitY()));
+			Eigen::AngleAxisd(questcal::Pi / 2.0, Eigen::Vector3d::UnitY()));
 		const Eigen::Quaterniond drvRot(
-			Eigen::AngleAxisd(EIGEN_PI / 2.0, Eigen::Vector3d::UnitX()));
+			Eigen::AngleAxisd(questcal::Pi / 2.0, Eigen::Vector3d::UnitX()));
 		protocol::DevicePoseSample s = RingSample(4, 2.0,
 			wfdRot, Eigen::Vector3d(1.0, 2.0, 3.0),
 			drvRot, Eigen::Vector3d(1.0, 0.0, 0.0),
@@ -2955,7 +2956,7 @@ void RunSolverPrimitiveScenarios()
 		a.time = 1.0;
 		b.time = 2.0;
 		a.rot = Eigen::Quaterniond::Identity();
-		b.rot = Eigen::Quaterniond(Eigen::AngleAxisd(EIGEN_PI / 2.0, Eigen::Vector3d::UnitY()));
+		b.rot = Eigen::Quaterniond(Eigen::AngleAxisd(questcal::Pi / 2.0, Eigen::Vector3d::UnitY()));
 		a.pos = Eigen::Vector3d(1.0, 2.0, 3.0);
 		b.pos = Eigen::Vector3d(5.0, 6.0, 7.0);
 		a.vel = Eigen::Vector3d(-1.0, 0.0, 1.0);
@@ -2966,7 +2967,7 @@ void RunSolverPrimitiveScenarios()
 
 		bool ok = CalibrationEngine::InterpolateAt(stream, 1.25, 1.1, out);
 		Eigen::Quaterniond expected(
-			Eigen::AngleAxisd(EIGEN_PI / 8.0, Eigen::Vector3d::UnitY()));
+			Eigen::AngleAxisd(questcal::Pi / 8.0, Eigen::Vector3d::UnitY()));
 		bool pass = ok &&
 			(out.pos - Eigen::Vector3d(2.0, 3.0, 4.0)).norm() < 1e-12 &&
 			(out.vel - Eigen::Vector3d(0.0, 1.0, 2.0)).norm() < 1e-12 &&
@@ -3066,7 +3067,7 @@ void RunSolverPrimitiveScenarios()
 		cfg.useFallbackTimeOffset = true;
 		cfg.fallbackTimeOffset = 0.0;
 		const EngineResult fellBack = CalibrationEngine::Solve(ref, target, cfg);
-		const double rotErr = fellBack.rotation.angularDistance(truth.rotation) * 180.0 / EIGEN_PI;
+		const double rotErr = fellBack.rotation.angularDistance(truth.rotation) * 180.0 / questcal::Pi;
 		const double posErr = (fellBack.translation - truth.translation).norm();
 		snprintf(detail, sizeof detail, "without: failure %d (%s); with: valid %d, fell back %d, %.3f deg, %.1f mm",
 			static_cast<int>(refused.failure), refused.timeOffsetFailure.c_str(),
@@ -3252,7 +3253,7 @@ void RunSolverPrimitiveScenarios()
 		EngineConfig cfg;
 		cfg.estimateTimeOffset = false;
 		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
-		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 		double transErr = (truth.translation - r.translation).norm();
 		bool pass = r.valid && r.samplesGated > 300 &&
 			r.samplesUsed == cfg.maxAlignedSamples &&
@@ -3281,7 +3282,7 @@ void RunSolverPrimitiveScenarios()
 		cfg.estimateTimeOffset = false;
 		cfg.maxAlignedSamples = 4096; // supported budget, above this 1800-sample stream
 		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
-		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 		double transErr = (truth.translation - r.translation).norm();
 		bool pass = r.valid && r.samplesUsed < target.size() - 50 &&
 			rotErr < 0.1 && transErr < 0.005;
@@ -3305,7 +3306,7 @@ void RunSolverPrimitiveScenarios()
 		cfg.maxPairs = 80;
 		cfg.minPairs = 30;
 		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
-		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 		double transErr = (truth.translation - r.translation).norm();
 		snprintf(detail, sizeof detail, "pairs %zu rot %.3f trans %.2f mm",
 			r.pairsUsed, rotErr, transErr * 1000.0);
@@ -3334,7 +3335,7 @@ void RunSolverRobustnessScenarios()
 		for (size_t i = 1; i < target.size(); i += 2)
 			target[i].rot.coeffs() = -target[i].rot.coeffs();
 		EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
-		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 		double transErr = (truth.translation - r.translation).norm();
 		snprintf(detail, sizeof detail, "rot %.3f deg trans %.2f mm",
 			rotErr, transErr * 1000.0);
@@ -3359,7 +3360,7 @@ void RunSolverRobustnessScenarios()
 			++corrupt;
 		}
 		EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
-		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 		double transErr = (truth.translation - r.translation).norm();
 		snprintf(detail, sizeof detail,
 			"%zu corrupt rot %.3f deg trans %.2f mm rejected %zu",
@@ -3387,7 +3388,7 @@ void RunSolverRobustnessScenarios()
 			}
 		}
 		EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
-		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 		double transErr = (truth.translation - r.translation).norm();
 		snprintf(detail, sizeof detail, "rot %.3f deg trans %.2f mm rejected %zu",
 			rotErr, transErr * 1000.0, r.pairsRejected);
@@ -3416,7 +3417,7 @@ void RunSolverRobustnessScenarios()
 		EngineResult r = CalibrationEngine::SolveAligned(aligned, cfg);
 		double scaleErr = std::abs(r.scale - scaledTruth.scale);
 		double rotErr = scaledTruth.rotation.angularDistance(r.rotation) *
-			180.0 / EIGEN_PI;
+			180.0 / questcal::Pi;
 		double transErr = (scaledTruth.translation - r.translation).norm();
 		snprintf(detail, sizeof detail,
 			"valid %d scale %.5f err %.5f rot %.3f deg trans %.1f mm rms %.1f mm",
@@ -3620,7 +3621,7 @@ void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
 				target[i].rot.coeffs() = -target[i].rot.coeffs();
 
 		EngineResult r = CalibrationEngine::Solve(ref, target, cfg);
-		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+		double rotErr = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 		double transErr = (truth.translation - r.translation).norm();
 		double offsetErr = std::abs(truth.latency - r.timeOffset);
 		double scaleErr = std::abs(truth.scale - r.scale);
@@ -3657,7 +3658,7 @@ void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
 		bool pass = true;
 		for (size_t i = 0; i < sizeof tilts / sizeof tilts[0]; ++i)
 		{
-			double t = tilts[i] * EIGEN_PI / 180.0;
+			double t = tilts[i] * questcal::Pi / 180.0;
 			GroundTruth truth;
 			truth.rotation =
 				Eigen::Quaterniond(Eigen::AngleAxisd(1.3, Eigen::Vector3d::UnitY())) *
@@ -3670,7 +3671,7 @@ void RunSolverPropertyScenarios(int trials, uint32_t propertySeed)
 			std::vector<PoseSample> ref, target;
 			GenerateStreams(scene, truth, static_cast<uint32_t>(5100 + i), ref, target);
 			EngineResult r = CalibrationEngine::Solve(ref, target, EngineConfig());
-			double err = truth.rotation.angularDistance(r.rotation) * 180.0 / EIGEN_PI;
+			double err = truth.rotation.angularDistance(r.rotation) * 180.0 / questcal::Pi;
 			worst = std::max(worst, err);
 			pass = pass && r.valid && err < 1.0 &&
 				(truth.translation - r.translation).norm() < 0.02;
@@ -3698,7 +3699,7 @@ struct JumpRun
 
 	double YawErrDeg(double trueYaw) const
 	{
-		return std::abs(2.0 * std::atan2(last.rotation.y(), last.rotation.w()) - trueYaw) * 180.0 / EIGEN_PI;
+		return std::abs(2.0 * std::atan2(last.rotation.y(), last.rotation.w()) - trueYaw) * 180.0 / questcal::Pi;
 	}
 	double TransErr(const Eigen::Vector3d &trueT) const
 	{
@@ -3724,7 +3725,7 @@ JumpRun DriveJump(JumpDetector &jd, double rate, MakeFn make)
 
 void RunJumpScenarios()
 {
-	const double jumpYaw = 25.0 * EIGEN_PI / 180.0;
+	const double jumpYaw = 25.0 * questcal::Pi / 180.0;
 	const Eigen::Quaterniond D_R(Eigen::AngleAxisd(jumpYaw, Eigen::Vector3d::UnitY()));
 	const Eigen::Vector3d D_T(0.4, 0.0, -0.3);
 	const double tJump = 1.5;
@@ -3818,10 +3819,10 @@ void RunJumpScenarios()
 	{
 		JumpDetector jd(TestQpcToSeconds);
 		const Eigen::Quaterniond wfd1(
-			Eigen::AngleAxisd(12.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+			Eigen::AngleAxisd(12.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		const Eigen::Vector3d trans1(0.2, 0.01, -0.1);
 		const Eigen::Quaterniond wfd2(
-			Eigen::AngleAxisd(-8.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+			Eigen::AngleAxisd(-8.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		const Eigen::Vector3d trans2(-0.15, 0.02, 0.25);
 		for (double t = 0.0; t < 3.0; t += 1.0 / rate)
 		{
@@ -3906,7 +3907,7 @@ void RunJumpScenarios()
 			const int jumps = (step >= 150 ? 1 : 0) + (step >= 172 ? 1 : 0);
 			for (uint32_t id = 0; id < (peerActive ? 2u : 1u); ++id)
 			{
-				const double yaw = id == 0 ? jumps * 6.0 * EIGEN_PI / 180.0 : 0.0;
+				const double yaw = id == 0 ? jumps * 6.0 * questcal::Pi / 180.0 : 0.0;
 				jd.Push(RingSample(id, t, Eigen::Quaterniond::Identity(), Eigen::Vector3d::Zero(),
 					Eigen::Quaterniond(Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitY())),
 					Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()));
@@ -4072,7 +4073,7 @@ void RunJumpScenarios()
 			return runWfdRebase(jd,
 				(D_R * Eigen::Quaterniond(Eigen::AngleAxisd(tilt, Eigen::Vector3d::UnitX()))).normalized());
 		};
-		JumpRun tilted = runWithTilt(6.0 * EIGEN_PI / 180.0);
+		JumpRun tilted = runWithTilt(6.0 * questcal::Pi / 180.0);
 		JumpRun upright = runWithTilt(0.0);
 
 		snprintf(detail, sizeof detail, "deltas %d  exact %d  yawErr %.3f deg  transErr %.4f m",
@@ -4083,8 +4084,8 @@ void RunJumpScenarios()
 		// The accepted rotation is built about UnitY: assert the axis exactly.
 		double offAxis = std::max(std::abs(tilted.last.rotation.x()),
 			std::abs(tilted.last.rotation.z()));
-		double reportedTiltDeg = tilted.last.residualTiltRad * 180.0 / EIGEN_PI;
-		double uprightTiltDeg = upright.last.residualTiltRad * 180.0 / EIGEN_PI;
+		double reportedTiltDeg = tilted.last.residualTiltRad * 180.0 / questcal::Pi;
+		double uprightTiltDeg = upright.last.residualTiltRad * 180.0 / questcal::Pi;
 
 		bool pass = tilted.deltas == 1 && tilted.last.exact &&
 			offAxis < 1e-12 &&
@@ -4136,7 +4137,7 @@ void RunJumpScenarios()
 		// Reset is what calibration start and monitor-disable call.
 		JumpDetector jd(TestQpcToSeconds);
 		const Eigen::Quaterniond D_R2(
-			Eigen::AngleAxisd(-10.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+			Eigen::AngleAxisd(-10.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		const Eigen::Vector3d D_T2(-0.2, 0.0, 0.15);
 
 		// Integer steps: 135 additions of 1/90 fall 3e-15 s short of 1.5, and
@@ -4259,9 +4260,9 @@ void RunDriftScenarios()
 		for (double t = 0.0; t < 10.0; t += 1.0 / rate)
 		{
 			Eigen::Vector3d sway(
-				0.015 * std::sin(2.0 * EIGEN_PI * t / 1.2),
+				0.015 * std::sin(2.0 * questcal::Pi * t / 1.2),
 				0.0,
-				0.012 * std::sin(2.0 * EIGEN_PI * t / 0.9 + 0.5));
+				0.012 * std::sin(2.0 * questcal::Pi * t / 0.9 + 0.5));
 			dm.Push(stillSample(t, base + sway + Eigen::Vector3d(n(rng), n(rng), n(rng))));
 			drain(dm, r);
 		}
@@ -4569,7 +4570,7 @@ FieldTransform DriverEffective(const protocol::SetAlignmentField &f, const Field
 
 FieldTransform SmallDelta(double yawDeg, const Eigen::Vector3d &t)
 {
-	return { Eigen::Quaterniond(Eigen::AngleAxisd(yawDeg * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())), t };
+	return { Eigen::Quaterniond(Eigen::AngleAxisd(yawDeg * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())), t };
 }
 
 double Dist3(const double (&a)[3], const double (&b)[3])
@@ -4605,7 +4606,7 @@ void RunFieldScenarios()
 		{
 			Eigen::Vector3d targetPt = base.R.conjugate() * (positions[i] - base.T);
 			FieldTransform eff = DriverEffective(field, base, positions[i]);
-			double rotErrDeg = eff.R.angularDistance(anchors[i].R) * 180.0 / EIGEN_PI;
+			double rotErrDeg = eff.R.angularDistance(anchors[i].R) * 180.0 / questcal::Pi;
 			worstPos = std::max(worstPos, (eff.Apply(targetPt) - anchors[i].Apply(targetPt)).norm());
 			worstRot = std::max(worstRot, rotErrDeg);
 		}
@@ -4619,7 +4620,7 @@ void RunFieldScenarios()
 		Eigen::Vector3d targetPt = base.R.conjugate() * (farPos - base.T);
 		FieldTransform eff = DriverEffective(field, base, farPos);
 		double posErr = (eff.Apply(targetPt) - base.Apply(targetPt)).norm();
-		double rotErr = eff.R.angularDistance(base.R) * 180.0 / EIGEN_PI;
+		double rotErr = eff.R.angularDistance(base.R) * 180.0 / questcal::Pi;
 		snprintf(detail, sizeof detail, "posErr %.4f mm  rotErr %.5f deg", posErr * 1000.0, rotErr);
 		Check("field: identity fade", posErr < 0.001 && rotErr < 0.01, detail);
 	}
@@ -4723,7 +4724,7 @@ void RunFieldScenarios()
 	// corrected world pose by exactly D, for both rotation and translation.
 	{
 		const FieldTransform D{
-			Eigen::Quaterniond(Eigen::AngleAxisd(25.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())),
+			Eigen::Quaterniond(Eigen::AngleAxisd(25.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())),
 			Eigen::Vector3d(0.4, 0.0, -0.3) };
 
 		FieldTransform baseJ = Compose(D, base);
@@ -4746,7 +4747,7 @@ void RunFieldScenarios()
 			FieldTransform eff = DriverEffective(field, base, base.Apply(targetPt));
 			FieldTransform effJ = DriverEffective(fieldJ, baseJ, baseJ.Apply(targetPt));
 
-			double rotErrDeg = effJ.R.angularDistance((D.R * eff.R).normalized()) * 180.0 / EIGEN_PI;
+			double rotErrDeg = effJ.R.angularDistance((D.R * eff.R).normalized()) * 180.0 / questcal::Pi;
 			worst = std::max(worst, (effJ.Apply(targetPt) - D.Apply(eff.Apply(targetPt))).norm());
 			worstRot = std::max(worstRot, rotErrDeg);
 		}
@@ -4762,7 +4763,7 @@ void RunChaperoneScenarios()
 {
 	char detail[256];
 
-	const Eigen::Quaterniond D_R(Eigen::AngleAxisd(25.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+	const Eigen::Quaterniond D_R(Eigen::AngleAxisd(25.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 	const Eigen::Vector3d D_T(0.4, 0.02, -0.3);
 	const Eigen::Quaterniond identity = Eigen::Quaterniond::Identity();
 
@@ -4979,7 +4980,7 @@ void RunBaseSlewScenarios()
 	const double transA[3] = { 0.10, 0.02, -0.30 };
 
 	// 1 deg yaw + 2 cm away from A: a worst-case continuous correction.
-	const Eigen::Quaterniond qB(Eigen::AngleAxisd(1.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+	const Eigen::Quaterniond qB(Eigen::AngleAxisd(1.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 	const vr::HmdQuaternion_t rotB{ qB.w(), qB.x(), qB.y(), qB.z() };
 	const double transB[3] = { 0.10 + 0.012, 0.02, -0.30 - 0.016 };
 
@@ -5019,7 +5020,7 @@ void RunBaseSlewScenarios()
 		// 2 cm at 0.01 m/s = 2.0 s; 1 deg at 0.5 deg/s = 2.0 s.
 		bool timely = converged > 1.8 && converged < 2.3;
 		snprintf(detail, sizeof detail, "steps %.3f mm / %.4f deg  conv %.2f s  norm %.1e",
-			worstTransStep * 1000.0, worstRotStep * 180.0 / EIGEN_PI, converged, normErr);
+			worstTransStep * 1000.0, worstRotStep * 180.0 / questcal::Pi, converged, normErr);
 		Check("baseslew: rate caps + convergence", firstSnap && capped && timely && normErr < 1e-12, detail);
 	}
 
@@ -5086,13 +5087,13 @@ void ApplyTrackingWarble(double t, double stopTime, PoseSample &sample)
 {
 	if (t < 20.0 || t >= stopTime)
 		return;
-	double angle = (1.6 * EIGEN_PI / 180.0) * std::sin(2.0 * EIGEN_PI * t / 0.8);
+	double angle = (1.6 * questcal::Pi / 180.0) * std::sin(2.0 * questcal::Pi * t / 0.8);
 	sample.rot = (Eigen::Quaterniond(Eigen::AngleAxisd(angle, Eigen::Vector3d::UnitX()))
 		* sample.rot).normalized();
 	sample.pos += Eigen::Vector3d(
-		0.008 * std::sin(2.0 * EIGEN_PI * t / 0.7),
-		0.008 * std::sin(2.0 * EIGEN_PI * t / 0.5 + 0.8),
-		0.008 * std::sin(2.0 * EIGEN_PI * t / 0.9 + 2.0));
+		0.008 * std::sin(2.0 * questcal::Pi * t / 0.7),
+		0.008 * std::sin(2.0 * questcal::Pi * t / 0.5 + 0.8),
+		0.008 * std::sin(2.0 * questcal::Pi * t / 0.9 + 2.0));
 }
 
 void SetMountAfterSlip(double t, double slipTime,
@@ -5105,7 +5106,7 @@ void SetMountAfterSlip(double t, double slipTime,
 		return;
 	}
 	rotation = kMountRot * Eigen::Quaterniond(Eigen::AngleAxisd(
-		3.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.2, 0.0).normalized()));
+		3.0 * questcal::Pi / 180.0, Eigen::Vector3d(1.0, 0.2, 0.0).normalized()));
 	position = kMountPos + Eigen::Vector3d(0.02, 0.0, -0.01);
 }
 
@@ -5148,7 +5149,7 @@ void CalError(const ContinuousSim &sim, const GroundTruth &truth, double t,
 	Eigen::Quaterniond dR = (truth.rotation * sim.calRot.conjugate()).normalized();
 	if (dR.w() < 0.0)
 		dR.coeffs() = -dR.coeffs();
-	yawDegOut = std::abs(2.0 * std::atan2(dR.y(), dR.w())) * 180.0 / EIGEN_PI;
+	yawDegOut = std::abs(2.0 * std::atan2(dR.y(), dR.w())) * 180.0 / questcal::Pi;
 	Eigen::Vector3d tD = truth.translation - dR * sim.calTrans;
 	Eigen::Vector3d hp = PositionAt(t);
 	posMOut = (dR * hp + tD - hp).norm();
@@ -5164,7 +5165,7 @@ double CalTiltDeg(const ContinuousSim &sim, const GroundTruth &truth)
 		dR.coeffs() = -dR.coeffs();
 	Eigen::Quaterniond yaw(Eigen::AngleAxisd(
 		2.0 * std::atan2(dR.y(), dR.w()), Eigen::Vector3d::UnitY()));
-	return yaw.angularDistance(dR) * 180.0 / EIGEN_PI;
+	return yaw.angularDistance(dR) * 180.0 / questcal::Pi;
 }
 
 // One closed-loop segment: generate both streams, tick Update at 50 Hz, apply
@@ -5225,7 +5226,7 @@ void RunContinuousSegment(ContinuousSim &sim, const SceneConfig &scene, double t
 			ContinuousAlignment::Correction c;
 			while (sim.ca.PollCorrection(c))
 			{
-				double corrDeg = c.rotation.angularDistance(Eigen::Quaterniond::Identity()) * 180.0 / EIGEN_PI;
+				double corrDeg = c.rotation.angularDistance(Eigen::Quaterniond::Identity()) * 180.0 / questcal::Pi;
 				sim.maxCorrRotDeg = std::max(sim.maxCorrRotDeg, corrDeg);
 				Eigen::Vector3d hp = PositionAt(t);
 				sim.maxCorrPosM = std::max(sim.maxCorrPosM, (c.rotation * hp + c.translation - hp).norm());
@@ -5321,7 +5322,7 @@ void RunContinuousScenarios()
 	auto makeOffsetSim = [&](ContinuousSim &sim, const GroundTruth &truth)
 	{
 		makeSim(sim, truth);
-		Eigen::Quaterniond dR(Eigen::AngleAxisd(0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		Eigen::Quaterniond dR(Eigen::AngleAxisd(0.3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		Eigen::Vector3d dT(0.004, 0.002, -0.003);
 		sim.calRot = (dR.conjugate() * truth.rotation).normalized();
 		sim.calTrans = dR.conjugate() * (truth.translation - dT);
@@ -5353,7 +5354,7 @@ void RunContinuousScenarios()
 
 		MountExtrinsic e, eWobble;
 		bool ok = ContinuousAlignment::DeriveMountExtrinsic(ref, tgt, cal, e);
-		double rotErr = e.rot.angularDistance(kMountRot) * 180.0 / EIGEN_PI;
+		double rotErr = e.rot.angularDistance(kMountRot) * 180.0 / questcal::Pi;
 		double posErr = (e.pos - kMountPos).norm();
 		// eWobble is left untouched on failure now, so its rms reads 0.
 		bool okWobble = ContinuousAlignment::DeriveMountExtrinsic(ref, tgtWobble, cal, eWobble);
@@ -5378,12 +5379,12 @@ void RunContinuousScenarios()
 		};
 		Eigen::Quaterniond tiltedRot, yawedRot;
 		Eigen::Vector3d tiltedTrans, yawedTrans;
-		turnedAboutHead(Eigen::Quaterniond(Eigen::AngleAxisd(1.2 * EIGEN_PI / 180.0, Eigen::Vector3d(0.8, 0.0, 0.6))),
+		turnedAboutHead(Eigen::Quaterniond(Eigen::AngleAxisd(1.2 * questcal::Pi / 180.0, Eigen::Vector3d(0.8, 0.0, 0.6))),
 			tiltedRot, tiltedTrans);
-		turnedAboutHead(Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())),
+		turnedAboutHead(Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())),
 			yawedRot, yawedTrans);
 		MountExtrinsic moved = kept;
-		moved.rot = (kept.rot * Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0,
+		moved.rot = (kept.rot * Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * questcal::Pi / 180.0,
 			Eigen::Vector3d(0.3, 0.9, 0.3).normalized()))).normalized();
 		const auto tilted = ContinuousAlignment::ReadWithMount(ref, tgt, kept, tiltedRot, tiltedTrans,
 			baseTruth.scale, baseTruth.latency);
@@ -5393,7 +5394,7 @@ void RunContinuousScenarios()
 			baseTruth.scale, baseTruth.latency);
 		const auto remounted = ContinuousAlignment::ReadWithMount(ref, tgt, moved, baseTruth.rotation,
 			baseTruth.translation, baseTruth.scale, baseTruth.latency);
-		const double readingErr = tilted.rotation.angularDistance(baseTruth.rotation) * 180.0 / EIGEN_PI;
+		const double readingErr = tilted.rotation.angularDistance(baseTruth.rotation) * 180.0 / questcal::Pi;
 		double headErr = (tilted.rotation * baseTruth.rotation.conjugate() * head +
 			tilted.translation - tilted.rotation * baseTruth.rotation.conjugate() * baseTruth.translation - head).norm();
 		snprintf(detail, sizeof detail,
@@ -5486,7 +5487,7 @@ void RunContinuousScenarios()
 		{
 			GroundTruth g = baseTruth;
 			g.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(
-				1.9 + (0.05 * EIGEN_PI / 180.0) * t, Eigen::Vector3d::UnitY()));
+				1.9 + (0.05 * questcal::Pi / 180.0) * t, Eigen::Vector3d::UnitY()));
 			g.translation = baseTruth.translation
 				+ 0.002 * t * Eigen::Vector3d(1.0, 0.0, 0.3).normalized();
 			return g;
@@ -5524,7 +5525,7 @@ void RunContinuousScenarios()
 	// tracking resumes cleanly.
 	{
 		std::mt19937 rng(404);
-		const Eigen::Quaterniond jR(Eigen::AngleAxisd(20.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond jR(Eigen::AngleAxisd(20.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		const Eigen::Vector3d jT(0.3, 0.0, -0.1);
 		auto refPost = [&](double t, PoseSample &s)
 		{
@@ -5542,7 +5543,7 @@ void RunContinuousScenarios()
 		// JumpDetector wins one second after the jump: fold its (slightly
 		// imperfect, 0.4 deg off) delta estimate, reset us. The continuous
 		// loop must clean up the residual afterwards.
-		const Eigen::Quaterniond jErr(Eigen::AngleAxisd(0.4 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond jErr(Eigen::AngleAxisd(0.4 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		sim.calRot = ((jErr * jR) * sim.calRot).normalized();
 		sim.calTrans = (jErr * jR) * sim.calTrans + jT;
 		sim.ca.Reset();
@@ -5605,7 +5606,7 @@ void RunContinuousScenarios()
 		// "resumed correcting" is observable.
 		GroundTruth stepped = baseTruth;
 		stepped.rotation = (Eigen::Quaterniond(Eigen::AngleAxisd(
-			0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())) * baseTruth.rotation).normalized();
+			0.3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())) * baseTruth.rotation).normalized();
 		auto stepTruth = [&](double t) { return t < 73.0 ? baseTruth : stepped; };
 
 		ContinuousSim sim;
@@ -5620,7 +5621,7 @@ void RunContinuousScenarios()
 		// until the window refills (minObs at ~10 obs/s), then it heals.
 		sim.ca.Reset();
 		sim.calRot = (Eigen::Quaterniond(Eigen::AngleAxisd(
-			-0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())) * sim.calRot).normalized();
+			-0.3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())) * sim.calRot).normalized();
 		int before = sim.corrections;
 		RunContinuousSegment(sim, scene, 82.0, 85.5, rng, stepTruth, constMount, alwaysVisible);
 		bool quietAfterReset = sim.corrections == before;
@@ -5967,7 +5968,7 @@ void RunContinuousScenarios()
 		// corrections must resume with no Resumed hysteresis (that event is
 		// for freezes).
 		sim.calRot = (Eigen::Quaterniond(Eigen::AngleAxisd(
-			0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())) * sim.calRot).normalized();
+			0.3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())) * sim.calRot).normalized();
 		int before = sim.corrections;
 		RunContinuousSegment(sim, scene, 50.0, 70.0, rng, constTruth, constMount, alwaysVisible, warble);
 		bool recovered = sim.corrections > before && sim.freezes == 0 && sim.resumes == 0 &&
@@ -6047,8 +6048,8 @@ void RunContinuousScenarios()
 		ContinuousSim sim;
 		makeSim(sim, baseTruth);
 		Eigen::Quaterniond dR =
-			Eigen::Quaterniond(Eigen::AngleAxisd(0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())) *
-			Eigen::Quaterniond(Eigen::AngleAxisd(0.6 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX()));
+			Eigen::Quaterniond(Eigen::AngleAxisd(0.3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())) *
+			Eigen::Quaterniond(Eigen::AngleAxisd(0.6 * questcal::Pi / 180.0, Eigen::Vector3d::UnitX()));
 		dR.normalize();
 		sim.calRot = (dR.conjugate() * baseTruth.rotation).normalized();
 
@@ -6096,7 +6097,7 @@ void RunContinuousScenarios()
 
 		// 3 deg of yaw error: past freezeYawDeg, sustained -> Frozen (~t=22).
 		const Eigen::Quaterniond kick(
-			Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+			Eigen::AngleAxisd(3.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		int correctionsAtKick = sim.corrections;
 		sim.calRot = (kick * sim.calRot).normalized();
 		RunContinuousSegment(sim, scene, 15.0, 34.0, rng, constTruth, constMount, alwaysVisible,
@@ -6110,7 +6111,7 @@ void RunContinuousScenarios()
 		// inside the resume band (freeze * resumeFactor) and stays there, and is
 		// still outside the deadband so corrections are observable afterwards.
 		const Eigen::Quaterniond residual(
-			Eigen::AngleAxisd(0.3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+			Eigen::AngleAxisd(0.3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		sim.calRot = (residual * kick.conjugate() * sim.calRot).normalized();
 		RunContinuousSegment(sim, scene, 34.0, 58.0, rng, constTruth, constMount, alwaysVisible);
 		bool resumed = sim.resumes == 1 && sim.freezes == 1 &&
@@ -6203,7 +6204,7 @@ void RunContinuousScenarios()
 		ContinuousSim sim;
 		makeSim(sim, farTruth);
 		const Eigen::Quaterniond tilt(Eigen::AngleAxisd(
-			1.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.0, 0.4).normalized()));
+			1.0 * questcal::Pi / 180.0, Eigen::Vector3d(1.0, 0.0, 0.4).normalized()));
 		sim.calRot = (tilt.conjugate() * farTruth.rotation).normalized();
 		const Eigen::Vector3d head(0.0, 1.25, 0.0);   // the head path's centre
 		const Eigen::Vector3d headRaw = farTruth.rotation.conjugate() * (head - farTruth.translation);
@@ -6245,13 +6246,13 @@ void RunContinuousScenarios()
 		makeSim(sim, baseTruth);
 
 		RunContinuousSegment(sim, scene, 0.0, 15.0, rng, constTruth, constMount, alwaysVisible);
-		const Eigen::Quaterniond kick(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond kick(Eigen::AngleAxisd(3.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		sim.calRot = (kick * sim.calRot).normalized();
 		RunContinuousSegment(sim, scene, 15.0, 34.0, rng, constTruth, constMount, alwaysVisible);
 		const bool froze = sim.freezes == 1 && sim.ca.GetState() == ContinuousAlignment::State::Frozen;
 
 		// 1.1 deg left: past the 1.0 deg fast band, inside the 2 deg freeze.
-		const Eigen::Quaterniond residual(Eigen::AngleAxisd(1.1 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond residual(Eigen::AngleAxisd(1.1 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		sim.calRot = (residual * kick.conjugate() * sim.calRot).normalized();
 		RunContinuousSegment(sim, scene, 34.0, 60.0, rng, constTruth, constMount, alwaysVisible);
 		const bool heldAtFirst = sim.resumes == 0 && sim.ca.GetState() == ContinuousAlignment::State::Frozen;
@@ -6276,7 +6277,7 @@ void RunContinuousScenarios()
 	{
 		std::mt19937 rng(2303);
 		GroundTruth offTruth = baseTruth;
-		const Eigen::Quaterniond off(Eigen::AngleAxisd(4.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond off(Eigen::AngleAxisd(4.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		offTruth.rotation = (off * baseTruth.rotation).normalized();
 		offTruth.translation = off * baseTruth.translation + Eigen::Vector3d(0.2, 0.0, -0.1);
 		auto restartTruth = [&](double t) { return (t >= 20.0 && t < 50.0) ? offTruth : baseTruth; };
@@ -6339,7 +6340,7 @@ void RunContinuousScenarios()
 	{
 		std::mt19937 rng(2404);
 		const Eigen::Quaterniond tilt(Eigen::AngleAxisd(
-			2.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.0, 0.4).normalized()));
+			2.0 * questcal::Pi / 180.0, Eigen::Vector3d(1.0, 0.0, 0.4).normalized()));
 		const Eigen::Vector3d head(0.0, 1.25, 0.0);
 		const Eigen::Vector3d headRaw = baseTruth.rotation.conjugate() * (head - baseTruth.translation);
 		auto tiltedAbout = [&](const Eigen::Quaterniond &extra, Eigen::Quaterniond &rotOut, Eigen::Vector3d &transOut)
@@ -6384,7 +6385,7 @@ void RunContinuousScenarios()
 		ContinuousSim yawed;
 		yawed.ca.SetExtrinsic(trueExtrinsic);
 		yawed.solvedOffset = baseTruth.latency;
-		tiltedAbout(Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY())),
+		tiltedAbout(Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY())),
 			yawed.calRot, yawed.calTrans);
 		RunContinuousSegment(yawed, scene, 0.0, 40.0, rng, constTruth, constMount, alwaysVisible);
 
@@ -6416,8 +6417,8 @@ void RunContinuousScenarios()
 	// is undone once the readings return to the old calibration (live
 	// 2026-09-25 01:25).
 	{
-		const Eigen::Quaterniond moveRot = (Eigen::AngleAxisd(30.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()) *
-			Eigen::AngleAxisd(20.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX())).normalized();
+		const Eigen::Quaterniond moveRot = (Eigen::AngleAxisd(30.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(20.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitX())).normalized();
 		const Eigen::Vector3d moveTrans(0.5, -0.3, 0.8);
 		GroundTruth moved = baseTruth;
 		moved.rotation = (moveRot * baseTruth.rotation).normalized();
@@ -6512,7 +6513,7 @@ void RunContinuousScenarios()
 			if (t < 20.0)
 				return baseTruth;
 			GroundTruth g = moved;
-			const Eigen::Quaterniond turn(Eigen::AngleAxisd(0.2 * (t - 20.0) * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+			const Eigen::Quaterniond turn(Eigen::AngleAxisd(0.2 * (t - 20.0) * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 			g.rotation = (turn * moved.rotation).normalized();
 			g.translation = turn * moved.translation;
 			return g;
@@ -6535,8 +6536,8 @@ void RunContinuousScenarios()
 		// last restart (2 deg of yaw and 5 deg of tilt, as at 01:25), and its
 		// next restart at 70 s clears it. The universes never moved: the fault
 		// is followed at about 56 s and undone after the restart settles.
-		const Eigen::Quaterniond faultRot = (Eigen::AngleAxisd(2.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()) *
-			Eigen::AngleAxisd(5.0 * EIGEN_PI / 180.0, Eigen::Vector3d(1.0, 0.0, 0.3).normalized())).normalized();
+		const Eigen::Quaterniond faultRot = (Eigen::AngleAxisd(2.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(5.0 * questcal::Pi / 180.0, Eigen::Vector3d(1.0, 0.0, 0.3).normalized())).normalized();
 		GroundTruth faulted = baseTruth;
 		faulted.rotation = (faultRot * baseTruth.rotation).normalized();
 		faulted.translation = faultRot * baseTruth.translation;
@@ -6600,8 +6601,8 @@ void RunContinuousScenarios()
 		};
 		// 00:42:09 on 2026-09-26: yaw 0.34 deg, tilt 1.25 deg, 6.6 cm.
 		LighthouseFrameWatch::Move stationMove;
-		stationMove.rotation = (Eigen::AngleAxisd(0.34 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()) *
-			Eigen::AngleAxisd(1.25 * EIGEN_PI / 180.0, Eigen::Vector3d(0.8, 0.0, 0.6))).normalized();
+		stationMove.rotation = (Eigen::AngleAxisd(0.34 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(1.25 * questcal::Pi / 180.0, Eigen::Vector3d(0.8, 0.0, 0.6))).normalized();
 		stationMove.translation = Eigen::Vector3d(0.045, -0.02, 0.044);
 
 		// Alone, the loop freezes on the 6.7 cm the move put at the head and is
@@ -6837,12 +6838,12 @@ void RunContinuousScenarios()
 	// and lifts nothing, and a next solution that reads something else is a
 	// second opinion that disagrees: both stay frozen.
 	{
-		const Eigen::Quaterniond sessionRot(Eigen::AngleAxisd(4.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond sessionRot(Eigen::AngleAxisd(4.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		GroundTruth session = baseTruth;
 		session.rotation = (sessionRot * baseTruth.rotation).normalized();
 		session.translation = sessionRot * baseTruth.translation + Eigen::Vector3d(0.25, 0.0, -0.15);
 		// What a second solution with a fault of its own reads: 3 deg more yaw.
-		const Eigen::Quaterniond otherRot(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond otherRot(Eigen::AngleAxisd(3.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		GroundTruth other = session;
 		other.rotation = (otherRot * session.rotation).normalized();
 		other.translation = otherRot * session.translation;
@@ -6915,8 +6916,8 @@ void RunContinuousScenarios()
 		// solution settles, and is followed. The reading the freeze was blamed
 		// on moves with the frame, so the solution still reads the same.
 		LighthouseFrameWatch::Move restartMove;   // yaw 0.79 deg and tilt 1.76 deg, as at 20:04:10
-		restartMove.rotation = (Eigen::AngleAxisd(0.79 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()) *
-			Eigen::AngleAxisd(1.76 * EIGEN_PI / 180.0, Eigen::Vector3d(0.6, 0.0, 0.8))).normalized();
+		restartMove.rotation = (Eigen::AngleAxisd(0.79 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()) *
+			Eigen::AngleAxisd(1.76 * questcal::Pi / 180.0, Eigen::Vector3d(0.6, 0.0, 0.8))).normalized();
 		restartMove.translation = Eigen::Vector3d(0.03, -0.01, 0.05);
 		GroundTruth movedSession = session;
 		{
@@ -8073,7 +8074,7 @@ static std::vector<PoseSample> GuideStream(double seconds, double rate,
 	const std::function<Eigen::Vector3d(double)> &posAt,
 	std::mt19937 &rng, double noiseDeg)
 {
-	std::normal_distribution<double> noise(0.0, noiseDeg * EIGEN_PI / 180.0);
+	std::normal_distribution<double> noise(0.0, noiseDeg * questcal::Pi / 180.0);
 	std::vector<PoseSample> out;
 	const double dt = 1.0 / rate;
 	for (double t = 0.0; t < seconds; t += dt)
@@ -8514,8 +8515,8 @@ int main(int argc, char **argv)
 		EngineResult on = CalibrationEngine::Solve(refStream, targetStream, config);
 		EngineResult off = CalibrationEngine::Solve(refStream, targetStream, noComp);
 
-		double onRot = t2.rotation.angularDistance(on.rotation) * 180.0 / EIGEN_PI;
-		double offRot = t2.rotation.angularDistance(off.rotation) * 180.0 / EIGEN_PI;
+		double onRot = t2.rotation.angularDistance(on.rotation) * 180.0 / questcal::Pi;
+		double offRot = t2.rotation.angularDistance(off.rotation) * 180.0 / questcal::Pi;
 		double onTrans = (on.translation - t2.translation).norm();
 		double offTrans = (off.translation - t2.translation).norm();
 
@@ -8558,7 +8559,7 @@ int main(int argc, char **argv)
 	// gravity prior and recover the tilt (measured 0.0592 deg / 0.0016 m).
 	{
 		GroundTruth tilted = truth;
-		tilted.rotation = truth.rotation * Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitX()));
+		tilted.rotation = truth.rotation * Eigen::Quaterniond(Eigen::AngleAxisd(3.0 * questcal::Pi / 180.0, Eigen::Vector3d::UnitX()));
 		RunScenario("tilted universe 3deg", noisyScene(), tilted, config, bands(0.24, 0.007));
 	}
 
@@ -8657,8 +8658,8 @@ int main(int argc, char **argv)
 
 		double seqErr = (seq.translation - truth.translation).norm();
 		double jointErr = (joint.translation - truth.translation).norm();
-		double seqRot = truth.rotation.angularDistance(seq.rotation) * 180.0 / EIGEN_PI;
-		double jointRot = truth.rotation.angularDistance(joint.rotation) * 180.0 / EIGEN_PI;
+		double seqRot = truth.rotation.angularDistance(seq.rotation) * 180.0 / questcal::Pi;
+		double jointRot = truth.rotation.angularDistance(joint.rotation) * 180.0 / questcal::Pi;
 
 		// "Never worse" is the contract (the production guard accepts ties and
 		// up to 2% axis-RMS regression); don't demand strict improvement.

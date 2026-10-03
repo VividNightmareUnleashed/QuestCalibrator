@@ -3,6 +3,7 @@
 #include "UiInternal.h"
 #include "Diagnostics.h"
 #include "LocalizationTables.h"
+#include "../common/MathConstants.h"
 
 void BuildSettingsScreen(const VRState &state)
 {
@@ -161,7 +162,7 @@ void BuildSettingsScreen(const VRState &state)
 					Eigen::Vector3d targetPt = a.rotation.conjugate() * (a.position - a.translationMeters);
 					Eigen::Vector3d basePos = CalCtx.transform.rotation * targetPt + CalCtx.transform.translationMeters;
 					double posDeltaCm = (a.position - basePos).norm() * 100.0;
-					double rotDeltaDeg = a.rotation.angularDistance(CalCtx.transform.rotation) * 180.0 / EIGEN_PI;
+					double rotDeltaDeg = a.rotation.angularDistance(CalCtx.transform.rotation) * 180.0 / questcal::Pi;
 					std::string line = FormatString("Anchor %zu at (%+.1f, %+.1f): %.1f cm / %.2f deg from base",
 						i + 1, a.position.x(), a.position.z(), posDeltaCm, rotDeltaDeg);
 					dl->AddText(g_fontSmall, g_fontSmall->LegacySize,

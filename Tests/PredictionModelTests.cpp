@@ -10,6 +10,7 @@
 // calibrated version of the pose it would have seen, at every horizon, and
 // the latency correction shifts only which instant that is.
 #include "../Driver/PoseTransform.h"
+#include "../common/MathConstants.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -59,7 +60,7 @@ WorldPose PredictWorld(const vr::DriverPose_t &p, double horizon)
 Eigen::Quaterniond RandomRotation(std::mt19937 &rng)
 {
 	std::uniform_real_distribution<double> u(-1.0, 1.0);
-	std::uniform_real_distribution<double> angle(-EIGEN_PI, EIGEN_PI);
+	std::uniform_real_distribution<double> angle(-questcal::Pi, questcal::Pi);
 	Eigen::Vector3d axis;
 	do
 		axis = Eigen::Vector3d(u(rng), u(rng), u(rng));

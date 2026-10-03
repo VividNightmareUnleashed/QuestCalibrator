@@ -16,6 +16,7 @@
 #include "PoseStreamHub.h"
 #include "ProfileValidation.h"
 #include "RingPoseMath.h"
+#include "../common/MathConstants.h"
 #include "../common/PoseChannel.h"
 #include "../common/Version.h"
 
@@ -729,8 +730,8 @@ static bool DescribeFrameMove(const LighthouseFrameWatch::Move &move, double &ya
 	Eigen::Quaterniond yaw = questcal::YawOnlyRotation(move.rotation, &tilt);
 	if (yaw.w() < 0.0)
 		yaw.coeffs() = -yaw.coeffs();
-	yawDeg = std::abs(2.0 * std::atan2(yaw.y(), yaw.w())) * 180.0 / EIGEN_PI;
-	tiltDeg = tilt * 180.0 / EIGEN_PI;
+	yawDeg = std::abs(2.0 * std::atan2(yaw.y(), yaw.w())) * 180.0 / questcal::Pi;
+	tiltDeg = tilt * 180.0 / questcal::Pi;
 	return move.shiftM >= 0.01 || yawDeg >= 0.1 || tiltDeg >= 0.1;
 }
 
@@ -1479,7 +1480,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 				ctx.discontinuousLossEvents = 0;
 				char buf[128];
 				snprintf(buf, sizeof buf, "correction applied: yaw %.3f deg, position %.1f mm",
-					2.0 * std::asin(std::min(1.0, std::abs(corr.rotation.y()))) * 180.0 / EIGEN_PI,
+					2.0 * std::asin(std::min(1.0, std::abs(corr.rotation.y()))) * 180.0 / questcal::Pi,
 					corr.translation.norm() * 1000.0);
 				ctx.Diag(buf);
 			}
@@ -1774,7 +1775,7 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	// disagreement with the base calibration means the universe moved since
 	// the base solve -- recalibrating the base is the honest fix, not a huge
 	// local patch.
-	double rotDeltaDeg = result.rotation.angularDistance(ctx.transform.rotation) * 180.0 / EIGEN_PI;
+	double rotDeltaDeg = result.rotation.angularDistance(ctx.transform.rotation) * 180.0 / questcal::Pi;
 	Eigen::Vector3d baseHere = ctx.transform.rotation * targetCentroid + ctx.transform.translationMeters;
 	double posDeltaM = (centroidRef - baseHere).norm();
 

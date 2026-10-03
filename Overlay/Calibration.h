@@ -11,6 +11,7 @@
 #include "Modules.h"
 #include "TrackerFrameCorrections.h"
 #include "SettingsRecordJson.h"
+#include "../common/MathConstants.h"
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
@@ -46,7 +47,7 @@ struct CalibrationTransform
 
 	Eigen::Vector3d RotationEulerDegrees() const
 	{
-		return rotation.toRotationMatrix().canonicalEulerAngles(2, 1, 0) * 180.0 / EIGEN_PI;
+		return rotation.toRotationMatrix().canonicalEulerAngles(2, 1, 0) * 180.0 / questcal::Pi;
 	}
 };
 
@@ -405,7 +406,7 @@ struct CalibrationContext : CalibrationProfileState
 	// instead of touching the live members.
 	static Eigen::Quaterniond RebuildRotationFromEuler(const Eigen::Vector3d &eulerDegrees)
 	{
-		Eigen::Vector3d e = eulerDegrees * EIGEN_PI / 180.0;
+		Eigen::Vector3d e = eulerDegrees * questcal::Pi / 180.0;
 		return
 			Eigen::AngleAxisd(e(0), Eigen::Vector3d::UnitZ()) *
 			Eigen::AngleAxisd(e(1), Eigen::Vector3d::UnitY()) *

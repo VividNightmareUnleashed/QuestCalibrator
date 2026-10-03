@@ -1,4 +1,5 @@
 #include "ContinuousAlignment.h"
+#include "../common/MathConstants.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,7 +10,7 @@ namespace questcal
 namespace
 {
 
-constexpr double RadToDeg = 180.0 / EIGEN_PI;
+constexpr double RadToDeg = 180.0 / questcal::Pi;
 
 bool HasPoseStep(const std::vector<PoseSample> &samples, double begin, double end,
                 const ContinuousAlignment::Config &config)

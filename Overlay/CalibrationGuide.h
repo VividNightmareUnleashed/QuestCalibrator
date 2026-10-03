@@ -9,6 +9,7 @@
 // synthetic test harness compiles exactly the code the overlay ships.
 
 #include "CalibrationEngine.h"
+#include "../common/MathConstants.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
@@ -145,7 +146,7 @@ inline bool GuideRigidity(const std::vector<PoseSample> &ref,
 	}
 	if (comparisons < 4)
 		return false;
-	rmsDegOut = std::sqrt(sq / static_cast<double>(comparisons)) * 180.0 / EIGEN_PI;
+	rmsDegOut = std::sqrt(sq / static_cast<double>(comparisons)) * 180.0 / questcal::Pi;
 	return true;
 }
 

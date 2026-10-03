@@ -84,6 +84,9 @@
     <ClInclude Include="..\common\Version.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\common\MathConstants.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="..\common\PoseChannel.h">
       <Filter>Header Files</Filter>
     </ClInclude>

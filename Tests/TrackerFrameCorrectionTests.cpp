@@ -6,6 +6,7 @@
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/DriverSession.h"
 #include "../Overlay/CalibrationRun.h"
+#include "../common/MathConstants.h"
 
 #include <algorithm>
 #include <array>
@@ -179,8 +180,8 @@ struct Fixture
 
 void SplitFrames(Check check)
 {
-	const Q rotation = Eigen::AngleAxisd(9.79 * EIGEN_PI / 180.0, V::UnitY()) *
-		Eigen::AngleAxisd(74.08 * EIGEN_PI / 180.0, V::UnitX());
+	const Q rotation = Eigen::AngleAxisd(9.79 * questcal::Pi / 180.0, V::UnitY()) *
+		Eigen::AngleAxisd(74.08 * questcal::Pi / 180.0, V::UnitX());
 	const V pivot(0, 1.7, 0);
 	const V translation = pivot + V(0, 0, 0.538) - rotation * pivot;
 	for (const unsigned mask : { 31u, 7u, 1u })

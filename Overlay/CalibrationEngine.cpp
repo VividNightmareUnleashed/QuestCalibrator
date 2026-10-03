@@ -2,6 +2,7 @@
 #include "EngineConfigValidation.h"
 #include "RobustPolicy.h"
 #include "SolverQualityPolicy.h"
+#include "../common/MathConstants.h"
 #include "../common/TransformLimits.h"
 
 #include <algorithm>
@@ -851,7 +852,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 			rotResidualSq += p.weight * residual * residual;
 			rotWeight += p.weight;
 		}
-		return std::sqrt(rotResidualSq / rotWeight) * 180.0 / EIGEN_PI;
+		return std::sqrt(rotResidualSq / rotWeight) * 180.0 / questcal::Pi;
 	};
 
 	// ---- translation (+ optional scale): weighted linear least squares -----
@@ -1153,7 +1154,7 @@ EngineResult CalibrationEngine::SolveAligned(const std::vector<AlignedSample> &s
 	// may have replaced `rot` - they describe the rotation that ships.
 	result.rotationRmsDeg = axisRmsDeg(rot);
 	result.rotation = Eigen::Quaterniond(rot);
-	result.tiltDeg = std::acos(std::min(1.0, std::max(-1.0, (rot * kUp).dot(kUp)))) * 180.0 / EIGEN_PI;
+	result.tiltDeg = std::acos(std::min(1.0, std::max(-1.0, (rot * kUp).dot(kUp)))) * 180.0 / questcal::Pi;
 
 	// The solved translation maps pre-rotated, pre-scaled target space; what the
 	// driver applies is world-from-driver, which matches this frame directly.

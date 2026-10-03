@@ -1,6 +1,7 @@
 #pragma once
 #include "CalibrationEngine.h"
 #include "SolverResourcePolicy.h"
+#include "../common/MathConstants.h"
 #include "../common/TransformLimits.h"
 #include <cmath>
 
@@ -29,7 +30,7 @@ inline bool IsValidEngineConfig(const EngineConfig &c)
 		c.scaleJackknifeBlocks <= 32 && c.scaleJackknifeBlocks != 1 &&
 		// This numeric envelope keeps the angle-weight normalization finite:
 		// every base is at least 1e-12 and there are at most MaxPairs bases.
-		c.minPairAngle >= 1e-6 && c.minPairAngle < c.maxPairAngle && c.maxPairAngle < EIGEN_PI &&
+		c.minPairAngle >= 1e-6 && c.minPairAngle < c.maxPairAngle && c.maxPairAngle < questcal::Pi &&
 		c.scaleSearchRange <= 1.0 - protocol::limits::MinScale &&
 		c.minAxisSpread <= 1 && c.minTransEigRatio <= 1 &&
 		c.minScaleCondition <= 1;

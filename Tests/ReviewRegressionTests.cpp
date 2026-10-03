@@ -4,6 +4,7 @@
 #include "../Overlay/PersistenceState.h"
 #include "../Overlay/RingPoseMath.h"
 #include "../Overlay/Updater.h"
+#include "../common/MathConstants.h"
 
 #include <atomic>
 #include <chrono>
@@ -131,7 +132,7 @@ bool ObserveCorrection(const Eigen::Vector3d &head, double yawDegrees,
 	questcal::MountExtrinsic mount;
 	mount.valid = true;
 	engine.SetExtrinsic(mount);
-	const Eigen::Quaterniond desired(Eigen::AngleAxisd(yawDegrees * EIGEN_PI / 180.0,
+	const Eigen::Quaterniond desired(Eigen::AngleAxisd(yawDegrees * questcal::Pi / 180.0,
 		Eigen::Vector3d::UnitY()));
 	for (int i = 0; i < 1000; ++i)
 	{
@@ -366,7 +367,7 @@ void FieldPivotSlewScenario(Check check)
 	for (double distance : { 1.0, 3.0, 10.0, 1000.0 })
 	{
 		const Eigen::Vector3d point(distance, 1.6, 0);
-		const Eigen::Quaterniond q(Eigen::AngleAxisd(3 * EIGEN_PI / 180.0, Eigen::Vector3d::UnitY()));
+		const Eigen::Quaterniond q(Eigen::AngleAxisd(3 * questcal::Pi / 180.0, Eigen::Vector3d::UnitY()));
 		const Eigen::Vector3d translation = point - q * point;
 		protocol::SetAlignmentField field;
 		field.enabled = 1;
@@ -416,7 +417,7 @@ void FieldRebaseScenario(Check check)
 		std::vector<Anchor> anchors;
 		for (int sign : { -1, 1 })
 			anchors.push_back({ Eigen::Vector3d(sign * 0.6, 0, 0),
-				Eigen::Quaterniond(Eigen::AngleAxisd(sign * degrees * EIGEN_PI / 180.0,
+				Eigen::Quaterniond(Eigen::AngleAxisd(sign * degrees * questcal::Pi / 180.0,
 					Eigen::Vector3d::UnitY())), zero });
 		for (const Eigen::Vector3d &raw : { zero, Eigen::Vector3d(0.2, 1.6, -0.4), Eigen::Vector3d(8, 1, 9) })
 		{

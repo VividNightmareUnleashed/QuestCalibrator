@@ -5,6 +5,7 @@
 // OpenVR header this TU already resolved (openvr_driver.h, via Protocol.h) is
 // the one ChaperoneMath.h sees.
 #include "ChaperoneMath.h"
+#include "../common/MathConstants.h"
 
 #include <algorithm>
 #include <bitset>
@@ -29,8 +30,8 @@ double YawOf(const Eigen::Quaterniond &q)
 
 double WrapAngle(double a)
 {
-	while (a > EIGEN_PI) a -= 2.0 * EIGEN_PI;
-	while (a < -EIGEN_PI) a += 2.0 * EIGEN_PI;
+	while (a > questcal::Pi) a -= 2.0 * questcal::Pi;
+	while (a < -questcal::Pi) a += 2.0 * questcal::Pi;
 	return a;
 }
 
@@ -264,7 +265,7 @@ void JumpDetector::DetectWfdRebase(uint32_t id, DeviceState &dev, double t,
 	candidates.push_back(c);
 
 	notes.push_back(Format("worldFromDriver rebase on device %u: yaw %+.2f deg, shift %.3f m (tilt residual %.2f deg)",
-		id, yaw * 180.0 / EIGEN_PI, dTrans.norm(), tilt * 180.0 / EIGEN_PI));
+		id, yaw * 180.0 / questcal::Pi, dTrans.norm(), tilt * 180.0 / questcal::Pi));
 }
 
 void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist &incoming)
@@ -288,7 +289,7 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 		{
 			if (detailed)
 				details.push_back(Format("frame jump on device %u at %.3f s (%.3f m / %.2f deg) falls inside the candidate at %.3f s",
-					id, incoming.t, posErr, yawErr * 180.0 / EIGEN_PI, c.t));
+					id, incoming.t, posErr, yawErr * 180.0 / questcal::Pi, c.t));
 			return;
 		}
 
@@ -309,7 +310,7 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	c.preWindow.assign(dev.hist.begin() + first, dev.hist.end());
 	if (detailed)
 		details.push_back(Format("candidate on device %u at %.3f s: frame jump %.3f m / %.2f deg over %.1f ms, moving %.3f m/s, turning %.3f rad/s%s",
-			id, c.t, posErr, yawErr * 180.0 / EIGEN_PI, dt * 1000.0, incoming.vel.norm(), std::abs(incoming.yawRate),
+			id, c.t, posErr, yawErr * 180.0 / questcal::Pi, dt * 1000.0, incoming.vel.norm(), std::abs(incoming.yawRate),
 			c.needsCorroboration ? "; under the solo floor, needs another device or a settled stream" : ""));
 	candidates.push_back(c);
 }
@@ -376,9 +377,9 @@ void JumpDetector::EvaluatePendingCandidates()
 		};
 		const std::string fitText = detailed ? Format(
 			"fit rms before %.1f mm / %.3f deg over %d samples, after %.1f mm / %.3f deg over %d (limits %.1f mm / %.3f deg)",
-			before.pos * 1000.0, before.yaw * 180.0 / EIGEN_PI, before.count,
-			after.pos * 1000.0, after.yaw * 180.0 / EIGEN_PI, after.count,
-			config.fitPositionRms * 1000.0, config.fitYawRmsRad * 180.0 / EIGEN_PI) : std::string();
+			before.pos * 1000.0, before.yaw * 180.0 / questcal::Pi, before.count,
+			after.pos * 1000.0, after.yaw * 180.0 / questcal::Pi, after.count,
+			config.fitPositionRms * 1000.0, config.fitYawRmsRad * 180.0 / questcal::Pi) : std::string();
 		if (!clean(before) || !clean(after))
 		{
 			Drop(c, "fit not clean, a transient or a second step: " + fitText);
@@ -388,15 +389,15 @@ void JumpDetector::EvaluatePendingCandidates()
 		{
 			details.push_back(Format(
 				"candidate on device %u at %.3f s fitted: before (%.4f, %.4f, %.4f) m yaw %.3f deg, after (%.4f, %.4f, %.4f) m yaw %.3f deg, %.3f m from the stream origin horizontally; ",
-				c.deviceId, c.t, prePos.x(), prePos.y(), prePos.z(), preYaw * 180.0 / EIGEN_PI,
-				postPos.x(), postPos.y(), postPos.z(), postYaw * 180.0 / EIGEN_PI,
+				c.deviceId, c.t, prePos.x(), prePos.y(), prePos.z(), preYaw * 180.0 / questcal::Pi,
+				postPos.x(), postPos.y(), postPos.z(), postYaw * 180.0 / questcal::Pi,
 				std::hypot(prePos.x(), prePos.z())) + fitText);
 			// The raw evidence, so the step can be refitted offline.
 			std::string samples = Format("samples around the step on device %u (ms from it, x y z m, yaw deg):", c.deviceId);
 			auto add = [&](const Hist &h)
 			{
 				samples += Format(" %+.1f %.4f %.4f %.4f %.3f;", (h.t - c.t) * 1000.0,
-					h.pos.x(), h.pos.y(), h.pos.z(), h.yaw * 180.0 / EIGEN_PI);
+					h.pos.x(), h.pos.y(), h.pos.z(), h.yaw * 180.0 / questcal::Pi);
 			};
 			for (const auto &h : c.preWindow)
 				add(h);
@@ -417,8 +418,8 @@ void JumpDetector::EvaluatePendingCandidates()
 		// cannot: both scale with the device's distance from the origin.
 		const double moved = (postPos - prePos).norm();
 		std::string note = Format("pose discontinuity on device %u: yaw %+.2f deg, shift %.3f m, device moved %.3f m (frame jump %.3f m / %.2f deg)",
-			c.deviceId, dYaw * 180.0 / EIGEN_PI, c.trans.norm(), moved,
-			c.frameJumpPos, c.frameJumpYawRad * 180.0 / EIGEN_PI);
+			c.deviceId, dYaw * 180.0 / questcal::Pi, c.trans.norm(), moved,
+			c.frameJumpPos, c.frameJumpYawRad * 180.0 / questcal::Pi);
 		const double resumeAge = ResumeAge(dev, c.t);
 		if (resumeAge <= config.recentResumeSeconds)
 			note += Format(" (%.1f s after the stream resumed)", resumeAge);
@@ -663,7 +664,7 @@ void JumpDetector::TryAccept()
 		ignoredTranslation += c0.trans;
 		notes.push_back(Format(
 			"unconfirmed pose discontinuity on device %u ignored (%d ignored this session: yaw %+.2f deg, shift %.3f m in total)",
-			c0.deviceId, ignoredSteps, ignoredYaw * 180.0 / EIGEN_PI, ignoredTranslation.norm()));
+			c0.deviceId, ignoredSteps, ignoredYaw * 180.0 / questcal::Pi, ignoredTranslation.norm()));
 	}
 
 	// Prune stale entries. A held HMD candidate lives until its follow-up
