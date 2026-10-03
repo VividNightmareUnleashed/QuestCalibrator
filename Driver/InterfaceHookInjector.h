@@ -10,14 +10,21 @@ class ServerTrackedDeviceProvider;
 bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDriverContext);
 bool IsPoseUpdateHookInstalled();
 uint32_t PoseUpdateHookMask();
-// Disables every hook and returns true once no thread can still be inside this
-// module's detours. False means the wait was abandoned: the module is pinned
-// resident with its hooks disabled, and anything a detour reads (the pose ring
-// above all) must not be released by the caller.
+// Disables every hook and returns true once no pose callback can still reach
+// the driver. The detours themselves stay in place, pinned with this module,
+// and only forward. False means a callback was still inside the driver when
+// the wait ran out: what it reads (the pose ring above all) must not be
+// released by the caller.
 bool DisableHooks();
 
 #ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
 // Called inside TryInstallPoseHook with the setup mutex held, after the accept
 // recheck and before the ready flag is read.
 extern void (*TryInstallAfterAcceptCheckForTest)();
+// Called inside a pose detour once it has found the driver, before handing it
+// the pose.
+extern void (*InsideDriverCallbackForTest)();
+// Called in DisableHooks once the hooks are disabled, before it waits for the
+// pose callbacks inside the driver.
+extern void (*BeforeDriverWaitForTest)();
 #endif

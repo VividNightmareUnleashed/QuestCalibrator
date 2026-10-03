@@ -8553,8 +8553,6 @@ int main(int argc, char **argv)
 		Check("driver linear scale", pass, "");
 	}
 
-	// Before any group that starts threads: DisableHooks proves quiescence only
-	// while no other thread has a frame in this executable.
 	RunHookInjectorScenarios(Check);
 
 	// Production-shared driver algebra and broad solver edge/property passes.

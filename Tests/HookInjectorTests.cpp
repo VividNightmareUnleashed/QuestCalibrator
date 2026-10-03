@@ -1,3 +1,4 @@
+#include "../Driver/HookLifecyclePolicy.h"
 #include "../Driver/InterfaceHookInjector.h"
 #include "../Driver/Logging.h"
 #include "../Driver/OpenVRHookLayout.h"
@@ -12,10 +13,9 @@
 #include <thread>
 
 // The real detours, installed with MinHook on stand-ins for vrserver's driver
-// context and host. DisableHooks suspends every other thread in this process
-// while it walks their stacks, and it only proves quiescence once no other
-// thread has a frame in this executable, so these scenarios must not run
-// while another test thread is alive.
+// context and host. Teardown disables the hooks without removing them, so each
+// scenario's Init enables the same hooks again, as a second Init in vrserver
+// would.
 namespace
 {
 using Check = void (*)(const char *, bool, const char *);
@@ -140,19 +140,17 @@ void HookReadyFlagTeardownRaceScenario(Check check)
 	std::thread request(&RequestHostInterface);
 	while (!Parked.load())
 		std::this_thread::yield();
-	const bool quiesced = DisableHooks();
+	const bool released = DisableHooks();
 	request.join();
 	TryInstallAfterAcceptCheckForTest = nullptr;
 	const uint32_t after = PoseUpdateHookMask();
 
 	char detail[160];
 	std::snprintf(detail, sizeof detail,
-		"mask after install %u (host origin x %.3f), after teardown %u, quiesced %d",
-		installed, firstOrigin, after, quiesced ? 1 : 0);
+		"mask after install %u (host origin x %.3f), after teardown %u, released %d",
+		installed, firstOrigin, after, released ? 1 : 0);
 	check(name, calibrated && installed == protocol::PoseHook006 && firstOrigin != 0.0 &&
-		after == 0 && quiesced, detail);
-	if (!quiesced)
-		return;   // the module stays pinned with its hooks disabled
+		after == 0 && released, detail);
 
 	// The next Init in the same process installs the hook afresh: a pose sent
 	// through the host reaches it calibrated.
@@ -169,9 +167,115 @@ void HookReadyFlagTeardownRaceScenario(Check check)
 		reinjected && again == protocol::PoseHook006 &&
 		origin != 0.0 && cleaned && PoseUpdateHookMask() == 0, detail);
 }
+
+std::atomic<bool> InsideDriver{ false };
+std::atomic<bool> LeaveDriver{ false };
+std::atomic<bool> TeardownWaiting{ false };
+
+// Holds a pose callback inside the driver until the scenario lets it go.
+void HoldInsideDriver()
+{
+	InsideDriver.store(true);
+	while (!LeaveDriver.load())
+		std::this_thread::yield();
+}
+
+void NoteTeardownWaiting()
+{
+	TeardownWaiting.store(true);
+}
+
+// At most five seconds, so a seam that is never reached fails the scenario
+// instead of hanging the harness.
+bool AwaitFlag(const std::atomic<bool> &flag)
+{
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (!flag.load())
+	{
+		if (std::chrono::steady_clock::now() >= deadline)
+			return false;
+		std::this_thread::yield();
+	}
+	return true;
+}
+
+// Teardown waits for a pose callback that has found the driver, since it may
+// still publish into the ring; the callback then forwards its pose through the
+// disabled hook's trampoline, and the next pose goes straight to the host.
+void TeardownWaitsForDriverScenario(Check check)
+{
+	const char *name = "hooks: teardown waits for a pose callback inside the driver";
+	auto provider = std::make_unique<ServerTrackedDeviceProvider>();
+	auto *context = reinterpret_cast<vr::IVRDriverContext *>(&Context);
+	const bool calibrated = CalibrateDeviceZero(*provider);
+	if (!InjectHooks(provider.get(), context))
+	{
+		check(name, false, "InjectHooks failed");
+		return;
+	}
+	RequestHostInterface();
+	const uint32_t installed = PoseUpdateHookMask();
+
+	InsideDriver.store(false);
+	LeaveDriver.store(false);
+	TeardownWaiting.store(false);
+	InsideDriverCallbackForTest = &HoldInsideDriver;
+	BeforeDriverWaitForTest = &NoteTeardownWaiting;
+	std::atomic<double> heldOrigin{ 0.0 };
+	std::thread pose([&] { heldOrigin.store(SendPoseThroughHost()); });
+	const bool held = AwaitFlag(InsideDriver);
+
+	std::atomic<bool> released{ false };
+	std::atomic<bool> returned{ false };
+	std::thread teardown([&] {
+		released.store(DisableHooks());
+		returned.store(true);
+	});
+	const bool waiting = AwaitFlag(TeardownWaiting);
+	// Ample time for a teardown that skipped the wait to return.
+	std::this_thread::sleep_for(std::chrono::milliseconds(50));
+	const bool returnedWhileHeld = returned.load();
+	LeaveDriver.store(true);
+	teardown.join();
+	pose.join();
+	InsideDriverCallbackForTest = nullptr;
+	BeforeDriverWaitForTest = nullptr;
+	const double after = SendPoseThroughHost();
+
+	char detail[160];
+	std::snprintf(detail, sizeof detail,
+		"mask %u, held %d, waiting %d, returned while held %d, released %d, "
+		"held pose origin x %.3f, next %.3f",
+		installed, held ? 1 : 0, waiting ? 1 : 0, returnedWhileHeld ? 1 : 0,
+		released.load() ? 1 : 0, heldOrigin.load(), after);
+	check(name, calibrated && installed == protocol::PoseHook006 && held && waiting &&
+		!returnedWhileHeld && released.load() && heldOrigin.load() != 0.0 && after == 0.0 &&
+		PoseUpdateHookMask() == 0, detail);
+}
+
+// A callback that never leaves ends the wait at its deadline instead of
+// holding SteamVR's shutdown.
+void CallbackWaitDeadlineScenario(Check check)
+{
+	questcal::hooks::CallbackActivity activity;
+	const bool idleAtOnce = activity.WaitUntilIdle(std::chrono::milliseconds(0));
+	bool gaveUp = false;
+	{
+		questcal::hooks::CallbackActivity::Guard inside(activity);
+		gaveUp = !activity.WaitUntilIdle(std::chrono::milliseconds(5));
+	}
+	const bool idleAfter = activity.WaitUntilIdle(std::chrono::milliseconds(0));
+	char detail[96];
+	std::snprintf(detail, sizeof detail, "idle at once %d, gave up %d, idle after %d",
+		idleAtOnce ? 1 : 0, gaveUp ? 1 : 0, idleAfter ? 1 : 0);
+	check("hooks: teardown stops waiting for a callback that stays inside",
+		idleAtOnce && gaveUp && idleAfter, detail);
+}
 } // namespace
 
 void RunHookInjectorScenarios(Check check)
 {
 	HookReadyFlagTeardownRaceScenario(check);
+	TeardownWaitsForDriverScenario(check);
+	CallbackWaitDeadlineScenario(check);
 }

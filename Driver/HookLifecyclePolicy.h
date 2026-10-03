@@ -1,25 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <thread>
 
 namespace questcal {
 namespace hooks {
 
-struct ModuleRange
-{
-	uintptr_t begin = 0, end = 0;
-	bool IsValid() const { return begin != 0 && end > begin; }
-	bool Contains(uintptr_t address) const { return address >= begin && address < end; }
-};
-
-// This decision requires the caller's targets to have been disabled. The OS
-// stack scan covers the entry/epilogue windows outside the counted C++ scope.
-inline bool CanRelease(bool inspected, bool referencesModule, uint32_t active)
-{
-	return inspected && !referencesModule && active == 0;
-}
-
+// Counts the callbacks inside code that teardown is about to release, so it
+// can wait for them to leave.
 class CallbackActivity
 {
 public:
@@ -35,9 +25,22 @@ public:
 		CallbackActivity &owner;
 	};
 	uint32_t Count() const { return count.load(std::memory_order_seq_cst); }
+
+	// True once no callback is counted; false if one still is after `timeout`.
+	bool WaitUntilIdle(std::chrono::milliseconds timeout) const
+	{
+		const auto deadline = std::chrono::steady_clock::now() + timeout;
+		while (Count() != 0)
+		{
+			if (std::chrono::steady_clock::now() >= deadline)
+				return false;
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+		return true;
+	}
 private:
 	// Simultaneous admitted callbacks must fit uint32_t, as they do in the
-	// supported process/thread domain. Module lifetime outlives every Guard.
+	// supported process/thread domain.
 	std::atomic<uint32_t> count{0};
 };
 

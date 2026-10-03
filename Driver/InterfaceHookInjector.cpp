@@ -6,13 +6,14 @@
 #include "ServerTrackedDeviceProvider.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <mutex>
-#include <tlhelp32.h>
-#include <vector>
 
 #ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
 void (*TryInstallAfterAcceptCheckForTest)() = nullptr;
+void (*InsideDriverCallbackForTest)() = nullptr;
+void (*BeforeDriverWaitForTest)() = nullptr;
 #endif
 
 namespace
@@ -22,231 +23,29 @@ std::atomic<ServerTrackedDeviceProvider *> Driver{ nullptr };
 std::atomic<bool> AcceptingHookRequests{ false };
 std::atomic<bool> PoseHook005Ready{ false };
 std::atomic<bool> PoseHook006Ready{ false };
+// Pose callbacks inside the driver, which teardown waits to leave.
 questcal::hooks::CallbackActivity ActiveCallbacks;
 std::mutex HookSetupMutex;
 bool MinHookInitialized = false;   // protected by HookSetupMutex
+bool HooksInstalled = false;       // protected by HookSetupMutex
 using CallbackGuard = questcal::hooks::CallbackActivity::Guard;
-using ModuleRange = questcal::hooks::ModuleRange;
 
-// Resolved before the first target can be enabled and kept for the whole hook
-// lifetime, so teardown never has to look it up (and fail) on demand.
-ModuleRange DriverModuleRange;
+// HandleDevicePoseUpdated never blocks, so this only covers a pose thread that
+// was preempted inside it.
+constexpr std::chrono::milliseconds DriverReleaseWait{ 1000 };
 
-bool GetThisModuleRange(ModuleRange &range)
-{
-	HMODULE module = nullptr;
-	if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-		GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-		reinterpret_cast<LPCSTR>(&GetThisModuleRange), &module))
-		return false;
-
-	// Our own loaded image: the loader has already validated these headers.
-	auto base = reinterpret_cast<uintptr_t>(module);
-	auto dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(base);
-	auto nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(base + dos->e_lfanew);
-	range = { base, base + nt->OptionalHeader.SizeOfImage };
-	return true;
-}
-
-// Unwind a suspended x64 thread without symbols. Every detour frame and every
-// return address back into one lives in this module; rejecting any such frame
-// closes both the pre-CallbackGuard entry window and the post-guard epilogue
-// window that a refcount alone cannot observe.
-bool StackReferencesModule(HANDLE thread, const ModuleRange &module, bool &references)
-{
-	references = false;
-	CONTEXT context{};
-	context.ContextFlags = CONTEXT_FULL;
-	if (!GetThreadContext(thread, &context))
-		return false;
-
-	for (int frame = 0; frame < 256 && context.Rip != 0; ++frame)
-	{
-		if (module.Contains(static_cast<uintptr_t>(context.Rip)))
-		{
-			references = true;
-			return true;
-		}
-
-		DWORD64 previousRsp = context.Rsp;
-		DWORD64 imageBase = 0;
-		PRUNTIME_FUNCTION function = RtlLookupFunctionEntry(
-			context.Rip, &imageBase, nullptr);
-		if (function)
-		{
-			PVOID handlerData = nullptr;
-			DWORD64 establisherFrame = 0;
-			RtlVirtualUnwind(UNW_FLAG_NHANDLER, imageBase, context.Rip,
-				function, &context, &handlerData, &establisherFrame, nullptr);
-		}
-		else
-		{
-			DWORD64 returnAddress = 0;
-			SIZE_T bytesRead = 0;
-			if (!ReadProcessMemory(GetCurrentProcess(),
-				reinterpret_cast<const void *>(context.Rsp), &returnAddress,
-				sizeof returnAddress, &bytesRead) || bytesRead != sizeof returnAddress)
-				return false;
-			context.Rip = returnAddress;
-			context.Rsp += sizeof returnAddress;
-		}
-
-		if (context.Rsp <= previousRsp)
-			return false;
-	}
-	return context.Rip == 0;
-}
-
-class SuspendedThreads
-{
-public:
-	~SuspendedThreads() { Resume(); }
-
-	bool SuspendAllOtherThreads()
-	{
-		HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-		if (snapshot == INVALID_HANDLE_VALUE)
-			return false;
-
-		// Open and store every handle before suspending anything. Growing a
-		// std::vector after the first suspension can deadlock if an arbitrary
-		// suspended thread owns the CRT heap lock.
-		THREADENTRY32 entry{};
-		entry.dwSize = sizeof entry;
-		bool success = Thread32First(snapshot, &entry) != FALSE;
-		DWORD processId = GetCurrentProcessId();
-		DWORD currentThreadId = GetCurrentThreadId();
-		while (success)
-		{
-			if (entry.th32OwnerProcessID == processId &&
-				entry.th32ThreadID != currentThreadId)
-			{
-				HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT |
-					THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
-				if (!thread)
-				{
-					if (GetLastError() != ERROR_INVALID_PARAMETER)
-					{
-						CloseHandle(snapshot);
-						CloseUnsuspendedHandles();
-						return false;
-					}
-				}
-				else
-					threads.push_back(thread);
-			}
-			success = Thread32Next(snapshot, &entry) != FALSE;
-		}
-		DWORD enumerationError = GetLastError();
-		CloseHandle(snapshot);
-		if (enumerationError != ERROR_NO_MORE_FILES)
-		{
-			CloseUnsuspendedHandles();
-			return false;
-		}
-
-		// The vector already contains every candidate handle, so this loop and
-		// every error path below perform no heap allocation. Compact successfully
-		// suspended handles in place while tolerating threads that exited after
-		// the snapshot was taken.
-		size_t suspendedCount = 0;
-		for (size_t i = 0; i < threads.size(); ++i)
-		{
-			HANDLE thread = threads[i];
-			if (SuspendThread(thread) != static_cast<DWORD>(-1))
-			{
-				threads[suspendedCount++] = thread;
-				continue;
-			}
-
-			DWORD exitCode = STILL_ACTIVE;
-			bool exited = GetExitCodeThread(thread, &exitCode) &&
-				exitCode != STILL_ACTIVE;
-			CloseHandle(thread);
-			if (exited)
-				continue;
-
-			// Preserve the successfully suspended prefix for Resume(), and close
-			// every candidate that has not yet been suspended.
-			for (size_t remaining = i + 1; remaining < threads.size(); ++remaining)
-				CloseHandle(threads[remaining]);
-			threads.resize(suspendedCount);
-			return false;
-		}
-
-		threads.resize(suspendedCount);
-		return true;
-	}
-
-	bool AnyStackReferences(const ModuleRange &module, bool &references) const
-	{
-		references = false;
-		for (HANDLE thread : threads)
-		{
-			bool oneReferences = false;
-			if (!StackReferencesModule(thread, module, oneReferences))
-				return false;
-			if (oneReferences)
-			{
-				references = true;
-				return true;
-			}
-		}
-		return true;
-	}
-
-	void Resume()
-	{
-		for (HANDLE thread : threads)
-		{
-			ResumeThread(thread);
-			CloseHandle(thread);
-		}
-		threads.clear();
-	}
-
-private:
-	void CloseUnsuspendedHandles()
-	{
-		for (HANDLE thread : threads)
-			CloseHandle(thread);
-		threads.clear();
-	}
-
-	std::vector<HANDLE> threads;
-};
-
-// Quiescence can be unreachable: a thread parked in code without unwind data
-// fails the stack walk every time. Retrying forever would hang SteamVR shutdown
-// and, through Init's failure paths, startup.
-constexpr ULONGLONG QuiescenceWaitMs = 5000;
-
-// Keeping this module resident is the safe way to stop waiting. Every hook is
-// already disabled at this point, so the detours that remain only forward, and a
-// pinned module can never unload under a frame that would return into it.
+// Once a hook has been enabled, a thread may be inside its detour or its
+// trampoline at any later moment, and only stopping every thread in vrserver
+// could prove otherwise. So neither ever goes away: this module stays loaded,
+// and MinHook initialized with its trampolines, until the process exits.
+// Teardown only disables the hooks, after which a detour still running only
+// forwards.
 bool PinThisModule()
 {
 	HMODULE module = nullptr;
 	return GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_PIN |
 		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-		reinterpret_cast<LPCSTR>(&GetThisModuleRange), &module) != FALSE;
-}
-
-// Returns false so callers know no quiescence proof was obtained; anything a
-// detour can still touch must outlive this call.
-bool AbandonTeardown(const char *reason)
-{
-	if (PinThisModule())
-	{
-		LOG("%s; keeping the driver module resident with its hooks disabled", reason);
-		return false;
-	}
-	// Without the pin, returning would permit this DLL to unload under an active
-	// detour frame, so waiting really is the only remaining safe outcome.
-	LOG("%s, and the module could not be pinned (error %u); teardown must wait",
-		reason, GetLastError());
-	for (;;)
-		Sleep(1000);
+		reinterpret_cast<LPCSTR>(&PinThisModule), &module) != FALSE;
 }
 
 Hook<void*(*)(vr::IVRDriverContext *, const char *, vr::EVRInitError *)>
@@ -265,8 +64,9 @@ PoseUpdateHook TrackedDevicePoseUpdatedHook006("IVRServerDriverHost006::TrackedD
 void ForwardPoseUpdate(PoseUpdateHook &hook, void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
-	// Null only if a thread enters the detour after its hook was removed
-	// (MinHook moves threads off the relay on disable only on a best-effort basis).
+	// Set before the hook was first enabled and never cleared, since hooks are
+	// disabled but not removed. A call through null would take vrserver down,
+	// so it is checked all the same.
 	auto original = hook.originalFunc.load(std::memory_order_acquire);
 
 	// Our copy is sized by the vendored DriverPose_t, so a caller passing a
@@ -281,8 +81,20 @@ void ForwardPoseUpdate(PoseUpdateHook &hook, void *_this,
 	}
 
 	auto pose = newPose;
-	if (ServerTrackedDeviceProvider *driver = Driver.load(std::memory_order_acquire))
-		driver->HandleDevicePoseUpdated(unWhichDevice, pose);
+	{
+		// Counted from before Driver is read until the driver is done. The count
+		// and this load are sequentially consistent with DisableHooks' store, so
+		// a callback is either counted when teardown looks or finds no driver.
+		CallbackGuard callback(ActiveCallbacks);
+		if (ServerTrackedDeviceProvider *driver = Driver.load(std::memory_order_seq_cst))
+		{
+#ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
+			if (InsideDriverCallbackForTest)
+				InsideDriverCallbackForTest();
+#endif
+			driver->HandleDevicePoseUpdated(unWhichDevice, pose);
+		}
+	}
 	if (original)
 		original(_this, unWhichDevice, pose, unPoseStructSize);
 }
@@ -290,7 +102,6 @@ void ForwardPoseUpdate(PoseUpdateHook &hook, void *_this,
 void DetourTrackedDevicePoseUpdated005(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
-	CallbackGuard callback(ActiveCallbacks);
 	ForwardPoseUpdate(TrackedDevicePoseUpdatedHook005, _this, unWhichDevice, newPose,
 		unPoseStructSize);
 }
@@ -298,7 +109,6 @@ void DetourTrackedDevicePoseUpdated005(void *_this,
 void DetourTrackedDevicePoseUpdated006(void *_this,
 	uint32_t unWhichDevice, const vr::DriverPose_t &newPose, uint32_t unPoseStructSize)
 {
-	CallbackGuard callback(ActiveCallbacks);
 	ForwardPoseUpdate(TrackedDevicePoseUpdatedHook006, _this, unWhichDevice, newPose,
 		unPoseStructSize);
 }
@@ -326,14 +136,6 @@ bool DisableEveryHook()
 	bool success = GetGenericInterfaceHook.Disable();
 	for (const PoseHookBinding &binding : PoseHookBindings)
 		success = binding.hook->Disable() && success;
-	return success;
-}
-
-bool DestroyEveryHook()
-{
-	bool success = GetGenericInterfaceHook.Destroy();
-	for (const PoseHookBinding &binding : PoseHookBindings)
-		success = binding.hook->Destroy() && success;
 	return success;
 }
 
@@ -381,7 +183,6 @@ void TryInstallPoseHook(const char *interfaceVersion, void *originalInterface)
 void *DetourGetGenericInterface(vr::IVRDriverContext *_this,
 	const char *pchInterfaceVersion, vr::EVRInitError *peError)
 {
-	CallbackGuard callback(ActiveCallbacks);
 	auto original = GetGenericInterfaceHook.originalFunc.load(std::memory_order_acquire);
 	if (!original)
 		return nullptr;
@@ -411,49 +212,37 @@ bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 	}
 
 	std::lock_guard<std::mutex> lock(HookSetupMutex);
-	if (MinHookInitialized)
+	if (HooksInstalled)
 	{
-		LOG("InjectHooks: hooks are already initialized");
+		LOG("InjectHooks: hooks are already installed");
 		return false;
 	}
-	if (!DriverModuleRange.IsValid())
+	// Once per process; a later Init enables the hooks the first one created.
+	if (!MinHookInitialized)
 	{
-		ModuleRange resolved;
-		if (!GetThisModuleRange(resolved))
+		if (!PinThisModule())
 		{
-			LOG("InjectHooks: could not resolve the driver module range");
+			LOG("InjectHooks: could not pin the driver module (error %u)", GetLastError());
 			return false;
 		}
-		DriverModuleRange = resolved;
+		MH_STATUS err = MH_Initialize();
+		if (err != MH_OK)
+		{
+			LOG("MH_Initialize error: %s", MH_StatusToString(err));
+			return false;
+		}
+		MinHookInitialized = true;
 	}
-
-	MH_STATUS err = MH_Initialize();
-	if (err != MH_OK)
-	{
-		LOG("MH_Initialize error: %s", MH_StatusToString(err));
-		return false;
-	}
-	MinHookInitialized = true;
 	Driver.store(driver, std::memory_order_release);
 
 	if (!GetGenericInterfaceHook.CreateHookInObjectVTable(
 		pDriverContext, openvr_hook::GetGenericInterfaceSlot, &DetourGetGenericInterface))
 	{
 		Driver.store(nullptr, std::memory_order_release);
-		// A failed enable can also fail to remove its allocated trampoline.
-		// Retain initialization until every owned hook and MinHook itself have
-		// actually released it; Cleanup can then retry instead of forgetting it.
-		if (GetGenericInterfaceHook.Destroy())
-		{
-			auto cleanup = MH_Uninitialize();
-			if (cleanup == MH_OK || cleanup == MH_ERROR_NOT_INITIALIZED)
-				MinHookInitialized = false;
-			else
-				LOG("MinHook cleanup after failed installation will retry: %s", MH_StatusToString(cleanup));
-		}
 		return false;
 	}
 
+	HooksInstalled = true;
 	AcceptingHookRequests.store(true, std::memory_order_release);
 	return true;
 }
@@ -478,114 +267,42 @@ bool DisableHooks()
 	// Stop detours from starting new hook creation before waiting on the setup
 	// mutex. A detour already waiting for the mutex rechecks this flag.
 	AcceptingHookRequests.store(false, std::memory_order_release);
-	Driver.store(nullptr, std::memory_order_release);
+	// Sequentially consistent, like the callbacks' count and their load of
+	// Driver: once the wait below finds no callback counted, every later
+	// callback finds no driver.
+	Driver.store(nullptr, std::memory_order_seq_cst);
 
-	// Hook removal is only safe after every target is confirmed disabled. If
-	// both the individual and MinHook-wide disable paths fail, keep the benign
-	// forwarding detours installed and retry instead of taking a snapshot during
-	// which a still-enabled target could form a new detour stack.
-	ULONGLONG lastDisableWaitLog = 0;
-	ModuleRange module;
-	for (;;)
 	{
+		std::lock_guard<std::mutex> lock(HookSetupMutex);
+		// Under the mutex, not before it: a detour that passed its accept
+		// check before the store above sets its ready flag while holding
+		// the mutex. Cleared earlier, that flag outlives the hook it names,
+		// and the next Init in this process skips installing the hook while
+		// IsPoseUpdateHookInstalled still reports it.
+		for (const PoseHookBinding &binding : PoseHookBindings)
+			binding.ready->store(false, std::memory_order_release);
+		HooksInstalled = false;
+		if (MinHookInitialized && !DisableEveryHook())
 		{
-			std::lock_guard<std::mutex> lock(HookSetupMutex);
-			// Under the mutex, not before it: a detour that passed its accept
-			// check before the store above sets its ready flag while holding
-			// the mutex. Cleared earlier, that flag outlives the hook it names,
-			// and the next Init in this process skips installing the hook while
-			// IsPoseUpdateHookInstalled still reports it.
-			for (const PoseHookBinding &binding : PoseHookBindings)
-				binding.ready->store(false, std::memory_order_release);
-			if (!MinHookInitialized)
-				return true;
-
-			bool disabled = DisableEveryHook();
-			if (!disabled)
-			{
-				LOG("One or more hooks could not be disabled individually; disabling all MinHook targets");
-				MH_STATUS error = MH_DisableHook(MH_ALL_HOOKS);
-				if (error != MH_OK && error != MH_ERROR_DISABLED)
-					LOG("Failed to disable all MinHook targets: %s", MH_StatusToString(error));
-				else
-					disabled = DisableEveryHook();   // synchronize each hook's lifecycle state
-			}
-			if (disabled)
-			{
-				module = DriverModuleRange;   // valid: InjectHooks resolves it before MH_Initialize
-				break;
-			}
+			LOG("One or more hooks could not be disabled individually; disabling all MinHook targets");
+			MH_STATUS error = MH_DisableHook(MH_ALL_HOOKS);
+			if (error != MH_OK && error != MH_ERROR_DISABLED)
+				LOG("Failed to disable all MinHook targets: %s; their detours stay in place and only forward",
+					MH_StatusToString(error));
+			else
+				DisableEveryHook();   // synchronize each hook's lifecycle state
 		}
-
-		ULONGLONG now = GetTickCount64();
-		if (lastDisableWaitLog == 0 || now - lastDisableWaitLog >= 5000)
-		{
-			LOG("Hook targets are still enabled; teardown is waiting and will retry");
-			lastDisableWaitLog = now;
-		}
-		// The lock guard must be destroyed before sleeping so an already-entered
-		// GetGenericInterface detour can observe AcceptingHookRequests=false and
-		// leave the module.
-		Sleep(100);
 	}
 
-	ULONGLONG quiescenceDeadline = GetTickCount64() + QuiescenceWaitMs;
-	ULONGLONG lastWaitLog = GetTickCount64();
-	for (;;)
-	{
-		std::unique_lock<std::mutex> lock(HookSetupMutex);
-		if (!MinHookInitialized)
-			return true;
-
-		SuspendedThreads suspended;
-		bool referencesModule = true;
-		bool inspected = suspended.SuspendAllOtherThreads() &&
-			suspended.AnyStackReferences(module, referencesModule);
-		if (questcal::hooks::CanRelease(inspected, referencesModule, ActiveCallbacks.Count()))
-		{
-			// Hooks are disabled, so after this proven-empty snapshot no new
-			// detour stack can form. Resume before freeing to avoid allocator or
-			// loader-lock deadlocks against an unrelated suspended thread.
-			suspended.Resume();
-			if (!DestroyEveryHook())
-			{
-				LOG("One or more hooks could not be removed after quiescence; teardown will retry");
-				lock.unlock();
-				if (GetTickCount64() >= quiescenceDeadline)
-					return AbandonTeardown("Hooks could not be removed after quiescence");
-				Sleep(100);
-				continue;
-			}
-			MH_STATUS err = MH_Uninitialize();
-			if (err == MH_OK || err == MH_ERROR_NOT_INITIALIZED)
-			{
-				MinHookInitialized = false;
-				DriverModuleRange = {};
-				return true;
-			}
-			LOG("MH_Uninitialize error after quiescence: %s; teardown will retry",
-				MH_StatusToString(err));
-			lock.unlock();
-			if (GetTickCount64() >= quiescenceDeadline)
-				return AbandonTeardown("MinHook could not be uninitialized after quiescence");
-			Sleep(100);
-			continue;
-		}
-
-		suspended.Resume();
-		lock.unlock();
-		if (GetTickCount64() - lastWaitLog >= 5000)
-		{
-			LOG("Waiting for hook detour stacks to drain (inspect=%d, references=%d, active=%u)",
-				inspected ? 1 : 0, referencesModule ? 1 : 0,
-				ActiveCallbacks.Count());
-			lastWaitLog = GetTickCount64();
-		}
-		// A failed inspection can be permanent, and a thread can sit in this
-		// module for as long as its own work takes, so stop suspending every
-		// thread in the process once the wait has run long enough.
-		if (GetTickCount64() >= quiescenceDeadline)
-			return AbandonTeardown("Hook detour stacks could not be proven drained");
-		Sleep(1);
-	}
+	// A thread still inside a detour finishes safely (see PinThisModule); only
+	// the driver it may have reached needs waiting for.
+#ifdef QUESTCAL_HOOK_INJECTOR_TEST_SEAM
+	if (BeforeDriverWaitForTest)
+		BeforeDriverWaitForTest();
+#endif
+	if (ActiveCallbacks.WaitUntilIdle(DriverReleaseWait))
+		return true;
+	LOG("A pose callback was still inside the driver after %lld ms",
+		static_cast<long long>(DriverReleaseWait.count()));
+	return false;
 }

@@ -13,12 +13,11 @@ public:
 	std::atomic<FuncType> originalFunc{ nullptr };
 	explicit Hook(const char *name) : name(name) { }
 
-	// `object` is a non-null interface pointer; callers check it.
+	// `object` is a non-null interface pointer; callers check it. A hook is
+	// created once and only ever disabled after that, so a later call for the
+	// same function enables it again, as a second Init in vrserver does.
 	bool CreateHookInObjectVTable(void *object, int vtableOffset, void *detourFunction)
 	{
-		if (targetFunc)
-			return Enable();
-
 		// MSVC places the vtable pointer first in a polymorphic object.
 		void **vtable = *((void ***)object);
 		if (!vtable)
@@ -32,6 +31,16 @@ public:
 		{
 			LOG("Cannot create hook for %s: target function is null", name);
 			return false;
+		}
+
+		if (targetFunc)
+		{
+			if (target != targetFunc)
+			{
+				LOG("Cannot hook %s on another implementation: the hook already patches one", name);
+				return false;
+			}
+			return Enable();
 		}
 
 		LPVOID original = nullptr;
@@ -70,25 +79,6 @@ public:
 		}
 
 		enabled = false;
-		return true;
-	}
-
-	bool Destroy()
-	{
-		if (!targetFunc)
-			return true;
-
-		if (!Disable())
-			return false;
-
-		auto error = MH_RemoveHook(targetFunc);
-		if (error != MH_OK && error != MH_ERROR_NOT_CREATED)
-		{
-			LOG("Failed to remove hook for %s, error: %s", name, MH_StatusToString(error));
-			return false;
-		}
-
-		Reset();
 		return true;
 	}
 

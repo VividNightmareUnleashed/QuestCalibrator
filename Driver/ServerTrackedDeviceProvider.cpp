@@ -76,20 +76,21 @@ void ServerTrackedDeviceProvider::Teardown()
 {
 	server.Stop();
 	// Hooks may be live even when Init failed (InjectHooks refuses while a
-	// previous Init's hooks remain). Quiesce the detours before the ring goes
-	// away, or a pose thread still publishing would write into an unmapped view.
-	bool quiesced = DisableHooks();
+	// previous Init's hooks remain). Wait for the detours to leave the driver
+	// before the ring goes away, or a pose thread still publishing would write
+	// into an unmapped view.
+	const bool released = DisableHooks();
 	poseRingReady.store(false, std::memory_order_release);
 	// The IPC thread has stopped; write what it would have.
 	FlushFrameLog();
-	if (quiesced)
+	if (released)
 		poseRing.Close();
 	else
 	{
 		// A pose thread may still reach the ring, so leak the mapping; the next
 		// writer's PID + creation-time liveness proof covers an owner that never
 		// closes.
-		LOG("Hook quiescence could not be proven; the pose ring mapping is retained");
+		LOG("The pose ring mapping is retained for the pose callback still inside the driver");
 	}
 }
 
