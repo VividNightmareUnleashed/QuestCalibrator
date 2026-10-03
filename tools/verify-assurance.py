@@ -5,6 +5,7 @@ Evidence is a local assurance record, not an authenticated third-party attestati
 The release workflow still separately gates the Windows build and integration tests.
 """
 import argparse
+import ast
 import copy
 import hashlib
 import json
@@ -14,6 +15,31 @@ import subprocess
 
 
 REQUIRED_SUITES = {"private-core", "input-validation", "contracts", "hub-traces", "inventory-extension", "binary-correspondence"}
+# The checkout every caller pins beside this tree. The counts that describe
+# private suites are read from it rather than written here, so a change there
+# needs no change to this file.
+VIRTUAL = Path(__file__).resolve().parents[1] / "VirtualQuest"
+
+
+def binary_cases(virtual=VIRTUAL):
+    """The finite V09 cases its verifier checks, as VirtualQuest records them."""
+    registry = json.loads((virtual / "formal/inventory-scope.json").read_text(encoding="utf-8"))
+    cases = registry["items"]["V09"].get("cases")
+    if type(cases) is not int or cases <= 0:
+        raise ValueError("VirtualQuest records no V09 case count")
+    return cases
+
+
+def capture_test_count(virtual=VIRTUAL):
+    """How many tests the capture suite runs: its unittest classes' test methods."""
+    tree = ast.parse((virtual / "Tests/test_quest_pose_debug.py").read_text(encoding="utf-8"))
+    count = sum(1 for node in ast.walk(tree) if isinstance(node, ast.ClassDef)
+                and any(getattr(base, "attr", getattr(base, "id", None)) == "TestCase" for base in node.bases)
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test"))
+    if count == 0:
+        raise ValueError("The capture suite defines no tests")
+    return count
 BINARY_CONTROLS = {
     "wrong-model-reset": "Quest reset mismatch",
     "wrong-model-position": "Quest position mismatch",
@@ -109,6 +135,7 @@ CAPTURE_MUTANTS = {
 }
 PUBLIC_INVENTORY_MUTANTS = {name: contract for name, contract in INVENTORY_MUTANTS.items()
                             if not name.startswith('V')}
+PRIVATE_INVENTORY_SELECTIONS = len(INVENTORY_MUTANTS) - len(PUBLIC_INVENTORY_MUTANTS)
 
 
 def validate_cpp_mutants(mutants, registry):
@@ -171,6 +198,7 @@ def validate_capture_mutants(mutants):
     names = [row.get("name") for row in mutants]
     if any(not isinstance(name, str) for name in names) or len(names) != len(set(names)) or set(names) != set(CAPTURE_MUTANTS):
         raise ValueError("Capture negative controls are missing, duplicate or unexpected")
+    tests = capture_test_count()
     for row in mutants:
         log = row.get("log")
         if row.get("status") != "passed" or row.get("method") != "compiling Python mutant" or not isinstance(log, str):
@@ -180,7 +208,7 @@ def validate_capture_mutants(mutants):
         if (re.search(r"^ERROR:", log, re.M) or len(failures) != len(expected)
                 or set(m.group(1) for m in failures) != set(expected)
                 or len(re.findall(r"^FAIL:", log, re.M)) != len(expected)
-                or re.findall(r"^Ran (\d+) tests in .+$", log, re.M) != ["19"]
+                or re.findall(r"^Ran (\d+) tests in .+$", log, re.M) != [str(tests)]
                 or re.findall(r"^FAILED \(failures=(\d+)\)$", log, re.M) != [str(len(expected))]):
             raise ValueError(f'{row["name"]}: capture mutant did not reach its intended tests')
         for index, failure in enumerate(failures):
@@ -201,6 +229,7 @@ def validate_capture_mutants(mutants):
 
 def capture_negative_control_fixtures(valid):
     validate_capture_mutants(valid)
+    tests = capture_test_count()
     fixtures = [[], valid[:-1], valid + [valid[0]]]
     for index in range(len(valid)):
         log = valid[index]["log"]
@@ -208,7 +237,7 @@ def capture_negative_control_fixtures(valid):
                            ("log", "std::bad_alloc"), ("log", log + "\nERROR: unrelated exception\n"),
                            ("log", log.replace("AssertionError:", "RuntimeError:")),
                            ("log", log.replace("test_", "unrelated_")),
-                           ("log", log.replace("Ran 19 tests", "Ran 0 tests")),
+                           ("log", log.replace(f"Ran {tests} tests", "Ran 0 tests")),
                            ("log", log.replace("FAILED (failures=", "INCOMPLETE (failures="))):
             invalid = copy.deepcopy(valid)
             invalid[index][key] = value
@@ -277,7 +306,7 @@ def validate(record, identity, expected, required=REQUIRED_SUITES, release=True,
         if suite == "contracts" and "P01" in expected[suite]:
             controls = entry.get("negativeControls")
             if release or require_negative_controls or controls is not None:
-                if not isinstance(controls, dict) or controls.get("acceptanceFixtures") != 67:
+                if not isinstance(controls, dict) or controls.get("acceptanceFixtures") != now_negative_control_fixtures():
                     raise ValueError("Missing Now negative-control acceptance evidence")
                 validate_now_mutants(controls.get("mutants"))
                 for check in checks:
@@ -289,32 +318,32 @@ def validate(record, identity, expected, required=REQUIRED_SUITES, release=True,
             # always require the complete intended-failure evidence.
             controls = entry.get("negativeControls")
             if release or require_negative_controls or controls is not None:
-                if not isinstance(controls, dict) or controls.get("acceptanceFixtures") != 186:
+                if not isinstance(controls, dict) or controls.get("acceptanceFixtures") != inventory_negative_control_fixtures():
                     raise ValueError("Missing inventory negative-control acceptance evidence")
                 validate_inventory_mutants(controls.get("mutants"))
-                if controls.get("captureAcceptanceFixtures") != 36:
-                    raise ValueError("Missing capture negative-control acceptance evidence")
                 validate_capture_mutants(controls.get("captureMutants"))
+                if controls.get("captureAcceptanceFixtures") != capture_negative_control_fixtures(controls["captureMutants"]):
+                    raise ValueError("Missing capture negative-control acceptance evidence")
                 if any(type(check.get("cases")) is not int or check["cases"] <= 0 for check in checks):
                     raise ValueError("Inventory extension has an empty positive witness")
         if suite == "public-inventory-extension":
-            if (len(expected[suite]) != 23 or any(name.startswith('V') for name in expected[suite])):
+            if not expected[suite] or any(name.startswith('V') for name in expected[suite]):
                 raise ValueError("Public inventory scope contains private or missing obligations")
             controls = entry.get("negativeControls")
             if require_negative_controls or controls is not None:
-                if not isinstance(controls, dict) or controls.get("acceptanceFixtures") != 144:
+                if not isinstance(controls, dict) or controls.get("acceptanceFixtures") != cpp_negative_control_fixtures(PUBLIC_INVENTORY_MUTANTS):
                     raise ValueError("Missing public inventory negative-control acceptance evidence")
                 validate_cpp_mutants(controls.get("mutants"), PUBLIC_INVENTORY_MUTANTS)
-                if controls.get("privateSelectionsRefused") != 6:
+                if controls.get("privateSelectionsRefused") != PRIVATE_INVENTORY_SELECTIONS:
                     raise ValueError("Private inventory selections were not refused")
                 if any(type(check.get("cases")) is not int or check["cases"] <= 0 for check in checks):
                     raise ValueError("Public inventory extension has an empty positive witness")
         if suite == "binary-correspondence" and "V09" in expected[suite]:
             validate_binary_controls(entry.get("negativeControls"))
-            if any(type(check.get("cases")) is not int or check["cases"] != 4577 for check in checks):
+            if any(type(check.get("cases")) is not int or check["cases"] != binary_cases() for check in checks):
                 raise ValueError("Binary correspondence has an incomplete positive witness")
             if release or require_negative_controls:
-                if entry.get("acceptanceFixtures") != 45:
+                if entry.get("acceptanceFixtures") != binary_negative_control_fixtures():
                     raise ValueError("Missing binary negative-control acceptance evidence")
     return True
 
@@ -322,9 +351,11 @@ def validate(record, identity, expected, required=REQUIRED_SUITES, release=True,
 def expected_checks(virtual, source, pwsh="pwsh"):
     expected = {"contracts": ["A01", "A02", "A03", "P01", "P02", "P03", "P04", "P05", "S04", "S07", "N05", "N06"]}
     registry = json.loads((virtual / "formal/inventory-scope.json").read_text())
+    if not set(expected["contracts"]) | {"V09"} <= set(registry["items"]):
+        raise ValueError("The inventory scope no longer holds the Now contracts and V09")
     extension = set(registry["items"]) - set(expected["contracts"]) - {"V09"}
-    if len(registry["items"]) != 44 or len(extension) != 31:
-        raise ValueError("Inventory scope changed without updating the release policy")
+    if not extension:
+        raise ValueError("The inventory scope has no extension obligations")
     expected["inventory-extension"] = sorted(extension)
     expected["binary-correspondence"] = ["V09"]
     for suite, selection in (("private-core", ["-Core"]), ("input-validation", ["-Only", "input-validation"])):

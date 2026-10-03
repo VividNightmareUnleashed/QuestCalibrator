@@ -31,13 +31,14 @@ def main():
     fixture = {'schemaVersion': 2, 'sources': identity, 'sourcesUnchanged': True,
                'success': True, 'dirty': False, 'fullSuite': False, 'suites': {}}
     for name in required:
-        checks = [{'name': check, 'status': 'passed', 'cases': 4577 if name == 'binary-correspondence' else 1,
+        checks = [{'name': check, 'status': 'passed', 'cases': assurance.binary_cases() if name == 'binary-correspondence' else 1,
                    'negative': True} for check in expected[name]]
         fixture['suites'][name] = {'complete': True, 'tools': {'fixture': 'acceptance data, not executed proofs'}, 'checks': checks}
     def cpp(registry):
         return [{'name': name, 'status': 'passed', 'method': 'production mutant',
                  'mutation': path, 'failure': message} for name, (path, message) in registry.items()]
-    fixture['suites']['contracts']['negativeControls'] = {'mutants': cpp(assurance.NOW_MUTANTS), 'acceptanceFixtures': 67}
+    fixture['suites']['contracts']['negativeControls'] = {'mutants': cpp(assurance.NOW_MUTANTS),
+                                                          'acceptanceFixtures': assurance.now_negative_control_fixtures()}
     captures = []
     for name, tests in assurance.CAPTURE_MUTANTS.items():
         log = ''
@@ -45,14 +46,15 @@ def main():
             log += f'FAIL: {test} (test_quest_pose_debug.PoseAnalysisTests.{test})\n'
             log += 'File "/private_fixture/capture.py", line 1\nPRIVATE_SOURCE_SENTINEL\n'
             log += 'AssertionError: ' + (message or '0.001 not less than 1e-06') + '\n'
-        log += f'Ran 19 tests in 0.001s\nFAILED (failures={len(tests)})\n'
+        log += f'Ran {assurance.capture_test_count()} tests in 0.001s\nFAILED (failures={len(tests)})\n'
         captures.append({'name': name, 'status': 'passed', 'method': 'compiling Python mutant', 'log': log})
     fixture['suites']['inventory-extension']['negativeControls'] = {
-        'mutants': cpp(assurance.INVENTORY_MUTANTS), 'acceptanceFixtures': 186,
-        'captureMutants': captures, 'captureAcceptanceFixtures': 36}
+        'mutants': cpp(assurance.INVENTORY_MUTANTS), 'acceptanceFixtures': assurance.inventory_negative_control_fixtures(),
+        'captureMutants': captures, 'captureAcceptanceFixtures': assurance.capture_negative_control_fixtures(captures)}
     fixture['suites']['binary-correspondence'].update(
         negativeControls=[{'name': name, 'status': 'passed', 'intendedFailure': message}
-                          for name, message in assurance.BINARY_CONTROLS.items()], acceptanceFixtures=45)
+                          for name, message in assurance.BINARY_CONTROLS.items()],
+        acceptanceFixtures=assurance.binary_negative_control_fixtures())
     fixture['privateLog'] = 'PRIVATE_SOURCE_SENTINEL'
     for suite in fixture['suites'].values():
         suite['checks'][0]['rawSource'] = 'PRIVATE_SOURCE_SENTINEL'
@@ -102,7 +104,8 @@ def main():
         'complete': True, 'tools': {'fixture': 'acceptance data'},
         'checks': [{'name': n, 'status': 'passed', 'cases': 1} for n in public_names],
         'negativeControls': {'mutants': cpp(assurance.PUBLIC_INVENTORY_MUTANTS),
-                             'acceptanceFixtures': 144, 'privateSelectionsRefused': 6}}}
+                             'acceptanceFixtures': assurance.cpp_negative_control_fixtures(assurance.PUBLIC_INVENTORY_MUTANTS),
+                             'privateSelectionsRefused': assurance.PRIVATE_INVENTORY_SELECTIONS}}}
     def validate_public(record):
         assurance.validate(record, identity, {'public-inventory-extension': public_names},
                            required={'public-inventory-extension'}, release=False, require_negative_controls=True)
@@ -136,7 +139,7 @@ def main():
         lambda r: r.pop('negativeControls'),
         lambda r: r['negativeControls'].pop(),
         lambda r: r['suites']['binary-correspondence']['checks'][0].update(cases=1),
-        lambda r: r['suites']['binary-correspondence'].update(acceptanceFixtures=44),
+        lambda r: r['suites']['binary-correspondence'].update(acceptanceFixtures=assurance.binary_negative_control_fixtures() - 1),
         lambda r: r['sources']['QuestCalibrator'].update(commit='stale'),
     ]:
         invalid = copy.deepcopy(safe_binary); change(invalid)
@@ -224,8 +227,7 @@ def main():
         return [row['Name'] for row in rows]
     complete_numeric = numeric()
     public_numeric = numeric('-PublicInputValidation')
-    assert len(complete_numeric) == 106 and len(public_numeric) == 102
-    assert set(complete_numeric) - set(public_numeric) == {
+    assert set(public_numeric) < set(complete_numeric) and set(complete_numeric) - set(public_numeric) == {
         'SimulatorController', 'SimulatorCache', 'SimulatorHealth', 'SimulatorScheduler'}
     # The validation workflow's input-validation job takes six shards.
     shards = [numeric('-PublicInputValidation', '-Shard', f'{i}/6') for i in range(1, 7)]

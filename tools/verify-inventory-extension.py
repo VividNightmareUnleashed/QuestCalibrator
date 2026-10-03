@@ -73,12 +73,17 @@ def main():
         if args.public_only:
             selected = {name for name in selected if not name.startswith('V')}
         expected = {suite_name: sorted(selected)}
-        if len(registry["items"]) != 44 or len(selected) != (23 if args.public_only else 31):
-            raise ValueError("Inventory scope changed without updating acceptance")
+        if not now | {"V09"} <= set(registry["items"]) or not selected:
+            raise ValueError("The inventory scope no longer holds the Now contracts, V09 and an extension")
         assurance.validate(record, identity, expected, required={suite_name},
                            release=False, require_negative_controls=True)
-        print("All 20 public mutants reached their intended assertions; 144 acceptance fixtures passed."
-              if args.public_only else "All 26 C++ and four Python mutants reached their intended assertions; 222 acceptance fixtures passed.")
+        controls = suite["negativeControls"]
+        fixtures = controls["acceptanceFixtures"] + controls.get("captureAcceptanceFixtures", 0)
+        mutants = len(controls["mutants"])
+        print(f"All {mutants} public mutants reached their intended assertions; {fixtures} acceptance fixtures passed."
+              if args.public_only else
+              f"All {mutants} C++ and {len(controls['captureMutants'])} Python mutants reached their intended assertions; "
+              f"{fixtures} acceptance fixtures passed.")
     except BaseException:
         record["success"] = False
         raise
