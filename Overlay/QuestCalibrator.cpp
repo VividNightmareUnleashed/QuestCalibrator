@@ -30,6 +30,8 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,12 +51,10 @@ void GLFWErrorCallback(int error, const char* description)
 
 static std::string Narrow(const std::wstring &wide);
 
+// The window RequestApplicationExit closes, while one exists (OverlayWindow).
 static GLFWwindow *glfwWindow = nullptr;
 static bool dashboardOwnsInput = false;
 static vr::VROverlayHandle_t overlayMainHandle = 0, overlayThumbnailHandle = 0;
-static bool imguiContextInitialized = false;
-static bool imguiGlfwInitialized = false;
-static bool imguiOpenGLInitialized = false;
 
 void RequestApplicationExit()
 {
@@ -75,8 +75,6 @@ static void ShowVRToast(const char *message)
 			vr::EVRNotificationStyle_Application, nullptr, &notifId);
 	}
 }
-static GLuint fboHandle = 0, fboTextureHandle = 0;
-static int fboTextureWidth = 0, fboTextureHeight = 0;
 
 // Directory containing QuestCalibrator.exe, in UTF-8 as the OpenVR APIs expect.
 // Everything loaded or registered by path sits next to the executable, never
@@ -334,73 +332,188 @@ static ImFont *AddUiFont(ImGuiIO &io, float size)
 	return font;
 }
 
-void CreateGLFWWindow()
+// The overlay texture's size: what SteamVR shows, what the UI lays out for and
+// what -shot writes.
+static constexpr int OverlayWidth = 1200;
+static constexpr int OverlayHeight = 800;
+
+// GLFW, the window, ImGui and the overlay texture each undo their own start
+// when destroyed, so every exit releases exactly what was made. wWinMain holds
+// them and decides when each goes.
+
+// GLFW itself, for the process's one window.
+struct GlfwLibrary
 {
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
-	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-	glfwWindowHint(GLFW_RESIZABLE, false);
+	const bool initialized = glfwInit() == GLFW_TRUE;
 
-	fboTextureWidth = 1200;
-	fboTextureHeight = 800;
-
-	glfwWindow = glfwCreateWindow(fboTextureWidth, fboTextureHeight, "QuestCalibrator", NULL, NULL);
-	if (!glfwWindow)
-		throw std::runtime_error("Couldn't create the window.");
-
-	glfwMakeContextCurrent(glfwWindow);
-	glfwSwapInterval(1);
-	if (gl3wInit() != 0)
-		throw std::runtime_error("Couldn't start OpenGL. Update your graphics driver.");
-
-	// Dark titlebar on Windows 10 20H1+ (attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE).
-	BOOL darkTitlebar = TRUE;
-	DwmSetWindowAttribute(glfwGetWin32Window(glfwWindow), 20, &darkTitlebar, sizeof darkTitlebar);
-
-	if (!g_uiPreviewMode)
-		glfwIconifyWindow(glfwWindow);
-	else
-		glfwShowWindow(glfwWindow);
-
-	ImGui::CreateContext();
-	imguiContextInitialized = true;
-	ImGuiIO &io = ImGui::GetIO();
-	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
-	io.IniFilename = nullptr;
-	g_fontBody = AddUiFont(io, 21.0f);
-	g_fontSmall = AddUiFont(io, 14.0f);
-	g_fontTitle = AddUiFont(io, 27.0f);
-	io.FontDefault = g_fontBody;
-
-	ImGui_ImplGlfw_InitForOpenGL(glfwWindow, true);
-	imguiGlfwInitialized = true;
-	glfwSetWindowFocusCallback(glfwWindow, [](GLFWwindow *, int focused) {
-		imgui_vr::DesktopFocusEvent(focused != 0, dashboardOwnsInput);
-	});
-	imguiOpenGLInitialized = ImGui_ImplOpenGL3_Init("#version 330");
-	if (!imguiOpenGLInitialized)
-		throw std::runtime_error("Couldn't start the user interface (ImGui OpenGL backend).");
-
-	ApplyTheme();
-
-	glGenTextures(1, &fboTextureHandle);
-	glBindTexture(GL_TEXTURE_2D, fboTextureHandle);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fboTextureWidth, fboTextureHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-
-	glGenFramebuffers(1, &fboHandle);
-	glBindFramebuffer(GL_FRAMEBUFFER, fboHandle);
-	glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, fboTextureHandle, 0);
-
-	GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
-	glDrawBuffers(1, drawBuffers);
-
-	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+	GlfwLibrary() = default;
+	GlfwLibrary(const GlfwLibrary &) = delete;
+	GlfwLibrary &operator=(const GlfwLibrary &) = delete;
+	~GlfwLibrary()
 	{
-		throw std::runtime_error("OpenGL framebuffer incomplete");
+		if (initialized)
+			glfwTerminate();
 	}
+};
+
+// The overlay's window, and the OpenGL context StartContext makes current.
+class OverlayWindow
+{
+public:
+	OverlayWindow(int width, int height)
+	{
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+		glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+		glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+		glfwWindowHint(GLFW_RESIZABLE, false);
+
+		window = glfwCreateWindow(width, height, "QuestCalibrator", NULL, NULL);
+		if (!window)
+			throw std::runtime_error("Couldn't create the window.");
+		glfwWindow = window;
+	}
+	OverlayWindow(const OverlayWindow &) = delete;
+	OverlayWindow &operator=(const OverlayWindow &) = delete;
+	~OverlayWindow()
+	{
+		glfwWindow = nullptr;
+		glfwDestroyWindow(window);
+	}
+
+	// False when OpenGL couldn't be loaded; the window stays open.
+	bool StartContext()
+	{
+		glfwMakeContextCurrent(window);
+		glfwSwapInterval(1);
+		if (gl3wInit() != 0)
+			return false;
+
+		// Dark titlebar on Windows 10 20H1+ (attribute 20 = DWMWA_USE_IMMERSIVE_DARK_MODE).
+		BOOL darkTitlebar = TRUE;
+		DwmSetWindowAttribute(glfwGetWin32Window(window), 20, &darkTitlebar, sizeof darkTitlebar);
+
+		if (!g_uiPreviewMode)
+			glfwIconifyWindow(window);
+		else
+			glfwShowWindow(window);
+		return true;
+	}
+
+	GLFWwindow *Handle() const { return window; }
+
+private:
+	GLFWwindow *window = nullptr;
+};
+
+// ImGui on the overlay's window: its context, fonts and theme, and the GLFW
+// and OpenGL backends, shut down in reverse by the destructor.
+class ImGuiSession
+{
+public:
+	explicit ImGuiSession(GLFWwindow *window)
+	{
+		ImGuiIO &io = ImGui::GetIO();
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+		io.IniFilename = nullptr;
+		g_fontBody = AddUiFont(io, 21.0f);
+		g_fontSmall = AddUiFont(io, 14.0f);
+		g_fontTitle = AddUiFont(io, 27.0f);
+		io.FontDefault = g_fontBody;
+
+		ImGui_ImplGlfw_InitForOpenGL(window, true);
+		glfwBackendStarted = true;
+		glfwSetWindowFocusCallback(window, [](GLFWwindow *, int focused) {
+			imgui_vr::DesktopFocusEvent(focused != 0, dashboardOwnsInput);
+		});
+		openGLBackendStarted = ImGui_ImplOpenGL3_Init("#version 330");
+		if (openGLBackendStarted)
+			ApplyTheme();
+	}
+	ImGuiSession(const ImGuiSession &) = delete;
+	ImGuiSession &operator=(const ImGuiSession &) = delete;
+	~ImGuiSession()
+	{
+		if (openGLBackendStarted)
+			ImGui_ImplOpenGL3_Shutdown();
+		if (glfwBackendStarted)
+			ImGui_ImplGlfw_Shutdown();
+	}
+
+	// False when the OpenGL backend could not start.
+	bool Started() const { return openGLBackendStarted; }
+
+private:
+	// A member, so it is destroyed last, and even when the constructor's body
+	// throws.
+	struct Context
+	{
+		Context() { ImGui::CreateContext(); }
+		~Context() { ImGui::DestroyContext(); }
+	} context;
+	bool glfwBackendStarted = false;
+	bool openGLBackendStarted = false;
+};
+
+// The texture the UI renders into, which SteamVR shows as the overlay and
+// -shot reads back, and the framebuffer object that draws into it.
+class OverlayFramebuffer
+{
+public:
+	OverlayFramebuffer(int w, int h) : width(w), height(h)
+	{
+		glGenTextures(1, &texture);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+		glGenFramebuffers(1, &fbo);
+		glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+		glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, texture, 0);
+
+		GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
+		glDrawBuffers(1, drawBuffers);
+
+		complete = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	}
+	OverlayFramebuffer(const OverlayFramebuffer &) = delete;
+	OverlayFramebuffer &operator=(const OverlayFramebuffer &) = delete;
+	~OverlayFramebuffer()
+	{
+		if (fbo)
+			glDeleteFramebuffers(1, &fbo);
+		if (texture)
+			glDeleteTextures(1, &texture);
+	}
+
+	bool Complete() const { return complete; }
+	GLuint Fbo() const { return fbo; }
+	GLuint Texture() const { return texture; }
+	int Width() const { return width; }
+	int Height() const { return height; }
+
+private:
+	int width, height;
+	GLuint texture = 0, fbo = 0;
+	bool complete = false;
+};
+
+// Opens the window and starts OpenGL, ImGui and the overlay texture, in that
+// order, into the caller's slots. A step that fails throws with the earlier
+// ones still in their slots, so the caller releases them at its usual point.
+static void StartGraphics(std::optional<OverlayWindow> &window,
+	std::optional<ImGuiSession> &imgui, std::optional<OverlayFramebuffer> &framebuffer)
+{
+	window.emplace(OverlayWidth, OverlayHeight);
+	if (!window->StartContext())
+		throw std::runtime_error("Couldn't start OpenGL. Update your graphics driver.");
+	imgui.emplace(window->Handle());
+	if (!imgui->Started())
+		throw std::runtime_error("Couldn't start the user interface (ImGui OpenGL backend).");
+	framebuffer.emplace(OverlayWidth, OverlayHeight);
+	if (!framebuffer->Complete())
+		throw std::runtime_error("OpenGL framebuffer incomplete");
 }
 
 void TryCreateVROverlay()
@@ -493,12 +606,13 @@ void InitVR(bool &initialized)
 // Writes the overlay texture to -shot's path as a PNG (via WIC). Read from the
 // FBO so it is the full 1200x800 whatever the window size. Alpha is dropped;
 // the compositor ignores it too.
-static bool SavePreviewShot(const std::wstring &path, std::string &error)
+static bool SavePreviewShot(const OverlayFramebuffer &framebuffer, const std::wstring &path,
+	std::string &error)
 {
-	const UINT w = static_cast<UINT>(fboTextureWidth), h = static_cast<UINT>(fboTextureHeight);
+	const UINT w = static_cast<UINT>(framebuffer.Width()), h = static_cast<UINT>(framebuffer.Height());
 	const UINT stride = w * 4;
 	std::vector<uint8_t> pixels(static_cast<size_t>(stride) * h);
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, fboHandle);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer.Fbo());
 	glPixelStorei(GL_PACK_ALIGNMENT, 1);
 	glReadPixels(0, 0, static_cast<GLsizei>(w), static_cast<GLsizei>(h), GL_BGRA, GL_UNSIGNED_BYTE, pixels.data());
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
@@ -559,8 +673,10 @@ static bool SavePreviewShot(const std::wstring &path, std::string &error)
 }
 
 // False when -shot could not write its picture.
-bool RunLoop(const LaunchOptions &options)
+bool RunLoop(const LaunchOptions &options, const OverlayFramebuffer &framebuffer)
 {
+	const GLuint fboHandle = framebuffer.Fbo(), fboTextureHandle = framebuffer.Texture();
+	const int fboTextureWidth = framebuffer.Width(), fboTextureHeight = framebuffer.Height();
 	int framesRendered = 0;
 	while (!glfwWindowShouldClose(glfwWindow))
 	{
@@ -735,7 +851,7 @@ bool RunLoop(const LaunchOptions &options)
 		if (options.frameLimit > 0 && ++framesRendered >= options.frameLimit)
 		{
 			std::string error;
-			if (!options.shotPath.empty() && !SavePreviewShot(options.shotPath, error))
+			if (!options.shotPath.empty() && !SavePreviewShot(framebuffer, options.shotPath, error))
 			{
 				CliReport(options.noUi, error.c_str(), true);
 				return false;
@@ -816,7 +932,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 		});
 	}
 
-	if (!glfwInit())
+	GlfwLibrary glfwLibrary;
+	if (!glfwLibrary.initialized)
 	{
 		MessageBox(nullptr,
 			L"QuestCalibrator couldn't create its window.\n\n"
@@ -843,35 +960,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 			vr::VR_Shutdown();
 		}
 	};
+	// Filled by StartGraphics. The UI and its texture go in shutdownGraphics,
+	// the window after any error dialog, and whatever is left when this
+	// function returns, in reverse order.
+	std::optional<OverlayWindow> window;
+	std::optional<ImGuiSession> imgui;
+	std::optional<OverlayFramebuffer> framebuffer;
 	auto shutdownGraphics = [&]()
 	{
-		if (glfwWindow)
-			glfwMakeContextCurrent(glfwWindow);
-		if (fboHandle)
-		{
-			glDeleteFramebuffers(1, &fboHandle);
-			fboHandle = 0;
-		}
-		if (fboTextureHandle)
-		{
-			glDeleteTextures(1, &fboTextureHandle);
-			fboTextureHandle = 0;
-		}
-		if (imguiOpenGLInitialized)
-		{
-			imguiOpenGLInitialized = false;
-			ImGui_ImplOpenGL3_Shutdown();
-		}
-		if (imguiGlfwInitialized)
-		{
-			imguiGlfwInitialized = false;
-			ImGui_ImplGlfw_Shutdown();
-		}
-		if (imguiContextInitialized)
-		{
-			imguiContextInitialized = false;
-			ImGui::DestroyContext();
-		}
+		if (window)
+			glfwMakeContextCurrent(window->Handle());
+		framebuffer.reset();
+		imgui.reset();
 	};
 
 	// Record what went wrong rather than acting on it inside the catch, so the
@@ -891,7 +991,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 			// ring (see g_singleInstanceMutex).
 			TryCreateVROverlay();
 		}
-		CreateGLFWWindow();
+		StartGraphics(window, imgui, framebuffer);
 		if (g_uiPreviewMode)
 		{
 			SetupPreviewState();
@@ -908,7 +1008,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 		// The override changes only the language drawn, never the saved one.
 		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(
 			options.langOverride.empty() ? CalCtx.language : options.langOverride));
-		shotWritten = RunLoop(options);
+		shotWritten = RunLoop(options, *framebuffer);
 	}
 	catch (const std::exception &e)
 	{
@@ -925,7 +1025,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 
 	// One shutdown pair for every path, before the modal dialog below can block:
 	// ShutdownCalibrator flushes debounced profile/settings writes. The
-	// ownership flags make the retry after a throw finish only what is left.
+	// ownership flags and the emptied graphics slots make the retry after a
+	// throw finish only what is left.
 	try
 	{
 		shutdownRuntime(fatal.empty());
@@ -947,10 +1048,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 		MessageBox(nullptr, message, L"QuestCalibrator", MB_OK | MB_ICONERROR);
 	}
 
-	if (glfwWindow)
-		glfwDestroyWindow(glfwWindow);
-
-	glfwTerminate();
+	// glfwLibrary terminates GLFW after this, on return.
+	window.reset();
 	// A -shot run that could not write its picture fails as a command does.
 	return !fatal.empty() ? -1 : shotWritten ? 0 : -2;
 }
