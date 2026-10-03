@@ -15,10 +15,10 @@
 namespace protocol
 {
 	// The handshake requires exact version equality, so every bump costs users a
-	// driver reinstall and a SteamVR restart. v10 adds a per-device rigid
-	// frame correction before the shared base calibration and spatial field,
-	// plus session-bound recovery of those corrections after an overlay restart.
-	const uint32_t Version = 10;
+	// driver reinstall and a SteamVR restart. v11 starts every connection with
+	// the version probe (VersionProbe.h), so the two ends of a partial update
+	// report a version mismatch instead of a frame of the wrong size.
+	const uint32_t Version = 11;
 	const uint32_t PoseHook005 = 1u << 0;
 	const uint32_t PoseHook006 = 1u << 1;
 
@@ -206,9 +206,9 @@ namespace protocol
 		explicit Response(ResponseType type) : type(type) { }
 	};
 
-	// The pipe carries a version but no layout identity, and the two ends get the
-	// OpenVR types from different headers (openvr_driver.h vs openvr.h), so equal
-	// versions do not prove equal bytes. When one of these fires on purpose, bump
+	// The two ends get the OpenVR types from different headers (openvr_driver.h
+	// vs openvr.h), so equal versions do not prove equal bytes; the version probe
+	// compares the frame sizes as well. When one of these fires on purpose, bump
 	// protocol::Version and update the size. x64 is the only target, so these
 	// sizes are exact.
 	static_assert(sizeof(SetDeviceTransform) == 88, "SetDeviceTransform wire layout changed");

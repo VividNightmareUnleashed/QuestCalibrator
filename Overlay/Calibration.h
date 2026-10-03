@@ -128,6 +128,7 @@ struct CalibrationProfileState
 		DriverUnreachable,
 		UniverseUnsafe,
 		FrameMovesLost,
+		DriverVersionMismatch,
 	};
 	DisableReason disableReason = DisableReason::None;
 	bool validProfile = false;

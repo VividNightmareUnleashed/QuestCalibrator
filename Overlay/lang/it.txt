@@ -179,6 +179,8 @@ en: %s headset isn't connected. Calibration is off until it's back.
 it: Il visore {0} non è collegato. La calibrazione resta disattivata finché non torna.
 en: SteamVR isn't accepting the calibration. Restart SteamVR.
 it: SteamVR non accetta la calibrazione. Riavvia SteamVR.
+en: The app and its SteamVR driver are from different releases. Reinstall QuestCalibrator, then restart SteamVR.
+it: L'app e il suo driver SteamVR sono di versioni diverse. Reinstalla QuestCalibrator, poi riavvia SteamVR.
 en: The saved calibration doesn't match the connected hardware. Recalibrate.
 it: La calibrazione salvata non corrisponde all'hardware collegato. Ricalibra.
 en: The saved calibration is damaged. Recalibrate.

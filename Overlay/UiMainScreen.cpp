@@ -528,6 +528,9 @@ void BuildMainScreen()
 				case Reason::DriverUnreachable:
 					why = "SteamVR isn't accepting the calibration. Restart SteamVR.";
 					break;
+				case Reason::DriverVersionMismatch:
+					why = "The app and its SteamVR driver are from different releases. Reinstall QuestCalibrator, then restart SteamVR.";
+					break;
 				case Reason::InvalidIdentity:
 					why = "The saved calibration doesn't match the connected hardware. Recalibrate.";
 					break;

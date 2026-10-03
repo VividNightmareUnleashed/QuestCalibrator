@@ -107,6 +107,7 @@
     <ClInclude Include="..\common\Protocol.h" />
     <ClInclude Include="..\common\TransformLimits.h" />
     <ClInclude Include="..\common\Version.h" />
+    <ClInclude Include="..\common\VersionProbe.h" />
     <ClInclude Include="AlignmentField.h" />
     <ClInclude Include="AtomicSnapshot.h" />
     <ClInclude Include="Hooking.h" />

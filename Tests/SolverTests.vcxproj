@@ -63,7 +63,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <PreprocessorDefinitions>NOMINMAX;_DEBUG;_CONSOLE;OPENVR_BUILD_STATIC;QUESTCAL_LOCALIZATION_TEST_SEAM;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;_DEBUG;_CONSOLE;OPENVR_BUILD_STATIC;QUESTCAL_LOCALIZATION_TEST_SEAM;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_CLIENT_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>..\lib;..\lib\openvr;..\lib\MinHook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -84,7 +84,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NOMINMAX;NDEBUG;_CONSOLE;OPENVR_BUILD_STATIC;QUESTCAL_LOCALIZATION_TEST_SEAM;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;NDEBUG;_CONSOLE;OPENVR_BUILD_STATIC;QUESTCAL_LOCALIZATION_TEST_SEAM;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_CLIENT_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalIncludeDirectories>..\lib;..\lib\openvr;..\lib\MinHook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>

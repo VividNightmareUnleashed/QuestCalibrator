@@ -30,6 +30,9 @@
     <ClInclude Include="..\common\Protocol.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="..\common\VersionProbe.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="Hooking.h">
       <Filter>Header Files</Filter>
     </ClInclude>

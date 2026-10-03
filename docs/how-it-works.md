@@ -44,9 +44,11 @@ Driver and IPC:
 
 - Base transforms and their field share one seqlock publication, with
   identity-quaternion / scale = 1 defaults instead of a zeroing `memset`.
-- Device ids arriving over the pipe are bounds-checked; short pipe messages are rejected;
-  the wire protocol requires a same-version handshake on every connection and only ever
-  carries complete, transactionally validated transforms/fields.
+- Device ids arriving over the pipe are bounds-checked; short pipe messages are rejected.
+  Every connection starts with a version probe whose layout never changes, so an app and
+  a driver from different releases report a version mismatch instead of a broken frame;
+  the wire protocol then requires a same-version handshake and only ever carries
+  complete, transactionally validated transforms/fields.
 - Race-free bounded multi-producer pose ring in shared memory (vrserver invokes pose
   updates from each device driver's own thread), with fail-fast contention handling,
   exact positional loss markers, and clean recovery across vrserver restarts. Its named

@@ -933,6 +933,7 @@ enum class LinkFault
 	Refuse,      // the driver answered, and said no
 	Throw,       // the send and IPCClient's reconnect-and-replay both failed
 	Reconnect,   // accepted, but by a new pipe: only the generation shows it
+	Mismatch,    // the connection found a driver from another release
 };
 
 // A scripted driver connection: records every request and answers each from a
@@ -955,9 +956,10 @@ struct FakeDriverLink
 				++generation;
 			// Reported whether or not the attempt succeeded, as in production.
 			result.connectionGeneration = generation;
-			if (fault == LinkFault::Throw)
+			if (fault == LinkFault::Throw || fault == LinkFault::Mismatch)
 			{
 				result.error = "scripted pipe failure";
+				result.versionMismatch = fault == LinkFault::Mismatch;
 				return result;
 			}
 			result.completed = true;
@@ -1216,6 +1218,34 @@ void RunDriverSessionScenarios()
 		Check("driver session: error debounce",
 			reportedOnce && cheapWhenDead && debounced && reportedAgain &&
 				withdrawn && reArmed, detail);
+	}
+
+	// 6. A driver from another release disables the profile with its own cause,
+	// since reinstalling fixes it and restarting SteamVR does not, and a later
+	// pipe failure is an ordinary one again.
+	{
+		SessionFixture fx;
+		fx.table.Place(0, questcal::SyncDeviceClass::Hmd, "lighthouse");
+		fx.table.Place(1, questcal::SyncDeviceClass::Other, "oculus");
+		questcal::DriverApplyRequest request = MakeSessionRequest(true, true);
+
+		fx.link.script = [](const protocol::Request &) { return LinkFault::Mismatch; };
+		questcal::DriverApplyResult mismatched = fx.session.Apply(request, 0.0);
+		fx.link.script = [](const protocol::Request &) { return LinkFault::Throw; };
+		questcal::DriverApplyResult dead = fx.session.Apply(request, 1.0);
+		fx.link.script = nullptr;
+		questcal::DriverApplyResult live = fx.session.Apply(request, 2.0);
+
+		char detail[96];
+		snprintf(detail, sizeof detail, "causes %d, %d, %d; %d error(s)",
+			static_cast<int>(mismatched.cause), static_cast<int>(dead.cause),
+			static_cast<int>(live.cause), fx.errors);
+		Check("driver session: a driver from another release has its own cause",
+			!mismatched.synchronized && !mismatched.enabled &&
+				mismatched.cause == questcal::DriverDisableCause::DriverVersionMismatch &&
+				fx.errors >= 1 && dead.cause == questcal::DriverDisableCause::DriverUnreachable &&
+				live.synchronized && live.cause == questcal::DriverDisableCause::None,
+			detail);
 	}
 }
 

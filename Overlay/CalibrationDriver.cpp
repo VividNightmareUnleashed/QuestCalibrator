@@ -20,6 +20,10 @@ IPCClient Client;
 DriverWorker Worker;
 DriverSyncTracker Tracker;
 std::optional<DriverNeutralizationResult> NeutralizationCompletion;
+// Why the driver last failed a state, which the refusal hold repeats until a
+// changed state is sent.
+CalibrationContext::DisableReason HeldRefusalReason =
+	CalibrationContext::DisableReason::DriverUnreachable;
 
 protocol::SetAlignmentField BuildAlignmentField(const CalibrationContext &ctx)
 {
@@ -139,11 +143,18 @@ void ApplyCompletion(CalibrationContext &ctx,
 	case DriverDisableCause::DriverUnreachable:
 		ctx.disableReason = CalibrationContext::DisableReason::DriverUnreachable;
 		break;
+	case DriverDisableCause::DriverVersionMismatch:
+		ctx.disableReason = CalibrationContext::DisableReason::DriverVersionMismatch;
+		break;
 	case DriverDisableCause::None:
 		if (result.enabled)
 			ctx.disableReason = CalibrationContext::DisableReason::None;
 		break;
 	}
+	if (!result.synchronized)
+		HeldRefusalReason = result.cause == DriverDisableCause::DriverVersionMismatch
+			? CalibrationContext::DisableReason::DriverVersionMismatch
+			: CalibrationContext::DisableReason::DriverUnreachable;
 	AssignDeviceIdentities(ctx, result.continuousTrackerId,
 		result.referenceDeviceMask, result.targetDeviceMask);
 }
@@ -184,6 +195,7 @@ void StartCalibrationDriver()
 {
 	Tracker = DriverSyncTracker{};
 	NeutralizationCompletion.reset();
+	HeldRefusalReason = CalibrationContext::DisableReason::DriverUnreachable;
 	Worker.Start([](const protocol::Request &request)
 	{
 		DriverTransportResult result;
@@ -191,6 +203,11 @@ void StartCalibrationDriver()
 		{
 			result.response = Client.SendBlocking(request);
 			result.completed = true;
+		}
+		catch (const DriverVersionMismatch &e)
+		{
+			result.error = e.what();
+			result.versionMismatch = true;
 		}
 		catch (const std::exception &e)
 		{
@@ -328,7 +345,7 @@ void SynchronizeCalibrationDriver(CalibrationContext &ctx)
 		// different since: stay disabled rather than flip the profile back on
 		// for the length of a round trip on every scan.
 		ctx.enabled = false;
-		ctx.disableReason = CalibrationContext::DisableReason::DriverUnreachable;
+		ctx.disableReason = HeldRefusalReason;
 		ClearDeviceIdentities(ctx);
 	}
 }

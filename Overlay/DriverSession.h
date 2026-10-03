@@ -26,6 +26,9 @@ struct DriverTransportResult
 	bool completed = false;
 	// Populated only when !completed.
 	std::string error;
+	// With !completed: the driver is from another release, which reinstalling
+	// fixes and retrying does not.
+	bool versionMismatch = false;
 	// Valid only when completed.
 	protocol::Response response;
 	// The transport's connection generation AFTER the attempt, whether or not
@@ -80,6 +83,8 @@ enum class DriverDisableCause
 	HmdMismatch,
 	// The batch did not complete on one connection.
 	DriverUnreachable,
+	// The batch failed because the driver is from another release.
+	DriverVersionMismatch,
 };
 
 // What the caller mirrors into its own state. Fail-closed: short of a complete
@@ -166,6 +171,7 @@ public:
 	DriverApplyResult Apply(const DriverApplyRequest &request, double atTime)
 	{
 		now = atTime;
+		versionMismatch = false;
 		const Batch batch = Begin();
 		DriverApplyResult result;
 		result.enabled = request.enabled;
@@ -175,7 +181,7 @@ public:
 			request.driverSessionId != batch.driverSessionId))
 		{
 			result.enabled = false;
-			result.cause = DriverDisableCause::DriverUnreachable;
+			result.cause = UnreachableCause();
 			return result;
 		}
 		uint64_t batchConnectionGeneration = batch.connectionGeneration;
@@ -198,7 +204,7 @@ public:
 				"recovering tracker frame corrections", &batchConnectionGeneration, &snapshot))
 			{
 				result.enabled = false;
-				result.cause = DriverDisableCause::DriverUnreachable;
+				result.cause = UnreachableCause();
 				return result;
 			}
 			result.recoveryChecked = true;
@@ -211,7 +217,7 @@ public:
 			{
 				ReportThrottled("The driver returned invalid tracker-frame recovery state; calibration was not overwritten\n");
 				result.enabled = false;
-				result.cause = DriverDisableCause::DriverUnreachable;
+				result.cause = UnreachableCause();
 				return result;
 			}
 			if (result.framesRecovered)
@@ -274,7 +280,7 @@ public:
 		if (!driverSynchronized)
 		{
 			result.enabled = false;
-			result.cause = DriverDisableCause::DriverUnreachable;
+			result.cause = UnreachableCause();
 			result.continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
 			for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
 			{
@@ -295,12 +301,19 @@ public:
 	bool DisableDeviceTransform(uint32_t id, double atTime)
 	{
 		now = atTime;
+		versionMismatch = false;
 		protocol::Request req(protocol::RequestSetDeviceTransform);
 		req.setDeviceTransform = protocol::SetDeviceTransform(id, false);
 		return SendRequest(req, "disabling a device transform", nullptr);
 	}
 
 private:
+	DriverDisableCause UnreachableCause() const
+	{
+		return versionMismatch ? DriverDisableCause::DriverVersionMismatch
+			: DriverDisableCause::DriverUnreachable;
+	}
+
 	Batch Begin()
 	{
 		Batch batch;
@@ -355,6 +368,7 @@ private:
 				"; the requested live state was not applied\n");
 			return false;
 		}
+		versionMismatch = versionMismatch || result.versionMismatch;
 		ReportThrottled(std::string("QuestCalibrator driver communication failed while ") +
 			operation + ": " + result.error + "\n");
 		return false;
@@ -380,6 +394,9 @@ private:
 	double lastErrorTime = -1e9;
 	// The caller's tick time for the request in flight, set at each entry point.
 	double now = 0.0;
+	// A request at this entry point failed because the driver is from another
+	// release.
+	bool versionMismatch = false;
 };
 
 } // namespace questcal

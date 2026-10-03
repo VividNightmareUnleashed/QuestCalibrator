@@ -1,6 +1,7 @@
 ﻿#include "stdafx.h"
 #include "IPCClient.h"
 #include "../common/IPCFramePolicy.h"
+#include "../common/Version.h"
 
 #include <string>
 
@@ -41,13 +42,15 @@ void IPCClient::Close()
 	}
 }
 
-// A timeout throws like an I/O error, so SendBlocking's reconnect-and-replay
-// handles both.
-DWORD IPCClient::AwaitOverlapped(OVERLAPPED &ov, const char *what)
+bool IPCClient::Complete(BOOL started, OVERLAPPED &ov, const char *what, DWORD &transferred,
+	DWORD &error)
 {
-	DWORD transferred = 0;
-	if (GetLastError() == ERROR_IO_PENDING)
+	transferred = 0;
+	if (!started)
 	{
+		error = GetLastError();
+		if (error != ERROR_IO_PENDING)
+			return false;
 		DWORD wait = WaitForSingleObject(ov.hEvent, TransactionTimeoutMs);
 		if (wait != WAIT_OBJECT_0)
 		{
@@ -61,19 +64,78 @@ DWORD IPCClient::AwaitOverlapped(OVERLAPPED &ov, const char *what)
 	}
 	if (!GetOverlappedResult(pipe, &ov, &transferred, FALSE))
 	{
-		throw std::runtime_error(std::string("Error ") + what + ". Error: " +
-			LastErrorString(GetLastError()));
+		error = GetLastError();
+		return false;
 	}
+	error = ERROR_SUCCESS;
+	return true;
+}
+
+// A timeout throws like an I/O error, so SendBlocking's reconnect-and-replay
+// handles both.
+DWORD IPCClient::AwaitOverlapped(BOOL started, OVERLAPPED &ov, const char *what)
+{
+	DWORD transferred = 0;
+	DWORD error = ERROR_SUCCESS;
+	if (!Complete(started, ov, what, transferred, error))
+		throw std::runtime_error(std::string("Error ") + what + ". Error: " +
+			LastErrorString(error));
 	return transferred;
+}
+
+// A driver from before the probe reads it as a malformed request and closes
+// the pipe, which is how that release is told apart from one that answers.
+protocol::VersionProbeResponse IPCClient::ProbeConnected()
+{
+	protocol::VersionProbeRequest probe;
+	probe.protocolVersion = protocol::Version;
+	OVERLAPPED ov = {};
+	ov.hEvent = transactionEvent;
+	ResetEvent(transactionEvent);
+	if (AwaitOverlapped(WriteFile(pipe, &probe, sizeof probe, nullptr, &ov), ov,
+		"writing the version probe") != sizeof probe)
+	{
+		throw std::runtime_error("Error writing the version probe. Error: " +
+			LastErrorString(ERROR_WRITE_FAULT));
+	}
+
+	protocol::VersionProbeResponse answer;
+	ov = {};
+	ov.hEvent = transactionEvent;
+	ResetEvent(transactionEvent);
+	DWORD bytesRead = 0;
+	DWORD error = ERROR_SUCCESS;
+	if (!Complete(ReadFile(pipe, &answer, sizeof answer, nullptr, &ov), ov,
+		"reading the driver's version", bytesRead, error))
+	{
+		if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED ||
+			error == ERROR_NO_DATA)
+		{
+			throw DriverVersionMismatch("QuestCalibrator's SteamVR driver is older than this app: "
+				"it closed the connection at the version probe. Reinstall QuestCalibrator, then "
+				"restart SteamVR.");
+		}
+		if (error != ERROR_MORE_DATA)
+			throw std::runtime_error("Error reading the driver's version. Error: " +
+				LastErrorString(error));
+		bytesRead = 0;   // longer than any answer to the probe
+	}
+	if (!questcal::ipc::VersionProbeAnswerComplete(bytesRead) ||
+		answer.magic != protocol::VersionProbeMagic)
+	{
+		throw DriverVersionMismatch("The program serving QuestCalibrator's driver pipe answered "
+			"the version probe in an unknown format. Reinstall QuestCalibrator, then restart "
+			"SteamVR.");
+	}
+	answer.release[sizeof answer.release - 1] = '\0';
+	return answer;
 }
 
 void IPCClient::Connect()
 {
 	Close();
-	LPTSTR pipeName = TEXT(QUESTCALIBRATOR_PIPE_NAME);
-
-	WaitNamedPipe(pipeName, 1000);
-	pipe = CreateFile(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING,
+	WaitNamedPipeA(pipeName, 1000);
+	pipe = CreateFileA(pipeName, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING,
 		FILE_FLAG_OVERLAPPED, 0);
 
 	if (pipe == INVALID_HANDLE_VALUE)
@@ -103,6 +165,20 @@ void IPCClient::Connect()
 	protocol::Response response;
 	try
 	{
+		const protocol::VersionProbeResponse probe = ProbeConnected();
+		if (probe.protocolVersion != protocol::Version ||
+			probe.requestSize != sizeof(protocol::Request) ||
+			probe.responseSize != sizeof(protocol::Response))
+		{
+			throw DriverVersionMismatch("QuestCalibrator's SteamVR driver is from release " +
+				std::string(probe.release) + " (protocol " + std::to_string(probe.protocolVersion) +
+				", frames of " + std::to_string(probe.requestSize) + "/" +
+				std::to_string(probe.responseSize) + " bytes), this app from release "
+				QUESTCAL_VERSION_STRING " (protocol " + std::to_string(protocol::Version) +
+				", frames of " + std::to_string(sizeof(protocol::Request)) + "/" +
+				std::to_string(sizeof(protocol::Response)) + " bytes). Reinstall QuestCalibrator, "
+				"then restart SteamVR.");
+		}
 		response = SendBlockingConnected(protocol::Request(protocol::RequestHandshake));
 	}
 	catch (...)
@@ -113,7 +189,7 @@ void IPCClient::Connect()
 	if (response.type != protocol::ResponseHandshake || response.protocol.version != protocol::Version)
 	{
 		Close();
-		throw std::runtime_error(
+		throw DriverVersionMismatch(
 			"Incorrect driver version installed, try reinstalling QuestCalibrator. (Client: " +
 			std::to_string(protocol::Version) +
 			", Driver: " +
@@ -165,9 +241,8 @@ void IPCClient::SendConnected(const protocol::Request &request)
 	ov.hEvent = transactionEvent;
 	ResetEvent(transactionEvent);
 
-	SetLastError(ERROR_SUCCESS);
-	WriteFile(pipe, &request, sizeof request, nullptr, &ov);
-	DWORD bytesWritten = AwaitOverlapped(ov, "writing IPC request");
+	DWORD bytesWritten = AwaitOverlapped(WriteFile(pipe, &request, sizeof request, nullptr, &ov),
+		ov, "writing IPC request");
 	if (bytesWritten != sizeof request)
 	{
 		throw std::runtime_error("Error writing IPC request. Error: " +
@@ -182,9 +257,8 @@ protocol::Response IPCClient::ReceiveConnected()
 	ov.hEvent = transactionEvent;
 	ResetEvent(transactionEvent);
 
-	SetLastError(ERROR_SUCCESS);
-	ReadFile(pipe, &response, sizeof response, nullptr, &ov);
-	DWORD bytesRead = AwaitOverlapped(ov, "reading IPC response");
+	DWORD bytesRead = AwaitOverlapped(ReadFile(pipe, &response, sizeof response, nullptr, &ov),
+		ov, "reading IPC response");
 
 	if (!questcal::ipc::ResponseFrameComplete(bytesRead))
 	{

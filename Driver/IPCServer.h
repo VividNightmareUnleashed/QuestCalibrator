@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "../common/Protocol.h"
+#include "../common/VersionProbe.h"
 #include "IPCProtocolGate.h"
 
 #include <atomic>
@@ -61,6 +62,9 @@ private:
 
 		protocol::Request request;
 		protocol::Response response;
+		protocol::VersionProbeResponse probeAnswer;
+		// What the outstanding write sends: a response, or a probe's answer.
+		DWORD writeSize = sizeof(protocol::Response);
 		questcal::ipc::ConnectionState connection;
 		// Cancellation is asynchronous. Once set, no callback may reuse this
 		// connection; the callback that observes the cancelled operation is the

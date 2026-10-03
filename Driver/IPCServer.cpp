@@ -1,8 +1,10 @@
 #include "IPCServer.h"
 #include "../common/IPCFramePolicy.h"
+#include "../common/Version.h"
 #include "Logging.h"
 
 #include <algorithm>
+#include <cstring>
 #include <exception>
 #include <new>
 #include <utility>
@@ -21,6 +23,25 @@ protocol::ResponseType SetterResult(bool accepted, const char *operation)
 	LOG("IPC %s rejected: the request cleared the protocol gate, so it was its "
 		"values that failed the driver trust boundary", operation);
 	return protocol::ResponseInvalid;
+}
+
+bool IsVersionProbe(const protocol::Request &received)
+{
+	protocol::VersionProbeRequest probe;
+	std::memcpy(&probe, &received, sizeof probe);
+	return probe.magic == protocol::VersionProbeMagic;
+}
+
+protocol::VersionProbeResponse VersionProbeAnswer()
+{
+	protocol::VersionProbeResponse answer;
+	answer.protocolVersion = protocol::Version;
+	answer.requestSize = sizeof(protocol::Request);
+	answer.responseSize = sizeof(protocol::Response);
+	static_assert(sizeof(QUESTCAL_VERSION_STRING) <= sizeof answer.release,
+		"the release must fit the version probe");
+	std::memcpy(answer.release, QUESTCAL_VERSION_STRING, sizeof(QUESTCAL_VERSION_STRING));
+	return answer;
 }
 
 } // namespace
@@ -450,6 +471,22 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 	if (!pipeInst)
 		return;
 
+	// The version probe is the one message of another size, and its answer
+	// keeps the probe's fixed layout whatever this release's frames are.
+	if (questcal::ipc::VersionProbeFrame(err, bytesRead) && IsVersionProbe(pipeInst->request))
+	{
+		pipeInst->probeAnswer = VersionProbeAnswer();
+		pipeInst->writeSize = sizeof(protocol::VersionProbeResponse);
+		if (!WriteFileEx(pipeInst->pipe, &pipeInst->probeAnswer, pipeInst->writeSize, overlap,
+			(LPOVERLAPPED_COMPLETION_ROUTINE) CompletedWriteCallback))
+		{
+			LOG("IPC client disconnecting: the version probe's answer could not be written, error: %d",
+				GetLastError());
+			pipeInst->server->ClosePipeInstance(pipeInst);
+		}
+		return;
+	}
+
 	// Only exactly-sized messages are dispatched: a short one would leave stale
 	// bytes from the previous request in the buffer. Logged apart from I/O
 	// errors, and only this connection closes.
@@ -466,10 +503,11 @@ void IPCServer::CompletedReadCallback(DWORD err, DWORD bytesRead, LPOVERLAPPED o
 	{
 		pipeInst->server->HandleRequest(pipeInst->request, pipeInst->response,
 			pipeInst->connection);
+		pipeInst->writeSize = sizeof(protocol::Response);
 		success = WriteFileEx(
 			pipeInst->pipe,
 			&pipeInst->response,
-			sizeof(protocol::Response),
+			pipeInst->writeSize,
 			overlap,
 			(LPOVERLAPPED_COMPLETION_ROUTINE) CompletedWriteCallback
 		);
@@ -496,7 +534,7 @@ void IPCServer::CompletedWriteCallback(DWORD err, DWORD bytesWritten, LPOVERLAPP
 		return;
 	BOOL success = FALSE;
 
-	if (err == 0 && bytesWritten == sizeof(protocol::Response))
+	if (err == 0 && bytesWritten == pipeInst->writeSize)
 	{
 		success = ReadFileEx(
 			pipeInst->pipe,
