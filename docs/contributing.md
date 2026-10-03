@@ -28,7 +28,11 @@ under `lib\` is exempt. The other modes:
 - `-Mode Analyze -All` rebuilds everything under Clang-Tidy.
 - `-Mode Duplicates` scans for copied code with jscpd.
 
-Settings for all of them live in `cpp-validation.json`.
+Settings for all of them live in `cpp-validation.json`. `-Mode Build` and
+`-Mode Compile` also take `-Configuration Debug`, which builds and tests the
+Debug configuration in `x64\Debug\`, and `-AddressSanitizer`, which builds only
+the harness, with AddressSanitizer, into `x64\Release-ASan\` and runs it there.
+CI runs both on every push.
 
 ### The test harness
 

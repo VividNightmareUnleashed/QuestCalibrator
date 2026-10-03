@@ -10,7 +10,15 @@ param(
     [string]$Project = '',
     # With -Project, analyze only the k-th of n shares of its files ('k/n'),
     # so CI can spread one project over runners too.
-    [string]$Shard = ''
+    [string]$Shard = '',
+    # With -Mode Build or Compile, build this configuration instead of the one
+    # cpp-validation.json names, and run that configuration's harness.
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = '',
+    # With -Mode Build or Compile, build only the harness, with
+    # AddressSanitizer, into x64\<configuration>-ASan, and run it from there.
+    # The plain build's output is left alone.
+    [switch]$AddressSanitizer
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,10 +34,22 @@ if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
 }
 $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 $solution = [System.IO.Path]::GetFullPath((Join-Path $Root ([string]$config.solution)))
-$configuration = [string]$config.configuration
+# PowerShell names are case-insensitive: this is the -Configuration parameter,
+# defaulted from the config.
+if (-not $Configuration) { $Configuration = [string]$config.configuration }
 $platform = [string]$config.platform
 $testExecutable = [System.IO.Path]::GetFullPath(
     (Join-Path $Root ([string]$config.testExecutable)))
+# Where this build's harness lands: x64\<configuration>, or beside it with
+# -ASan, which keeps the instrumented objects and executable apart.
+$outputName = $configuration + $(if ($AddressSanitizer) { '-ASan' } else { '' })
+if ($outputName -ne [string]$config.configuration) {
+    $testExecutable = Join-Path $Root "$platform\$outputName\$(Split-Path -Leaf $testExecutable)"
+}
+if ($outputName -ne [string]$config.configuration -and $Mode -notin @('Build', 'Compile')) {
+    Write-Output '-Configuration and -AddressSanitizer apply to -Mode Build and Compile only.'
+    exit 2
+}
 $testProject = [System.IO.Path]::GetFullPath(
     (Join-Path $Root ([string]$config.testProject)))
 $duplicateMinLines = [int]$config.duplicateMinLines
@@ -139,6 +159,17 @@ function Invoke-MSBuildValidation {
         '/v:m',
         '/nologo'
     )
+    if ($AddressSanitizer) {
+        # Only the harness runs instrumented, so only it is built. Both
+        # directories are relative to the project, so they need no quotes,
+        # which their trailing backslash would otherwise escape.
+        $arguments += @(
+            '/t:SolverTests',
+            '/p:EnableASAN=true',
+            "/p:OutDir=..\$platform\$outputName\",
+            "/p:IntDir=$platform\$outputName\"
+        )
+    }
     if ($ClangTidy) {
         # Eigen exceeds the 32-bit analyzer's address space. Select the binary
         # directly: VS can override PreferredToolArchitecture for this toolset.
@@ -292,6 +323,27 @@ function Invoke-MSBuildValidation {
     return
 }
 
+# The x64 AddressSanitizer runtime of the toolset MSBuild compiled with:
+# <VS>\VC\Tools\MSVC\<its default version>\bin\Hostx64\x64.
+function Get-AddressSanitizerRuntime {
+    $directory = Split-Path -Parent $msbuild
+    for ($up = 0; $up -lt 5 -and $directory; $up++) {
+        $versionFile = Join-Path $directory 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+        if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
+            $version = (Get-Content -LiteralPath $versionFile -TotalCount 1).Trim()
+            $runtime = Join-Path $directory "VC\Tools\MSVC\$version\bin\Hostx64\x64"
+            if (Test-Path -LiteralPath (Join-Path $runtime 'clang_rt.asan_dynamic-x86_64.dll') -PathType Leaf) {
+                return $runtime
+            }
+            break
+        }
+        $directory = Split-Path -Parent $directory
+    }
+    # Write-Host, not Write-Output: the caller keeps this function's output.
+    Write-Host "No AddressSanitizer runtime beside $msbuild's toolset; install the VS 2022 C++ AddressSanitizer component."
+    exit 2
+}
+
 function Invoke-SolverTests {
     if (-not (Test-Path -LiteralPath $testExecutable -PathType Leaf)) {
         Write-Output "Solver test executable not found after build: $testExecutable"
@@ -339,13 +391,20 @@ function Invoke-SolverTests {
     # script-wide Stop policy that aborts the validation before the executable's
     # real exit code and summary can be checked.
     $previousErrorAction = $ErrorActionPreference
+    $previousPath = $env:Path
     $ErrorActionPreference = 'Continue'
     try {
+        if ($AddressSanitizer) {
+            # The instrumented harness loads the AddressSanitizer runtime DLL
+            # from the toolset that built it, which a plain shell has no path to.
+            $env:Path = (Get-AddressSanitizerRuntime) + ';' + $env:Path
+        }
         $output = @(& $testExecutable 2>&1 | ForEach-Object { [string]$_ })
         $exitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $previousErrorAction
+        $env:Path = $previousPath
     }
     if ($exitCode -ne 0) {
         $output | Write-Output

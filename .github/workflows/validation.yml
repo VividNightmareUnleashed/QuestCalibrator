@@ -3,7 +3,8 @@ name: Validation
 # The release gates on pushes to alpha and stable and on pull requests into
 # them: the Release build and the solver harness (blocking), then the duplicate
 # scan (advisory, as locally: its findings need a human's review, not an
-# automatic veto), and in a parallel job Clang-Tidy over every translation unit
+# automatic veto); in parallel jobs, the harness again in Debug and with
+# AddressSanitizer (blocking), and Clang-Tidy over every translation unit
 # (clang-tidy.yml; blocking, since the tree has no findings). Changes to
 # documentation alone don't trigger it; the release workflow runs every gate on
 # the tagged commit anyway.
@@ -142,6 +143,48 @@ jobs:
           npm install --global --no-fund --no-audit jscpd@5.0.12 | Out-Null
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Duplicates
           if ($LASTEXITCODE -ne 0) { Write-Host '::warning::The duplicate scan reported clones; review them.'; exit 1 }
+
+  # The harness in Debug, with the debug runtime's checks and asserts on, and
+  # in Release with AddressSanitizer, which turns a stray read or write in the
+  # pose ring or the pipe code into a report naming the line instead of a
+  # crash inside vrserver. On a runner of its own, beside the build job.
+  harness-checks:
+    name: harness (Debug, AddressSanitizer)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      HAS_VIRTUALQUEST: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY != '' }}
+
+    steps:
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check out VirtualQuest
+        if: env.HAS_VIRTUALQUEST == 'true'
+        timeout-minutes: 5
+        shell: pwsh
+        env:
+          VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
+        run: tools\ci\checkout-virtualquest.ps1
+
+      - name: Build and run the harness in Debug
+        id: debug
+        timeout-minutes: 30
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Build -Configuration Debug
+          if ($LASTEXITCODE -ne 0) { throw 'The Debug build or its harness failed.' }
+
+      # Runs whether or not the Debug run passed, so each reports.
+      - name: Build and run the harness with AddressSanitizer
+        if: ${{ !cancelled() && steps.debug.outcome != 'skipped' }}
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\validate-cpp.ps1 -Mode Build -AddressSanitizer
+          if ($LASTEXITCODE -ne 0) { throw 'The AddressSanitizer build or its harness failed; a report above names the line.' }
 
   # A full rebuild under analysis, so it runs beside the build job rather than
   # after it.
