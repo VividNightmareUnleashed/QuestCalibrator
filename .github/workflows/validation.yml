@@ -116,6 +116,17 @@ jobs:
           VIRTUALQUEST_DEPLOY_KEY: ${{ secrets.VIRTUALQUEST_DEPLOY_KEY }}
         run: tools\ci\checkout-virtualquest.ps1
 
+      # The formal suite's pins on this source, in seconds: a refactor that
+      # moved pinned code fails here, naming the pin and where it went, instead
+      # of in the formal jobs much later.
+      - name: Check the formal suite's pins on this source
+        if: env.HAS_VIRTUALQUEST == 'true'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          python VirtualQuest/formal/check-pins.py
+          if ($LASTEXITCODE -ne 0) { throw 'A pin of the formal suite no longer holds; it is named above.' }
+
       # Every step has its own limit, a few times its usual length, so a hung
       # step fails in minutes instead of holding the runner to the job limit.
       - name: Build and run the solver harness

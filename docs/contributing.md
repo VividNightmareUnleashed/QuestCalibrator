@@ -149,6 +149,12 @@ scenarios out. With access, a new checkout or worktree needs
 `git submodule update --init VirtualQuest`. Commit changes inside the submodule
 first, then the updated submodule pointer here.
 
+Some of its formal checks pin code here: a statement a mutant replaces, the
+order of calls, a marker the portable scenarios are cut at. Reformatting keeps
+a pin, but moving or rewriting the code does not, so after such a change run
+`python VirtualQuest/formal/check-pins.py`. It checks every pin in about a second
+and names any that moved and where to.
+
 ## Editor setup
 
 `compile_flags.txt` is for clangd only. Never add machine-specific paths to it.
