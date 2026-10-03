@@ -67,6 +67,8 @@ bool CalibrationContextCorrectionBasisScenario();
 bool ContinuousInputDiagnosticsScenario();
 bool PoseStreamDiagnosticsScenario();
 bool DiagnosticsExportScenario();
+bool DiagnosticsAnonymisationScenario();
+bool SessionLogTrimScenario();
 bool ContinuousWindowDiagnosticsScenario();
 bool ContinuousPairingDiagnosticsScenario();
 void RunReviewRegressionScenarios(void (*check)(const char *, bool, const char *));
@@ -1555,7 +1557,12 @@ void RunDriverSyncStateScenarios()
 void RunPoseSampleScenarios()
 {
 	Check("diagnostics: complete exported file", DiagnosticsExportScenario(),
-		"build hash, driver status, scale confidence, mount and raw poses reach the on-disk report");
+		"format line, enum names, build hash, driver status, scale confidence, mount and raw poses "
+		"reach the on-disk report; the newest ten reports are kept");
+	Check("diagnostics: names are anonymised as whole words", DiagnosticsAnonymisationScenario(),
+		"a short account or computer name never rewrites the words it occurs in");
+	Check("diagnostics: a long session log keeps its start and its end", SessionLogTrimScenario(),
+		"past its budget the log is the first lines, a count of those left out, and the latest");
 	Check("pose stream diagnostics: passive snapshot", PoseStreamDiagnosticsScenario(),
 		"all devices and loss markers are retained without consuming another reader's samples");
 	Check("continuous diagnostics: input and export", ContinuousInputDiagnosticsScenario(),

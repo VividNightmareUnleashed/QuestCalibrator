@@ -13,6 +13,7 @@
 #include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -96,11 +97,69 @@ std::string Clock(double unixTime)
 	std::time_t t = static_cast<std::time_t>(unixTime);
 	std::tm tm;
 	if (localtime_s(&tm, &t) == 0)
-		std::strftime(buf, sizeof buf, "%H:%M:%S", &tm);
+		std::strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S", &tm);
 	return buf;
 }
 
 const char *OnOff(bool v) { return v ? "on" : "off"; }
+
+// The enums a report shows, by name: a number means nothing without the exact
+// build's enum order. Each table is checked against its enum's last value.
+template <typename Enum, size_t N>
+std::string EnumName(Enum value, const char *const (&names)[N])
+{
+	const auto index = static_cast<size_t>(value);
+	return index < N ? names[index] : "unknown (" + std::to_string(index) + ")";
+}
+
+constexpr const char *CalibrationStateNames[] = {
+	"None", "Begin", "Neutralizing", "Collecting", "Editing" };
+static_assert(std::size(CalibrationStateNames) == static_cast<size_t>(CalibrationState::Editing) + 1,
+	"name every calibration state");
+constexpr const char *DisableReasonNames[] = {
+	"None", "InvalidIdentity", "InvalidTransform", "HmdMismatch", "DriverUnreachable",
+	"UniverseUnsafe", "FrameMovesLost", "DriverVersionMismatch", "DriverRefusedValues" };
+static_assert(std::size(DisableReasonNames) ==
+	static_cast<size_t>(CalibrationContext::DisableReason::DriverRefusedValues) + 1,
+	"name every disable reason");
+constexpr const char *ScaleGuardNames[] = {
+	"NotApplied", "FromGrossMotion", "NeutralizedForSmoothing" };
+static_assert(std::size(ScaleGuardNames) ==
+	static_cast<size_t>(questcal::ScaleGuard::NeutralizedForSmoothing) + 1, "name every scale guard");
+constexpr const char *ErrorSourceNames[] = {
+	"None", "General", "Driver", "ProfilePersistence", "SettingsPersistence", "Chaperone",
+	"ChaperoneMonitor" };
+static_assert(std::size(ErrorSourceNames) ==
+	static_cast<size_t>(CalibrationContext::ErrorSource::ChaperoneMonitor) + 1,
+	"name every error source");
+constexpr const char *ContinuousStateNames[] = {
+	"Inactive", "Tracking", "Coasting", "Frozen", "Holding" };
+static_assert(std::size(ContinuousStateNames) ==
+	static_cast<size_t>(questcal::ContinuousAlignment::State::Holding) + 1,
+	"name every continuous calibration state");
+
+// Older reports in the folder past this many are deleted when a new one is
+// written.
+constexpr size_t KeptReports = 10;
+
+void PruneOldReports(const std::wstring &dir)
+{
+	std::vector<std::wstring> reports;
+	WIN32_FIND_DATAW found;
+	HANDLE search = FindFirstFileW((dir + L"\\QuestCalibrator-diagnostics-*.txt").c_str(), &found);
+	if (search == INVALID_HANDLE_VALUE)
+		return;
+	do
+	{
+		if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+			reports.push_back(found.cFileName);
+	} while (FindNextFileW(search, &found));
+	FindClose(search);
+	// The names carry their timestamp, so the newest sort last.
+	std::sort(reports.begin(), reports.end());
+	for (size_t i = 0; i + KeptReports < reports.size(); ++i)
+		DeleteFileW((dir + L"\\" + reports[i]).c_str());
+}
 
 void DescribeModule(std::ostream &out, const char *name, HMODULE module)
 {
@@ -228,7 +287,8 @@ std::string DescribeFrameFailureCapture(const CalibrationContext &ctx, vr::IVRSy
 {
 	std::ostringstream out;
 	out << std::setprecision(10) << "frame failure capture at QPC seconds " << capture.sampleClock
-		<< ", driver session " << ctx.frameDriverSession << ", calibration state " << static_cast<int>(ctx.state)
+		<< ", driver session " << ctx.frameDriverSession << ", calibration state "
+		<< EnumName(ctx.state, CalibrationStateNames)
 		<< "\nRaw and runtime samples have different capture/prediction times; they are not an exact pose pair.\n";
 	DescribeRawPoses(out, capture.poseStream, capture.sampleClock, qpcToSeconds);
 	for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
@@ -255,10 +315,10 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 		else
 			out << "unavailable";
 	};
-	out << "continuous input diagnostics v1 (session totals; device counts cover the selected pair)\n";
+	out << "continuous input diagnostics v2 (session totals; device counts cover the selected pair)\n";
 	out << "loop eligible: " << OnOff(ctx.ContinuousShouldRun())
 		<< ", method: " << (ctx.continuousNoPause ? "legacy" : "standard")
-		<< ", calibration state: " << static_cast<int>(ctx.state)
+		<< ", calibration state: " << EnumName(ctx.state, CalibrationStateNames)
 		<< ", HMD is reference: " << OnOff(ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd])
 		<< ", tracker slot: " << ctx.continuousTrackerId
 		<< ", pose hook mask: " << ctx.driverPoseHookMask << "\n";
@@ -345,6 +405,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	DescribeRuntimePoses(runtimePoses, ctx, system);
 	std::ostringstream out;
 	out << "QuestCalibrator " << QUESTCAL_VERSION_STRING << " diagnostics, written " << Stamp("%Y-%m-%d %H:%M:%S") << "\n";
+	out << "format: questcal-diagnostics/2\n";
 	out << "Personal folders and the account name are shown as <user>, the computer name as <pc>.\n";
 	out << "Device serial numbers are kept: they identify hardware, not people.\n\n";
 	out << std::setprecision(10);
@@ -380,7 +441,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 
 	out << "[profile]\n";
 	out << "valid: " << OnOff(ctx.validProfile) << ", enabled: " << OnOff(ctx.enabled) << "\n";
-	out << "disable reason: " << static_cast<int>(ctx.disableReason)
+	out << "disable reason: " << EnumName(ctx.disableReason, DisableReasonNames)
 		<< ", universe unsafe: " << OnOff(ctx.profileUniverseUnsafe)
 		<< ", owner HMD: " << ctx.profileHmdSerial << "\n";
 	out << "base generation: " << ctx.baseGeneration << ", field generation: " << ctx.fieldGeneration << "\n";
@@ -397,7 +458,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			<< ctx.lastResult.timeOffset * 1000.0 << " ms\n";
 		const auto &result = ctx.lastResult;
 		out << "scale identifiable: " << OnOff(result.scaleIdentifiable) << ", condition " << result.scaleCondition
-			<< ", one-sigma " << result.scaleStdDev << ", guard " << static_cast<int>(result.scaleGuard) << "\n";
+			<< ", one-sigma " << result.scaleStdDev << ", guard " << EnumName(result.scaleGuard, ScaleGuardNames) << "\n";
 		out << "motion gain valid: " << OnOff(result.motionGainValid) << ", gross " << result.motionGainLow
 			<< ", fine " << result.motionGainHigh << ", smoothing " << OnOff(result.motionSmoothingDetected)
 			<< ", inconsistent " << OnOff(result.motionGainInconsistent) << "\n";
@@ -501,7 +562,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 	out << "submitted sequence: " << sync.latestSequence << ", state change sequence: " << sync.latestStateChangeSequence
 		<< ", last verdict sequence: " << sync.lastAcceptedVerdictSequence << ", refused " << OnOff(sync.lastVerdictRefused)
 		<< ", changed since verdict " << OnOff(sync.stateChangedSinceVerdict) << "\n";
-	out << "overlay error source: " << static_cast<int>(ctx.uiErrorSource) << ", error: " << ctx.uiError << "\n\n";
+	out << "overlay error source: " << EnumName(ctx.uiErrorSource, ErrorSourceNames) << ", error: " << ctx.uiError << "\n\n";
 
 	out << "[continuous calibration]\n";
 	out << "enabled: " << OnOff(ctx.continuousEnabled)
@@ -517,7 +578,7 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 			<< " " << mount.rot.y() << " " << mount.rot.z() << "; position (m): " << mount.pos.transpose();
 	}
 	out << "\n";
-	out << "state: " << static_cast<int>(ctx.continuousState) << ", corrections applied: " << ctx.autoCorrectionsApplied
+	out << "state: " << EnumName(ctx.continuousState, ContinuousStateNames) << ", corrections applied: " << ctx.autoCorrectionsApplied
 		<< ", re-anchors: " << ctx.continuousReanchors << " (undone: " << ctx.continuousReanchorsUndone
 		<< ", past a restart once the tracker's next solution agreed: " << ctx.continuousReanchorsAcrossSolutions << ")\n";
 	out << "headset tracker: connected " << OnOff(ctx.continuousTrackerConnected)
@@ -570,6 +631,8 @@ bool WriteDiagnosticsFile(const CalibrationContext &ctx, std::string &pathOut, s
 		error = "Couldn't finish writing the diagnostics file.";
 		return false;
 	}
+	file.close();
+	PruneOldReports(dir);
 	pathOut = Utf8(path);
 	return true;
 }

@@ -17,6 +17,7 @@
 #include "ProfileValidation.h"
 #include "QualityBands.h"
 #include "RingPoseMath.h"
+#include "SessionLogTrim.h"
 #include "StreamEvents.h"
 #include "../common/MathConstants.h"
 #include "../common/PoseChannel.h"
@@ -248,10 +249,46 @@ static void PersistenceTick(CalibrationContext &ctx, double now)
 // Session log (see Calibration.h)
 
 static std::ofstream SessionLog;
-static size_t SessionLogBytes = 0;
+static std::wstring SessionLogPath;
 static std::mutex SessionLogMutex;
-// Hard cap so a pathological log loop can never eat a user's disk.
+// The file never grows past 4 MiB, so a pathological log loop can never eat a
+// user's disk; past that it keeps the session's first and latest megabyte.
 static constexpr size_t SessionLogMaxBytes = 4 * 1024 * 1024;
+static constexpr size_t SessionLogEndBytes = 1024 * 1024;
+static constexpr size_t SessionLogLineMaxBytes = 64 * 1024;
+static questcal::SessionLogTrim SessionLogBudget(SessionLogEndBytes, SessionLogEndBytes, SessionLogMaxBytes);
+
+static std::string LocalTimeText(const char *format)
+{
+	char text[32] = { 0 };
+	std::time_t now = std::time(nullptr);
+	std::tm tm;
+	if (localtime_s(&tm, &now) == 0)
+		std::strftime(text, sizeof text, format, &tm);
+	return text;
+}
+
+// Writes a line and, once the file reaches its budget, rewrites it as the head
+// and tail SessionLogTrim keeps, through a temporary file so a crash mid-rewrite
+// leaves the old log whole.
+static void WriteSessionLogLine(const std::string &line)
+{
+	SessionLog << line;
+	// Flushed per line so a crashed or killed session keeps everything.
+	SessionLog.flush();
+	if (!SessionLogBudget.Note(line))
+		return;
+
+	const std::string compacted = SessionLogBudget.Compacted();
+	const std::wstring rewrite = SessionLogPath + L".tmp";
+	std::ofstream file(rewrite.c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
+	file.write(compacted.data(), static_cast<std::streamsize>(compacted.size()));
+	file.close();
+	SessionLog.close();
+	if (file.good())
+		MoveFileExW(rewrite.c_str(), SessionLogPath.c_str(), MOVEFILE_REPLACE_EXISTING);
+	SessionLog.open(SessionLogPath.c_str(), std::ios::out | std::ios::app | std::ios::binary);
+}
 
 void InitSessionLog()
 {
@@ -264,58 +301,32 @@ void InitSessionLog()
 	std::wstring dir = std::wstring(base) + L"\\QuestCalibrator";
 	CreateDirectoryW(dir.c_str(), nullptr);
 
-	std::wstring current = dir + L"\\QuestCalibrator.log";
+	SessionLogPath = dir + L"\\QuestCalibrator.log";
 	std::wstring previous = dir + L"\\QuestCalibrator.prev.log";
 	// One-generation rotation: bounded disk use, but the session that ended in
 	// a problem survives the restart that usually precedes the bug report.
-	MoveFileExW(current.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
+	MoveFileExW(SessionLogPath.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
 
-	SessionLog.open(current.c_str(), std::ios::out | std::ios::trunc);
+	SessionLog.open(SessionLogPath.c_str(), std::ios::out | std::ios::trunc | std::ios::binary);
 	if (!SessionLog.is_open())
 		return;
-
-	char date[32] = { 0 };
-	std::time_t now = std::time(nullptr);
-	std::tm tm;
-	if (localtime_s(&tm, &now) == 0)
-		std::strftime(date, sizeof date, "%Y-%m-%d %H:%M:%S", &tm);
-	SessionLog << "QuestCalibrator " << QUESTCAL_VERSION_STRING
-		<< " session started " << date << "\n";
-	SessionLog.flush();
-	std::streampos written = SessionLog.tellp();
-	SessionLogBytes = written > 0 ? static_cast<size_t>(written) : 0;
+	SessionLogBudget = questcal::SessionLogTrim(SessionLogEndBytes, SessionLogEndBytes, SessionLogMaxBytes);
+	WriteSessionLogLine(std::string("QuestCalibrator ") + QUESTCAL_VERSION_STRING +
+		" session started " + LocalTimeText("%Y-%m-%d %H:%M:%S") + "\n");
 }
 
 void AppendSessionLog(const std::string &msg)
 {
 	std::lock_guard<std::mutex> lock(SessionLogMutex);
-	if (!SessionLog.is_open() || msg.empty() || SessionLogBytes >= SessionLogMaxBytes)
+	if (!SessionLog.is_open() || msg.empty())
 		return;
 
-	char stamp[16] = { 0 };
-	std::time_t now = std::time(nullptr);
-	std::tm tm;
-	if (localtime_s(&tm, &now) == 0)
-		std::strftime(stamp, sizeof stamp, "[%H:%M:%S] ", &tm);
-
-	const size_t stampBytes = strlen(stamp);
-	const size_t framingBytes = stampBytes + 1;
-	const size_t remaining = SessionLogMaxBytes - SessionLogBytes;
-	if (remaining <= framingBytes)
-	{
-		SessionLogBytes = SessionLogMaxBytes;
-		return;
-	}
-
-	const size_t count = (std::min)(msg.size(), remaining - framingBytes);
-	SessionLog << stamp;
-	SessionLog.write(msg.data(), count);
-	if (msg[count - 1] != '\n')
-		SessionLog << '\n';
-
-	SessionLogBytes += stampBytes + count + (msg[count - 1] == '\n' ? 0 : 1);
-	// Flushed per line so a crashed or killed session keeps everything.
-	SessionLog.flush();
+	// Each line carries its date: a session can run past midnight.
+	std::string line = LocalTimeText("[%Y-%m-%d %H:%M:%S] ");
+	line.append(msg, 0, (std::min)(msg.size(), SessionLogLineMaxBytes));
+	if (line.back() != '\n')
+		line += '\n';
+	WriteSessionLogLine(line);
 }
 
 void InitCalibrator()

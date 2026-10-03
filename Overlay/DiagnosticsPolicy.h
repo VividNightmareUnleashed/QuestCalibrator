@@ -33,6 +33,48 @@ inline void ReplaceAllNoCase(std::string &text, const std::string &needle, const
 	text.swap(out);
 }
 
+// As ReplaceAllNoCase, but only where `needle` stands as a whole word, between
+// characters that are not letters or digits (UTF-8 bytes count as letters): a
+// short account or computer name must not rewrite the words it occurs in.
+inline void ReplaceWordNoCase(std::string &text, const std::string &needle, const std::string &with)
+{
+	if (needle.empty()) return;
+	auto lowered = [](std::string s)
+	{
+		std::transform(s.begin(), s.end(), s.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return s;
+	};
+	auto wordByte = [](char c)
+	{
+		const unsigned char byte = static_cast<unsigned char>(c);
+		return std::isalnum(byte) != 0 || byte >= 0x80;
+	};
+	const std::string lowerText = lowered(text), lowerNeedle = lowered(needle);
+	std::string out;
+	size_t copied = 0;
+	size_t from = 0;
+	for (;;)
+	{
+		const size_t hit = lowerText.find(lowerNeedle, from);
+		if (hit == std::string::npos)
+		{
+			out.append(text, copied, std::string::npos);
+			break;
+		}
+		const size_t end = hit + needle.size();
+		if ((hit > 0 && wordByte(text[hit - 1])) || (end < text.size() && wordByte(text[end])))
+		{
+			from = hit + 1;
+			continue;
+		}
+		out.append(text, copied, hit - copied);
+		out += with;
+		copied = from = end;
+	}
+	text.swap(out);
+}
+
 inline std::string AnonymiseDiagnosticsText(const std::string &text,
 	const std::string &userProfileDir, const std::string &userName, const std::string &computerName)
 {
@@ -41,9 +83,9 @@ inline std::string AnonymiseDiagnosticsText(const std::string &text,
 	if (!userProfileDir.empty())
 		ReplaceAllNoCase(out, userProfileDir, "<user>");
 	if (userName.size() >= 2)
-		ReplaceAllNoCase(out, userName, "<user>");
+		ReplaceWordNoCase(out, userName, "<user>");
 	if (computerName.size() >= 2)
-		ReplaceAllNoCase(out, computerName, "<pc>");
+		ReplaceWordNoCase(out, computerName, "<pc>");
 	return out;
 }
 

@@ -1,6 +1,8 @@
 #include "../Overlay/Calibration.h"
 #include "../Overlay/CalibrationDriver.h"
 #include "../Overlay/Diagnostics.h"
+#include "../Overlay/DiagnosticsPolicy.h"
+#include "../Overlay/SessionLogTrim.h"
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -39,8 +41,24 @@ bool DiagnosticsExportScenario()
 	capture.poseStream.devices[16].received = 1;
 	capture.poseStream.devices[16].latest.deviceId = 16;
 	capture.poseStream.devices[16].latest.position[1] = -0.25;
+	// Eleven older reports: writing the twelfth keeps the newest ten.
+	const auto reports = root / L"QuestCalibrator" / L"diagnostics";
+	std::filesystem::create_directories(reports);
+	for (int i = 0; i < 11; ++i)
+		std::ofstream(reports / (L"QuestCalibrator-diagnostics-20000101-0000" +
+			std::wstring(i < 10 ? L"0" : L"") + std::to_wstring(i) + L".txt")) << "old";
 	std::string path, error;
 	const bool saved = WriteDiagnosticsFile(ctx, path, error, nullptr, capture);
+	size_t kept = 0;
+	bool oldestKept = false;
+	for (const auto &entry : std::filesystem::directory_iterator(reports))
+	{
+		++kept;
+		oldestKept = oldestKept ||
+			entry.path().filename() == L"QuestCalibrator-diagnostics-20000101-000000.txt" ||
+			entry.path().filename() == L"QuestCalibrator-diagnostics-20000101-000001.txt";
+	}
+	const bool pruned = kept == 10 && !oldestKept;
 	// What the log and the screen get instead of the full path.
 	const bool shortened = PathForLog(path).rfind("%LOCALAPPDATA%\\QuestCalibrator\\diagnostics\\", 0) == 0 &&
 		ShortenUserPath("C:\\Users\\Jo\\AppData\\Local\\x", "C:\\Users\\jo\\AppData\\Local", "C:\\Users\\jo") ==
@@ -58,11 +76,17 @@ bool DiagnosticsExportScenario()
 		file.close();
 		std::filesystem::remove(std::filesystem::u8path(path));
 	}
+	for (int i = 0; i < 11; ++i)
+		std::filesystem::remove(reports / (L"QuestCalibrator-diagnostics-20000101-0000" +
+			std::wstring(i < 10 ? L"0" : L"") + std::to_wstring(i) + L".txt"));
 	// Only remove the exact directories created by this fixture, never recursively.
 	std::filesystem::remove(root / L"QuestCalibrator" / L"diagnostics");
 	std::filesystem::remove(root / L"QuestCalibrator");
 	std::filesystem::remove(root);
-	return saved && error.empty() && shortened && report.find("SHA-256: unavailable") == std::string::npos &&
+	return saved && error.empty() && shortened && pruned &&
+		report.find("\nformat: questcal-diagnostics/2\n") != std::string::npos &&
+		report.find("disable reason: None,") != std::string::npos &&
+		report.find("SHA-256: unavailable") == std::string::npos &&
 		report.find("[driver synchronization]") != std::string::npos &&
 		report.find("[tracker frame corrections]") != std::string::npos &&
 		report.find("device 16 test-tracker: rotation (w x y z) 1 0 0 0, translation (unscaled m) -0.25 0 0") != std::string::npos &&
@@ -357,4 +381,40 @@ bool CalibrationContextCorrectionBasisScenario()
 	ctx.SetCalibrationContinuous(Eigen::Quaterniond::Identity(), Eigen::Vector3d(2, 0, 0), 1.0);
 	return !ctx.continuousCorrectionGate.HasPending() &&
 		!ctx.continuousCorrectionGate.Take(true, true, correction) && ctx.baseGeneration == 1;
+}
+
+// The account and computer names are replaced where they stand as words, in
+// any case, and nowhere inside another word, however short the name.
+bool DiagnosticsAnonymisationScenario()
+{
+	using questcal::diagnostics::AnonymiseDiagnosticsText;
+	const std::string report = AnonymiseDiagnosticsText(
+		"Calibration by Al on BOX-7 at C:\\Users\\Al\\log; al_backup, Inbox, alpha\n",
+		"C:\\Users\\Al", "Al", "BOX-7");
+	return report == "Calibration by <user> on <pc> at <user>\\log; <user>_backup, Inbox, alpha\n" &&
+		AnonymiseDiagnosticsText("j", "", "j", "") == "j";
+}
+
+// A long session keeps its first lines and its latest, with a line saying how
+// many in between were left out, and the file stays within its budget.
+bool SessionLogTrimScenario()
+{
+	questcal::SessionLogTrim trim(30, 30, 100);
+	std::string file;
+	bool compacted = false;
+	for (int i = 0; i < 40; ++i)
+	{
+		const std::string line = "line " + std::to_string(i) + "\n";
+		file += line;
+		if (trim.Note(line))
+		{
+			file = trim.Compacted();
+			compacted = true;
+		}
+		if (file.size() > 100)
+			return false;
+	}
+	return compacted && file.rfind("line 0\nline 1\nline 2\nline 3\nline 4\n", 0) == 0 &&
+		file.find(" lines left out]\n") != std::string::npos &&
+		file.size() >= 8 && file.compare(file.size() - 8, 8, "line 39\n") == 0;
 }

@@ -132,6 +132,9 @@
     <ClInclude Include="HookCoverage.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="SessionLogTrim.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="DriverWorker.h">
       <Filter>Header Files</Filter>
     </ClInclude>
