@@ -19,6 +19,11 @@ constexpr double MaxLocalPositionErrorMeters = 0.005;
 constexpr double MaxLocalRotationErrorRadians =
 	1.0 * 3.14159265358979323846 / 180.0;
 
+// A device at rest: its pose unchanged within these, however long between
+// samples (base stations publish rarely).
+constexpr double RestPositionMeters = 0.001;
+constexpr double RestRotationRadians = 0.05 * 3.14159265358979323846 / 180.0;
+
 struct DriverLocalPoseSample
 {
 	double time = 0.0;

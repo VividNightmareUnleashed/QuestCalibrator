@@ -161,9 +161,8 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	bool rebased = false;
 	if (dev.wfdValid)
 	{
-		double dRot = p.wfdRot.angularDistance(dev.wfdRot);
-		double dTrans = (p.wfdTrans - dev.wfdTrans).norm();
-		if (dRot > config.wfdRotEpsRad || dTrans > config.wfdTransEps)
+		if (questcal::WorldFromDriverChanged(dev.wfdRot, dev.wfdTrans, p.wfdRot, p.wfdTrans,
+			config.wfdRotEpsRad, config.wfdTransEps))
 		{
 			// A WFD change is exact only when the driver-local pose remained on
 			// its predicted trajectory. Some drivers can instead change WFD and

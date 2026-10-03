@@ -45,11 +45,18 @@ inline double SignedYawRadians(
 	return 2.0 * std::atan2(sign * yaw.y(), sign * yaw.w());
 }
 
+// The smallest worldFromDriver change that counts as one. The universe
+// verdict pairs the transitions it sees with the jump detector's by sample
+// time, so both judge with these.
+constexpr double WorldFromDriverChangeRadians = 1e-5;
+constexpr double WorldFromDriverChangeMeters = 1e-4;
+
 // Inputs come from trusted ring samples or values validated when loaded.
 inline bool WorldFromDriverChanged(
 	const Eigen::Quaterniond &oldRotation, const Eigen::Vector3d &oldTranslation,
 	const Eigen::Quaterniond &newRotation, const Eigen::Vector3d &newTranslation,
-	double rotationEpsilonRadians = 1e-5, double translationEpsilonMeters = 1e-4)
+	double rotationEpsilonRadians = WorldFromDriverChangeRadians,
+	double translationEpsilonMeters = WorldFromDriverChangeMeters)
 {
 	return oldRotation.normalized().angularDistance(newRotation.normalized()) >
 			rotationEpsilonRadians ||

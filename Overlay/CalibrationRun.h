@@ -106,13 +106,13 @@ struct CalibrationRun
 		}
 
 	private:
-		// On its trajectory, or unchanged for a device at rest (1 mm,
-		// 0.05 deg, as LighthouseFrameWatch holds it).
+		// On its trajectory, or unchanged for a device at rest, as
+		// LighthouseFrameWatch holds it.
 		static bool Kept(const ringpose::DriverLocalPoseSample &was, const ringpose::DriverLocalPoseSample &is)
 		{
 			return ringpose::IsDriverLocalPoseContinuous(was, is) ||
-				((is.position - was.position).norm() <= 0.001 &&
-					is.rotation.angularDistance(was.rotation) <= 0.05 * 3.14159265358979323846 / 180.0);
+				((is.position - was.position).norm() <= ringpose::RestPositionMeters &&
+					is.rotation.angularDistance(was.rotation) <= ringpose::RestRotationRadians);
 		}
 	};
 

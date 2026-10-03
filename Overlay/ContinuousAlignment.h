@@ -67,7 +67,7 @@ public:
 	struct Config
 	{
 		// --- observation forming ---
-		double maxInterpolationGap = 0.06; // s; engine convention
+		double maxInterpolationGap = MaxInterpolationGapSeconds; // s; the solver's
 		double maxLinearSpeed = 1.5;       // m/s; residual timing error scales
 		double maxAngularSpeed = 2.0;      // rad/s; with speed through the mount
 		double obsMinSpacing = 0.10;       // s; thin observations to ~10 Hz

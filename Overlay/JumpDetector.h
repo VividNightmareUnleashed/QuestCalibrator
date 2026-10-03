@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PoseMath.h"
 #include "RingPoseMath.h"
 
 #include <Eigen/Core>
@@ -33,8 +34,9 @@ public:
 	// Fixed detection policy.
 	struct Config
 	{
-		double wfdRotEpsRad = 1e-5;        // wfd rotation change that counts as a rebase
-		double wfdTransEps = 1e-4;         // meters
+		// A wfd change that counts as a rebase, as the universe verdict counts it.
+		double wfdRotEpsRad = questcal::WorldFromDriverChangeRadians;
+		double wfdTransEps = questcal::WorldFromDriverChangeMeters;   // meters
 		double discontinuityPos = 0.20;    // meters of unexplained motion in one frame pair
 		double discontinuityYawRad = 5.0 * 3.14159265358979 / 180.0;
 		// Smaller steps need a clean fit and tighter HMD/controller agreement.

@@ -1,6 +1,7 @@
 // Rating and continuous-status logic, the status band and the main screen.
 #include "stdafx.h"
 #include "UiInternal.h"
+#include "QualityBands.h"
 
 bool s_showSettings = false;
 
@@ -133,12 +134,10 @@ CalRating ComputeCalibrationRating(ContinuousStatus continuous)
 	// Solve quality caps the rating; staleness/drift then degrade it further.
 	if (CalCtx.lastResult.valid)
 	{
-		double rot = CalCtx.lastResult.rotationRmsDeg;
-		double pos = CalCtx.lastResult.translationRmsMeters * 100.0;
-		int q =
-			(rot <= 3.0 && pos <= 1.5) ? Rating_Good :
-			(rot <= 6.0 && pos <= 3.0) ? Rating_Decent :
-			(rot <= 12.0 && pos <= 6.0) ? Rating_Poor : Rating_VeryPoor;
+		const questcal::SolveQuality band = questcal::JudgeSolveQuality(
+			CalCtx.lastResult.rotationRmsDeg, CalCtx.lastResult.translationRmsMeters);
+		const int q = band == questcal::SolveQuality::Good ? Rating_Good
+			: band == questcal::SolveQuality::Decent ? Rating_Decent : Rating_Poor;
 		if (q > r)
 			r = q;
 	}
@@ -184,7 +183,7 @@ CalRating ComputeCalibrationRating(ContinuousStatus continuous)
 			r = Rating_Decent;
 		if (CalCtx.alignment == CalibrationContext::AlignmentHealth::Stale && r < Rating_Poor)
 			r = Rating_Poor;
-		if (CalCtx.driftScore >= 0.85)
+		if (CalCtx.driftScore >= questcal::DriftVeryPoorScore)
 			r = Rating_VeryPoor;
 	}
 

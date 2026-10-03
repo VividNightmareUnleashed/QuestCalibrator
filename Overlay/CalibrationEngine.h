@@ -52,6 +52,10 @@ struct AlignedSample
 
 // Production runs these defaults (solveScale aside), and the solver relies on
 // them: positive angles, knees and steps, and minPairs >= 1.
+// The longest dropout a stream is interpolated across, in seconds: the
+// solver's default, and the continuous loop's, which reads the same streams.
+constexpr double MaxInterpolationGapSeconds = 0.06;
+
 struct EngineConfig
 {
 	// --- time alignment ---
@@ -69,11 +73,14 @@ struct EngineConfig
 	// whole division of it (step/2 at or above 2 ms, else the step itself), so
 	// every lag is an exact slot shift of one shared resampling.
 	double timeOffsetStep = 0.002;
+	// A lag is taken only when its correlation reaches this; below it the
+	// estimate is refused (and the fallback, if any, used).
+	double minTimeOffsetCorrelation = 0.25;
 
 	// --- sample gating ---
 	double maxLinearSpeed = 1.6;       // m/s; samples above either bound are dropped
 	double maxAngularSpeed = 8.0;      // rad/s
-	double maxInterpolationGap = 0.06; // seconds; do not interpolate across dropouts
+	double maxInterpolationGap = MaxInterpolationGapSeconds; // do not interpolate across dropouts
 	size_t maxAlignedSamples = 240;    // evenly thinned above this
 
 	// --- rotation solve ---
@@ -83,6 +90,9 @@ struct EngineConfig
 	// anti-aligned axes that no downstream check can detect (both angles are
 	// ~pi, so the angle-mismatch gate passes). Reject the ambiguous band.
 	double maxPairAngle = 2.9;         // rad
+	// The devices are rigid, so both deltas of a pair turn by the same angle;
+	// a larger difference means jitter or a timing glitch on that pair.
+	double maxPairAngleMismatch = 0.35; // rad
 	size_t maxPairs = 20000;           // all-pairs count is thinned above this
 	double gravityPriorRatio = 0.5;    // virtual up-pair weight as a fraction of data weight; 0 disables
 	int    irlsIterations = 4;
@@ -95,6 +105,9 @@ struct EngineConfig
 	// rotation as exact, so its error otherwise leaks into the translation as a
 	// bias that grows with distance from the sampled cloud. 0 disables.
 	int    refineIterations = 3;
+	// The polish is kept only when the axis-pair fit worsens by at most this
+	// factor; otherwise the sequential result stands.
+	double maxRefinementAxisRmsRatio = 1.02;
 
 	// --- scale ---
 	bool   solveScale = false;

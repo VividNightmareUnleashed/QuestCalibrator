@@ -74,10 +74,9 @@ public:
 	struct Config
 	{
 		double groupSeconds = 1.0;
-		// A device at rest: its pose unchanged within these, however long
-		// between samples (base stations publish rarely).
-		double restPositionM = 0.001;
-		double restRotationRad = 0.05 * 3.14159265358979323846 / 180.0;
+		// A device at rest (ringpose::RestPositionMeters and RestRotationRadians).
+		double restPositionM = ringpose::RestPositionMeters;
+		double restRotationRad = ringpose::RestRotationRadians;
 		// How long such a device waits for the move to show on another
 		// device: the station's own sample can come after it.
 		double inferSeconds = 5.0;
@@ -337,7 +336,13 @@ public:
 	// belong in the detailed log with the re-expressions.
 	static bool Notable(const Report &r)
 	{
-		return r.moved > 0 && (r.largestShiftM >= 0.01 || r.yawDeg >= 0.1 || r.tiltDeg >= 0.1);
+		return r.moved > 0 && NotableMove(r.largestShiftM, r.yawDeg, r.tiltDeg);
+	}
+
+	// The same bounds for a single move.
+	static bool NotableMove(double shiftM, double yawDeg, double tiltDeg)
+	{
+		return shiftM >= 0.01 || yawDeg >= 0.1 || tiltDeg >= 0.1;
 	}
 
 	// One log line for a report.

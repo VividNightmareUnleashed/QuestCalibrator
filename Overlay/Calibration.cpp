@@ -15,6 +15,7 @@
 #include "FieldMath.h"
 #include "PoseStreamHub.h"
 #include "ProfileValidation.h"
+#include "QualityBands.h"
 #include "RingPoseMath.h"
 #include "../common/MathConstants.h"
 #include "../common/PoseChannel.h"
@@ -601,8 +602,8 @@ static void UpdateDriftScore(CalibrationContext &ctx)
 		ctx.driftScore = std::min(ctx.driftScore, 0.5);
 
 	ctx.alignment =
-		ctx.driftScore >= 0.65 ? CalibrationContext::AlignmentHealth::Stale :
-		ctx.driftScore >= 0.30 ? CalibrationContext::AlignmentHealth::Aging :
+		ctx.driftScore >= questcal::DriftStaleScore ? CalibrationContext::AlignmentHealth::Stale :
+		ctx.driftScore >= questcal::DriftAgingScore ? CalibrationContext::AlignmentHealth::Aging :
 		CalibrationContext::AlignmentHealth::Fresh;
 
 	// A healthy continuous loop re-measures the alignment constantly; the
@@ -722,14 +723,14 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 }
 
 // A frame move's yaw and tilt in degrees, and whether it is worth a session
-// log line: a centimeter at the device or a tenth of a degree, as for the
-// frame watch's reports (smaller is a station refined in place).
+// log line by the frame watch's own bounds (smaller is a station refined in
+// place).
 static bool DescribeFrameMove(const LighthouseFrameWatch::Move &move, double &yawDeg, double &tiltDeg)
 {
 	double tilt = 0.0;
 	yawDeg = std::abs(questcal::SignedYawRadians(move.rotation, &tilt)) * 180.0 / questcal::Pi;
 	tiltDeg = tilt * 180.0 / questcal::Pi;
-	return move.shiftM >= 0.01 || yawDeg >= 0.1 || tiltDeg >= 0.1;
+	return LighthouseFrameWatch::NotableMove(move.shiftM, yawDeg, tiltDeg);
 }
 
 // While SteamVR sets up its universe (LighthouseVisibility.h) a frame move
@@ -1610,8 +1611,10 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		if (step > 0.002) step = 0.002;
 		if (step < -0.002) step = -0.002;
 		double updated = ctx.transform.timeOffset + step;
-		if (updated > 0.060) updated = 0.060;
-		if (updated < -0.060) updated = -0.060;
+		// Never past the range a calibration searches.
+		const double range = questcal::EngineConfig().timeOffsetRange;
+		if (updated > range) updated = range;
+		if (updated < -range) updated = -range;
 
 		double appliedBefore = questcal::ComputeAppliedTimeOffset(ctx.transform.timeOffset);
 		double appliedAfter = questcal::ComputeAppliedTimeOffset(updated);
@@ -1773,6 +1776,8 @@ static void StoreFieldAnchor(CalibrationContext &ctx, const questcal::EngineResu
 	bool append = slot == ctx.fieldAnchors.size();
 	if (append && ctx.fieldAnchors.size() >= protocol::SetAlignmentField::MaxAnchors)
 	{
+		// The sentence is a translation key, so it names the limit itself.
+		static_assert(protocol::SetAlignmentField::MaxAnchors == 8, "the anchor-limit message names 8");
 		ctx.Outcome("Anchor not added", "You already have 8 anchors.",
 			"Add this one within 1 m of an existing anchor to replace it, or clear the anchors in Settings.",
 			"Anchor limit reached (8)", CalibrationContext::Tone::Warn);
@@ -2163,10 +2168,10 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// One plain sentence on the quality band the rating uses; the residuals
 	// behind it went to the detail lines above.
 	ctx.lastRunHint = CalibrationContext::GuideHint::Success;
-	const double rotDeg = result.rotationRmsDeg;
-	const double posCm = result.translationRmsMeters * 100.0;
-	const bool good = rotDeg <= 3.0 && posCm <= 1.5;
-	const bool rough = rotDeg > 6.0 || posCm > 3.0;
+	const questcal::SolveQuality band =
+		questcal::JudgeSolveQuality(result.rotationRmsDeg, result.translationRmsMeters);
+	const bool good = band == questcal::SolveQuality::Good;
+	const bool rough = band == questcal::SolveQuality::Poor;
 	const std::string quality = good ? "Check that the tracker positions line up in VR."
 		: rough ? "The alignment is rough." : "The alignment may need another pass.";
 	const std::string action = good ? ""

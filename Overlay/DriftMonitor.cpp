@@ -5,6 +5,11 @@
 
 #include <cmath>
 
+// A hole the monitors ride through stays shorter than the loss gap, even on
+// the sparsest pose stream (see ringpose::MaxToleratedMonitorGap).
+static_assert(static_cast<double>(ringpose::MaxToleratedMonitorGap) / ringpose::SparsestPoseRateHz <
+	DriftMonitor::Config{}.lossGap, "a tolerated monitor gap would span the drift monitor's loss gap");
+
 void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 {
 	auto &dev = devices[s.deviceId];

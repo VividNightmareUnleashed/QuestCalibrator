@@ -15,11 +15,15 @@ inline bool IsValidEngineConfig(const EngineConfig &c)
 	for (double value : nonnegative)
 		if (!std::isfinite(value) || value < 0 || value > 1e6) return false;
 	const double positive[] = {c.timeOffsetStep, c.maxInterpolationGap,
-		c.minPairAngle, c.maxPairAngle, c.huberRotation, c.huberTranslation,
-		c.gainSplitSeconds};
+		c.minPairAngle, c.maxPairAngle, c.maxPairAngleMismatch, c.huberRotation,
+		c.huberTranslation, c.gainSplitSeconds};
 	for (double value : positive)
 		if (!std::isfinite(value) || value < 1e-12 || value > 1e6) return false;
 	return std::isfinite(c.fallbackTimeOffset) &&
+		std::isfinite(c.minTimeOffsetCorrelation) &&
+		c.minTimeOffsetCorrelation >= -1.0 && c.minTimeOffsetCorrelation <= 1.0 &&
+		std::isfinite(c.maxRefinementAxisRmsRatio) &&
+		c.maxRefinementAxisRmsRatio >= 1.0 && c.maxRefinementAxisRmsRatio <= 1e6 &&
 		std::abs(c.fallbackTimeOffset) <= protocol::limits::MaxAbsTimeOffsetSeconds &&
 		c.timeOffsetRange <= protocol::limits::MaxAbsTimeOffsetSeconds &&
 		c.timeOffsetRange / c.timeOffsetStep <= solverresource::MaxLagSteps &&

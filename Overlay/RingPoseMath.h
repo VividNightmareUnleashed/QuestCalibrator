@@ -62,9 +62,10 @@ inline bool CollectionGapTolerable(uint64_t largestGap, bool crossedSessionBound
 // The leash is set by the drift monitor, which tells a tracking loss from a
 // hole in its own input by time alone, so a tolerated hole must never span
 // its 0.3 s lossGap: eight poses of a lone 72 Hz headset, the sparsest stream
-// there is, last 110 ms. Anything larger, and any session boundary, still
-// resets them.
+// there is, last 110 ms (DriftMonitor.cpp asserts it). Anything larger, and
+// any session boundary, still resets them.
 constexpr uint64_t MaxToleratedMonitorGap = 8;
+constexpr double SparsestPoseRateHz = 72.0;
 
 inline bool MonitorGapTolerable(uint64_t gap, bool crossedSessionBoundary)
 {

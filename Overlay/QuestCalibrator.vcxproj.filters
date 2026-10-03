@@ -147,6 +147,9 @@
     <ClInclude Include="PoseStreamHub.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="QualityBands.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="ProfileScalarValidation.h">
       <Filter>Header Files</Filter>
     </ClInclude>
