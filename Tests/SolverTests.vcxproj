@@ -183,6 +183,7 @@
     <ClInclude Include="..\Overlay\CalibrationRun.h" />
     <ClInclude Include="..\Overlay\Clocks.h" />
     <ClInclude Include="..\Overlay\CollectionSource.h" />
+    <ClInclude Include="..\Overlay\LanguageCodes.h" />
     <ClInclude Include="..\Overlay\ChaperoneMath.h" />
     <ClInclude Include="..\Overlay\FieldMath.h" />
     <ClInclude Include="..\Overlay\ContinuousAlignment.h" />

@@ -25,7 +25,8 @@ namespace questcal::i18n
 	enum class Language { English, Japanese, Italian };
 	constexpr int kLanguageCount = 3;
 
-	// Persisted codes: "en", "ja", "it". Empty or unknown means "follow Windows".
+	// Persisted codes, listed in LanguageCodes.h. Empty or unknown means
+	// "follow Windows".
 	Language LanguageFromCode(const std::string &code);
 	const char *LanguageCode(Language language);
 

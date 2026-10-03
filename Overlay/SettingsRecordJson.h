@@ -1,6 +1,7 @@
 #pragma once
 #include "ProfileRecordJson.h"
 #include "ChaperoneMath.h"
+#include "LanguageCodes.h"
 #include <map>
 #include <utility>
 namespace questcal {
@@ -252,7 +253,7 @@ inline PersistedRevision ParseSettingsUnchecked(SettingsRecord &settings, std::i
 	if (HasTypedValue<std::string>(obj, "language"))
 	{
 		const std::string code = obj.at("language").get<std::string>();
-		if (code == "en" || code == "ja" || code == "it")
+		if (i18n::LanguageCodeIndex(code) >= 0)
 			settings.language = code;
 	}
 	if (HasTypedValue<picojson::object>(obj, "device_names"))

@@ -2,6 +2,7 @@
 #include "Configuration.h"
 #include "ChaperoneMath.h"
 #include "ProfileValidation.h"
+#include "RecordBounds.h"
 #include "SettingsRecordJson.h"
 #include "UserInterface.h"
 #include "../common/Protocol.h"
@@ -13,8 +14,6 @@
 #include <iomanip>
 #include <limits>
 #include <cmath>
-
-static constexpr DWORD MaxRegistryValueBytes = 16u * 1024u * 1024u;
 
 // PersistedCalibrationSpeed mirrors this enum (see ProfileValidation.h); pin
 // the two together where both are visible.
@@ -302,7 +301,7 @@ static RegistryReadResult ReadRegistryValue(const char *valueName)
 	// size counts the trailing NUL; zero would underflow the resize below.
 	if (size == 0)
 		return { RegistryReadStatus::Present, {}, {} };
-	if (size > MaxRegistryValueBytes)
+	if (size > questcal::MaxRecordBytes)
 	{
 		return { RegistryReadStatus::Error, {},
 			std::string(valueName) + " exceeds the 16 MiB safety limit" };
@@ -327,7 +326,7 @@ static RegistryReadResult ReadRegistryValue(const char *valueName)
 
 static bool WriteRegistryValue(const char *valueName, const std::string &str, std::string &error)
 {
-	if (str.size() >= MaxRegistryValueBytes)
+	if (str.size() >= questcal::MaxRecordBytes)
 	{
 		error = std::string(valueName) + " exceeds the 16 MiB safety limit";
 		return false;

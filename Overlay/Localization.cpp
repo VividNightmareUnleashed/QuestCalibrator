@@ -1,5 +1,6 @@
 // Display-time translation; see Localization.h for the lookup order.
 #include "Localization.h"
+#include "LanguageCodes.h"
 #include "LocalizationTables.h"
 
 #include <windows.h>
@@ -520,25 +521,19 @@ bool HasTranslation(Language language, const std::string &english)
 	return Translate(*table, english, 0, complete).has_value() && complete;
 }
 
+// LanguageCodes lists one code per Language, at its position.
+static_assert(LanguageCodeCount == kLanguageCount, "one saved code for each language");
+
 Language LanguageFromCode(const std::string &code)
 {
-	if (code == "ja")
-		return Language::Japanese;
-	if (code == "it")
-		return Language::Italian;
-	if (code == "en")
-		return Language::English;
-	return SystemLanguage();
+	const int index = LanguageCodeIndex(code);
+	return index < 0 ? SystemLanguage() : static_cast<Language>(index);
 }
 
 const char *LanguageCode(Language language)
 {
-	switch (language)
-	{
-	case Language::Japanese: return "ja";
-	case Language::Italian:  return "it";
-	default:                 return "en";
-	}
+	const int index = static_cast<int>(language);
+	return LanguageCodes[index >= 0 && index < LanguageCodeCount ? index : 0];
 }
 
 Language SystemLanguage()

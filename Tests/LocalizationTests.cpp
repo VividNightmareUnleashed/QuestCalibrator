@@ -2,8 +2,10 @@
 // order Localization.h promises (exact, pattern, sentences) on the shapes the
 // overlay actually builds. Expected text is assembled from the table itself,
 // so these hold for any wording a translator picks.
+#include "../Overlay/LanguageCodes.h"
 #include "../Overlay/Localization.h"
 #include "../Overlay/LocalizationTables.h"
+#include "../Overlay/SettingsRecordJson.h"
 
 #include <windows.h>
 
@@ -459,6 +461,24 @@ void ItalianLookups(Check check)
 		"joined sentences keep their space");
 	check("i18n it code", LanguageFromCode("it") == Language::Italian &&
 		std::string(LanguageCode(Language::Italian)) == "it", "the saved code round-trips");
+
+	// Every saved code maps to its language and back, an unknown one follows
+	// Windows, and the settings codec keeps exactly the codes listed.
+	{
+		bool mapped = true;
+		for (const char *code : questcal::i18n::LanguageCodes)
+			mapped = mapped && std::string(LanguageCode(LanguageFromCode(code))) == code;
+		auto saved = [](const char *code)
+		{
+			std::istringstream in(std::string("{\"language\":\"") + code + "\"}");
+			questcal::SettingsRecord record;
+			questcal::ParseSettings(record, in);
+			return record.language;
+		};
+		check("i18n saved language codes", mapped && LanguageFromCode("xx") == SystemLanguage() &&
+			saved("ja") == "ja" && saved("xx").empty(),
+			"every listed code round-trips, and the settings keep only listed codes");
+	}
 
 	SetLanguage(Language::English);
 	BeginFrame();

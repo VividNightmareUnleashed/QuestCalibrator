@@ -121,6 +121,7 @@
     <ClInclude Include="CalibrationRun.h" />
     <ClInclude Include="Clocks.h" />
     <ClInclude Include="CollectionSource.h" />
+    <ClInclude Include="LanguageCodes.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
     <ClInclude Include="PersistenceState.h" />

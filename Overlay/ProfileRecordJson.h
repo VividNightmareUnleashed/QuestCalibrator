@@ -286,8 +286,7 @@ inline ProfileParseResult ParseProfileObjectUnchecked(ProfileRecord &profile,
 	// translation, and clearing it without re-solving would misalign the space.
 	double settingsVersionValue = HasTypedValue<double>(obj, "settings_version")
 		? GetDouble(obj.at("settings_version")) : 1.0;
-	if (settingsVersionValue < 1.0 || settingsVersionValue > 100.0 ||
-		std::floor(settingsVersionValue) != settingsVersionValue)
+	if (!IsValidSettingsVersion(settingsVersionValue))
 		throw std::runtime_error("invalid settings_version");
 	legacy.settingsVersion = static_cast<int>(settingsVersionValue);
 	bool hasSolveScale = HasTypedValue<bool>(obj, "solve_scale");
