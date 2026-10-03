@@ -5,7 +5,7 @@
 #include <cmath>
 
 // The scalar field bounds of a persisted profile. Kept free of Eigen, unlike
-// ProfileValidation.h which includes it, so the model checker in
+// ProfileRecord.h which includes it, so the model checker in
 // VirtualQuest/formal/input-validation (which cannot parse Eigen) checks this
 // code as written.
 namespace questcal

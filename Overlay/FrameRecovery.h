@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ProfileValidation.h"
+#include "ProfileRecord.h"
 #include "../common/Protocol.h"
 
 #include <array>

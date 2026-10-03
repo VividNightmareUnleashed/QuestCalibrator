@@ -24,7 +24,7 @@
 #include <vector>
 
 #include "PoseMath.h"
-#include "ProfileValidation.h"
+#include "ProfileRecord.h"
 #include "../common/TransformLimits.h"
 
 namespace questcal

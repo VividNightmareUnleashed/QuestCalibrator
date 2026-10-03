@@ -199,6 +199,9 @@
     <ClInclude Include="..\Overlay\PersistenceState.h" />
     <ClInclude Include="..\Overlay\ProfileScalarValidation.h" />
     <ClInclude Include="..\Overlay\ProfileValidation.h" />
+    <ClInclude Include="..\Overlay\PersistencePlan.h" />
+    <ClInclude Include="..\Overlay\ProfileRecord.h" />
+    <ClInclude Include="..\Overlay\RecordGates.h" />
     <ClInclude Include="..\Overlay\LocalPoseContinuity.h" />
     <ClInclude Include="..\Overlay\RingPoseMath.h" />
     <ClInclude Include="..\Overlay\RingSampleGate.h" />

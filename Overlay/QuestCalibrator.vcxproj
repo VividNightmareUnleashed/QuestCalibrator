@@ -127,6 +127,9 @@
     <ClInclude Include="PersistenceState.h" />
     <ClInclude Include="ProfileScalarValidation.h" />
     <ClInclude Include="ProfileValidation.h" />
+    <ClInclude Include="PersistencePlan.h" />
+    <ClInclude Include="ProfileRecord.h" />
+    <ClInclude Include="RecordGates.h" />
     <ClInclude Include="RingPoseMath.h" />
     <ClInclude Include="RingSampleGate.h" />
     <ClInclude Include="ContinuousAlignment.h" />

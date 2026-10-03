@@ -2,7 +2,7 @@
 
 #include "CalibrationEngine.h"
 #include "LocalPoseContinuity.h"
-#include "ProfileValidation.h"
+#include "ProfileRecord.h"
 #include "RingSampleGate.h"
 
 #include "../common/NumericValidation.h"

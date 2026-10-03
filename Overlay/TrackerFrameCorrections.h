@@ -1,7 +1,7 @@
 #pragma once
 
 #include "LighthouseFrameWatch.h"
-#include "ProfileValidation.h"
+#include "ProfileRecord.h"
 #include "FrameRecovery.h"
 
 #include <array>
