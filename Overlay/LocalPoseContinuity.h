@@ -6,6 +6,8 @@
 // free of OpenVR headers so a header any translation unit includes can use
 // it; RingPoseMath.h carries it for everything that reads the pose ring.
 
+#include "PoseMath.h"
+
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
@@ -26,6 +28,18 @@ struct DriverLocalPoseSample
 	Eigen::Vector3d angularVelocity{ 0, 0, 0 };
 };
 
+// The same sample in the raw universe: worldFromDriver o local pose.
+inline DriverLocalPoseSample ComposeWithWorldFromDriver(const DriverLocalPoseSample &local,
+	const Eigen::Quaterniond &worldFromDriverRotation, const Eigen::Vector3d &worldFromDriverTranslation)
+{
+	DriverLocalPoseSample world = local;
+	world.rotation = (worldFromDriverRotation * local.rotation).normalized();
+	world.position = worldFromDriverRotation * local.position + worldFromDriverTranslation;
+	world.velocity = worldFromDriverRotation * local.velocity;
+	world.angularVelocity = worldFromDriverRotation * local.angularVelocity;
+	return world;
+}
+
 // A worldFromDriver transition describes a real raw-universe rebase only if
 // adjacent driver-local poses remain on their reported trajectory. An inverse
 // local-pose rewrite is bookkeeping that leaves the composed raw pose still.
@@ -41,17 +55,10 @@ inline bool IsDriverLocalPoseContinuous(
 	if (dt <= 0.0 || dt > maxFrameSeconds)
 		return false;
 
-	Eigen::Vector3d predictedPosition = previous.position +
-		0.5 * (previous.velocity + current.velocity) * dt;
-	Eigen::Quaterniond predictedRotation = previous.rotation.normalized();
-	Eigen::Vector3d meanAngularVelocity =
-		0.5 * (previous.angularVelocity + current.angularVelocity);
-	double predictedAngle = meanAngularVelocity.norm() * dt;
-	if (predictedAngle > 1e-12)
-	{
-		predictedRotation = Eigen::Quaterniond(Eigen::AngleAxisd(
-			predictedAngle, meanAngularVelocity.normalized())) * predictedRotation;
-	}
+	const Eigen::Vector3d predictedPosition = questcal::PredictPosition(
+		previous.position, previous.velocity, current.velocity, dt);
+	const Eigen::Quaterniond predictedRotation = questcal::PredictRotation(
+		previous.rotation.normalized(), previous.angularVelocity, current.angularVelocity, dt);
 
 	return (current.position - predictedPosition).norm() <=
 			maxPositionErrorMeters &&

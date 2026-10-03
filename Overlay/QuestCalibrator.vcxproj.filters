@@ -141,6 +141,9 @@
     <ClInclude Include="JumpDetector.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="PoseMath.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="PoseStreamHub.h">
       <Filter>Header Files</Filter>
     </ClInclude>

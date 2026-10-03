@@ -1,10 +1,7 @@
 // PCH-free on purpose: SolverTests compiles this file standalone.
 #include "JumpDetector.h"
 
-// For the shared yaw projection only. Included after JumpDetector.h so the
-// OpenVR header this TU already resolved (openvr_driver.h, via Protocol.h) is
-// the one ChaperoneMath.h sees.
-#include "ChaperoneMath.h"
+#include "PoseMath.h"
 #include "../common/MathConstants.h"
 
 #include <algorithm>
@@ -20,12 +17,14 @@
 namespace
 {
 
-// Heading of a rotation as a scalar, which the heuristic path's line fit needs;
-// taken from questcal::YawOnlyRotation so both paths share one projection.
+// Heading of a rotation, or the turn of a delta, as a scalar: what the
+// heuristic path's line fit and the candidates' comparisons need. Through
+// questcal::YawOnlyRotation, so both paths share one projection. A small
+// delta reads small even when its quaternion came with w < 0; headings are
+// only ever compared through WrapAngle or the fit's unwrapping.
 double YawOf(const Eigen::Quaterniond &q)
 {
-	Eigen::Quaterniond yaw = questcal::YawOnlyRotation(q);
-	return 2.0 * std::atan2(yaw.y(), yaw.w());
+	return questcal::SignedYawRadians(q);
 }
 
 double WrapAngle(double a)
@@ -150,14 +149,14 @@ void JumpDetector::Push(const protocol::DevicePoseSample &s)
 	Eigen::Vector3d driverVelocity(s.velocity[0], s.velocity[1], s.velocity[2]);
 	Eigen::Vector3d driverAngularVelocity(
 		s.angularVelocity[0], s.angularVelocity[1], s.angularVelocity[2]);
+	const ringpose::DriverLocalPoseSample world = RingWorldPose(s, p, t);
 
 	Hist h;
 	h.t = t;
-	h.pos = p.wfdRot * p.drvPos + p.wfdTrans;
-	h.vel = p.wfdRot * driverVelocity;
-	Eigen::Vector3d worldAngVel = p.wfdRot * driverAngularVelocity;
-	h.yaw = YawOf(p.wfdRot * p.drvRot);
-	h.yawRate = worldAngVel.y();
+	h.pos = world.position;
+	h.vel = world.velocity;
+	h.yaw = YawOf(world.rotation);
+	h.yawRate = world.angularVelocity.y();
 
 	bool rebased = false;
 	if (dev.wfdValid)
@@ -275,8 +274,7 @@ void JumpDetector::DetectDiscontinuity(uint32_t id, DeviceState &dev, const Hist
 	if (dt > config.maxFrameGap)
 		return;
 
-	Eigen::Vector3d meanVel = 0.5 * (prev.vel + incoming.vel);
-	double posErr = (incoming.pos - prev.pos - meanVel * dt).norm();
+	double posErr = (incoming.pos - questcal::PredictPosition(prev.pos, prev.vel, incoming.vel, dt)).norm();
 	double yawErr = std::abs(WrapAngle(incoming.yaw - prev.yaw - prev.yawRate * dt));
 
 	if (posErr < config.corroboratedPos && yawErr < config.corroboratedYawRad)

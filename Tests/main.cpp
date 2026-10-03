@@ -74,6 +74,7 @@ void RunHookInjectorScenarios(void (*check)(const char *, bool, const char *));
 void RunUniverseVerdictScenarios(void (*check)(const char *, bool, const char *));
 void RunPoseHubHoleScenarios(void (*check)(const char *, bool, const char *));
 void RunCalibrationSpaceScenarios(void (*check)(const char *, bool, const char *));
+void RunPoseMathScenarios(void (*check)(const char *, bool, const char *));
 void RunIPCServerTransportScenarios(void (*check)(const char *, bool, const char *));
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
 #ifdef QUESTCAL_VIRTUAL_QUEST
@@ -3928,6 +3929,28 @@ void RunJumpScenarios()
 			(deltas[1].worldFromDriverTranslation - trans2).norm() < 1e-12;
 		snprintf(detail, sizeof detail, "deltas %zu endpoints %d", deltas.size(), endpoints);
 		Check("jump: queued exact WFD endpoints", endpoints, detail);
+	}
+
+	// A runtime may send worldFromDriver as -q, the same rotation: the delta is
+	// the same, and its note reads the true turn rather than one near 360 deg.
+	{
+		JumpDetector jd(TestQpcToSeconds);
+		JumpRun r = runWfdRebase(jd, Eigen::Quaterniond(-D_R.coeffs()));
+		int notes = 0, truthful = 0;
+		std::string note;
+		while (jd.PollNote(note))
+		{
+			if (note.find("worldFromDriver rebase") == std::string::npos)
+				continue;
+			++notes;
+			truthful += note.find("yaw +25.00 deg") != std::string::npos ? 1 : 0;
+		}
+		const bool delta = r.deltas == 1 && r.last.exact &&
+			r.last.rotation.angularDistance(D_R) < 1e-9 && r.TransErr(D_T) < 1e-9;
+		snprintf(detail, sizeof detail, "deltas %d exact %d, rebase notes %d, reading +25.00 deg %d",
+			r.deltas, r.last.exact, notes, truthful);
+		Check("jump: a negated worldFromDriver reads its true turn",
+			delta && notes > 0 && truthful == notes, detail);
 	}
 
 	// Raw-pose jump under noise: heuristic path, windowed estimation,
@@ -8544,6 +8567,7 @@ int main(int argc, char **argv)
 	RunPoseHubHoleScenarios(Check);
 	RunIPCServerTransportScenarios(Check);
 	RunCalibrationSpaceScenarios(Check);
+	RunPoseMathScenarios(Check);
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();
 	RunSolverPropertyScenarios(propertyTrials, propertySeed);

@@ -1,5 +1,6 @@
 #include "CalibrationEngine.h"
 #include "EngineConfigValidation.h"
+#include "PoseMath.h"
 #include "RobustPolicy.h"
 #include "SolverQualityPolicy.h"
 #include "../common/MathConstants.h"
@@ -378,10 +379,7 @@ bool JointRefine(const std::vector<AlignedSample> &samples, const EngineConfig &
 		cAccum += v * v.transpose();
 	}
 	d /= n;
-	Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> cEig(cAccum);
-	Eigen::Vector4d cv = cEig.eigenvectors().col(3);
-	Eigen::Quaterniond C(cv(3), cv(0), cv(1), cv(2));
-	C.normalize();
+	Eigen::Quaterniond C = QuaternionMean(cAccum);
 
 	auto robustCost = [&](const Eigen::Matrix3d &Rc, const Eigen::Vector3d &tc,
 	                      const Eigen::Vector3d &dc, const Eigen::Quaterniond &Cc,

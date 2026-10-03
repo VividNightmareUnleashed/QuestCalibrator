@@ -1,4 +1,5 @@
 #include "ContinuousAlignment.h"
+#include "PoseMath.h"
 #include "../common/MathConstants.h"
 
 #include <algorithm>
@@ -30,12 +31,10 @@ bool HasPoseStep(const std::vector<PoseSample> &samples, double begin, double en
 		double dt = next->time - previous.time;
 		if (dt > config.maxInterpolationGap)
 			continue;
-		Eigen::Vector3d positionError = next->pos - previous.pos -
-			0.5 * (previous.vel + next->vel) * dt;
-		Eigen::Vector3d angularStep = 0.5 * (previous.angVel + next->angVel) * dt;
-		Eigen::Quaterniond predicted = previous.rot;
-		if (angularStep.norm() > 1e-12)
-			predicted = Eigen::Quaterniond(Eigen::AngleAxisd(angularStep.norm(), angularStep.normalized())) * predicted;
+		const Eigen::Vector3d positionError =
+			next->pos - PredictPosition(previous.pos, previous.vel, next->vel, dt);
+		const Eigen::Quaterniond predicted =
+			PredictRotation(previous.rot, previous.angVel, next->angVel, dt);
 		if (positionError.norm() > config.jumpGuardPosM ||
 			next->rot.angularDistance(predicted) * RadToDeg > config.jumpGuardRotDeg)
 			return true;
@@ -43,9 +42,7 @@ bool HasPoseStep(const std::vector<PoseSample> &samples, double begin, double en
 	return false;
 }
 
-// Hemisphere-safe quaternion mean (Markley eigenvector method): the maximal
-// eigenvector of M = sum q q^T. The outer product is invariant under q -> -q,
-// so the double cover needs no bookkeeping.
+// The quaternion mean of the kept entries (see QuaternionMean).
 Eigen::Quaterniond EigenvectorMean(const std::vector<Eigen::Quaterniond> &quats,
                                    const std::vector<char> &keep)
 {
@@ -57,11 +54,53 @@ Eigen::Quaterniond EigenvectorMean(const std::vector<Eigen::Quaterniond> &quats,
 		Eigen::Vector4d v = quats[i].coeffs();   // (x, y, z, w)
 		M += v * v.transpose();
 	}
-	Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> es(M);
-	Eigen::Vector4d ev = es.eigenvectors().col(3);   // eigenvalues ascend
-	Eigen::Quaterniond mean(ev(3), ev(0), ev(1), ev(2));
-	mean.normalize();
-	return mean;
+	return QuaternionMean(M);
+}
+
+// Each stride-subsampled target sample under the speed gates, with the
+// reference pose interpolated at its time less `timeOffset` and also under
+// them: the time-aligned pairs the mount derivation and its reading share.
+template <typename Fn>
+void ForEachAlignedPair(const std::vector<PoseSample> &refStream,
+	const std::vector<PoseSample> &targetStream, double timeOffset,
+	const ContinuousAlignment::Config &config, Fn &&fn)
+{
+	const size_t stride = std::max<size_t>(1, targetStream.size() / 600);
+	for (size_t i = 0; i < targetStream.size(); i += stride)
+	{
+		const PoseSample &t = targetStream[i];
+		if (t.angVel.norm() > config.maxAngularSpeed || t.vel.norm() > config.maxLinearSpeed)
+			continue;
+		PoseSample h;
+		if (!CalibrationEngine::InterpolateAt(refStream, t.time - timeOffset,
+			config.maxInterpolationGap, h))
+			continue;
+		if (h.angVel.norm() > config.maxAngularSpeed || h.vel.norm() > config.maxLinearSpeed)
+			continue;
+		fn(h, t);
+	}
+}
+
+// How far `rotation, translation` sits from a calibration, as a left delta D
+// (new = D o old): D's yaw, the tilt left after the yaw, and the step D makes
+// at `head`, which `yawOut` and `stepOut` also carry.
+ContinuousAlignment::Deviation DeviationFrom(const Eigen::Quaterniond &rotation,
+	const Eigen::Vector3d &translation, const Eigen::Quaterniond &calRotation,
+	const Eigen::Vector3d &calTranslation, const Eigen::Vector3d &head,
+	double &yawOut, Eigen::Vector3d &stepOut)
+{
+	const Eigen::Quaterniond rD = (rotation * calRotation.conjugate()).normalized();
+	yawOut = SignedYawRadians(rD);
+	const Eigen::Quaterniond rYaw(Eigen::AngleAxisd(yawOut, Eigen::Vector3d::UnitY()));
+	const Eigen::Vector3d tD = translation - rD * calTranslation;
+	stepOut = rD * head + tD - head;
+
+	ContinuousAlignment::Deviation d;
+	d.valid = true;
+	d.yawDeg = std::abs(yawOut) * RadToDeg;
+	d.tiltDeg = rYaw.angularDistance(rD) * RadToDeg;
+	d.posM = stepOut.norm();
+	return d;
 }
 
 double Median(std::vector<double> values)
@@ -790,13 +829,7 @@ ContinuousAlignment::Deviation ContinuousAlignment::MeasureDeviation(
 {
 	// Deviation of the windowed estimate from the current calibration, as a
 	// left delta D: newCal = D o oldCal.
-	Eigen::Quaterniond rD = (est.rot * calRotation.conjugate()).normalized();
-	if (rD.w() < 0.0)
-		rD.coeffs() = -rD.coeffs();
-	yawAngleOut = 2.0 * std::atan2(rD.y(), rD.w());
-	Eigen::Quaterniond rYaw(Eigen::AngleAxisd(yawAngleOut, Eigen::Vector3d::UnitY()));
-	Eigen::Vector3d tD = est.trans - rD * calTranslationMeters;
-
+	//
 	// Effective displacement at the user's head: the honest magnitude of the
 	// deviation (a yaw delta far from the origin has a huge raw translation).
 	// Every observation maps the tracker exactly onto the head, so the
@@ -806,14 +839,8 @@ ContinuousAlignment::Deviation ContinuousAlignment::MeasureDeviation(
 	// off). Decide runs only on a fresh observation (< coastGapSeconds old,
 	// |time offset| <= 1 s), so the newest reference sample is still retained.
 	headPosOut = refWindow.back().pos;
-	headStepOut = rD * headPosOut + tD - headPosOut;
-
-	Deviation d;
-	d.valid = true;
-	d.yawDeg = std::abs(yawAngleOut) * RadToDeg;
-	d.tiltDeg = rYaw.angularDistance(rD) * RadToDeg;
-	d.posM = headStepOut.norm();
-	return d;
+	return DeviationFrom(est.rot, est.trans, calRotation, calTranslationMeters,
+		headPosOut, yawAngleOut, headStepOut);
 }
 
 // One owner for the freeze hysteresis' paired sentinels: entering either end
@@ -1074,26 +1101,13 @@ bool ContinuousAlignment::DeriveMountExtrinsic(const std::vector<PoseSample> &re
 	// are redundant for a constant.
 	std::vector<Eigen::Quaterniond> quats;
 	std::vector<Eigen::Vector3d> vecs;
-	size_t stride = std::max<size_t>(1, targetStream.size() / 600);
-	for (size_t i = 0; i < targetStream.size(); i += stride)
-	{
-		const PoseSample &t = targetStream[i];
-		if (t.angVel.norm() > config.maxAngularSpeed || t.vel.norm() > config.maxLinearSpeed)
-			continue;
-
-		PoseSample h;
-		if (!CalibrationEngine::InterpolateAt(refStream, t.time - calibration.timeOffset,
-			config.maxInterpolationGap, h))
-			continue;
-		if (h.angVel.norm() > config.maxAngularSpeed || h.vel.norm() > config.maxLinearSpeed)
-			continue;
-
-		Eigen::Quaterniond qE = (h.rot.conjugate() * (calibration.rotation * t.rot)).normalized();
-		Eigen::Vector3d pE = h.rot.conjugate()
-			* (calibration.rotation * (calibration.scale * t.pos) + calibration.translation - h.pos);
-		quats.push_back(qE);
-		vecs.push_back(pE);
-	}
+	ForEachAlignedPair(refStream, targetStream, calibration.timeOffset, config,
+		[&](const PoseSample &h, const PoseSample &t)
+		{
+			quats.push_back((h.rot.conjugate() * (calibration.rotation * t.rot)).normalized());
+			vecs.push_back(h.rot.conjugate() * (calibration.rotation * (calibration.scale * t.pos) +
+				calibration.translation - h.pos));
+		});
 
 	RobustStats stats;
 	if (!RobustAverage(quats, vecs, 0.1, 0.005, stats))
@@ -1132,21 +1146,13 @@ ContinuousAlignment::MountReading ContinuousAlignment::ReadWithMount(
 	// (FormObservations), over the pairs DeriveMountExtrinsic would use.
 	std::vector<Eigen::Quaterniond> quats;
 	std::vector<Eigen::Vector3d> vecs;
-	size_t stride = std::max<size_t>(1, targetStream.size() / 600);
-	for (size_t i = 0; i < targetStream.size(); i += stride)
-	{
-		const PoseSample &t = targetStream[i];
-		if (t.angVel.norm() > config.maxAngularSpeed || t.vel.norm() > config.maxLinearSpeed)
-			continue;
-		PoseSample h;
-		if (!CalibrationEngine::InterpolateAt(refStream, t.time - timeOffset, config.maxInterpolationGap, h))
-			continue;
-		if (h.angVel.norm() > config.maxAngularSpeed || h.vel.norm() > config.maxLinearSpeed)
-			continue;
-		const Eigen::Quaterniond qObs = (h.rot * mount.rot * t.rot.conjugate()).normalized();
-		quats.push_back(qObs);
-		vecs.push_back((h.rot * mount.pos + h.pos) - qObs * (scale * t.pos));
-	}
+	ForEachAlignedPair(refStream, targetStream, timeOffset, config,
+		[&](const PoseSample &h, const PoseSample &t)
+		{
+			const Eigen::Quaterniond qObs = (h.rot * mount.rot * t.rot.conjugate()).normalized();
+			quats.push_back(qObs);
+			vecs.push_back((h.rot * mount.pos + h.pos) - qObs * (scale * t.pos));
+		});
 	out.observations = quats.size();
 	RobustStats stats;
 	if (quats.size() < config.minObsForEstimate || !RobustAverage(quats, vecs, 0.3, 0.01, stats))
@@ -1164,16 +1170,10 @@ ContinuousAlignment::MountReading ContinuousAlignment::ReadWithMount(
 	for (const auto &s : refStream)
 		head += s.pos;
 	head /= static_cast<double>(refStream.size());
-	Eigen::Quaterniond rD = (out.rotation * solvedRotation.conjugate()).normalized();
-	if (rD.w() < 0.0)
-		rD.coeffs() = -rD.coeffs();
-	const double yaw = 2.0 * std::atan2(rD.y(), rD.w());
-	const Eigen::Quaterniond rYaw(Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitY()));
-	const Eigen::Vector3d tD = out.translation - rD * solvedTranslation;
-	out.fromSolve.valid = true;
-	out.fromSolve.yawDeg = std::abs(yaw) * RadToDeg;
-	out.fromSolve.tiltDeg = rYaw.angularDistance(rD) * RadToDeg;
-	out.fromSolve.posM = (rD * head + tD - head).norm();
+	double yaw = 0.0;
+	Eigen::Vector3d step;
+	out.fromSolve = DeviationFrom(out.rotation, out.translation, solvedRotation,
+		solvedTranslation, head, yaw, step);
 
 	out.adopt = out.scatterRotDeg <= config.extrinsicMaxRotRmsDeg &&
 		out.scatterPosM <= config.maxScatterPosM &&

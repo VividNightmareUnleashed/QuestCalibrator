@@ -727,10 +727,7 @@ static void LighthouseTick(CalibrationContext &ctx, double time)
 static bool DescribeFrameMove(const LighthouseFrameWatch::Move &move, double &yawDeg, double &tiltDeg)
 {
 	double tilt = 0.0;
-	Eigen::Quaterniond yaw = questcal::YawOnlyRotation(move.rotation, &tilt);
-	if (yaw.w() < 0.0)
-		yaw.coeffs() = -yaw.coeffs();
-	yawDeg = std::abs(2.0 * std::atan2(yaw.y(), yaw.w())) * 180.0 / questcal::Pi;
+	yawDeg = std::abs(questcal::SignedYawRadians(move.rotation, &tilt)) * 180.0 / questcal::Pi;
 	tiltDeg = tilt * 180.0 / questcal::Pi;
 	return move.shiftM >= 0.01 || yawDeg >= 0.1 || tiltDeg >= 0.1;
 }
@@ -1439,7 +1436,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 			ctx.autoCorrectionsApplied++;
 			char buf[128];
 			snprintf(buf, sizeof buf, "correction applied: yaw %.3f deg, position %.1f mm",
-				2.0 * std::asin(std::min(1.0, std::abs(delta.rotation.y()))) * 180.0 / questcal::Pi,
+				std::abs(questcal::SignedYawRadians(delta.rotation)) * 180.0 / questcal::Pi,
 				delta.translation.norm() * 1000.0);
 			ctx.Diag(buf);
 		}

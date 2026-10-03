@@ -98,6 +98,23 @@ inline RingSampleParts UnpackRingSample(const protocol::DevicePoseSample &s)
 	};
 }
 
+// A ring sample's pose as the driver reported it, before worldFromDriver.
+inline ringpose::DriverLocalPoseSample DriverLocalPose(const protocol::DevicePoseSample &s,
+	const RingSampleParts &p, double time)
+{
+	return { time, p.drvRot, p.drvPos,
+		Eigen::Vector3d(s.velocity[0], s.velocity[1], s.velocity[2]),
+		Eigen::Vector3d(s.angularVelocity[0], s.angularVelocity[1], s.angularVelocity[2]) };
+}
+
+// The same pose in the raw universe (worldFromDriver o driver pose), for the
+// readers that take its parts without TryComposeRingSample's trust checks.
+inline ringpose::DriverLocalPoseSample RingWorldPose(const protocol::DevicePoseSample &s,
+	const RingSampleParts &p, double time)
+{
+	return ringpose::ComposeWithWorldFromDriver(DriverLocalPose(s, p, time), p.wfdRot, p.wfdTrans);
+}
+
 // A misbehaving driver can publish poseIsValid=true with field values that pass
 // the per-field ring checks yet compose into something unusable; gate the
 // composed pose too so no consumer (solver, continuous alignment, drift
@@ -125,16 +142,16 @@ inline bool TryComposeRingSample(const protocol::DevicePoseSample &s,
 	if (!IsTrustedRingSample(s, qpcToSeconds))
 		return false;
 
-	RingSampleParts p = UnpackRingSample(s);
-	questcal::PoseSample composed;
 	// poseTimeOffset is the driver's own estimate of how far the pose's validity
 	// time differs from the submit time; folding it in tightens the alignment.
-	composed.time = RingSampleTime(s, qpcToSeconds);
-	composed.rot = (p.wfdRot * p.drvRot).normalized();
-	composed.pos = p.wfdRot * p.drvPos + p.wfdTrans;
-	composed.vel = p.wfdRot * Eigen::Vector3d(s.velocity[0], s.velocity[1], s.velocity[2]);
-	composed.angVel = p.wfdRot * Eigen::Vector3d(
-		s.angularVelocity[0], s.angularVelocity[1], s.angularVelocity[2]);
+	const ringpose::DriverLocalPoseSample world =
+		RingWorldPose(s, UnpackRingSample(s), RingSampleTime(s, qpcToSeconds));
+	questcal::PoseSample composed;
+	composed.time = world.time;
+	composed.rot = world.rotation;
+	composed.pos = world.position;
+	composed.vel = world.velocity;
+	composed.angVel = world.angularVelocity;
 
 	if (!IsUsableComposedSample(composed))
 		return false;

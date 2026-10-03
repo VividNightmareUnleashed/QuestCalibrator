@@ -111,20 +111,6 @@ struct HmdWorldTransition
 SpaceState Space;
 constexpr float ChaperoneCompareTolerance = 0.002f;
 
-// The same sample expressed in the raw universe: continuity of this is what
-// tells a moved world from a re-expressed local pose.
-ringpose::DriverLocalPoseSample ComposeWithWorldFromDriver(
-	const ringpose::DriverLocalPoseSample &local, const Eigen::Quaterniond &rotation,
-	const Eigen::Vector3d &translation)
-{
-	ringpose::DriverLocalPoseSample world = local;
-	world.rotation = rotation * local.rotation;
-	world.position = rotation * local.position + translation;
-	world.velocity = rotation * local.velocity;
-	world.angularVelocity = rotation * local.angularVelocity;
-	return world;
-}
-
 bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 	HmdWorldTransition &transition)
 {
@@ -138,15 +124,7 @@ bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 		return false;
 
 	const RingSampleParts parts = UnpackRingSample(sample);
-	ringpose::DriverLocalPoseSample localPose;
-	localPose.time = sampleTime;
-	localPose.rotation = parts.drvRot;
-	localPose.position = parts.drvPos;
-	localPose.velocity = Eigen::Vector3d(
-		sample.velocity[0], sample.velocity[1], sample.velocity[2]);
-	localPose.angularVelocity = Eigen::Vector3d(
-		sample.angularVelocity[0], sample.angularVelocity[1],
-		sample.angularVelocity[2]);
+	const ringpose::DriverLocalPoseSample localPose = DriverLocalPose(sample, parts, sampleTime);
 
 	if (Space.hmd.HasEndpoint() && questcal::WorldFromDriverChanged(
 		Space.hmd.rotation, Space.hmd.translation, parts.wfdRot, parts.wfdTrans))
@@ -158,11 +136,13 @@ bool CacheHmdWorldFromDriver(const protocol::DevicePoseSample &sample,
 		transition.currentTranslation = parts.wfdTrans;
 		transition.localPoseContinuous = Space.hmd.IsUsable() &&
 			ringpose::IsDriverLocalPoseContinuous(Space.hmd.localPose, localPose);
+		// Continuity of the raw-universe pose is what tells a moved world from
+		// a re-expressed local pose.
 		transition.composedPoseContinuous = Space.hmd.IsUsable() &&
 			ringpose::IsDriverLocalPoseContinuous(
-				ComposeWithWorldFromDriver(Space.hmd.localPose, Space.hmd.rotation,
+				ringpose::ComposeWithWorldFromDriver(Space.hmd.localPose, Space.hmd.rotation,
 					Space.hmd.translation),
-				ComposeWithWorldFromDriver(localPose, parts.wfdRot, parts.wfdTrans));
+				ringpose::ComposeWithWorldFromDriver(localPose, parts.wfdRot, parts.wfdTrans));
 		Space.verdict.NoteTransition(sampleTime,
 			{ transition.previousRotation, transition.previousTranslation },
 			{ transition.currentRotation, transition.currentTranslation },
@@ -709,8 +689,7 @@ bool ApplyUniverseDelta(CalibrationContext &ctx,
 	Space.verdict.NoteCompensation(delta.time);
 
 	ctx.jumpsCompensated++;
-	const double yawDegrees = 2.0 *
-		std::atan2(delta.rotation.y(), delta.rotation.w()) * 180.0 / questcal::Pi;
+	const double yawDegrees = questcal::SignedYawRadians(delta.rotation) * 180.0 / questcal::Pi;
 	// A jump seconds after the reference stream came back is the headset's
 	// wake sequence as often as a moved universe (see recentResumeSeconds),
 	// so the log line carries the age for whoever reads it later.

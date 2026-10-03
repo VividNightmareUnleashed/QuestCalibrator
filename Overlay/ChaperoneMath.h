@@ -14,8 +14,8 @@
 #include <Eigen/Geometry>
 
 // The flattened OpenVR headers both define the vr types but cannot coexist in
-// one TU. The harness and JumpDetector.cpp (PCH-free, in both builds) reach
-// openvr_driver.h through Protocol.h, so this include must stay conditional.
+// one TU. The harness (PCH-free) reaches openvr_driver.h through Protocol.h,
+// so this include must stay conditional.
 #if !defined(_OPENVR_API) && !defined(_OPENVR_DRIVER_API)
 #include <openvr.h>
 #endif
@@ -23,33 +23,12 @@
 #include <cmath>
 #include <vector>
 
+#include "PoseMath.h"
 #include "ProfileValidation.h"
 #include "../common/TransformLimits.h"
 
 namespace questcal
 {
-
-// The single yaw projection behind every raw-universe delta in the overlay, so
-// the jump path's applied delta and the chaperone re-anchor are the same
-// transform. A recenter preserves gravity, so only the twist around +Y may be
-// applied; worldFromDriver's tiny tilt residual would move gravity itself.
-// `unitRotation` must be normalized; the optional residual (the discarded tilt)
-// is diagnostic only. Normalizing the twist directly keeps x and z exactly
-// zero, and a rotation of almost exactly 180 degrees about a horizontal axis,
-// which has no recoverable heading, answers identity.
-inline Eigen::Quaterniond YawOnlyRotation(
-	const Eigen::Quaterniond &unitRotation, double *residualTiltRadians = nullptr)
-{
-	Eigen::Quaterniond yaw(unitRotation.w(), 0.0, unitRotation.y(), 0.0);
-	if (yaw.squaredNorm() <= 1e-12)
-		yaw = Eigen::Quaterniond::Identity();
-	else
-		yaw.normalize();
-
-	if (residualTiltRadians)
-		*residualTiltRadians = yaw.angularDistance(unitRotation);
-	return yaw;
-}
 
 // The gravity-preserving (yaw + translation) raw-universe delta between two
 // worldFromDriver transforms, which come from trusted ring samples or a
@@ -68,16 +47,6 @@ inline bool WorldFromDriverDelta(
 	return IsBoundedVector(deltaTranslation, protocol::limits::MaxAbsTranslationMeters);
 }
 
-// Inputs come from trusted ring samples or values validated when loaded.
-inline bool WorldFromDriverChanged(
-	const Eigen::Quaterniond &oldRotation, const Eigen::Vector3d &oldTranslation,
-	const Eigen::Quaterniond &newRotation, const Eigen::Vector3d &newTranslation,
-	double rotationEpsilonRadians = 1e-5, double translationEpsilonMeters = 1e-4)
-{
-	return oldRotation.normalized().angularDistance(newRotation.normalized()) >
-			rotationEpsilonRadians ||
-		(newTranslation - oldTranslation).norm() > translationEpsilonMeters;
-}
 
 // Left-compose a rigid universe delta (R, T) onto a standing-center pose:
 // out = [R|T] * m, i.e. the same physical pose expressed in the post-jump

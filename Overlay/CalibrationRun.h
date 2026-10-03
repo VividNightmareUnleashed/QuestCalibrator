@@ -64,8 +64,9 @@ struct CalibrationRun
 			Verdict verdict = Verdict::Same;
 			if (valid && WorldFromDriverChanged(wfdRot, wfdTrans, sampleWfdRot, sampleWfdTrans))
 			{
-				const bool worldKept = Kept(World(wfdRot, wfdTrans, local),
-					World(sampleWfdRot, sampleWfdTrans, sample));
+				const bool worldKept = Kept(
+					ringpose::ComposeWithWorldFromDriver(local, wfdRot, wfdTrans),
+					ringpose::ComposeWithWorldFromDriver(sample, sampleWfdRot, sampleWfdTrans));
 				if (!worldKept)
 				{
 					if (!Kept(local, sample))
@@ -105,12 +106,6 @@ struct CalibrationRun
 		}
 
 	private:
-		static ringpose::DriverLocalPoseSample World(const Eigen::Quaterniond &r, const Eigen::Vector3d &t,
-			const ringpose::DriverLocalPoseSample &l)
-		{
-			return { l.time, (r * l.rotation).normalized(), r * l.position + t, r * l.velocity, r * l.angularVelocity };
-		}
-
 		// On its trajectory, or unchanged for a device at rest (1 mm,
 		// 0.05 deg, as LighthouseFrameWatch holds it).
 		static bool Kept(const ringpose::DriverLocalPoseSample &was, const ringpose::DriverLocalPoseSample &is)

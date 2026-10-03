@@ -116,6 +116,7 @@
     <ClCompile Include="UniverseVerdictTests.cpp" />
     <ClCompile Include="PoseHubHoleTests.cpp" />
     <ClCompile Include="CalibrationSpaceTests.cpp" />
+    <ClCompile Include="PoseMathTests.cpp" />
     <ClCompile Include="OverlayStubs.cpp" />
     <ClCompile Include="IPCServerTransportTests.cpp" />
     <ClCompile Include="TrackingRecoveryTests.cpp" />
@@ -175,6 +176,7 @@
     <ClInclude Include="..\Driver\ProtocolValidation.h" />
     <ClInclude Include="..\Driver\IPCProtocolGate.h" />
     <ClInclude Include="..\common\MathConstants.h" />
+    <ClInclude Include="..\Overlay\PoseMath.h" />
     <ClInclude Include="..\common\NumericValidation.h" />
     <ClInclude Include="..\common\PoseChannel.h" />
     <ClInclude Include="..\common\TransformLimits.h" />

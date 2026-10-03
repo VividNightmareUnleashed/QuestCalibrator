@@ -146,6 +146,7 @@
     <ClInclude Include="IPCClient.h" />
     <ClInclude Include="JsonNesting.h" />
     <ClInclude Include="JumpDetector.h" />
+    <ClInclude Include="PoseMath.h" />
     <ClInclude Include="PoseStreamHub.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />

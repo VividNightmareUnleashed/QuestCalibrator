@@ -4,6 +4,7 @@
 // has, and ChaperoneMath.h adds none once one is in.
 #include "RingPoseMath.h"
 #include "ChaperoneMath.h"
+#include "../common/MathConstants.h"
 
 #include <algorithm>
 #include <cmath>
@@ -417,10 +418,10 @@ private:
 		const bool localKept = ringpose::IsDriverLocalPoseContinuous(localWas, localIs) ||
 			Unchanged(was.drvRot, was.drvPos, is.drvRot, is.drvPos);
 
-		ringpose::DriverLocalPoseSample worldWas{ was.time, (was.wfdRot * was.drvRot).normalized(),
-			was.wfdRot * was.drvPos + was.wfdTrans, was.wfdRot * was.vel, was.wfdRot * was.angVel };
-		ringpose::DriverLocalPoseSample worldIs{ is.time, (is.wfdRot * is.drvRot).normalized(),
-			is.wfdRot * is.drvPos + is.wfdTrans, is.wfdRot * is.vel, is.wfdRot * is.angVel };
+		const ringpose::DriverLocalPoseSample worldWas =
+			ringpose::ComposeWithWorldFromDriver(localWas, was.wfdRot, was.wfdTrans);
+		const ringpose::DriverLocalPoseSample worldIs =
+			ringpose::ComposeWithWorldFromDriver(localIs, is.wfdRot, is.wfdTrans);
 		const bool worldKept = ringpose::IsDriverLocalPoseContinuous(worldWas, worldIs) ||
 			Unchanged(worldWas.rotation, worldWas.position, worldIs.rotation, worldIs.position);
 
@@ -476,11 +477,8 @@ private:
 			r.rotation = reference->rotation;
 			r.translation = reference->translation;
 			double tilt = 0.0;
-			Eigen::Quaterniond yaw = questcal::YawOnlyRotation(r.rotation, &tilt);
-			if (yaw.w() < 0.0)
-				yaw.coeffs() = -yaw.coeffs();
-			r.yawDeg = std::abs(2.0 * std::atan2(yaw.y(), yaw.w())) * 180.0 / 3.14159265358979323846;
-			r.tiltDeg = tilt * 180.0 / 3.14159265358979323846;
+			r.yawDeg = std::abs(questcal::SignedYawRadians(r.rotation, &tilt)) * 180.0 / questcal::Pi;
+			r.tiltDeg = tilt * 180.0 / questcal::Pi;
 			for (const auto &c : open)
 			{
 				if (c.kind != Kind::Moved)

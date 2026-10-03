@@ -1,5 +1,6 @@
 // PCH-free on purpose: SolverTests compiles this file standalone.
 #include "DriftMonitor.h"
+#include "PoseMath.h"
 #include "RingPoseMath.h"
 
 #include <cmath>
@@ -23,10 +24,9 @@ void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 		haveLast = false;
 	}
 
-	RingSampleParts p = UnpackRingSample(s);
-	Eigen::Vector3d pos = linearScale * (p.wfdRot * p.drvPos + p.wfdTrans);
-	Eigen::Vector3d velocity = linearScale * (p.wfdRot * Eigen::Vector3d(
-		s.velocity[0], s.velocity[1], s.velocity[2]));
+	const ringpose::DriverLocalPoseSample world = RingWorldPose(s, UnpackRingSample(s), t);
+	Eigen::Vector3d pos = linearScale * world.position;
+	Eigen::Vector3d velocity = linearScale * world.velocity;
 
 	// Discontinuous-loss recovery: only short absences count, and only when
 	// the device reappears far from where it vanished.
@@ -39,8 +39,8 @@ void DriftMonitor::Push(const protocol::DevicePoseSample &s, double linearScale)
 			// Ordinary motion through a short occlusion is not a re-localization.
 			// Compare recovery against a trapezoidal velocity prediction so only
 			// unexplained displacement contributes drift evidence.
-			Eigen::Vector3d predicted = dev.lastValid.pos +
-				0.5 * (dev.lastValid.vel + velocity) * gap;
+			Eigen::Vector3d predicted = questcal::PredictPosition(
+				dev.lastValid.pos, dev.lastValid.vel, velocity, gap);
 			double residual = (pos - predicted).norm();
 			if (gap <= config.maxLossGap && residual > config.lossJump)
 				events.push_back({ Event::DiscontinuousLoss, s.deviceId, residual, t });
