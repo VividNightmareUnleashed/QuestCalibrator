@@ -779,6 +779,13 @@ void RunDriverProtocolValidationScenarios()
 		return setterAccepts ? protocol::RejectReason::None : protocol::RejectReason::StaleSession;
 	};
 	sink.poseHookMask = [] { return protocol::PoseHook006; };
+	sink.hookStatus = []
+	{
+		protocol::HookStatus status;
+		status.hookedDevices = 0x5;
+		status.reentrantPoseUpdates = 2;
+		return status;
+	};
 	server.SetSinkForTest(sink);
 
 	questcal::ipc::ConnectionState dispatchConn;
@@ -796,7 +803,8 @@ void RunDriverProtocolValidationScenarios()
 	protocol::Request dispatchHandshake(protocol::RequestHandshake);
 	server.DispatchForTest(dispatchHandshake, dispatched, dispatchConn);
 	bool dispatchHandshakeOk = dispatched.type == protocol::ResponseHandshake &&
-		dispatched.poseHookMask == protocol::PoseHook006;
+		dispatched.poseHookMask == protocol::PoseHook006 &&
+		dispatched.hookStatus.hookedDevices == 0x5 && dispatched.hookStatus.reentrantPoseUpdates == 2;
 
 	// Each mutation reaches its own setter and only its own.
 	server.DispatchForTest(transformReq, dispatched, dispatchConn);
@@ -1324,6 +1332,8 @@ void RunDriverWorkerScenario()
 		result.response = protocol::Response(request.type == protocol::RequestHandshake
 			? protocol::ResponseHandshake : protocol::ResponseSuccess);
 		result.response.poseHookMask = protocol::PoseHook006;
+		if (request.type == protocol::RequestHandshake)
+			result.response.hookStatus.hookedDevices = 0x12;
 		return result;
 	});
 
@@ -1342,7 +1352,8 @@ void RunDriverWorkerScenario()
 	questcal::DriverCompletion completion;
 	const bool gotLatest = AwaitCompletion(worker, deviceChanged.sequence, completion, 1000, 1) &&
 		completion.result.synchronized &&
-		completion.result.poseHookMask == protocol::PoseHook006;
+		completion.result.poseHookMask == protocol::PoseHook006 &&
+		completion.result.hookStatus.hookedDevices == 0x12;
 
 	const uint64_t neutralization = worker.Neutralize({ 7, 9 }, 1.0);
 	job.request.desired.scale = 1.02;

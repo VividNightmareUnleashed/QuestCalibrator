@@ -66,6 +66,7 @@ vr::EVRInitError ServerTrackedDeviceProvider::Init(vr::IVRDriverContext *pDriver
 		return reason;
 	};
 	sink.poseHookMask = [] { return PoseUpdateHookMask(); };
+	sink.hookStatus = [] { return PoseHookStatus(); };
 	sink.getRuntimeState = [this](protocol::Response &response) { GetRuntimeState(response); };
 	if (!server.Run(std::move(sink)))
 	{

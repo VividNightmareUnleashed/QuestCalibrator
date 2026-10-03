@@ -563,6 +563,19 @@ void BuildMainScreen()
 						CalCtx.driverPoseHookMask & protocol::PoseHook006 ? "active" : "missing");
 				warn.push_back({ IconInfo, Pal::Warn, why });
 			}
+			if (CalCtx.enabled && CalCtx.hookBypassingDevices != 0)
+			{
+				std::string why = "Calibration can't move some target devices, because their tracking doesn't pass through QuestCalibrator's SteamVR driver.";
+				if (CalCtx.uiAdvanced)
+				{
+					std::string ids;
+					for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+						if (CalCtx.hookBypassingDevices & (uint64_t{ 1 } << id))
+							ids += (ids.empty() ? "" : ", ") + std::to_string(id);
+					why += FormatString(" (OpenVR devices %s)", ids.c_str());
+				}
+				warn.push_back({ IconInfo, Pal::Warn, why });
+			}
 			const questcal::update::Snapshot update =
 				questcal::update::AppUpdater.GetSnapshot();
 			if (update.state == questcal::update::State::Ready)

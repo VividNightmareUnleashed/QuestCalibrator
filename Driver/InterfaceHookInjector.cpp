@@ -25,6 +25,15 @@ std::atomic<bool> PoseHook005Ready{ false };
 std::atomic<bool> PoseHook006Ready{ false };
 // Pose callbacks inside the driver, which teardown waits to leave.
 questcal::hooks::CallbackActivity ActiveCallbacks;
+// What the pose hook has seen since InjectHooks (protocol::HookStatus).
+std::atomic<uint64_t> HookedDevices{ 0 };
+std::atomic<uint32_t> MismatchedPoseUpdates{ 0 };
+std::atomic<uint32_t> ReentrantPoseUpdates{ 0 };
+// The device whose pose this thread is forwarding through a pose detour. A
+// host whose TrackedDevicePoseUpdated calls another hooked version (005
+// forwarding to 006, say) would otherwise transform the pose twice and publish
+// the transformed one as raw.
+thread_local uint32_t ForwardingDevice = vr::k_unTrackedDeviceIndexInvalid;
 std::mutex HookSetupMutex;
 bool MinHookInitialized = false;   // protected by HookSetupMutex
 bool HooksInstalled = false;       // protected by HookSetupMutex
@@ -69,15 +78,39 @@ void ForwardPoseUpdate(PoseUpdateHook &hook, void *_this,
 	// so it is checked all the same.
 	auto original = hook.originalFunc.load(std::memory_order_acquire);
 
+	// The outer detour already handled this device's pose.
+	if (ForwardingDevice == unWhichDevice)
+	{
+		ReentrantPoseUpdates.fetch_add(1, std::memory_order_relaxed);
+		if (original)
+			original(_this, unWhichDevice, newPose, unPoseStructSize);
+		return;
+	}
+	struct Forwarding
+	{
+		uint32_t outer;
+		~Forwarding() { ForwardingDevice = outer; }
+	} forwarding{ ForwardingDevice };
+	ForwardingDevice = unWhichDevice;
+
 	// Our copy is sized by the vendored DriverPose_t, so a caller passing a
 	// different layout gets its own object forwarded untouched: no ring publish,
 	// no transform. A layout change then degrades to "calibration not applied",
 	// never to a corrupt device. No logging: stdio must not run on a pose thread.
 	if (unPoseStructSize != sizeof(vr::DriverPose_t))
 	{
+		MismatchedPoseUpdates.fetch_add(1, std::memory_order_relaxed);
 		if (original)
 			original(_this, unWhichDevice, newPose, unPoseStructSize);
 		return;
+	}
+
+	if (unWhichDevice < vr::k_unMaxTrackedDeviceCount)
+	{
+		// A load first, so after a device's first pose this is all it costs.
+		const uint64_t bit = uint64_t{ 1 } << unWhichDevice;
+		if ((HookedDevices.load(std::memory_order_relaxed) & bit) == 0)
+			HookedDevices.fetch_or(bit, std::memory_order_relaxed);
 	}
 
 	auto pose = newPose;
@@ -217,6 +250,9 @@ bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDri
 		LOG("InjectHooks: hooks are already installed");
 		return false;
 	}
+	HookedDevices.store(0, std::memory_order_relaxed);
+	MismatchedPoseUpdates.store(0, std::memory_order_relaxed);
+	ReentrantPoseUpdates.store(0, std::memory_order_relaxed);
 	// Once per process; a later Init enables the hooks the first one created.
 	if (!MinHookInitialized)
 	{
@@ -260,6 +296,15 @@ uint32_t PoseUpdateHookMask()
 	if (PoseHook006Ready.load(std::memory_order_acquire))
 		mask |= protocol::PoseHook006;
 	return mask;
+}
+
+protocol::HookStatus PoseHookStatus()
+{
+	protocol::HookStatus status;
+	status.hookedDevices = HookedDevices.load(std::memory_order_relaxed);
+	status.mismatchedPoseUpdates = MismatchedPoseUpdates.load(std::memory_order_relaxed);
+	status.reentrantPoseUpdates = ReentrantPoseUpdates.load(std::memory_order_relaxed);
+	return status;
 }
 
 bool DisableHooks()

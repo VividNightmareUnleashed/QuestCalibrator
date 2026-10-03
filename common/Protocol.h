@@ -18,8 +18,8 @@ namespace protocol
 	// The handshake requires exact version equality, so every bump costs users a
 	// driver reinstall and a SteamVR restart. v11 starts every connection with
 	// the version probe (VersionProbe.h), so the two ends of a partial update
-	// report a version mismatch instead of a frame of the wrong size, and says
-	// why a request was refused.
+	// report a version mismatch instead of a frame of the wrong size, says why a
+	// request was refused, and reports which devices reach the pose hook.
 	const uint32_t Version = 11;
 	const uint32_t PoseHook005 = 1u << 0;
 	const uint32_t PoseHook006 = 1u << 1;
@@ -217,6 +217,21 @@ namespace protocol
 		double angularVelocity[3] = { 0.0, 0.0, 0.0 };        // rad/s
 	};
 
+	// What the pose hook has seen since the driver session began, so the app can
+	// tell a device whose poses go around the hook (another driver resolved its
+	// host interface first, or a host version this build does not hook).
+	struct HookStatus
+	{
+		// Devices whose poses passed through the hook, bit per OpenVR id.
+		uint64_t hookedDevices = 0;
+		// Pose updates forwarded untouched because their DriverPose_t size is
+		// not this build's.
+		uint32_t mismatchedPoseUpdates = 0;
+		// Pose updates forwarded untouched because they re-entered the hook for
+		// the same device from inside the host call it forwards to.
+		uint32_t reentrantPoseUpdates = 0;
+	};
+
 	// Fixed-size wire messages; the whole struct crosses the pipe via sizeof.
 	// Every field has an initializer (padding is not scrubbed; the pipe never
 	// leaves this machine).
@@ -239,6 +254,8 @@ namespace protocol
 		RejectReason rejectReason = RejectReason::None;
 		uint64_t driverSessionId = 0;
 		SetRuntimeState runtimeState;
+		// Filled in a handshake's response.
+		HookStatus hookStatus;
 
 		Response() = default;
 		explicit Response(ResponseType type) : type(type) { }
@@ -254,8 +271,9 @@ namespace protocol
 	static_assert(sizeof(SetAlignmentField) == 664, "SetAlignmentField wire layout changed");
 	static_assert(sizeof(FrameCorrection) == 56, "FrameCorrection wire layout changed");
 	static_assert(sizeof(SetRuntimeState) == 4880, "SetRuntimeState wire layout changed");
+	static_assert(sizeof(HookStatus) == 16, "HookStatus wire layout changed");
 	static_assert(sizeof(Request) == 4976, "Request wire layout changed");
-	static_assert(sizeof(Response) == 4904, "Response wire layout changed");
+	static_assert(sizeof(Response) == 4920, "Response wire layout changed");
 	// The fields each message starts with.
 	static_assert(offsetof(Request, protocol) == 0 && offsetof(Request, type) == 4,
 		"Request header layout changed");

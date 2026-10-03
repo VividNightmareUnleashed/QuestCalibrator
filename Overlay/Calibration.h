@@ -279,6 +279,14 @@ struct CalibrationContext : CalibrationProfileState
 	// runtime poses, so the UI reports it as a first-class status.
 	bool poseRingOpen = false;
 	uint32_t driverPoseHookMask = 0;
+	// What the driver's pose hook has seen this SteamVR session
+	// (protocol::HookStatus), from the last synchronized state.
+	uint64_t driverHookedDevices = 0;
+	uint32_t driverMismatchedPoseUpdates = 0;
+	uint32_t driverReentrantPoseUpdates = 0;
+	// Target devices SteamVR tracks whose poses have not reached the hook over
+	// several synchronizations: calibration cannot move them.
+	uint64_t hookBypassingDevices = 0;
 
 	// Runtime alignment monitoring. The device masks mark reference/target
 	// system devices (refreshed by the profile scan); the counters feed drift

@@ -53,6 +53,8 @@ void IPCServer::HandleRequest(const protocol::Request &request, protocol::Respon
 		if (response.type == protocol::ResponseHandshake)
 		{
 			response.poseHookMask = sink.poseHookMask();
+			if (sink.hookStatus)
+				response.hookStatus = sink.hookStatus();
 			// Read the session identity without returning a checkpoint before
 			// the peer has completed an exact-version handshake.
 			if (sink.getRuntimeState)

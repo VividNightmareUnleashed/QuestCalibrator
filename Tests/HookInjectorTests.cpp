@@ -3,6 +3,7 @@
 #include "../Driver/Logging.h"
 #include "../Driver/OpenVRHookLayout.h"
 #include "../Driver/ServerTrackedDeviceProvider.h"
+#include "../Overlay/HookCoverage.h"
 #include "../common/Protocol.h"
 
 #include <atomic>
@@ -23,6 +24,14 @@ using Check = void (*)(const char *, bool, const char *);
 std::atomic<int> ContextCalls{ 0 };
 std::atomic<int> HostPoseCalls{ 0 };
 std::atomic<double> HostReceivedOriginX{ 0.0 };
+// Set, the host's next pose update calls the hooked slot again for the same
+// device from inside itself, as a host version forwarding to another would;
+// what that inner call receives lands in InnerOriginX.
+std::atomic<bool> ReenterOnce{ false };
+std::atomic<double> InnerOriginX{ 0.0 };
+thread_local int HostDepth = 0;
+
+using PoseUpdateFn = void (*)(void *, uint32_t, const vr::DriverPose_t &, uint32_t);
 
 // Distinct bodies, so identical-code folding cannot merge a hooked target with
 // an unrelated function.
@@ -36,7 +45,14 @@ struct FakeHost
 		const vr::DriverPose_t &pose, uint32_t size)
 	{
 		HostPoseCalls.fetch_add(static_cast<int>(device + size) | 1);
-		HostReceivedOriginX.store(pose.vecWorldFromDriverTranslation[0]);
+		(HostDepth > 0 ? InnerOriginX : HostReceivedOriginX).store(pose.vecWorldFromDriverTranslation[0]);
+		if (ReenterOnce.exchange(false))
+		{
+			++HostDepth;
+			void **vtable = *reinterpret_cast<void ***>(this);
+			reinterpret_cast<PoseUpdateFn>(vtable[openvr_hook::PoseUpdateSlot])(this, device, pose, size);
+			--HostDepth;
+		}
 	}
 };
 
@@ -68,19 +84,19 @@ void RequestHostInterface()
 	fn(&Context, "IVRServerDriverHost_006", &error);
 }
 
-// A tracking pose for device 0 through the host's vtable slot, as a device
-// driver sends it; returns the world-from-driver origin the host received.
-double SendPoseThroughHost()
+// A tracking pose through the host's vtable slot, as a device driver sends it;
+// returns the world-from-driver origin the host received. `size` is the
+// DriverPose_t size the caller claims.
+double SendPoseThroughHost(uint32_t device = 0, uint32_t size = sizeof(vr::DriverPose_t))
 {
-	using Fn = void (*)(void *, uint32_t, const vr::DriverPose_t &, uint32_t);
 	vr::DriverPose_t pose{};
 	pose.poseIsValid = pose.deviceIsConnected = true;
 	pose.result = vr::TrackingResult_Running_OK;
 	pose.qRotation.w = pose.qWorldFromDriverRotation.w = pose.qDriverFromHeadRotation.w = 1;
 	void **vtable = *reinterpret_cast<void ***>(&Host);
-	auto fn = reinterpret_cast<Fn>(vtable[openvr_hook::PoseUpdateSlot]);
+	auto fn = reinterpret_cast<PoseUpdateFn>(vtable[openvr_hook::PoseUpdateSlot]);
 	HostReceivedOriginX.store(0.0);
-	fn(&Host, 0, pose, sizeof pose);
+	fn(&Host, device, pose, size);
 	return HostReceivedOriginX.load();
 }
 
@@ -271,6 +287,69 @@ void CallbackWaitDeadlineScenario(Check check)
 	check("hooks: teardown stops waiting for a callback that stays inside",
 		idleAtOnce && gaveUp && idleAfter, detail);
 }
+
+// The hook reports the devices whose poses it has seen, and forwards untouched
+// a pose whose DriverPose_t size is not this build's, and one re-entering the
+// hook for the same device from inside the host call it forwards to: that pose
+// is already transformed, and its raw form already published.
+void HookStatusScenario(Check check)
+{
+	const char *name = "hooks: the pose hook reports what it has seen";
+	auto provider = std::make_unique<ServerTrackedDeviceProvider>();
+	auto *context = reinterpret_cast<vr::IVRDriverContext *>(&Context);
+	const bool calibrated = CalibrateDeviceZero(*provider);
+	if (!InjectHooks(provider.get(), context))
+	{
+		check(name, false, "InjectHooks failed");
+		return;
+	}
+	RequestHostInterface();
+	const protocol::HookStatus fresh = PoseHookStatus();
+
+	const double mismatched = SendPoseThroughHost(5, sizeof(vr::DriverPose_t) - 8);
+	InnerOriginX.store(0.0);
+	ReenterOnce.store(true);
+	const double outer = SendPoseThroughHost(0);
+	const double inner = InnerOriginX.load();
+	const protocol::HookStatus seen = PoseHookStatus();
+	const bool released = DisableHooks();
+
+	char detail[220];
+	std::snprintf(detail, sizeof detail,
+		"fresh %llx/%u/%u; devices %llx, mismatched %u (origin %.3f), re-entrant %u "
+		"(outer %.3f, inner %.3f); released %d",
+		static_cast<unsigned long long>(fresh.hookedDevices), fresh.mismatchedPoseUpdates,
+		fresh.reentrantPoseUpdates, static_cast<unsigned long long>(seen.hookedDevices),
+		seen.mismatchedPoseUpdates, mismatched, seen.reentrantPoseUpdates, outer, inner,
+		released ? 1 : 0);
+	check(name, calibrated && fresh.hookedDevices == 0 && fresh.mismatchedPoseUpdates == 0 &&
+		fresh.reentrantPoseUpdates == 0 && seen.hookedDevices == 1 &&
+		seen.mismatchedPoseUpdates == 1 && mismatched == 0.0 &&
+		seen.reentrantPoseUpdates == 1 && outer != 0.0 && inner == outer && released, detail);
+}
+
+// A target SteamVR tracks but the hook has not seen is reported once three
+// synchronizations in a row have missed it; one the hook has seen, an
+// untracked one and one that is not a target never are.
+void HookCoverageScenario(Check check)
+{
+	questcal::HookCoverage coverage;
+	const uint64_t targets = 0b1110;
+	const uint64_t tracked = 0b0111;
+	const uint64_t first = coverage.Note(0b0010, tracked, targets);
+	const uint64_t second = coverage.Note(0b0010, tracked, targets);
+	const uint64_t third = coverage.Note(0b0010, tracked, targets);
+	const uint64_t fourth = coverage.Note(0b0010, tracked, targets);
+	const uint64_t reached = coverage.Note(0b0110, tracked, targets);
+
+	char detail[96];
+	std::snprintf(detail, sizeof detail, "reported %llx %llx %llx %llx, then %llx",
+		static_cast<unsigned long long>(first), static_cast<unsigned long long>(second),
+		static_cast<unsigned long long>(third), static_cast<unsigned long long>(fourth),
+		static_cast<unsigned long long>(reached));
+	check("hooks: a target that bypasses the pose hook is reported after three syncs",
+		first == 0 && second == 0 && third == 0b0100 && fourth == 0b0100 && reached == 0, detail);
+}
 } // namespace
 
 void RunHookInjectorScenarios(Check check)
@@ -278,4 +357,6 @@ void RunHookInjectorScenarios(Check check)
 	HookReadyFlagTeardownRaceScenario(check);
 	TeardownWaitsForDriverScenario(check);
 	CallbackWaitDeadlineScenario(check);
+	HookStatusScenario(check);
+	HookCoverageScenario(check);
 }

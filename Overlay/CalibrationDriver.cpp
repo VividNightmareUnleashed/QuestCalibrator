@@ -5,6 +5,7 @@
 #include "DriverSyncTracker.h"
 #include "DriverWorker.h"
 #include "FieldMath.h"
+#include "HookCoverage.h"
 #include "IPCClient.h"
 #include "ProfileValidation.h"
 
@@ -24,6 +25,9 @@ std::optional<DriverNeutralizationResult> NeutralizationCompletion;
 // changed state is sent.
 CalibrationContext::DisableReason HeldRefusalReason =
 	CalibrationContext::DisableReason::DriverUnreachable;
+HookCoverage Coverage;
+static_assert(HookCoverage::Devices == vr::k_unMaxTrackedDeviceCount,
+	"hook coverage keeps one bit per OpenVR device");
 
 protocol::SetAlignmentField BuildAlignmentField(const CalibrationContext &ctx)
 {
@@ -135,6 +139,22 @@ void ApplyCompletion(CalibrationContext &ctx,
 	}
 	ctx.enabled = result.enabled;
 	ctx.driverPoseHookMask = result.poseHookMask;
+	if (result.synchronized)
+	{
+		ctx.driverHookedDevices = result.hookStatus.hookedDevices;
+		ctx.driverMismatchedPoseUpdates = result.hookStatus.mismatchedPoseUpdates;
+		ctx.driverReentrantPoseUpdates = result.hookStatus.reentrantPoseUpdates;
+		uint64_t tracked = 0;
+		uint64_t targets = 0;
+		for (uint32_t id = 0; id < vr::k_unMaxTrackedDeviceCount; ++id)
+		{
+			if (ctx.devicePoses[id].bPoseIsValid)
+				tracked |= uint64_t{ 1 } << id;
+			if (result.targetDeviceMask[id])
+				targets |= uint64_t{ 1 } << id;
+		}
+		ctx.hookBypassingDevices = Coverage.Note(result.hookStatus.hookedDevices, tracked, targets);
+	}
 	switch (result.cause)
 	{
 	case DriverDisableCause::HmdMismatch:
@@ -202,6 +222,7 @@ void StartCalibrationDriver()
 	Tracker = DriverSyncTracker{};
 	NeutralizationCompletion.reset();
 	HeldRefusalReason = CalibrationContext::DisableReason::DriverUnreachable;
+	Coverage = HookCoverage{};
 	Worker.Start([](const protocol::Request &request)
 	{
 		DriverTransportResult result;

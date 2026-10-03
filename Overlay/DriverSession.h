@@ -101,6 +101,7 @@ struct DriverApplyResult
 	bool targetDeviceMask[vr::k_unMaxTrackedDeviceCount] = {};
 	uint32_t continuousTrackerId = vr::k_unTrackedDeviceIndexInvalid;
 	uint32_t poseHookMask = 0;
+	protocol::HookStatus hookStatus;
 	uint64_t driverSessionId = 0;
 	uint64_t frameProfileKey = 0;
 	bool recoveryChecked = false;
@@ -152,6 +153,7 @@ class DriverSession
 		bool connectionReady = false;
 		uint64_t connectionGeneration = 0;
 		uint32_t poseHookMask = 0;
+		protocol::HookStatus hookStatus;
 		uint64_t driverSessionId = 0;
 	};
 
@@ -179,6 +181,7 @@ public:
 		DriverApplyResult result;
 		result.enabled = request.enabled;
 		result.poseHookMask = batch.poseHookMask;
+		result.hookStatus = batch.hookStatus;
 		result.driverSessionId = batch.driverSessionId;
 		if (!batch.connectionReady || (request.driverSessionId != 0 &&
 			request.driverSessionId != batch.driverSessionId))
@@ -330,6 +333,7 @@ private:
 		if (batch.connectionReady)
 		{
 			batch.poseHookMask = response.poseHookMask;
+			batch.hookStatus = response.hookStatus;
 			batch.driverSessionId = response.driverSessionId;
 		}
 		return batch;

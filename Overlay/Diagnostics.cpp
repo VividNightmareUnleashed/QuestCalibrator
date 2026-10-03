@@ -262,6 +262,10 @@ std::string DescribeContinuousDiagnostics(const CalibrationContext &ctx, double 
 		<< ", HMD is reference: " << OnOff(ctx.referenceDeviceMask[vr::k_unTrackedDeviceIndex_Hmd])
 		<< ", tracker slot: " << ctx.continuousTrackerId
 		<< ", pose hook mask: " << ctx.driverPoseHookMask << "\n";
+	out << "pose hook coverage: devices seen 0x" << std::hex << ctx.driverHookedDevices
+		<< ", bypassing targets 0x" << ctx.hookBypassingDevices << std::dec
+		<< ", size-mismatched updates " << ctx.driverMismatchedPoseUpdates
+		<< ", re-entrant updates " << ctx.driverReentrantPoseUpdates << "\n";
 	out << "Quest last engine update age: ";
 	age(input.lastUpdateTime);
 	out << "; last observation age: ";

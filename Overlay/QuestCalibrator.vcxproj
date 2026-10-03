@@ -143,6 +143,7 @@
     <ClInclude Include="DriverWorker.h" />
     <ClInclude Include="EmbeddedFiles.h" />
     <ClInclude Include="FieldMath.h" />
+    <ClInclude Include="HookCoverage.h" />
     <ClInclude Include="IPCClient.h" />
     <ClInclude Include="JsonNesting.h" />
     <ClInclude Include="JumpDetector.h" />

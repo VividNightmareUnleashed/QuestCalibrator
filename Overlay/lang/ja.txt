@@ -197,6 +197,10 @@ en: active
 ja: 有効
 en: missing
 ja: なし
+en: Calibration can't move some target devices, because their tracking doesn't pass through QuestCalibrator's SteamVR driver.
+ja: 一部の対象デバイスのトラッキングが QuestCalibrator の SteamVR ドライバーを通らないため、キャリブレーションでそれらを動かせません。
+en: (OpenVR devices %s)
+ja: （OpenVR デバイス {0}）
 en: QuestCalibrator %s is ready. Open Settings to install it.
 ja: QuestCalibrator {0} の準備ができました。設定からインストールしてください。
 

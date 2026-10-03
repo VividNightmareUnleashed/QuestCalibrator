@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../common/Protocol.h"
+
 #include <openvr_driver.h>
 
 class ServerTrackedDeviceProvider;
@@ -10,6 +12,8 @@ class ServerTrackedDeviceProvider;
 bool InjectHooks(ServerTrackedDeviceProvider *driver, vr::IVRDriverContext *pDriverContext);
 bool IsPoseUpdateHookInstalled();
 uint32_t PoseUpdateHookMask();
+// What the pose hook has seen since InjectHooks.
+protocol::HookStatus PoseHookStatus();
 // Disables every hook and returns true once no pose callback can still reach
 // the driver. The detours themselves stay in place, pinned with this module,
 // and only forward. False means a callback was still inside the driver when
