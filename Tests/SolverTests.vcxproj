@@ -115,6 +115,7 @@
     <ClCompile Include="HookInjectorTests.cpp" />
     <ClCompile Include="UniverseVerdictTests.cpp" />
     <ClCompile Include="PoseHubHoleTests.cpp" />
+    <ClCompile Include="PoseRingTests.cpp" />
     <ClCompile Include="CalibrationSpaceTests.cpp" />
     <ClCompile Include="PoseMathTests.cpp" />
     <ClCompile Include="QualityBandsTests.cpp" />
