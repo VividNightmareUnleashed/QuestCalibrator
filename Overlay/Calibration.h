@@ -104,6 +104,14 @@ struct CalibrationProfileState
 	uint32_t driftSlideEvents = 0;
 	double driftMaxSlideM = 0.0;
 	uint32_t discontinuousLossEvents = 0;
+	// The drift evidence was acted on (a correction, a re-anchor or a new
+	// calibration), so it starts over.
+	void ClearDriftEvidence()
+	{
+		driftSlideEvents = 0;
+		driftMaxSlideM = 0.0;
+		discontinuousLossEvents = 0;
+	}
 	double driftScore = 0.0;
 	enum class AlignmentHealth { Fresh, Aging, Stale };
 	AlignmentHealth alignment = AlignmentHealth::Fresh;

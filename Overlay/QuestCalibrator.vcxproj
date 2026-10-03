@@ -149,6 +149,7 @@
     <ClInclude Include="PoseMath.h" />
     <ClInclude Include="PoseStreamHub.h" />
     <ClInclude Include="QualityBands.h" />
+    <ClInclude Include="StreamEvents.h" />
     <ClInclude Include="stdafx.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="UiLayout.h" />

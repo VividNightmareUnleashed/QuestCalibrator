@@ -17,6 +17,7 @@
 #include "ProfileValidation.h"
 #include "QualityBands.h"
 #include "RingPoseMath.h"
+#include "StreamEvents.h"
 #include "../common/MathConstants.h"
 #include "../common/PoseChannel.h"
 #include "../common/Version.h"
@@ -137,6 +138,43 @@ static void ResetContinuousObservations(CalibrationContext &ctx,
 	Continuous->Reset(reason);
 	ctx.continuousDiagnostics.engine = Continuous->GetDiagnostics();
 	ctx.continuousCorrectionGate.Clear();
+}
+
+// The one place the windows hear about a stream or calibration event; what
+// each event drops is the table in StreamEvents.h.
+static void DispatchStreamEvent(CalibrationContext &ctx, questcal::StreamEvent event)
+{
+	const questcal::StreamResets resets = questcal::ResetsFor(event);
+	if (resets.universeObservations)
+		questcal::ResetUniverseObservations(ctx);
+	if (resets.universeHoleNote)
+		questcal::NoteUniverseStreamHole();
+	if (resets.drift)
+		Drift->Reset();
+	if (resets.monitorObservations)
+		Monitors.ResetObservations();
+	if (resets.frameWatch)
+		FrameWatch.Reset();
+	if (resets.frameProgress)
+	{
+		std::fill(std::begin(FrameObservedThrough), std::end(FrameObservedThrough), 0);
+		// The tail held back for the frame watch was read against the old frames.
+		ContinuousPending.clear();
+	}
+	if (resets.continuous)
+		ResetContinuousObservations(ctx, resets.continuousReason);
+}
+
+// A new driver session (the ring's writer restarted or its epoch moved): its
+// tracker frame corrections start over, and the driver is asked for any it
+// kept for the profile.
+static void StartFrameSession(CalibrationContext &ctx, uint64_t boundary)
+{
+	FrameStreamBoundary = boundary;
+	ctx.frameDriverSession = 0;
+	ctx.frameRecoveryPending = true;
+	ctx.ResetTrackerFrames();
+	questcal::SynchronizeCalibrationDriver(ctx);
 }
 
 
@@ -848,7 +886,7 @@ static void CompensateTrackerFrameMoves(CalibrationContext &ctx)
 	}
 	if (changed)
 	{
-		Drift->Reset();
+		DispatchStreamEvent(ctx, questcal::StreamEvent::FrameMoved);
 		SynchronizeCalibrationDriver(ctx);
 	}
 }
@@ -857,20 +895,14 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 {
 	const uint64_t boundary = PoseHub.StreamBoundaries();
 	if (boundary != FrameStreamBoundary)
-	{
-		FrameStreamBoundary = boundary;
-		ctx.frameDriverSession = 0;
-		ctx.frameRecoveryPending = true;
-		ctx.ResetTrackerFrames();
-		SynchronizeCalibrationDriver(ctx);
-	}
+		StartFrameSession(ctx, boundary);
+	// Frame corrections also start over from a recalibration or a profile
+	// load, and come back from the driver's recovery: the epoch is how those
+	// reach the windows kept here.
 	if (FrameEpoch != ctx.trackerFrameEpoch)
 	{
 		FrameEpoch = ctx.trackerFrameEpoch;
-		FrameWatch.Reset();
-		std::fill(std::begin(FrameObservedThrough), std::end(FrameObservedThrough), 0);
-		ContinuousPending.clear();
-		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::Suspended);
+		DispatchStreamEvent(ctx, questcal::StreamEvent::TrackerFramesReset);
 	}
 	// Score even while the monitors are parked so the UI's health readout
 	// tracks calibration age from the moment a profile loads. Age alone
@@ -887,14 +919,12 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	{
 		if (MonitorActive)
 		{
-			questcal::ResetUniverseObservations(ctx);
-			Drift->Reset();
 			// The frame watch keeps each device's last frame across the pause:
 			// a station SteamVR re-solved meanwhile is still found from the
 			// samples on either side of it, and corrections are kept for the
 			// profile when it comes back. Forgetting them would leave a tracker
 			// off by that move until the next fresh calibration.
-			Monitors.ResetObservations();
+			DispatchStreamEvent(ctx, questcal::StreamEvent::MonitorsParked);
 			MonitorActive = false;
 		}
 		PoseHub.DiscardBacklog(MonitorConsumer);
@@ -904,7 +934,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	if (!MonitorActive)
 	{
 		PoseHub.DiscardBacklog(MonitorConsumer);
-		Monitors.ResetObservations();
+		DispatchStreamEvent(ctx, questcal::StreamEvent::MonitorsResumed);
 		MonitorActive = true;
 	}
 
@@ -916,27 +946,18 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 	uint64_t dropped = PoseHub.Drain(MonitorConsumer, MonitorScratch, &hole);
 	if (hole.sessionBoundary && PoseHub.StreamBoundaries() != FrameStreamBoundary)
 	{
-		FrameStreamBoundary = PoseHub.StreamBoundaries();
-		ctx.frameDriverSession = 0;
-		ctx.frameRecoveryPending = true;
-		ctx.ResetTrackerFrames();
+		StartFrameSession(ctx, PoseHub.StreamBoundaries());
+		// The session boundary below drops the frame watch and its progress;
+		// the continuous loop hears the boundary from its own drain.
 		FrameEpoch = ctx.trackerFrameEpoch;
-		std::fill(std::begin(FrameObservedThrough), std::end(FrameObservedThrough), 0);
-		ContinuousPending.clear();
-		SynchronizeCalibrationDriver(ctx);
 	}
 	if (!ringpose::MonitorGapTolerable(hole.size, hole.sessionBoundary))
 	{
 		// We lost part of our own observation window; baselines across the
 		// hole are unsafe. For the drift monitor a drain hole would read as a
-		// tracking loss and could fake a discontinuity event. The frame watch
-		// judges each device across the hole by its own samples, as it does a
-		// pause, and starts over only for a new SteamVR session.
-		questcal::ResetUniverseObservations(ctx);
-		Drift->Reset();
-		if (hole.sessionBoundary)
-			FrameWatch.Reset();
-		Monitors.ResetObservations();
+		// tracking loss and could fake a discontinuity event.
+		DispatchStreamEvent(ctx, hole.sessionBoundary
+			? questcal::StreamEvent::SessionBoundary : questcal::StreamEvent::MonitorHole);
 	}
 	else if (dropped > 0)
 	{
@@ -944,7 +965,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		// every few seconds to minutes). The drift monitor and the watermarks
 		// work on sample times and lose nothing to a hole this short; the
 		// jump detector must not fit a step across it, and keeps the rest.
-		questcal::NoteUniverseStreamHole();
+		DispatchStreamEvent(ctx, questcal::StreamEvent::MonitorDrop);
 	}
 	if (!ctx.detailedLogging)
 		StreamDigest.Reset();
@@ -981,9 +1002,7 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 
 	if (!idle)
 	{
-		questcal::ResetUniverseObservations(ctx);
-		Drift->Reset();
-		Monitors.ResetObservations();
+		DispatchStreamEvent(ctx, questcal::StreamEvent::Calibrating);
 		return;
 	}
 
@@ -1055,16 +1074,11 @@ static void RuntimeMonitorTick(CalibrationContext &ctx, double now)
 		}
 	}
 
-	// A compensated jump moved the raw stream under the drift windows; it was
-	// corrected, so it is not staleness evidence. Jump acceptance lands before
-	// a slide window can conclude (~0.25 s vs ~2.5 s), so dropping the window
-	// also discards any event queued from the same discontinuity. The
-	// continuous windows straddle the same rebase and must refill too.
+	// Jump acceptance lands before a slide window can conclude (~0.25 s vs
+	// ~2.5 s), so dropping the drift window also discards any event queued
+	// from the same discontinuity.
 	if (jumped)
-	{
-		Drift->Reset();
-		ResetContinuousObservations(ctx, questcal::ContinuousAlignment::ResetReason::UniverseJump);
-	}
+		DispatchStreamEvent(ctx, questcal::StreamEvent::UniverseJump);
 
 	DriftMonitor::Event drift;
 	while (Drift->PollEvent(drift))
@@ -1429,9 +1443,7 @@ static void ContinuousTick(CalibrationContext &ctx, double now)
 		ctx.lastAutoCorrectionUnixTime = static_cast<double>(std::time(nullptr));
 		// The drift evidence was just acted on; the monitor windows stay
 		// valid because a correction never moves raw poses.
-		ctx.driftSlideEvents = 0;
-		ctx.driftMaxSlideM = 0.0;
-		ctx.discontinuousLossEvents = 0;
+		ctx.ClearDriftEvidence();
 		if (!snap)
 		{
 			ctx.autoCorrectionsApplied++;
@@ -2137,9 +2149,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 	// A fresh solve resets the staleness clock and all accumulated drift
 	// evidence, and re-arms the one-shot notifications.
 	ctx.calibrationUnixTime = static_cast<double>(std::time(nullptr));
-	ctx.driftSlideEvents = 0;
-	ctx.driftMaxSlideM = 0.0;
-	ctx.discontinuousLossEvents = 0;
+	ctx.ClearDriftEvidence();
 	ctx.driftScore = 0.0;
 	ctx.alignment = CalibrationContext::AlignmentHealth::Fresh;
 	Monitors.ReArmNotifications();
@@ -2148,7 +2158,7 @@ static void FinishCalibration(CalibrationContext &ctx)
 	ctx.continuousReanchors = 0;
 	ctx.continuousReanchorsUndone = 0;
 	ctx.continuousReanchorsAcrossSolutions = 0;
-	Drift->Reset();
+	DispatchStreamEvent(ctx, questcal::StreamEvent::Recalibrated);
 
 	bool priorUniverseUnsafe = ctx.profileUniverseUnsafe;
 	questcal::RebindCalibrationUniverse(

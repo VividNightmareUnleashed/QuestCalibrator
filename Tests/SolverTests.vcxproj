@@ -118,6 +118,7 @@
     <ClCompile Include="CalibrationSpaceTests.cpp" />
     <ClCompile Include="PoseMathTests.cpp" />
     <ClCompile Include="QualityBandsTests.cpp" />
+    <ClCompile Include="StreamEventsTests.cpp" />
     <ClCompile Include="OverlayStubs.cpp" />
     <ClCompile Include="IPCServerTransportTests.cpp" />
     <ClCompile Include="TrackingRecoveryTests.cpp" />

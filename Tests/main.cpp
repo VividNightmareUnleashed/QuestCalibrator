@@ -76,6 +76,7 @@ void RunPoseHubHoleScenarios(void (*check)(const char *, bool, const char *));
 void RunCalibrationSpaceScenarios(void (*check)(const char *, bool, const char *));
 void RunPoseMathScenarios(void (*check)(const char *, bool, const char *));
 void RunQualityBandsScenarios(void (*check)(const char *, bool, const char *));
+void RunStreamEventScenarios(void (*check)(const char *, bool, const char *));
 void RunIPCServerTransportScenarios(void (*check)(const char *, bool, const char *));
 void RunTrackingRecoveryScenarios(void (*check)(const char *, bool, const char *));
 #ifdef QUESTCAL_VIRTUAL_QUEST
@@ -8570,6 +8571,7 @@ int main(int argc, char **argv)
 	RunCalibrationSpaceScenarios(Check);
 	RunPoseMathScenarios(Check);
 	RunQualityBandsScenarios(Check);
+	RunStreamEventScenarios(Check);
 	RunSolverPrimitiveScenarios();
 	RunSolverRobustnessScenarios();
 	RunSolverPropertyScenarios(propertyTrials, propertySeed);
