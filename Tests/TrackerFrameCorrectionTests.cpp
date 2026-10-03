@@ -6,6 +6,7 @@
 #include "../Overlay/ContinuousAlignment.h"
 #include "../Overlay/DriverSession.h"
 #include "../Overlay/CalibrationRun.h"
+#include "../Overlay/CollectionSource.h"
 #include "../common/MathConstants.h"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -733,6 +735,94 @@ void DeferredFrameLog(Check check)
 }
 } // namespace
 
+// Where a calibration samples (CollectionSource.h): the raw channel when it
+// holds a fresh trusted sample of both selected devices, each in one frame;
+// otherwise runtime poses, read the way the fallback reads them.
+void CollectionFallback(Check check)
+{
+	const double now = 20.0;
+	auto tracking = [](uint32_t id, double time, const Q &frame = Q::Identity())
+	{
+		protocol::DevicePoseSample s = Sample(id, time, V(0.2, 1.4, -0.3), frame);
+		s.deviceIsConnected = true;
+		return s;
+	};
+	protocol::DevicePoseSample hidden = tracking(9, now - 0.1);
+	hidden.deviceIsConnected = false;   // as the channel carries a tracker another driver hides
+	protocol::DevicePoseSample lost = tracking(0, now - 0.1);
+	lost.trackingResult = vr::TrackingResult_Running_OutOfRange;
+	const Q moved(Eigen::AngleAxisd(0.05, V::UnitY()));
+	struct Case
+	{
+		const char *name;
+		std::vector<protocol::DevicePoseSample> batch;
+		bool raw;
+		const char *reason;
+	};
+	// Another device's frame moving is none of the preflight's business.
+	const Case cases[] = {
+		{ "pair", { tracking(0, now - 0.1), tracking(9, now - 0.1), tracking(4, now - 0.1, moved), tracking(4, now - 0.05) },
+			true, "fresh trusted pair available" },
+		{ "no target", { tracking(0, now - 0.1) }, false, "target had no fresh trusted samples" },
+		{ "stale target", { tracking(0, now - 0.1), tracking(9, now - 0.6) }, false, "target had no fresh trusted samples" },
+		{ "hidden target", { tracking(0, now - 0.1), hidden }, false, "target had no fresh trusted samples" },
+		{ "lost reference", { lost, tracking(9, now - 0.1) }, false, "reference had no fresh trusted samples" },
+		{ "nothing", {}, false, "neither selected device had fresh trusted samples" },
+		{ "target frame moved", { tracking(0, now - 0.1), tracking(9, now - 0.2), tracking(9, now - 0.1, moved) },
+			false, "selected device changed world-from-driver during preflight" },
+	};
+	std::string wrong;
+	for (const auto &c : cases)
+	{
+		questcal::CalibrationRun run;
+		run.referenceId = 0;
+		run.targetId = 9;
+		const char *reason = "";
+		const bool raw = questcal::PreflightPoseRing(run, c.batch, now, TickScale, reason);
+		if (raw != c.raw || std::string(reason) != c.reason ||
+			run.referenceUniverse.valid != raw || run.targetUniverse.valid != raw)
+			wrong += std::string(wrong.empty() ? "" : ", ") + c.name + ": " + reason;
+	}
+	check("collection: the raw channel serves only a fresh trusted pair, else runtime poses do",
+		wrong.empty(), wrong.c_str());
+
+	vr::TrackedDevicePose_t pose{};
+	const Q turn(Eigen::AngleAxisd(0.5, V(0.3, 0.9, 0.1).normalized()));
+	const Eigen::Matrix3d r = turn.toRotationMatrix();
+	for (int i = 0; i < 3; ++i)
+	{
+		for (int j = 0; j < 3; ++j)
+			pose.mDeviceToAbsoluteTracking.m[i][j] = static_cast<float>(r(i, j));
+		pose.mDeviceToAbsoluteTracking.m[i][3] = static_cast<float>(0.1 * (i + 1));
+		pose.vVelocity.v[i] = static_cast<float>(0.2 * i);
+		pose.vAngularVelocity.v[i] = static_cast<float>(-0.3 * i);
+	}
+	pose.bPoseIsValid = true;
+	pose.bDeviceIsConnected = true;
+	pose.eTrackingResult = vr::TrackingResult_Running_OK;
+	questcal::PoseSample read;
+	const bool accepted = questcal::RuntimePoseSample(pose, now, read);
+	const bool faithful = accepted && read.time == now && read.rot.angularDistance(turn) < 1e-5 &&
+		(read.pos - V(0.1, 0.2, 0.3)).norm() < 1e-6 && (read.vel - V(0.0, 0.2, 0.4)).norm() < 1e-6 &&
+		(read.angVel - V(0.0, -0.3, -0.6)).norm() < 1e-6;
+	auto refused = [&](void (*spoil)(vr::TrackedDevicePose_t &))
+	{
+		vr::TrackedDevicePose_t bad = pose;
+		spoil(bad);
+		questcal::PoseSample out;
+		return !questcal::RuntimePoseSample(bad, now, out);
+	};
+	const bool gated =
+		refused([](vr::TrackedDevicePose_t &p) { p.bPoseIsValid = false; }) &&
+		refused([](vr::TrackedDevicePose_t &p) { p.eTrackingResult = vr::TrackingResult_Running_OutOfRange; }) &&
+		refused([](vr::TrackedDevicePose_t &p) { p.mDeviceToAbsoluteTracking.m[1][3] = std::numeric_limits<float>::quiet_NaN(); }) &&
+		refused([](vr::TrackedDevicePose_t &p) { p.vVelocity.v[0] = 1e9f; });
+	char detail[96];
+	snprintf(detail, sizeof detail, "accepted %d, faithful %d, gated %d", accepted, faithful, gated);
+	check("collection: a runtime pose is read at the tick as the runtime gave it, and only when trusted",
+		accepted && faithful && gated, detail);
+}
+
 void RunTrackerFrameCorrectionScenarios(Check check)
 {
 	SplitFrames(check);
@@ -745,4 +835,5 @@ void RunTrackerFrameCorrectionScenarios(Check check)
 	RecoveryProtocolGate(check);
 	PausedMonitorAndRecalibration(check);
 	DeferredFrameLog(check);
+	CollectionFallback(check);
 }

@@ -119,6 +119,7 @@
     <ClInclude Include="UpdatePolicy.h" />
     <ClInclude Include="Updater.h" />
     <ClInclude Include="CalibrationRun.h" />
+    <ClInclude Include="CollectionSource.h" />
     <ClInclude Include="ChaperoneMath.h" />
     <ClInclude Include="Configuration.h" />
     <ClInclude Include="PersistenceState.h" />

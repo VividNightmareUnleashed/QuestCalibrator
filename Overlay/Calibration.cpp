@@ -4,6 +4,7 @@
 #include "CalibrationDriver.h"
 #include "CalibrationEngine.h"
 #include "CalibrationSpace.h"
+#include "CollectionSource.h"
 #include "Configuration.h"
 #include "DriftMonitor.h"
 #include "LighthouseFrameWatch.h"
@@ -393,39 +394,6 @@ static void DiscardPoseRingBacklog()
 	PoseHub.DiscardBacklog(CollectorConsumer);
 }
 
-static bool PreflightPoseRing(questcal::CalibrationRun &run,
-	const std::vector<protocol::DevicePoseSample> &samples, double qpcNow, const char *&reason)
-{
-	questcal::CalibrationRun::Universe reference;
-	questcal::CalibrationRun::Universe target;
-	for (const auto &sample : samples)
-	{
-		if (!IsTrustedRingSample(sample, QpcToSeconds) ||
-			!ringpose::IsFreshCaptureTime(
-				RingCaptureTime(sample, QpcToSeconds), qpcNow, 0.5))
-			continue;
-
-		auto parts = UnpackRingSample(sample);
-		auto *universe = sample.deviceId == run.referenceId ? &reference :
-			sample.deviceId == run.targetId ? &target : nullptr;
-		if (universe && !universe->Accept(parts.wfdRot, parts.wfdTrans))
-		{
-			reason = "selected device changed world-from-driver during preflight";
-			return false;
-		}
-	}
-	if (!reference.valid || !target.valid)
-	{
-		reason = !reference.valid && !target.valid ? "neither selected device had fresh trusted samples"
-			: !reference.valid ? "reference had no fresh trusted samples" : "target had no fresh trusted samples";
-		return false;
-	}
-	reason = "fresh trusted pair available";
-	run.referenceUniverse = reference;
-	run.targetUniverse = target;
-	return true;
-}
-
 static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 {
 	auto &run = ctx.run;
@@ -527,32 +495,18 @@ static bool CollectFromPoseRing(CalibrationContext &ctx, double now)
 	return true;
 }
 
-// Fallback when the shmem channel is unavailable (e.g. running against an old
-// driver build): sample runtime poses at tick rate. Loses per-device capture
-// timestamps and driver velocities, so alignment quality is reduced.
+// The fallback when the raw pose channel cannot serve the selected pair (see
+// CollectionSource.h): samples runtime poses at tick rate. Loses per-device
+// capture timestamps and driver velocities, so alignment quality is reduced.
 static void CollectFromRuntimePoses(CalibrationContext &ctx, double now)
 {
 	auto &run = ctx.run;
 	// The run's ids were bounds-checked when it began.
 	auto push = [&](uint32_t id, std::vector<questcal::PoseSample> &into, double &lastTime)
 	{
-		const auto &p = ctx.devicePoses[id];
-		if (!p.bPoseIsValid || p.eTrackingResult != vr::TrackingResult_Running_OK)
-			return;
-
-		const auto &m = p.mDeviceToAbsoluteTracking.m;
-		Eigen::Matrix3d rot;
-		for (int i = 0; i < 3; i++)
-			for (int j = 0; j < 3; j++)
-				rot(i, j) = m[i][j];
-
 		questcal::PoseSample s;
-		s.time = now;
-		s.rot = Eigen::Quaterniond(rot).normalized();
-		s.pos = Eigen::Vector3d(m[0][3], m[1][3], m[2][3]);
-		s.vel = Eigen::Vector3d(p.vVelocity.v[0], p.vVelocity.v[1], p.vVelocity.v[2]);
-		s.angVel = Eigen::Vector3d(p.vAngularVelocity.v[0], p.vAngularVelocity.v[1], p.vAngularVelocity.v[2]);
-		if (!IsUsableComposedSample(s) || (!into.empty() && s.time <= into.back().time))
+		if (!questcal::RuntimePoseSample(ctx.devicePoses[id], now, s) ||
+			(!into.empty() && s.time <= into.back().time))
 			return;
 		if (run.anchor && id == run.targetId)
 		{
@@ -2562,8 +2516,8 @@ void CalibrationTick(double time)
 		const uint64_t preflightDropped =
 			PoseHub.DrainThroughGaps(CollectorConsumer, CollectorScratch).loss;
 		const char *preflightReason = "raw channel closed";
-		run.usesPoseRing = PoseHub.RingOpen() && PreflightPoseRing(
-			run, CollectorScratch, QpcNowSeconds(), preflightReason);
+		run.usesPoseRing = PoseHub.RingOpen() && questcal::PreflightPoseRing(
+			run, CollectorScratch, QpcNowSeconds(), QpcToSeconds, preflightReason);
 		// The loss is the idle collector's backlog overflowing since its last
 		// run (every sample of a long session reads as lost), not stream health.
 		snprintf(buf, sizeof buf, "pose preflight: %s; batch %zu samples, dropped while idle %llu",
