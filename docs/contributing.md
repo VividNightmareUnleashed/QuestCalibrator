@@ -36,16 +36,23 @@ CI runs both on every push.
 
 ### The test harness
 
-The harness has no framework. `Tests/main.cpp` calls each `Run*Scenarios()`
-group in order, and `SolverTests.exe` exits with the number of failed
-scenarios. A new test file needs three edits:
+Each scenario group (a `Run*Scenarios()` function) is a doctest test case,
+registered at the end of `Tests/main.cpp` in the order the groups have always
+run, and `SolverTests.exe` exits with the number of failed scenarios. Checks
+still go through `Check(name, pass, detail)`: a group fails when one of its
+checks does or when it throws, and the next group still runs. A new test file
+needs three edits:
 
 1. a `ClCompile` for it in `Tests/SolverTests.vcxproj`;
 2. a forward declaration of its group in `Tests/main.cpp`;
-3. a call to the group from `main()`.
+3. a `DOCTEST_TEST_CASE` for the group, with the others at the end of
+   `Tests/main.cpp`.
 
 Groups in other files take `void (*check)(const char *, bool, const char *)`.
-There is no way to run a single scenario.
+doctest's options pick and time groups: `--list-test-cases` lists them,
+`--test-case=<pattern>` runs only those it matches (`*` is a wildcard and a
+comma separates patterns), and `--duration=true` times each. A filtered run
+reports fewer scenarios, so validation always runs them all.
 
 The harness links most overlay sources as they are, including
 `CalibrationSpace.cpp` and `CalibrationDriver.cpp`, but not `Calibration.cpp`,
@@ -61,8 +68,8 @@ a group that stops running is caught. When you add tests, validation prints the
 new count: raise the number in the same change.
 
 `SolverTests.exe` takes `--property-trials N` and `--property-seed N` for the
-randomized property trials, and `--emit-traces DIR`, which records pose hub runs
-for the formal checks in the VirtualQuest submodule.
+randomized property trials, `--emit-traces DIR`, which records pose hub runs
+for the formal checks in the VirtualQuest submodule, and doctest's options.
 
 ### Fuzzing
 

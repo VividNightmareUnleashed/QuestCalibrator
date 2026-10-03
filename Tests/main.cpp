@@ -61,6 +61,13 @@
 #include <thread>
 #include <vector>
 
+// doctest runs the scenario groups as its test cases (they are registered after
+// the groups, below). Only its DOCTEST_-prefixed macros exist, so none of its
+// names can collide with the code under test.
+#define DOCTEST_CONFIG_IMPLEMENT
+#define DOCTEST_CONFIG_NO_SHORT_MACRO_NAMES
+#include <doctest/doctest.h>
+
 bool CalibrationContextResetScenario();
 bool ControllerTriggerAxisScenario();
 bool CalibrationContextCadenceScenario();
@@ -8574,89 +8581,15 @@ void RunUpdatePolicyScenarios()
 		error.c_str());
 }
 
-int main(int argc, char **argv)
+// The scenario groups end here. VirtualQuest's portable projection cuts this
+// file up to this line, and nothing above it uses doctest.
+
+// From the command line, before any group runs.
+int PropertyTrials = 64;
+uint32_t PropertySeed = 0x5EED1234u;
+
+void RunProfileHelperScenarios()
 {
-	// Unbuffered: an abort discards a buffered stdout, so a harness that dies
-	// mid-run would report nothing about where.
-	setvbuf(stdout, nullptr, _IONBF, 0);
-	int propertyTrials = 64;
-	uint32_t propertySeed = 0x5EED1234u;
-	for (int i = 1; i < argc; ++i)
-	{
-		std::string arg = argv[i];
-#ifdef QUESTCAL_FORMAL_CONFORMANCE
-		// Records runs of the real code for the formal models' trace checks
-		// (VirtualQuest/formal/check.ps1) and exits.
-		if (arg == "--emit-traces" && i + 1 < argc)
-			return EmitFormalTraces(argv[i + 1]) > 0 ? 0 : 1;
-#endif
-		if ((arg == "--property-trials" || arg == "--property-seed") && i + 1 < argc)
-		{
-			try
-			{
-				size_t used = 0;
-				unsigned long value = std::stoul(argv[++i], &used, 0);
-				if (used != std::string(argv[i]).size())
-					throw std::invalid_argument("trailing characters");
-				if (arg == "--property-trials")
-				{
-					if (value < 1 || value > 100000)
-						throw std::out_of_range("property trial count");
-					propertyTrials = static_cast<int>(value);
-				}
-				else
-				{
-					propertySeed = static_cast<uint32_t>(value);
-				}
-			}
-			catch (const std::exception &)
-			{
-				fprintf(stderr, "Invalid value for %s\n", arg.c_str());
-				return 2;
-			}
-		}
-		else
-		{
-			fprintf(stderr,
-				"Usage: SolverTests.exe [--property-trials N] [--property-seed N]\n");
-			return 2;
-		}
-	}
-
-	// A hung scenario would otherwise wait out CI's step timeout without a word
-	// of where it is. Past five minutes without a result (longer for a larger
-	// property run), name the last scenario that finished and fail the run.
-	std::thread([limit = std::chrono::minutes(5) * (std::max)(1, propertyTrials / 64)]()
-	{
-		int seen = -1;
-		auto since = std::chrono::steady_clock::now();
-		for (;;)
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(250));
-			const int reported = ScenariosReported.load(std::memory_order_acquire);
-			const auto now = std::chrono::steady_clock::now();
-			if (reported != seen)
-			{
-				seen = reported;
-				since = now;
-			}
-			else if (now - since >= limit)
-			{
-				printf("\nNo scenario finished in %lld minutes; the last to finish was \"%s\", "
-					"%d in. Stopping.\n",
-					static_cast<long long>(std::chrono::duration_cast<std::chrono::minutes>(limit).count()),
-					LastScenario, reported);
-				std::_Exit(3);
-			}
-		}
-	}).detach();
-
-	GroundTruth truth;
-	truth.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(1.9, Eigen::Vector3d::UnitY()));   // yaw-only truth
-	truth.translation = Eigen::Vector3d(1.2, 0.03, -0.7);
-
-	EngineConfig config;
-
 	// Production-path helpers used by profile loading and the driver.
 	{
 		Eigen::Quaterniond identity(1.0, 0.0, 0.0, 0.0);
@@ -8703,29 +8636,15 @@ int main(int argc, char **argv)
 			acceleration[0] == 7.0 && acceleration[1] == -8.0 && acceleration[2] == 9.0;
 		Check("driver linear scale", pass, "");
 	}
+}
 
-	RunHookInjectorScenarios(Check);
+void RunSolverAccuracyScenarios()
+{
+	GroundTruth truth;
+	truth.rotation = Eigen::Quaterniond(Eigen::AngleAxisd(1.9, Eigen::Vector3d::UnitY()));   // yaw-only truth
+	truth.translation = Eigen::Vector3d(1.2, 0.03, -0.7);
 
-	// Production-shared driver algebra and broad solver edge/property passes.
-	RunDriverPoseTransformScenarios();
-	RunPredictionModelScenarios(Check);
-	RunDriverProtocolValidationScenarios();
-	RunDriverSyncScenarios();
-	RunDriverSessionScenarios();
-	RunDriverWorkerScenario();
-	RunDriverSyncStateScenarios();
-	RunPoseChannelScenarios();
-	RunPoseHubHoleScenarios(Check);
-	RunIPCServerTransportScenarios(Check);
-	RunCalibrationSpaceScenarios(Check);
-	RunPoseMathScenarios(Check);
-	RunQualityBandsScenarios(Check);
-	RunStreamEventScenarios(Check);
-	RunSolverPrimitiveScenarios();
-	RunSolverRobustnessScenarios();
-	RunSolverPropertyScenarios(propertyTrials, propertySeed);
-	// Every untrusted input's properties over mutated seeds, and the float slew.
-	RunPropertyScenarios(Check, propertyTrials, propertySeed);
+	EngineConfig config;
 
 	// Accuracy bands are ~4x each scenario's measured error (12 seeds x
 	// {Debug, Release}, MSVC 14.44). The deterministic scenarios are
@@ -9136,44 +9055,169 @@ int main(int argc, char **argv)
 			std::abs(ComputeAppliedTimeOffset(+0.040) + 0.015) < 1e-12;
 		Check("applied offset sign/clamp", pass, "");
 	}
+}
 
-	// ---- Universe-jump detection ----
-	RunJumpScenarios();
-	RunTrackingRecoveryScenarios(Check);
-	RunUniverseVerdictScenarios(Check);
+// Runs one group as a doctest test case: a failed check, or an exception the
+// group lets out, fails the case, and the next group still runs.
+template <typename Run>
+void Group(Run run)
+{
+	const int before = failures;
+	try
+	{
+		run();
+	}
+	catch (const std::exception &error)
+	{
+		Check("the group threw", false, error.what());
+	}
+	catch (...)
+	{
+		Check("the group threw", false, "a non-standard exception");
+	}
+	const int failed = failures - before;
+	DOCTEST_CHECK_MESSAGE(failed == 0, failed << " check(s) failed");
+}
+
+// In the order they always ran: doctest runs a file's test cases in line order.
+DOCTEST_TEST_CASE("profile and driver helpers") { Group([] { RunProfileHelperScenarios(); }); }
+DOCTEST_TEST_CASE("hook injector") { Group([] { RunHookInjectorScenarios(Check); }); }
+// Production-shared driver algebra and broad solver edge/property passes.
+DOCTEST_TEST_CASE("driver pose transform") { Group([] { RunDriverPoseTransformScenarios(); }); }
+DOCTEST_TEST_CASE("prediction model") { Group([] { RunPredictionModelScenarios(Check); }); }
+DOCTEST_TEST_CASE("driver protocol validation") { Group([] { RunDriverProtocolValidationScenarios(); }); }
+DOCTEST_TEST_CASE("driver sync") { Group([] { RunDriverSyncScenarios(); }); }
+DOCTEST_TEST_CASE("driver session") { Group([] { RunDriverSessionScenarios(); }); }
+DOCTEST_TEST_CASE("driver worker") { Group([] { RunDriverWorkerScenario(); }); }
+DOCTEST_TEST_CASE("driver sync state") { Group([] { RunDriverSyncStateScenarios(); }); }
+DOCTEST_TEST_CASE("pose channel") { Group([] { RunPoseChannelScenarios(); }); }
+DOCTEST_TEST_CASE("pose hub holes") { Group([] { RunPoseHubHoleScenarios(Check); }); }
+DOCTEST_TEST_CASE("IPC server transport") { Group([] { RunIPCServerTransportScenarios(Check); }); }
+DOCTEST_TEST_CASE("calibration space") { Group([] { RunCalibrationSpaceScenarios(Check); }); }
+DOCTEST_TEST_CASE("pose math") { Group([] { RunPoseMathScenarios(Check); }); }
+DOCTEST_TEST_CASE("quality bands") { Group([] { RunQualityBandsScenarios(Check); }); }
+DOCTEST_TEST_CASE("stream events") { Group([] { RunStreamEventScenarios(Check); }); }
+DOCTEST_TEST_CASE("solver primitives") { Group([] { RunSolverPrimitiveScenarios(); }); }
+DOCTEST_TEST_CASE("solver robustness") { Group([] { RunSolverRobustnessScenarios(); }); }
+DOCTEST_TEST_CASE("solver properties") { Group([] { RunSolverPropertyScenarios(PropertyTrials, PropertySeed); }); }
+// Every untrusted input's properties over mutated seeds, and the float slew.
+DOCTEST_TEST_CASE("input properties") { Group([] { RunPropertyScenarios(Check, PropertyTrials, PropertySeed); }); }
+DOCTEST_TEST_CASE("solver accuracy") { Group([] { RunSolverAccuracyScenarios(); }); }
+DOCTEST_TEST_CASE("universe jumps") { Group([] { RunJumpScenarios(); }); }
+DOCTEST_TEST_CASE("tracking recovery") { Group([] { RunTrackingRecoveryScenarios(Check); }); }
+DOCTEST_TEST_CASE("universe verdict") { Group([] { RunUniverseVerdictScenarios(Check); }); }
 #ifdef QUESTCAL_VIRTUAL_QUEST
-	// The simulated headset (the VirtualQuest submodule), when checked out.
-	RunVirtualQuestScenarios(Check);
+// The simulated headset (the VirtualQuest submodule), when checked out.
+DOCTEST_TEST_CASE("virtual quest") { Group([] { RunVirtualQuestScenarios(Check); }); }
 #endif
 #ifdef QUESTCAL_FORMAL_CONFORMANCE
-	// The code checked against the formal models' own tables.
-	RunFormalConformanceScenarios(Check);
+// The code checked against the formal models' own tables.
+DOCTEST_TEST_CASE("formal conformance") { Group([] { RunFormalConformanceScenarios(Check); }); }
 #endif
+DOCTEST_TEST_CASE("drift") { Group([] { RunDriftScenarios(); }); }
+DOCTEST_TEST_CASE("lighthouse") { Group([] { RunLighthouseScenarios(Check); }); }
+DOCTEST_TEST_CASE("localization") { Group([] { RunLocalizationScenarios(Check); }); }
+DOCTEST_TEST_CASE("correction field") { Group([] { RunFieldScenarios(); }); }
+DOCTEST_TEST_CASE("chaperone") { Group([] { RunChaperoneScenarios(); }); }
+DOCTEST_TEST_CASE("base slew") { Group([] { RunBaseSlewScenarios(); }); }
+DOCTEST_TEST_CASE("continuous calibration") { Group([] { RunContinuousScenarios(); }); }
+DOCTEST_TEST_CASE("guide") { Group([] { RunGuideScenarios(); }); }
+DOCTEST_TEST_CASE("update policy") { Group([] { RunUpdatePolicyScenarios(); }); }
+DOCTEST_TEST_CASE("review regressions") { Group([] { RunReviewRegressionScenarios(Check); }); }
+DOCTEST_TEST_CASE("tracker frame corrections") { Group([] { RunTrackerFrameCorrectionScenarios(Check); }); }
+DOCTEST_TEST_CASE("persistence") { Group([] { RunPersistenceScenarios(); }); }
 
-	// ---- Drift staleness monitoring ----
-	RunDriftScenarios();
-	RunLighthouseScenarios(Check);
-	RunLocalizationScenarios(Check);
+int main(int argc, char **argv)
+{
+	// Unbuffered: an abort discards a buffered stdout, so a harness that dies
+	// mid-run would report nothing about where.
+	setvbuf(stdout, nullptr, _IONBF, 0);
+	// The harness's own options; doctest takes the rest, among them
+	// --test-case=<pattern> to run only the groups it matches,
+	// --list-test-cases, and --duration=true to time each group.
+	std::vector<const char *> doctestArguments = { argv[0] };
+	for (int i = 1; i < argc; ++i)
+	{
+		std::string arg = argv[i];
+#ifdef QUESTCAL_FORMAL_CONFORMANCE
+		// Records runs of the real code for the formal models' trace checks
+		// (VirtualQuest/formal/check.ps1) and exits.
+		if (arg == "--emit-traces" && i + 1 < argc)
+			return EmitFormalTraces(argv[i + 1]) > 0 ? 0 : 1;
+#endif
+		if ((arg == "--property-trials" || arg == "--property-seed") && i + 1 < argc)
+		{
+			try
+			{
+				size_t used = 0;
+				unsigned long value = std::stoul(argv[++i], &used, 0);
+				if (used != std::string(argv[i]).size())
+					throw std::invalid_argument("trailing characters");
+				if (arg == "--property-trials")
+				{
+					if (value < 1 || value > 100000)
+						throw std::out_of_range("property trial count");
+					PropertyTrials = static_cast<int>(value);
+				}
+				else
+				{
+					PropertySeed = static_cast<uint32_t>(value);
+				}
+			}
+			catch (const std::exception &)
+			{
+				fprintf(stderr, "Invalid value for %s\n", arg.c_str());
+				return 2;
+			}
+		}
+		else if (arg.rfind("-", 0) == 0)
+		{
+			doctestArguments.push_back(argv[i]);
+		}
+		else
+		{
+			fprintf(stderr,
+				"Usage: SolverTests.exe [--property-trials N] [--property-seed N] [doctest options]\n");
+			return 2;
+		}
+	}
 
-	// ---- Spatial correction field ----
-	RunFieldScenarios();
+	// A hung scenario would otherwise wait out CI's step timeout without a word
+	// of where it is. Past five minutes without a result (longer for a larger
+	// property run), name the last scenario that finished and fail the run.
+	std::thread([limit = std::chrono::minutes(5) * (std::max)(1, PropertyTrials / 64)]()
+	{
+		int seen = -1;
+		auto since = std::chrono::steady_clock::now();
+		for (;;)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+			const int reported = ScenariosReported.load(std::memory_order_acquire);
+			const auto now = std::chrono::steady_clock::now();
+			if (reported != seen)
+			{
+				seen = reported;
+				since = now;
+			}
+			else if (now - since >= limit)
+			{
+				printf("\nNo scenario finished in %lld minutes; the last to finish was \"%s\", "
+					"%d in. Stopping.\n",
+					static_cast<long long>(std::chrono::duration_cast<std::chrono::minutes>(limit).count()),
+					LastScenario, reported);
+				std::_Exit(3);
+			}
+		}
+	}).detach();
 
-	// ---- Chaperone snapshot math ----
-	RunChaperoneScenarios();
-
-	// ---- Base-transform slew (continuous calibration) ----
-	RunBaseSlewScenarios();
-
-	// ---- Continuous calibration (HMD-mounted tracker) ----
-	RunContinuousScenarios();
-	RunGuideScenarios();
-	RunUpdatePolicyScenarios();
-	RunReviewRegressionScenarios(Check);
-	RunTrackerFrameCorrectionScenarios(Check);
-
-	// ---- Profile persistence: codec, write gates, load plan ----
-	RunPersistenceScenarios();
+	doctest::Context context;
+	context.applyCommandLine(static_cast<int>(doctestArguments.size()), doctestArguments.data());
+	context.setOption("no-breaks", true);
+	const int result = context.run();
+	if (context.shouldExit())   // --help, --list-test-cases and the like
+		return result;
 
 	printf("\n%d scenario(s) ran, %d failed\n", checksRun, failures);
-	return failures;
+	// doctest fails a run for more than checks (a crash it caught, say).
+	return failures != 0 ? failures : result;
 }
