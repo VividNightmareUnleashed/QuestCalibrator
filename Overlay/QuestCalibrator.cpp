@@ -135,7 +135,8 @@ struct LaunchOptions
 
 	// -shot PATH: write the last frame's 1200x800 overlay texture to PATH as a
 	// PNG, then return as -frames does (thirty frames by default, enough for
-	// the tab thumb and hover fades to settle).
+	// the tab thumb and hover fades to settle). A picture it cannot write fails
+	// the run.
 	std::wstring shotPath;
 
 	// -lang CODE: show the overlay in this language for the session, whatever
@@ -557,7 +558,8 @@ static bool SavePreviewShot(const std::wstring &path, std::string &error)
 	return true;
 }
 
-void RunLoop(const LaunchOptions &options)
+// False when -shot could not write its picture.
+bool RunLoop(const LaunchOptions &options)
 {
 	int framesRendered = 0;
 	while (!glfwWindowShouldClose(glfwWindow))
@@ -662,7 +664,7 @@ void RunLoop(const LaunchOptions &options)
 					break;
 				}
 				case vr::VREvent_Quit:
-					return;
+					return true;
 				}
 			}
 		}
@@ -734,8 +736,11 @@ void RunLoop(const LaunchOptions &options)
 		{
 			std::string error;
 			if (!options.shotPath.empty() && !SavePreviewShot(options.shotPath, error))
+			{
 				CliReport(options.noUi, error.c_str(), true);
-			return;
+				return false;
+			}
+			return true;
 		}
 
 		// An animated visible window is already paced by SwapBuffers (vsync).
@@ -749,6 +754,7 @@ void RunLoop(const LaunchOptions &options)
 		else
 			glfwWaitEventsTimeout(waitEventsTimeout);
 	}
+	return true;
 }
 
 // Two instances would each open a pose-ring reader and silently split the
@@ -871,6 +877,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 	// Record what went wrong rather than acting on it inside the catch, so the
 	// shutdown pair below exists exactly once for every path.
 	std::string fatal;
+	bool shotWritten = true;
 	try {
 		if (!g_uiPreviewMode)
 		{
@@ -901,7 +908,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 		// The override changes only the language drawn, never the saved one.
 		questcal::i18n::SetLanguage(questcal::i18n::LanguageFromCode(
 			options.langOverride.empty() ? CalCtx.language : options.langOverride));
-		RunLoop(options);
+		shotWritten = RunLoop(options);
 	}
 	catch (const std::exception &e)
 	{
@@ -944,7 +951,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE /*hInstance*/, _In_opt_ HINSTANCE /*hPrevIn
 		glfwDestroyWindow(glfwWindow);
 
 	glfwTerminate();
-	return fatal.empty() ? 0 : -1;
+	// A -shot run that could not write its picture fails as a command does.
+	return !fatal.empty() ? -1 : shotWritten ? 0 : -2;
 }
 
 
