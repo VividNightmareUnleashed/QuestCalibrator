@@ -43,6 +43,14 @@ scenarios. A new test file needs three edits:
 Groups in other files take `void (*check)(const char *, bool, const char *)`.
 There is no way to run a single scenario.
 
+The harness links most overlay sources as they are, including
+`CalibrationSpace.cpp` and `CalibrationDriver.cpp`, but not `Calibration.cpp`,
+`Configuration.cpp`, the UI or openvr_api. `Tests/OverlayStubs.cpp` defines
+what the linked code needs from those: the `CalCtx` context, the session log,
+the two saves, and the two openvr_api exports behind `openvr.h`'s accessors.
+It reports no runtime, so `vr::VRSystem()` and the other accessors return
+null, as they do before SteamVR starts.
+
 `cpp-validation.json` holds the exact scenario counts, with and without the
 VirtualQuest scenarios, and validation fails when a run comes in below them, so
 a group that stops running is caught. When you add tests, validation prints the

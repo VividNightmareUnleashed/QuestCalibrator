@@ -63,7 +63,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <Optimization>Disabled</Optimization>
       <RuntimeLibrary>MultiThreadedDebug</RuntimeLibrary>
-      <PreprocessorDefinitions>NOMINMAX;_DEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;_DEBUG;_CONSOLE;OPENVR_BUILD_STATIC;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>..\lib;..\lib\openvr;..\lib\MinHook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -84,7 +84,7 @@
       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
-      <PreprocessorDefinitions>NOMINMAX;NDEBUG;_CONSOLE;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NOMINMAX;NDEBUG;_CONSOLE;OPENVR_BUILD_STATIC;QUESTCAL_POSE_CHANNEL_TEST_SEAM;QUESTCAL_POSE_STREAM_HUB_TEST_SEAM;QUESTCAL_IPC_SERVER_TEST_SEAM;QUESTCAL_UPDATER_TEST_SEAM;QUESTCAL_DRIVER_PROVIDER_TEST_SEAM;QUESTCAL_HOOK_INJECTOR_TEST_SEAM;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <SDLCheck>true</SDLCheck>
       <AdditionalIncludeDirectories>..\lib;..\lib\openvr;..\lib\MinHook\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -115,6 +115,8 @@
     <ClCompile Include="HookInjectorTests.cpp" />
     <ClCompile Include="UniverseVerdictTests.cpp" />
     <ClCompile Include="PoseHubHoleTests.cpp" />
+    <ClCompile Include="CalibrationSpaceTests.cpp" />
+    <ClCompile Include="OverlayStubs.cpp" />
     <ClCompile Include="IPCServerTransportTests.cpp" />
     <ClCompile Include="TrackingRecoveryTests.cpp" />
     <ClCompile Include="LighthouseLogTests.cpp" />
@@ -143,10 +145,13 @@
     <ClCompile Include="..\lib\MinHook\src\hde\hde32.c" />
     <ClCompile Include="..\lib\MinHook\src\hde\hde64.c" />
     <ClCompile Include="..\Driver\Logging.cpp" />
+    <ClCompile Include="..\Overlay\CalibrationDriver.cpp" />
     <ClCompile Include="..\Overlay\CalibrationEngine.cpp" />
+    <ClCompile Include="..\Overlay\CalibrationSpace.cpp" />
     <ClCompile Include="..\Overlay\ContinuousAlignment.cpp" />
     <ClCompile Include="..\Overlay\Diagnostics.cpp" />
     <ClCompile Include="..\Overlay\DriftMonitor.cpp" />
+    <ClCompile Include="..\Overlay\IPCClient.cpp" />
     <ClCompile Include="..\Overlay\LighthouseLog.cpp" />
     <ClCompile Include="..\Overlay\Localization.cpp" />
     <ClCompile Include="..\Overlay\LocalizationJa.cpp">
