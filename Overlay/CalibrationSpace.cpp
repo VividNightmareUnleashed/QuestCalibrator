@@ -1000,7 +1000,7 @@ bool ApplyChaperoneBounds(bool logSuccess)
 		return false;
 	}
 
-	const int restored = questcal::RestoreChaperoneTransaction(
+	const auto restored = questcal::RestoreChaperoneTransaction(
 		[&]() { setup->RevertWorkingCopy(); },
 		[&]() {
 			if (!CalCtx.chaperone.geometry.empty())
@@ -1038,7 +1038,7 @@ bool ApplyChaperoneBounds(bool logSuccess)
 					ChaperoneCompareTolerance;
 			return verified;
 		});
-	if (restored == 1)
+	if (restored == questcal::ChaperoneCommitRejected)
 	{
 		CalCtx.ReportError(
 			"Couldn't restore the chaperone: SteamVR rejected the update.\n",
@@ -1046,7 +1046,7 @@ bool ApplyChaperoneBounds(bool logSuccess)
 		return false;
 	}
 
-	if (restored == 2)
+	if (restored == questcal::ChaperoneReadbackMismatch)
 	{
 		CalCtx.ReportError(
 			"Couldn't verify the restored chaperone. Check it in SteamVR Room Setup before relying on it.\n",

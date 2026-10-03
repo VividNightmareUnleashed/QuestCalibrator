@@ -10,16 +10,22 @@ inline ChaperonePermission ChaperoneRestorePermission(bool ownerKnown,
 	if (!baselineCurrent) return ChaperonePermission::Unsettled;
 	return ChaperonePermission::Allowed;
 }
+enum ChaperoneRestoreResult
+{
+	ChaperoneRestored = 0,
+	ChaperoneCommitRejected = 1,
+	ChaperoneReadbackMismatch = 2,
+};
 // Caller has validated snapshot plausibility and permission before entering.
 // Owns the complete revert/stage/commit/readback order; platform calls are
 // injected operations. Failed commit and readback never report restoration.
 template<class Revert, class Stage, class Commit, class Verify>
-int RestoreChaperoneTransaction(Revert revert, Stage stage, Commit commit, Verify verify)
+ChaperoneRestoreResult RestoreChaperoneTransaction(Revert revert, Stage stage, Commit commit, Verify verify)
 {
 	revert();
 	stage();
-	if (!commit()) { revert(); return 1; }
+	if (!commit()) { revert(); return ChaperoneCommitRejected; }
 	revert(); // read the committed live copy, not our uncommitted working data
-	return verify() ? 0 : 2;
+	return verify() ? ChaperoneRestored : ChaperoneReadbackMismatch;
 }
 }
